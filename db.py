@@ -280,3 +280,11 @@ async def ai_inc_today(conn: aiosqlite.Connection, user_id: int, date: str) -> N
         (user_id, date),
     )
     await conn.commit()
+
+async def ai_reset_user_today(conn: aiosqlite.Connection, user_id: int, date: str) -> None:
+    await conn.execute("DELETE FROM ai_daily_usage WHERE user_id=? AND date=?", (user_id, date))
+    await conn.commit()
+
+async def ai_reset_all_usage(conn: aiosqlite.Connection) -> None:
+    await conn.execute("DELETE FROM ai_daily_usage")
+    await conn.commit()

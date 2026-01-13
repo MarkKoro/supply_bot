@@ -115,6 +115,10 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
 
         if data == "menu:ai":
+            if not s.OPENAI_API_KEY:
+                await show(update, context, "AI отключен: добавь OPENAI_API_KEY в .env.", back())
+                return
+
             tz = await db.get_user_tz(conn, user_id)
             today = datetime.now(ZoneInfo(tz)).date().isoformat()
             can = await db.ai_can_use_today(conn, user_id, today, s.AI_MAX_PER_DAY)
@@ -133,16 +137,25 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
             interactions_hint = "Подсказки по конфликтам/синергиям по набору добавим позже (агрегация по твоему стэку)."
 
-            cfg = OpenAIConfig(api_key=s.OPENAI_API_KEY, model=s.OPENAI_MODEL) if s.OPENAI_API_KEY else None
+            cfg = OpenAIConfig(api_key=s.OPENAI_API_KEY, model=s.OPENAI_MODEL)
             await show(update, context, "🤖 Думаю… (AI)", back())
 
-            advice = await daily_advice(
-                cfg,
-                user_summary="Пользователь ведёт дневник добавок в Telegram.",
-                checkins_text=checkins_text,
-                user_supplements=user_supp_text,
-                interactions_hint=interactions_hint,
-            )
+            try:
+                advice = await daily_advice(
+                    cfg,
+                    user_summary="Пользователь ведёт дневник добавок в Telegram.",
+                    checkins_text=checkins_text,
+                    user_supplements=user_supp_text,
+                    interactions_hint=interactions_hint,
+                )
+            except Exception:
+                log.exception("OpenAI request failed")
+                await show(update, context, "AI временно недоступен.", back())
+                return
+
+            if not advice or not advice.strip():
+                await show(update, context, "AI не вернул ответ. Попробуй позже.", back())
+                return
 
             await db.ai_inc_today(conn, user_id, today)
             await show(update, context, f"🤖 <b>AI-совет</b>\n\n{advice}", back())
@@ -191,6 +204,29 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception:
         pass
 
+async def ai_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    s = context.application.bot_data["settings"]
+    tg_uid = update.effective_user.id
+    if tg_uid not in s.ADMIN_IDS:
+        await show(update, context, "Недостаточно прав.")
+        return
+
+    conn = await db.connect(s.DB_PATH)
+    try:
+        user_id = await db.get_or_create_user(conn, tg_uid, tz_name=s.APP_TZ)
+        args = context.args or []
+        if args and args[0].lower() == "all":
+            await db.ai_reset_all_usage(conn)
+            await show(update, context, "AI-лимиты сброшены для всех пользователей.")
+            return
+
+        tz = await db.get_user_tz(conn, user_id)
+        today = datetime.now(ZoneInfo(tz)).date().isoformat()
+        await db.ai_reset_user_today(conn, user_id, today)
+        await show(update, context, f"AI-лимит сброшен на сегодня ({today}).")
+    finally:
+        await conn.close()
+
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     log.exception("Unhandled error while processing update: %s", update, exc_info=context.error)
 
@@ -200,6 +236,7 @@ def build_app() -> Application:
     app.bot_data["settings"] = s
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("ai_reset", ai_reset))
     app.add_handler(CallbackQueryHandler(on_menu, pattern=r"^(menu:|add_pick:|compat_pick:|mine:del:)"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_error_handler(on_error)

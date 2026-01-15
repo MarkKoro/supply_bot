@@ -56,7 +56,7 @@ async def get_classes(conn: aiosqlite.Connection, slug: str) -> set[str]:
     row = await db.get_supplement_by_slug(conn, slug)
     if not row:
         return set()
-    return _parse_classes(row["interaction_classes"])
+    return _parse_classes(_classes_raw(row))
 
 def class_based_interactions(slug_a: str, slug_b: str, classes_a: set[str], classes_b: set[str]) -> list[dict]:
     hits: list[dict] = []
@@ -97,10 +97,7 @@ async def stack_compatibility(conn: aiosqlite.Connection, supp_rows, *, limit: i
     if len(rows) < 2:
         return []
 
-    classes_by_id = {
-        int(r["id"]): _parse_classes(r["interaction_classes"])
-        for r in rows
-    }
+    classes_by_id = {int(r["id"]): _parse_classes(_classes_raw(r)) for r in rows}
 
     for i, a in enumerate(rows):
         for b in rows[i + 1:]:
@@ -155,17 +152,17 @@ def format_stack_compatibility(items: list[dict]) -> str:
     return "\n".join(lines)
 
 async def _class_based_for_supplement(conn: aiosqlite.Connection, supp_row, *, limit_each: int = 8) -> dict[str, list[dict]]:
-    classes_a = _parse_classes(supp_row["interaction_classes"])
+    classes_a = _parse_classes(_classes_raw(supp_row))
     if not classes_a:
         return {rel: [] for rel in REL_ORDER}
 
-    rows = await db.fetchall(conn, "SELECT id,slug,name,interaction_classes FROM supplements")
+    rows = await db.fetchall(conn, "SELECT id,slug,name,interaction_classes,interaction_classes_json FROM supplements")
     rule_groups: dict[str, list[dict]] = {rel: [] for rel in REL_ORDER}
 
     for other in rows:
         if int(other["id"]) == int(supp_row["id"]):
             continue
-        classes_b = _parse_classes(other["interaction_classes"])
+        classes_b = _parse_classes(_classes_raw(other))
         if not classes_b:
             continue
         hits = class_based_interactions(supp_row["slug"], other["slug"], classes_a, classes_b)
@@ -231,3 +228,74 @@ def _parse_classes(raw) -> set[str]:
     if not isinstance(data, list):
         return set()
     return {str(item) for item in data if item}
+
+def _classes_raw(row) -> str:
+    if "interaction_classes_json" in row.keys() and row["interaction_classes_json"]:
+        return row["interaction_classes_json"]
+    return row["interaction_classes"] or "[]"
+
+def _format_evidence_summary(raw: str | None) -> str:
+    if not raw:
+        return ""
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    humans = data.get("human_trials_count_est") or ""
+    participants = data.get("participants_total_est") or ""
+    effect = data.get("avg_effect_percent_est") or ""
+    confidence = data.get("confidence") or ""
+    parts = []
+    if humans:
+        parts.append(f"Исследований на людях: {humans}")
+    if participants:
+        parts.append(f"участников: {participants}")
+    if effect:
+        parts.append(f"типичный эффект: {effect}")
+    if confidence:
+        parts.append(f"уверенность: {confidence}")
+    return "; ".join(parts)
+
+def format_supplement_details(row) -> str:
+    name_ru = row["name_ru"] or ""
+    name_en = row["name_en"] or ""
+    if name_ru and name_en:
+        title = f"{name_ru} ({name_en})"
+    else:
+        title = name_ru or name_en or row["name"]
+    summary_verified = row["summary_verified"] or row["summary_ru"] or row["mechanisms"] or ""
+    summary_theoretical = row["summary_theoretical"] or ""
+    molecular = row["molecular_mechanisms"] or ""
+    evidence_grade = row["evidence_grade"] or ""
+    evidence_summary = _format_evidence_summary(row["evidence_json"] or "")
+    dose = row["dose_ru"] or ""
+    timing = row["timing_ru"] or ""
+    safety = row["safety_ru"] or row["safety_notes"] or ""
+    tags = []
+    if row["tags_json"]:
+        try:
+            tags = json.loads(row["tags_json"])
+        except json.JSONDecodeError:
+            tags = []
+    parts = [f"💊 <b>{title}</b>"]
+    if evidence_grade:
+        parts.append(f"📊 Доказательность: <b>{evidence_grade}</b>")
+    if summary_verified:
+        parts.append(f"🧠 {summary_verified}")
+    if summary_theoretical:
+        parts.append(f"🔬 <b>Теоретически</b>: {summary_theoretical}")
+    if molecular:
+        parts.append(f"🧪 <b>Молекулярно</b>: {molecular}")
+    if evidence_summary:
+        parts.append(f"📈 {evidence_summary}")
+    if dose:
+        parts.append(f"💊 Дозировка: {dose}")
+    if timing:
+        parts.append(f"⏰ Время: {timing}")
+    if safety:
+        parts.append(f"⚠️ {safety}")
+    if tags:
+        parts.append("🏷️ " + ", ".join(tags))
+    return "\n\n".join(parts)

@@ -334,35 +334,12 @@ async def _show_supplement_page(
     if not row:
         await show(update, context, "Не нашёл в каталоге.", back())
         return
-    name_ru = row["name_ru"] or ""
-    name_en = row["name_en"] or ""
-    if name_ru and name_en:
-        title = f"{name_ru} ({name_en})"
-    else:
-        title = name_ru or name_en or row["name"]
-    summary = row["summary_ru"] or row["mechanisms"] or ""
-    evidence = row["evidence_grade"] or ""
-    safety = row["safety_notes"] or ""
-    tags = []
-    if row["tags_json"]:
-        try:
-            tags = json.loads(row["tags_json"])
-        except json.JSONDecodeError:
-            tags = []
-    parts = [f"💊 <b>{title}</b>"]
-    if evidence:
-        parts.append(f"📊 Доказательность: <b>{evidence}</b>")
-    if summary:
-        parts.append(f"🧠 {summary}")
-    if safety:
-        parts.append(f"⚠️ {safety}")
-    if tags:
-        parts.append("🏷️ " + ", ".join(tags))
+    text = engine.format_supplement_details(row)
     in_stack = await db.user_has_supplement(conn, user_id, int(row["id"]))
     await show(
         update,
         context,
-        "\n\n".join(parts),
+        text,
         supplement_page(slug, back_page, in_stack, row["purchase_url"]),
     )
 

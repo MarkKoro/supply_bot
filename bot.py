@@ -376,7 +376,16 @@ async def _show_supplement_page(
         supplement_page(slug, back_page, in_stack, row["purchase_url"]),
     )
 
+def _ensure_event_loop() -> None:
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+
 def main() -> None:
+    _ensure_event_loop()
     app = build_app()
     log.info("Bot started")
     app.run_polling(allowed_updates=Update.ALL_TYPES)

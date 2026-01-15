@@ -21,16 +21,39 @@ async def _import(supp_path: str | None, inter_path: str | None) -> None:
 
         if supp_path:
             for item in _read_jsonl(supp_path):
+                name_ru = item.get("name_ru")
+                name_en = item.get("name_en")
                 payload = {
                     "slug": item["slug"],
-                    "name": item["name"],
+                    "name": item.get("name") or name_ru or name_en or item["slug"],
+                    "name_ru": name_ru,
+                    "name_en": name_en,
+                    "summary_ru": item.get("summary_ru") or "",
+                    "purchase_url": item.get("purchase_url") or "",
                     "tags_json": json.dumps(item.get("tags") or [], ensure_ascii=False),
-                    "mechanisms": item.get("mechanisms") or "",
-                    "evidence_grade": item.get("evidence") or "",
-                    "safety_notes": item.get("safety_notes") or "",
+                    "mechanisms": item.get("mechanisms_ru") or item.get("mechanisms") or "",
+                    "evidence_grade": item.get("evidence_grade") or item.get("evidence") or "",
+                    "safety_notes": item.get("safety_ru") or item.get("safety_notes") or "",
                 }
                 sid = await db.upsert_supplement(conn, payload)
                 slug_to_id[item["slug"]] = sid
+                alias_sets = [
+                    (item.get("aliases_ru") or [], "ru"),
+                    (item.get("aliases_en") or [], "en"),
+                    (item.get("aliases_misc") or [], "misc"),
+                    (item.get("aliases") or [], "misc"),
+                ]
+                for aliases, kind in alias_sets:
+                    for alias in aliases:
+                        alias = str(alias).strip()
+                        if not alias:
+                            continue
+                        await conn.execute(
+                            """INSERT OR IGNORE INTO supplement_aliases(supplement_id, alias, alias_norm, kind)
+                               VALUES(?,?,?,?)""",
+                            (sid, alias, db.normalize(alias), kind),
+                        )
+                await conn.commit()
 
         if inter_path:
             for item in _read_jsonl(inter_path):
@@ -49,9 +72,9 @@ async def _import(supp_path: str | None, inter_path: str | None) -> None:
                 await db.upsert_interaction(conn, slug_to_id[a], slug_to_id[b], {
                     "relation": item.get("relation", "neutral"),
                     "severity": int(item.get("severity", 0)),
-                    "evidence_grade": item.get("evidence", ""),
-                    "note": item.get("note", ""),
-                    "source_url": item.get("source", ""),
+                    "evidence_grade": item.get("evidence_grade") or item.get("evidence", ""),
+                    "note": item.get("note_ru") or item.get("note", ""),
+                    "source_url": item.get("source") or item.get("source_url", ""),
                 })
     finally:
         await conn.close()

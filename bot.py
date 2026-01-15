@@ -1,4 +1,6 @@
 from __future__ import annotations
+import asyncio
+import json
 import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -12,13 +14,22 @@ from settings import get_settings
 import db
 import engine
 from ux import show
-from keyboards import main_menu, back, pick_search_results, my_supplements
+from keyboards import (
+    main_menu,
+    back,
+    pick_search_results,
+    my_supplements,
+    catalog_page,
+    supplement_page,
+    supplement_compat_back,
+)
 from openai_client import OpenAIConfig, daily_advice
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("supply-bot")
 
 WAITING_KEY = "waiting"
+CATALOG_PAGE_SIZE = 8
 
 async def home(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await show(
@@ -63,6 +74,10 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await show(update, context, "Введи название добавки (поиск по каталогу).\nНапример: <b>caffeine</b> или <b>magnesium</b>", back())
             return
 
+        if data == "menu:catalog":
+            await _show_catalog_page(update, context, conn, 0)
+            return
+
         if data == "menu:mine":
             rows = await db.list_user_supplements(conn, user_id, limit=100)
             if not rows:
@@ -103,6 +118,43 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 await show(update, context, f"✅ Добавлено: <b>{row['name']}</b>", back())
             else:
                 await show(update, context, "Не нашёл в каталоге.", back())
+            return
+
+        if data.startswith("cat:page:"):
+            page = int(data.split(":")[-1])
+            await _show_catalog_page(update, context, conn, page)
+            return
+
+        if data.startswith("supp:view:"):
+            _, _, slug, page = data.split(":", 3)
+            await _show_supplement_page(update, context, conn, user_id, slug, int(page))
+            return
+
+        if data.startswith("supp:add:"):
+            _, _, slug, page = data.split(":", 3)
+            row = await db.get_supplement_by_slug(conn, slug)
+            if row:
+                await db.add_user_supplement(conn, user_id, int(row["id"]))
+            await _show_supplement_page(update, context, conn, user_id, slug, int(page))
+            return
+
+        if data.startswith("supp:del:"):
+            _, _, slug, page = data.split(":", 3)
+            row = await db.get_supplement_by_slug(conn, slug)
+            if row:
+                await db.remove_user_supplement(conn, user_id, int(row["id"]))
+            await _show_supplement_page(update, context, conn, user_id, slug, int(page))
+            return
+
+        if data.startswith("supp:compat:"):
+            _, _, slug, page = data.split(":", 3)
+            row = await db.get_supplement_by_slug(conn, slug)
+            if not row:
+                await show(update, context, "Не нашёл в каталоге.", back())
+                return
+            groups = await engine.describe_interactions(conn, row, limit_each=8)
+            text = engine.format_interactions(row["name"], groups)
+            await show(update, context, text, supplement_compat_back(slug, int(page)))
             return
 
         if data == "menu:checkin_demo":
@@ -232,15 +284,77 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 def build_app() -> Application:
     s = get_settings()
+    asyncio.run(db.init_db(s.DB_PATH))
     app = Application.builder().token(s.TG_TOKEN).build()
     app.bot_data["settings"] = s
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("ai_reset", ai_reset))
-    app.add_handler(CallbackQueryHandler(on_menu, pattern=r"^(menu:|add_pick:|compat_pick:|mine:del:)"))
+    app.add_handler(CallbackQueryHandler(on_menu, pattern=r"^(menu:|add_pick:|compat_pick:|mine:del:|cat:page:|supp:)"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_error_handler(on_error)
     return app
+
+async def _show_catalog_page(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, page: int) -> None:
+    page = max(page, 0)
+    offset = page * CATALOG_PAGE_SIZE
+    rows = await db.list_supplements_page(conn, offset=offset, limit=CATALOG_PAGE_SIZE + 1)
+    has_next = len(rows) > CATALOG_PAGE_SIZE
+    display_rows = rows[:CATALOG_PAGE_SIZE]
+    if not display_rows:
+        await show(update, context, "Каталог пуст.", back())
+        return
+    text = f"📚 <b>Каталог</b> (стр. {page + 1})"
+    await show(
+        update,
+        context,
+        text,
+        catalog_page(display_rows, page, has_prev=page > 0, has_next=has_next),
+    )
+
+async def _show_supplement_page(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    conn,
+    user_id: int,
+    slug: str,
+    back_page: int,
+) -> None:
+    row = await db.get_supplement_by_slug(conn, slug)
+    if not row:
+        await show(update, context, "Не нашёл в каталоге.", back())
+        return
+    name_ru = row["name_ru"] or ""
+    name_en = row["name_en"] or ""
+    if name_ru and name_en:
+        title = f"{name_ru} ({name_en})"
+    else:
+        title = name_ru or name_en or row["name"]
+    summary = row["summary_ru"] or row["mechanisms"] or ""
+    evidence = row["evidence_grade"] or ""
+    safety = row["safety_notes"] or ""
+    tags = []
+    if row["tags_json"]:
+        try:
+            tags = json.loads(row["tags_json"])
+        except json.JSONDecodeError:
+            tags = []
+    parts = [f"💊 <b>{title}</b>"]
+    if evidence:
+        parts.append(f"📊 Доказательность: <b>{evidence}</b>")
+    if summary:
+        parts.append(f"🧠 {summary}")
+    if safety:
+        parts.append(f"⚠️ {safety}")
+    if tags:
+        parts.append("🏷️ " + ", ".join(tags))
+    in_stack = await db.user_has_supplement(conn, user_id, int(row["id"]))
+    await show(
+        update,
+        context,
+        "\n\n".join(parts),
+        supplement_page(slug, back_page, in_stack, row["purchase_url"]),
+    )
 
 def main() -> None:
     app = build_app()

@@ -94,6 +94,16 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await show(update, context, "Удалено.", back())
             return
 
+        if data == "mine:check":
+            rows = await db.list_user_supplements(conn, user_id, limit=100)
+            if len(rows) < 2:
+                await show(update, context, "Добавь минимум 2 добавки для проверки стека.", back())
+                return
+            items = await engine.stack_compatibility(conn, rows, limit=30)
+            text = engine.format_stack_compatibility(items)
+            await show(update, context, text, back())
+            return
+
         if data == "menu:compat":
             context.user_data[WAITING_KEY] = "compat_query"
             await show(update, context, "Введи добавку, чтобы показать совместимость (синергии/антагонисты).", back())
@@ -290,7 +300,7 @@ def build_app() -> Application:
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("ai_reset", ai_reset))
-    app.add_handler(CallbackQueryHandler(on_menu, pattern=r"^(menu:|add_pick:|compat_pick:|mine:del:|cat:page:|supp:)"))
+    app.add_handler(CallbackQueryHandler(on_menu, pattern=r"^(menu:|add_pick:|compat_pick:|mine:|cat:page:|supp:)"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_error_handler(on_error)
     return app

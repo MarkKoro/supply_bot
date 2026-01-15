@@ -23,6 +23,7 @@ def pick_search_results(rows, prefix: str) -> InlineKeyboardMarkup:
 
 def my_supplements(rows) -> InlineKeyboardMarkup:
     btns = []
+    btns.append([InlineKeyboardButton("🧩 Проверить стек", callback_data="mine:check")])
     for r in rows:
         btns.append([InlineKeyboardButton(f"❌ {r['name']}", callback_data=f"mine:del:{r['slug']}")])
     btns.append([InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")])

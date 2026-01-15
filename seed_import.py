@@ -34,6 +34,7 @@ async def _import(supp_path: str | None, inter_path: str | None) -> None:
                     "mechanisms": item.get("mechanisms_ru") or item.get("mechanisms") or "",
                     "evidence_grade": item.get("evidence_grade") or item.get("evidence") or "",
                     "safety_notes": item.get("safety_ru") or item.get("safety_notes") or "",
+                    "interaction_classes": json.dumps(item.get("interaction_classes") or [], ensure_ascii=False),
                 }
                 sid = await db.upsert_supplement(conn, payload)
                 slug_to_id[item["slug"]] = sid

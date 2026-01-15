@@ -44,7 +44,8 @@ CREATE TABLE IF NOT EXISTS supplements (
   tags_json      TEXT,
   mechanisms     TEXT,
   evidence_grade TEXT,
-  safety_notes   TEXT
+  safety_notes   TEXT,
+  interaction_classes TEXT DEFAULT '[]'
 );
 
 CREATE INDEX IF NOT EXISTS idx_supplements_name ON supplements(name);
@@ -142,6 +143,7 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     await _ensure_column(conn, "supplements", "name_en", "TEXT")
     await _ensure_column(conn, "supplements", "summary_ru", "TEXT")
     await _ensure_column(conn, "supplements", "purchase_url", "TEXT")
+    await _ensure_column(conn, "supplements", "interaction_classes", "TEXT DEFAULT '[]'")
     await _ensure_column(conn, "supplement_aliases", "alias_norm", "TEXT")
     await _ensure_column(conn, "supplement_aliases", "kind", "TEXT")
     await conn.execute("CREATE INDEX IF NOT EXISTS idx_alias_norm ON supplement_aliases(alias_norm)")
@@ -152,6 +154,9 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
            )"""
     )
     await conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_alias_unique ON supplement_aliases(supplement_id, alias)")
+    await conn.execute(
+        "UPDATE supplements SET interaction_classes='[]' WHERE interaction_classes IS NULL OR interaction_classes=''"
+    )
     await _backfill_alias_norm(conn)
 
 async def _ensure_column(conn: aiosqlite.Connection, table: str, column: str, column_type: str) -> None:
@@ -195,8 +200,10 @@ async def upsert_supplement(conn: aiosqlite.Connection, s: dict) -> int:
     elif name_en:
         display_name = name_en
     await conn.execute(
-        """INSERT INTO supplements(slug,name,name_ru,name_en,summary_ru,purchase_url,tags_json,mechanisms,evidence_grade,safety_notes)
-        VALUES(?,?,?,?,?,?,?,?,?,?)
+        """INSERT INTO supplements(
+          slug,name,name_ru,name_en,summary_ru,purchase_url,tags_json,mechanisms,evidence_grade,safety_notes,interaction_classes
+        )
+        VALUES(?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(slug) DO UPDATE SET
           name=excluded.name,
           name_ru=excluded.name_ru,
@@ -206,7 +213,8 @@ async def upsert_supplement(conn: aiosqlite.Connection, s: dict) -> int:
           tags_json=excluded.tags_json,
           mechanisms=excluded.mechanisms,
           evidence_grade=excluded.evidence_grade,
-          safety_notes=excluded.safety_notes
+          safety_notes=excluded.safety_notes,
+          interaction_classes=excluded.interaction_classes
         """,
         (
             s["slug"],
@@ -219,6 +227,7 @@ async def upsert_supplement(conn: aiosqlite.Connection, s: dict) -> int:
             s.get("mechanisms"),
             s.get("evidence_grade"),
             s.get("safety_notes"),
+            s.get("interaction_classes", "[]"),
         ),
     )
     await conn.commit()
@@ -297,6 +306,10 @@ async def list_interactions_for_supplement(conn: aiosqlite.Connection, supp_id: 
            ORDER BY severity DESC LIMIT ?""",
         (supp_id, supp_id, limit),
     )
+
+async def get_interaction_between(conn: aiosqlite.Connection, a_id: int, b_id: int):
+    a, b = canon_pair(a_id, b_id)
+    return await fetchone(conn, "SELECT * FROM interactions WHERE a_id=? AND b_id=?", (a, b))
 
 # user library
 async def add_user_supplement(conn: aiosqlite.Connection, user_id: int, supplement_id: int):

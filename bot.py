@@ -2,6 +2,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -13,6 +14,7 @@ from telegram.ext import (
 from settings import get_settings
 import db
 import engine
+import seed_import
 from ux import show
 from keyboards import (
     main_menu,
@@ -292,15 +294,37 @@ async def ai_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     log.exception("Unhandled error while processing update: %s", update, exc_info=context.error)
 
-def build_app() -> Application:
-    s = get_settings()
+async def _supplements_count(db_path: str) -> int:
+    conn = await db.connect(db_path)
     try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        row = await db.fetchone(conn, "SELECT COUNT(*) FROM supplements")
+        return int(row[0]) if row else 0
+    finally:
+        await conn.close()
 
-    loop.run_until_complete(db.init_db(s.DB_PATH))
+async def _maybe_seed_catalog(s) -> None:
+    if not s.AUTO_SEED_ON_START:
+        return
+
+    existing = await _supplements_count(s.DB_PATH)
+    if existing > 0:
+        return
+
+    seed_paths = [s.SEED_SUPPLEMENTS_PATH, s.SEED_INTERACTIONS_PATH]
+    missing = [path for path in seed_paths if not os.path.exists(path)]
+    if missing:
+        log.warning("Seed files missing, skipping auto-seed: %s", ", ".join(missing))
+        return
+
+    await seed_import._import(s.SEED_SUPPLEMENTS_PATH, s.SEED_INTERACTIONS_PATH)
+    seeded = await _supplements_count(s.DB_PATH)
+    log.info("Seeded OK: %s supplements", seeded)
+
+async def _bootstrap() -> Application:
+    s = get_settings()
+    await db.init_db(s.DB_PATH)
+    await _maybe_seed_catalog(s)
+
     app = Application.builder().token(s.TG_TOKEN).build()
     app.bot_data["settings"] = s
 
@@ -311,6 +335,9 @@ def build_app() -> Application:
     app.add_error_handler(on_error)
     return app
 
+def build_app() -> Application:
+    return asyncio.run(_bootstrap())
+
 async def _show_catalog_page(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, page: int) -> None:
     page = max(page, 0)
     offset = page * CATALOG_PAGE_SIZE
@@ -318,7 +345,7 @@ async def _show_catalog_page(update: Update, context: ContextTypes.DEFAULT_TYPE,
     has_next = len(rows) > CATALOG_PAGE_SIZE
     display_rows = rows[:CATALOG_PAGE_SIZE]
     if not display_rows:
-        await show(update, context, "Каталог пуст.", back())
+        await show(update, context, "Каталог пуст. Похоже, сиды ещё не импортированы…", back())
         return
     text = f"📚 <b>Каталог</b> (стр. {page + 1})"
     await show(

@@ -294,7 +294,13 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 def build_app() -> Application:
     s = get_settings()
-    asyncio.run(db.init_db(s.DB_PATH))
+    try:
+    loop = asyncio.get_event_loop()
+    except RuntimeError:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    loop.run_until_complete(db.init_db(s.DB_PATH))
     app = Application.builder().token(s.TG_TOKEN).build()
     app.bot_data["settings"] = s
 

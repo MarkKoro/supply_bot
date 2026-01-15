@@ -2,6 +2,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+from pathlib import Path
 from settings import get_settings
 import db
 
@@ -94,7 +95,15 @@ async def _import_rich(conn, supp_path: str, slug_to_id: dict[str, int]) -> None
         if remaining:
             print(f"Skipped {len(remaining)} pending interactions due to missing slugs.")
 
-async def _import(supp_path: str | None, inter_path: str | None, rich_supp_path: str | None) -> None:
+async def _import(
+    supp_path: str | None,
+    inter_path: str | None,
+    rich_supp_path: str | None = None,
+) -> None:
+    if rich_supp_path is None and supp_path:
+        if "rich" in Path(supp_path).name:
+            rich_supp_path = supp_path
+            supp_path = None
     s = get_settings()
     conn = await db.connect(s.DB_PATH)
     try:

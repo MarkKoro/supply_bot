@@ -9,8 +9,8 @@ def utc_now_iso() -> str:
 def normalize(text: str | None) -> str:
     if not text:
         return ""
-    value = text.strip().lower()
-    for ch in ("-", "_", ".", " "):
+    value = text.strip().lower().replace("ё", "е")
+    for ch in ("-", "_", ".", " ", "(", ")"):
         value = value.replace(ch, "")
     return value
 
@@ -40,12 +40,22 @@ CREATE TABLE IF NOT EXISTS supplements (
   name_ru       TEXT,
   name_en       TEXT,
   summary_ru    TEXT,
+  summary_verified TEXT,
+  summary_theoretical TEXT,
+  molecular_mechanisms TEXT,
+  evidence_json TEXT,
+  dose_ru TEXT,
+  timing_ru TEXT,
+  safety_ru TEXT,
   purchase_url  TEXT,
   tags_json      TEXT,
   mechanisms     TEXT,
   evidence_grade TEXT,
   safety_notes   TEXT,
-  interaction_classes TEXT DEFAULT '[]'
+  interaction_classes TEXT DEFAULT '[]',
+  interaction_classes_json TEXT DEFAULT '[]',
+  payload_json TEXT,
+  is_active INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE INDEX IF NOT EXISTS idx_supplements_name ON supplements(name);
@@ -54,14 +64,12 @@ CREATE INDEX IF NOT EXISTS idx_supplements_slug ON supplements(slug);
 CREATE TABLE IF NOT EXISTS supplement_aliases (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   supplement_id INTEGER NOT NULL REFERENCES supplements(id) ON DELETE CASCADE,
-  alias         TEXT NOT NULL,
-  alias_norm    TEXT,
-  kind          TEXT
+  alias_raw     TEXT NOT NULL,
+  alias_norm    TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_alias_alias ON supplement_aliases(alias);
 CREATE INDEX IF NOT EXISTS idx_alias_norm ON supplement_aliases(alias_norm);
 CREATE INDEX IF NOT EXISTS idx_alias_supp ON supplement_aliases(supplement_id);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_alias_unique ON supplement_aliases(supplement_id, alias);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_alias_unique_norm ON supplement_aliases(supplement_id, alias_norm);
 
 CREATE TABLE IF NOT EXISTS interactions (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -142,22 +150,62 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     await _ensure_column(conn, "supplements", "name_ru", "TEXT")
     await _ensure_column(conn, "supplements", "name_en", "TEXT")
     await _ensure_column(conn, "supplements", "summary_ru", "TEXT")
+    await _ensure_column(conn, "supplements", "summary_verified", "TEXT")
+    await _ensure_column(conn, "supplements", "summary_theoretical", "TEXT")
+    await _ensure_column(conn, "supplements", "molecular_mechanisms", "TEXT")
+    await _ensure_column(conn, "supplements", "evidence_json", "TEXT")
+    await _ensure_column(conn, "supplements", "dose_ru", "TEXT")
+    await _ensure_column(conn, "supplements", "timing_ru", "TEXT")
+    await _ensure_column(conn, "supplements", "safety_ru", "TEXT")
     await _ensure_column(conn, "supplements", "purchase_url", "TEXT")
     await _ensure_column(conn, "supplements", "interaction_classes", "TEXT DEFAULT '[]'")
-    await _ensure_column(conn, "supplement_aliases", "alias_norm", "TEXT")
-    await _ensure_column(conn, "supplement_aliases", "kind", "TEXT")
-    await conn.execute("CREATE INDEX IF NOT EXISTS idx_alias_norm ON supplement_aliases(alias_norm)")
-    await conn.execute(
-        """DELETE FROM supplement_aliases
-           WHERE id NOT IN (
-             SELECT MIN(id) FROM supplement_aliases GROUP BY supplement_id, alias
-           )"""
-    )
-    await conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_alias_unique ON supplement_aliases(supplement_id, alias)")
+    await _ensure_column(conn, "supplements", "interaction_classes_json", "TEXT DEFAULT '[]'")
+    await _ensure_column(conn, "supplements", "payload_json", "TEXT")
+    await _ensure_column(conn, "supplements", "is_active", "INTEGER NOT NULL DEFAULT 1")
+    await _ensure_aliases_table(conn)
     await conn.execute(
         "UPDATE supplements SET interaction_classes='[]' WHERE interaction_classes IS NULL OR interaction_classes=''"
     )
+    await conn.execute(
+        "UPDATE supplements SET interaction_classes_json='[]' WHERE interaction_classes_json IS NULL OR interaction_classes_json=''"
+    )
     await _backfill_alias_norm(conn)
+
+async def _ensure_aliases_table(conn: aiosqlite.Connection) -> None:
+    table = await fetchone(
+        conn,
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='supplement_aliases'",
+    )
+    if not table:
+        await conn.execute(
+            """CREATE TABLE IF NOT EXISTS supplement_aliases (
+              id            INTEGER PRIMARY KEY AUTOINCREMENT,
+              supplement_id INTEGER NOT NULL REFERENCES supplements(id) ON DELETE CASCADE,
+              alias_raw     TEXT NOT NULL,
+              alias_norm    TEXT
+            )"""
+        )
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_alias_norm ON supplement_aliases(alias_norm)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_alias_supp ON supplement_aliases(supplement_id)")
+        await conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_alias_unique_norm ON supplement_aliases(supplement_id, alias_norm)"
+        )
+        return
+
+    await _ensure_column(conn, "supplement_aliases", "alias_raw", "TEXT")
+    await _ensure_column(conn, "supplement_aliases", "alias_norm", "TEXT")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_alias_norm ON supplement_aliases(alias_norm)")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_alias_supp ON supplement_aliases(supplement_id)")
+    await conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_alias_unique_norm ON supplement_aliases(supplement_id, alias_norm)"
+    )
+    await _backfill_alias_raw(conn)
+    await conn.execute(
+        """DELETE FROM supplement_aliases
+           WHERE id NOT IN (
+             SELECT MIN(id) FROM supplement_aliases GROUP BY supplement_id, alias_norm
+           )"""
+    )
 
 async def _ensure_column(conn: aiosqlite.Connection, table: str, column: str, column_type: str) -> None:
     cols = await fetchall(conn, f"PRAGMA table_info({table})")
@@ -165,10 +213,29 @@ async def _ensure_column(conn: aiosqlite.Connection, table: str, column: str, co
         return
     await conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
 
-async def _backfill_alias_norm(conn: aiosqlite.Connection) -> None:
-    rows = await fetchall(conn, "SELECT id, alias FROM supplement_aliases WHERE alias_norm IS NULL OR alias_norm=''")
+async def _backfill_alias_raw(conn: aiosqlite.Connection) -> None:
+    cols = await fetchall(conn, "PRAGMA table_info(supplement_aliases)")
+    col_names = {c["name"] for c in cols}
+    if "alias_raw" not in col_names or "alias" not in col_names:
+        return
+    rows = await fetchall(
+        conn,
+        "SELECT id, alias, alias_raw FROM supplement_aliases WHERE alias_raw IS NULL OR alias_raw=''",
+    )
     for row in rows:
-        alias_norm = normalize(row["alias"])
+        alias_raw = row["alias"] or ""
+        await conn.execute("UPDATE supplement_aliases SET alias_raw=? WHERE id=?", (alias_raw, int(row["id"])))
+
+async def _backfill_alias_norm(conn: aiosqlite.Connection) -> None:
+    cols = await fetchall(conn, "PRAGMA table_info(supplement_aliases)")
+    col_names = {c["name"] for c in cols}
+    alias_col = "alias_raw" if "alias_raw" in col_names else "alias"
+    rows = await fetchall(
+        conn,
+        f"SELECT id, {alias_col} AS alias_value FROM supplement_aliases WHERE alias_norm IS NULL OR alias_norm=''",
+    )
+    for row in rows:
+        alias_norm = normalize(row["alias_value"])
         await conn.execute("UPDATE supplement_aliases SET alias_norm=? WHERE id=?", (alias_norm, int(row["id"])))
 
 # users
@@ -201,20 +268,32 @@ async def upsert_supplement(conn: aiosqlite.Connection, s: dict) -> int:
         display_name = name_en
     await conn.execute(
         """INSERT INTO supplements(
-          slug,name,name_ru,name_en,summary_ru,purchase_url,tags_json,mechanisms,evidence_grade,safety_notes,interaction_classes
+          slug,name,name_ru,name_en,summary_ru,summary_verified,summary_theoretical,molecular_mechanisms,
+          evidence_json,dose_ru,timing_ru,safety_ru,purchase_url,tags_json,mechanisms,evidence_grade,
+          safety_notes,interaction_classes,interaction_classes_json,payload_json,is_active
         )
-        VALUES(?,?,?,?,?,?,?,?,?,?,?)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(slug) DO UPDATE SET
           name=excluded.name,
           name_ru=excluded.name_ru,
           name_en=excluded.name_en,
           summary_ru=excluded.summary_ru,
+          summary_verified=excluded.summary_verified,
+          summary_theoretical=excluded.summary_theoretical,
+          molecular_mechanisms=excluded.molecular_mechanisms,
+          evidence_json=excluded.evidence_json,
+          dose_ru=excluded.dose_ru,
+          timing_ru=excluded.timing_ru,
+          safety_ru=excluded.safety_ru,
           purchase_url=excluded.purchase_url,
           tags_json=excluded.tags_json,
           mechanisms=excluded.mechanisms,
           evidence_grade=excluded.evidence_grade,
           safety_notes=excluded.safety_notes,
-          interaction_classes=excluded.interaction_classes
+          interaction_classes=excluded.interaction_classes,
+          interaction_classes_json=excluded.interaction_classes_json,
+          payload_json=excluded.payload_json,
+          is_active=excluded.is_active
         """,
         (
             s["slug"],
@@ -222,12 +301,22 @@ async def upsert_supplement(conn: aiosqlite.Connection, s: dict) -> int:
             name_ru,
             name_en,
             s.get("summary_ru"),
+            s.get("summary_verified"),
+            s.get("summary_theoretical"),
+            s.get("molecular_mechanisms"),
+            s.get("evidence_json"),
+            s.get("dose_ru"),
+            s.get("timing_ru"),
+            s.get("safety_ru"),
             s.get("purchase_url"),
             s.get("tags_json"),
             s.get("mechanisms"),
             s.get("evidence_grade"),
             s.get("safety_notes"),
             s.get("interaction_classes", "[]"),
+            s.get("interaction_classes_json", s.get("interaction_classes", "[]")),
+            s.get("payload_json"),
+            int(s.get("is_active", 1)),
         ),
     )
     await conn.commit()
@@ -252,8 +341,7 @@ async def search_supplements(conn: aiosqlite.Connection, q: str, limit: int = 10
             UNION ALL
             SELECT s.id AS sid, 1 AS rank
             FROM supplements s
-            LEFT JOIN supplement_aliases a ON a.supplement_id=s.id
-            WHERE s.name LIKE ? OR s.slug LIKE ? OR s.name_en LIKE ? OR a.alias LIKE ?
+            WHERE s.name LIKE ? OR s.slug LIKE ? OR s.name_ru LIKE ? OR s.name_en LIKE ?
         )
         SELECT s.* FROM ranked r
         JOIN supplements s ON s.id=r.sid
@@ -262,6 +350,45 @@ async def search_supplements(conn: aiosqlite.Connection, q: str, limit: int = 10
         LIMIT ?""",
         (q_norm, q_like, q_like, q_like, q_like, limit),
     )
+
+async def upsert_aliases(conn: aiosqlite.Connection, supplement_id: int, aliases: list[str]) -> None:
+    if not aliases:
+        return
+    cols = await fetchall(conn, "PRAGMA table_info(supplement_aliases)")
+    col_names = {c["name"] for c in cols}
+    has_alias = "alias" in col_names
+    has_alias_raw = "alias_raw" in col_names
+    has_kind = "kind" in col_names
+    for alias in aliases:
+        alias_raw = str(alias).strip()
+        if not alias_raw:
+            continue
+        alias_norm = normalize(alias_raw)
+        if has_alias and has_alias_raw and has_kind:
+            await conn.execute(
+                """INSERT OR IGNORE INTO supplement_aliases(supplement_id, alias, alias_raw, alias_norm, kind)
+                   VALUES(?,?,?,?,?)""",
+                (supplement_id, alias_raw, alias_raw, alias_norm, None),
+            )
+        elif has_alias and has_alias_raw:
+            await conn.execute(
+                """INSERT OR IGNORE INTO supplement_aliases(supplement_id, alias, alias_raw, alias_norm)
+                   VALUES(?,?,?,?)""",
+                (supplement_id, alias_raw, alias_raw, alias_norm),
+            )
+        elif has_alias:
+            await conn.execute(
+                """INSERT OR IGNORE INTO supplement_aliases(supplement_id, alias, alias_norm)
+                   VALUES(?,?,?)""",
+                (supplement_id, alias_raw, alias_norm),
+            )
+        else:
+            await conn.execute(
+                """INSERT OR IGNORE INTO supplement_aliases(supplement_id, alias_raw, alias_norm)
+                   VALUES(?,?,?)""",
+                (supplement_id, alias_raw, alias_norm),
+            )
+    await conn.commit()
 
 async def list_supplements_page(conn: aiosqlite.Connection, offset: int, limit: int = 10):
     return await fetchall(

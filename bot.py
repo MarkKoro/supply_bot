@@ -377,16 +377,17 @@ async def _show_supplement_page(
     )
 
 def _ensure_event_loop() -> None:
+    # asyncio.run resets event loop; PTB run_polling needs a current loop on Python 3.13
     try:
-        asyncio.get_running_loop()
+        asyncio.get_event_loop()
     except RuntimeError:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
 
 def main() -> None:
-    _ensure_event_loop()
     app = build_app()
+    _ensure_event_loop()
     log.info("Bot started")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 

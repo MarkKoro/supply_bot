@@ -310,13 +310,17 @@ async def _maybe_seed_catalog(s) -> None:
     if existing > 0:
         return
 
-    seed_paths = [s.SEED_SUPPLEMENTS_PATH, s.SEED_INTERACTIONS_PATH]
-    missing = [path for path in seed_paths if not os.path.exists(path)]
-    if missing:
-        log.warning("Seed files missing, skipping auto-seed: %s", ", ".join(missing))
+    supp_path = s.SEED_SUPPLEMENTS_PATH
+    inter_path = s.SEED_INTERACTIONS_PATH
+    if not supp_path or not os.path.exists(supp_path):
+        log.warning("Supplements seed file missing, skipping auto-seed: %s", supp_path)
         return
 
-    await seed_import._import(s.SEED_SUPPLEMENTS_PATH, s.SEED_INTERACTIONS_PATH)
+    if inter_path and not os.path.exists(inter_path):
+        log.warning("Interactions seed file missing, seeding supplements only: %s", inter_path)
+        inter_path = None
+
+    await seed_import._import(supp_path, inter_path)
     seeded = await _supplements_count(s.DB_PATH)
     log.info("Seeded OK: %s supplements", seeded)
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import sys
 from pathlib import Path
 from settings import get_settings
 import db
@@ -104,6 +105,15 @@ async def _import(
         if "rich" in Path(supp_path).name:
             rich_supp_path = supp_path
             supp_path = None
+    if rich_supp_path:
+        if not Path(rich_supp_path).exists():
+            raise RuntimeError(f"Missing rich supplements seed file: {rich_supp_path}")
+    elif supp_path:
+        if not Path(supp_path).exists():
+            raise RuntimeError(f"Missing supplements seed file: {supp_path}")
+    if inter_path and not Path(inter_path).exists():
+        print(f"Warning: interactions seed file missing, skipping: {inter_path}", file=sys.stderr)
+        inter_path = None
     s = get_settings()
     conn = await db.connect(s.DB_PATH)
     try:

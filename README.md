@@ -18,5 +18,6 @@ notepad.exe .env
 
 python init_db.py
 python seed_import.py --supplements data/seed/supplements.jsonl --interactions data/seed/interactions.jsonl
+python seed_import.py --supplements data/seed_rich/supplements_rich.jsonl
 python bot.py
 ```

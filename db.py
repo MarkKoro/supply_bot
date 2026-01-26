@@ -91,9 +91,10 @@ CREATE TABLE IF NOT EXISTS user_supplements (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   supplement_id INTEGER NOT NULL REFERENCES supplements(id) ON DELETE CASCADE,
-  custom_dose   TEXT,
-  notes         TEXT,
-  active        INTEGER NOT NULL DEFAULT 1,
+  is_active     INTEGER NOT NULL DEFAULT 1,
+  dose_text     TEXT,
+  note_text     TEXT,
+  created_at    TEXT NOT NULL,
   UNIQUE (user_id, supplement_id)
 );
 CREATE INDEX IF NOT EXISTS idx_user_supp_user ON user_supplements(user_id);
@@ -163,6 +164,7 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     await _ensure_column(conn, "supplements", "payload_json", "TEXT")
     await _ensure_column(conn, "supplements", "is_active", "INTEGER NOT NULL DEFAULT 1")
     await _ensure_aliases_table(conn)
+    await _ensure_user_supplements(conn)
     await conn.execute(
         "UPDATE supplements SET interaction_classes='[]' WHERE interaction_classes IS NULL OR interaction_classes=''"
     )
@@ -205,6 +207,39 @@ async def _ensure_aliases_table(conn: aiosqlite.Connection) -> None:
            WHERE id NOT IN (
              SELECT MIN(id) FROM supplement_aliases GROUP BY supplement_id, alias_norm
            )"""
+    )
+
+async def _ensure_user_supplements(conn: aiosqlite.Connection) -> None:
+    await _ensure_column(conn, "user_supplements", "is_active", "INTEGER NOT NULL DEFAULT 1")
+    await _ensure_column(conn, "user_supplements", "dose_text", "TEXT")
+    await _ensure_column(conn, "user_supplements", "note_text", "TEXT")
+    await _ensure_column(conn, "user_supplements", "created_at", "TEXT NOT NULL DEFAULT ''")
+    await _backfill_user_supplements(conn)
+
+async def _backfill_user_supplements(conn: aiosqlite.Connection) -> None:
+    cols = await fetchall(conn, "PRAGMA table_info(user_supplements)")
+    col_names = {c["name"] for c in cols}
+    if "custom_dose" in col_names:
+        await conn.execute(
+            """UPDATE user_supplements
+               SET dose_text=custom_dose
+               WHERE (dose_text IS NULL OR dose_text='') AND custom_dose IS NOT NULL AND custom_dose!=''"""
+        )
+    if "notes" in col_names:
+        await conn.execute(
+            """UPDATE user_supplements
+               SET note_text=notes
+               WHERE (note_text IS NULL OR note_text='') AND notes IS NOT NULL AND notes!=''"""
+        )
+    if "active" in col_names:
+        await conn.execute(
+            """UPDATE user_supplements
+               SET is_active=active
+               WHERE (is_active IS NULL OR is_active='') AND active IS NOT NULL"""
+        )
+    await conn.execute(
+        "UPDATE user_supplements SET created_at=? WHERE created_at IS NULL OR created_at=''",
+        (utc_now_iso(),),
     )
 
 async def _ensure_column(conn: aiosqlite.Connection, table: str, column: str, column_type: str) -> None:
@@ -439,31 +474,130 @@ async def get_interaction_between(conn: aiosqlite.Connection, a_id: int, b_id: i
     return await fetchone(conn, "SELECT * FROM interactions WHERE a_id=? AND b_id=?", (a, b))
 
 # user library
-async def add_user_supplement(conn: aiosqlite.Connection, user_id: int, supplement_id: int):
+async def add_user_supplement(conn: aiosqlite.Connection, tg_user_id: int, supplement_id: int) -> None:
+    user_id = await get_or_create_user(conn, tg_user_id)
     await conn.execute(
-        "INSERT OR IGNORE INTO user_supplements(user_id, supplement_id) VALUES(?,?)",
+        """INSERT INTO user_supplements(user_id, supplement_id, is_active, created_at)
+           VALUES(?,?,1,?)
+           ON CONFLICT(user_id, supplement_id) DO UPDATE SET
+             is_active=1""",
+        (user_id, supplement_id, utc_now_iso()),
+    )
+    await conn.commit()
+
+async def remove_user_supplement(conn: aiosqlite.Connection, tg_user_id: int, supplement_id: int) -> None:
+    user_id = await get_or_create_user(conn, tg_user_id)
+    await conn.execute("DELETE FROM user_supplements WHERE user_id=? AND supplement_id=?", (user_id, supplement_id))
+    await conn.commit()
+
+async def get_user_supplement(conn: aiosqlite.Connection, tg_user_id: int, supplement_id: int):
+    user_id = await get_or_create_user(conn, tg_user_id)
+    return await fetchone(
+        conn,
+        """SELECT us.*, s.slug, s.name, s.name_ru, s.name_en,
+                  s.summary_ru, s.summary_verified, s.summary_theoretical,
+                  s.molecular_mechanisms, s.mechanisms
+           FROM user_supplements us
+           JOIN supplements s ON s.id=us.supplement_id
+           WHERE us.user_id=? AND us.supplement_id=?""",
+        (user_id, supplement_id),
+    )
+
+async def list_user_supplements_page(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    q: str | None = None,
+    page: int = 0,
+    page_size: int = 10,
+):
+    user_id = await get_or_create_user(conn, tg_user_id)
+    page = max(page, 0)
+    offset = page * page_size
+    q = (q or "").strip()
+    params = [user_id]
+    filters = ""
+    if q:
+        filters = " AND (s.name LIKE ? OR s.slug LIKE ? OR s.name_ru LIKE ? OR s.name_en LIKE ?)"
+        q_like = f"%{q}%"
+        params.extend([q_like, q_like, q_like, q_like])
+
+    count_row = await fetchone(
+        conn,
+        f"""SELECT COUNT(*) AS total
+            FROM user_supplements us
+            JOIN supplements s ON s.id=us.supplement_id
+            WHERE us.user_id=?{filters}""",
+        tuple(params),
+    )
+    total = int(count_row["total"]) if count_row else 0
+
+    params.extend([page_size, offset])
+    rows = await fetchall(
+        conn,
+        f"""SELECT us.*, s.id AS supplement_id, s.slug, s.name, s.name_ru, s.name_en,
+                  s.summary_ru, s.summary_verified, s.summary_theoretical,
+                  s.molecular_mechanisms, s.mechanisms
+           FROM user_supplements us
+           JOIN supplements s ON s.id=us.supplement_id
+           WHERE us.user_id=?{filters}
+           ORDER BY s.name
+           LIMIT ? OFFSET ?""",
+        tuple(params),
+    )
+    return rows, total
+
+async def set_user_supplement_dose(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    supplement_id: int,
+    dose_text: str | None,
+) -> None:
+    user_id = await get_or_create_user(conn, tg_user_id)
+    await conn.execute(
+        "UPDATE user_supplements SET dose_text=? WHERE user_id=? AND supplement_id=?",
+        (dose_text, user_id, supplement_id),
+    )
+    await conn.commit()
+
+async def set_user_supplement_note(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    supplement_id: int,
+    note_text: str | None,
+) -> None:
+    user_id = await get_or_create_user(conn, tg_user_id)
+    await conn.execute(
+        "UPDATE user_supplements SET note_text=? WHERE user_id=? AND supplement_id=?",
+        (note_text, user_id, supplement_id),
+    )
+    await conn.commit()
+
+async def toggle_user_supplement_active(conn: aiosqlite.Connection, tg_user_id: int, supplement_id: int) -> None:
+    user_id = await get_or_create_user(conn, tg_user_id)
+    await conn.execute(
+        """UPDATE user_supplements
+           SET is_active=CASE WHEN is_active=1 THEN 0 ELSE 1 END
+           WHERE user_id=? AND supplement_id=?""",
         (user_id, supplement_id),
     )
     await conn.commit()
 
-async def remove_user_supplement(conn: aiosqlite.Connection, user_id: int, supplement_id: int):
-    await conn.execute("DELETE FROM user_supplements WHERE user_id=? AND supplement_id=?", (user_id, supplement_id))
-    await conn.commit()
-
-async def list_user_supplements(conn: aiosqlite.Connection, user_id: int, limit: int = 50):
+async def list_user_supplements(conn: aiosqlite.Connection, tg_user_id: int, limit: int = 50):
+    user_id = await get_or_create_user(conn, tg_user_id)
     return await fetchall(
         conn,
         """SELECT s.* FROM user_supplements us
            JOIN supplements s ON s.id=us.supplement_id
-           WHERE us.user_id=? AND us.active=1
+           WHERE us.user_id=? AND us.is_active=1
            ORDER BY s.name LIMIT ?""",
         (user_id, limit),
     )
 
-async def user_has_supplement(conn: aiosqlite.Connection, user_id: int, supplement_id: int) -> bool:
+async def user_has_supplement(conn: aiosqlite.Connection, tg_user_id: int, supplement_id: int) -> bool:
+    user_id = await get_or_create_user(conn, tg_user_id)
     row = await fetchone(
         conn,
-        "SELECT 1 FROM user_supplements WHERE user_id=? AND supplement_id=? AND active=1",
+        "SELECT 1 FROM user_supplements WHERE user_id=? AND supplement_id=?",
         (user_id, supplement_id),
     )
     return row is not None

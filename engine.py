@@ -299,3 +299,33 @@ def format_supplement_details(row) -> str:
     if tags:
         parts.append("🏷️ " + ", ".join(tags))
     return "\n\n".join(parts)
+
+def format_supplement_hub(supp_row, user_row) -> str:
+    name_ru = supp_row["name_ru"] or ""
+    name_en = supp_row["name_en"] or ""
+    if name_ru and name_en:
+        title = f"{name_ru} ({name_en})"
+    else:
+        title = name_ru or name_en or supp_row["name"]
+
+    summary = (
+        supp_row["summary_verified"]
+        or supp_row["summary_ru"]
+        or supp_row["summary_theoretical"]
+        or supp_row["molecular_mechanisms"]
+        or supp_row["mechanisms"]
+        or ""
+    )
+
+    is_active = bool(user_row["is_active"])
+    dose_text = user_row["dose_text"] or "не указано"
+    note_text = user_row["note_text"] or "нет"
+    status = "Активен" if is_active else "Пауза"
+
+    parts = [f"💊 <b>{title}</b>"]
+    if summary:
+        parts.append(summary)
+    parts.append(f"Статус: <b>{status}</b>")
+    parts.append(f"Доза: <b>{dose_text}</b>")
+    parts.append(f"Заметка: <b>{note_text}</b>")
+    return "\n\n".join(parts)

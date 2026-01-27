@@ -2,6 +2,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
+import json
 import re
 import aiosqlite
 
@@ -114,15 +115,18 @@ CREATE INDEX IF NOT EXISTS idx_intake_user_time ON intake_log(user_id, taken_at)
 CREATE TABLE IF NOT EXISTS daily_checkins (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  date          TEXT NOT NULL,
-  energy        INTEGER,
-  sleep         INTEGER,
-  mood          INTEGER,
-  stress        INTEGER,
-  training      INTEGER,
-  note          TEXT,
+  day           TEXT NOT NULL,
   created_at    TEXT NOT NULL,
-  UNIQUE(user_id, date)
+  payload_json  TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS daily_plan_overrides (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  day           TEXT NOT NULL,
+  override_json TEXT NOT NULL,
+  created_at    TEXT NOT NULL,
+  UNIQUE(user_id, day)
 );
 
 CREATE TABLE IF NOT EXISTS ai_daily_usage (
@@ -189,6 +193,8 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     await _ensure_user_supplements(conn)
     await _ensure_user_schedules(conn)
     await _ensure_user_intake_log(conn)
+    await _ensure_daily_checkins(conn)
+    await _ensure_daily_plan_overrides(conn)
     await conn.execute(
         "UPDATE supplements SET interaction_classes='[]' WHERE interaction_classes IS NULL OR interaction_classes=''"
     )
@@ -288,6 +294,60 @@ async def _ensure_user_intake_log(conn: aiosqlite.Connection) -> None:
     await _ensure_column(conn, "user_intake_log", "updated_at", "TEXT NOT NULL DEFAULT ''")
     await conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_user_intake_unique ON user_intake_log(user_id, supplement_id, local_date)"
+    )
+
+async def _ensure_daily_checkins(conn: aiosqlite.Connection) -> None:
+    table = await fetchone(
+        conn,
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='daily_checkins'",
+    )
+    if not table:
+        await conn.execute(
+            """CREATE TABLE IF NOT EXISTS daily_checkins (
+              id            INTEGER PRIMARY KEY AUTOINCREMENT,
+              user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+              day           TEXT NOT NULL,
+              created_at    TEXT NOT NULL,
+              payload_json  TEXT NOT NULL
+            )"""
+        )
+        return
+    await _ensure_column(conn, "daily_checkins", "day", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "daily_checkins", "payload_json", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "daily_checkins", "created_at", "TEXT NOT NULL DEFAULT ''")
+    cols = await fetchall(conn, "PRAGMA table_info(daily_checkins)")
+    col_names = {c["name"] for c in cols}
+    if "date" in col_names:
+        await conn.execute("UPDATE daily_checkins SET day=date WHERE day IS NULL OR day=''")
+    await conn.execute(
+        "UPDATE daily_checkins SET created_at=? WHERE created_at IS NULL OR created_at=''",
+        (utc_now_iso(),),
+    )
+    await conn.execute(
+        "UPDATE daily_checkins SET payload_json='{}' WHERE payload_json IS NULL OR payload_json=''",
+    )
+    await conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_checkins_user_day_created ON daily_checkins(user_id, day, created_at)"
+    )
+
+async def _ensure_daily_plan_overrides(conn: aiosqlite.Connection) -> None:
+    table = await fetchone(
+        conn,
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='daily_plan_overrides'",
+    )
+    if not table:
+        await conn.execute(
+            """CREATE TABLE IF NOT EXISTS daily_plan_overrides (
+              id            INTEGER PRIMARY KEY AUTOINCREMENT,
+              user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+              day           TEXT NOT NULL,
+              override_json TEXT NOT NULL,
+              created_at    TEXT NOT NULL,
+              UNIQUE(user_id, day)
+            )"""
+        )
+    await conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_plan_overrides_user_day ON daily_plan_overrides(user_id, day)"
     )
 
 async def _backfill_user_supplements(conn: aiosqlite.Connection) -> None:
@@ -405,6 +465,11 @@ def next_run_datetime_for_hhmm(hhmm: str, tz_name: str | None) -> datetime:
 
 def get_user_local_date(tz_name: str | None) -> str:
     return local_date(tz_name)
+
+async def get_user_local_day(conn: aiosqlite.Connection, user_id: int) -> str:
+    row = await fetchone(conn, "SELECT tz_name FROM users WHERE id=?", (user_id,))
+    tz_name = str(row["tz_name"] or "").strip() if row else ""
+    return local_date(tz_name or None)
 
 # catalog
 async def upsert_supplement(conn: aiosqlite.Connection, s: dict) -> int:
@@ -746,6 +811,28 @@ async def list_user_supplements(conn: aiosqlite.Connection, tg_user_id: int, lim
         (user_id, limit),
     )
 
+async def list_user_stack_details(conn: aiosqlite.Connection, tg_user_id: int, local_date: str | None = None):
+    user_id = await get_or_create_user(conn, tg_user_id)
+    params: list = [local_date or "", user_id]
+    status_join = (
+        "LEFT JOIN user_intake_log uil ON uil.user_id=us.user_id "
+        "AND uil.supplement_id=us.supplement_id AND uil.local_date=?"
+    )
+    return await fetchall(
+        conn,
+        f"""SELECT us.supplement_id, us.dose_text, us.note_text, us.is_active,
+                   s.name, s.slug,
+                   sch.time_hhmm,
+                   uil.status AS today_status
+            FROM user_supplements us
+            JOIN supplements s ON s.id=us.supplement_id
+            LEFT JOIN user_schedules sch ON sch.user_id=us.user_id AND sch.supplement_id=us.supplement_id
+            {status_join}
+            WHERE us.user_id=? AND us.is_active=1
+            ORDER BY s.name""",
+        tuple(params),
+    )
+
 async def user_has_supplement(conn: aiosqlite.Connection, tg_user_id: int, supplement_id: int) -> bool:
     user_id = await get_or_create_user(conn, tg_user_id)
     row = await fetchone(
@@ -843,37 +930,47 @@ async def set_today_intake_status(
     await conn.commit()
 
 # checkins
-async def upsert_checkin(conn: aiosqlite.Connection, user_id: int, date: str, data: dict):
+async def save_daily_checkin(conn: aiosqlite.Connection, user_id: int, day: str, payload: dict) -> None:
     await conn.execute(
-        """INSERT INTO daily_checkins(user_id,date,energy,sleep,mood,stress,training,note,created_at)
-        VALUES(?,?,?,?,?,?,?,?,?)
-        ON CONFLICT(user_id,date) DO UPDATE SET
-          energy=excluded.energy,
-          sleep=excluded.sleep,
-          mood=excluded.mood,
-          stress=excluded.stress,
-          training=excluded.training,
-          note=excluded.note
-        """,
-        (
-            user_id, date,
-            data.get("energy"),
-            data.get("sleep"),
-            data.get("mood"),
-            data.get("stress"),
-            data.get("training"),
-            data.get("note"),
-            utc_now_iso(),
-        ),
+        """INSERT INTO daily_checkins(user_id, day, created_at, payload_json)
+           VALUES(?,?,?,?)""",
+        (user_id, day, utc_now_iso(), json.dumps(payload, ensure_ascii=False)),
     )
     await conn.commit()
 
-async def list_checkins(conn: aiosqlite.Connection, user_id: int, limit: int = 7):
+async def list_recent_checkins(conn: aiosqlite.Connection, user_id: int, limit: int = 3):
     return await fetchall(
         conn,
-        "SELECT * FROM daily_checkins WHERE user_id=? ORDER BY date DESC LIMIT ?",
+        "SELECT * FROM daily_checkins WHERE user_id=? ORDER BY created_at DESC LIMIT ?",
         (user_id, limit),
     )
+
+async def upsert_daily_plan_override(conn: aiosqlite.Connection, user_id: int, day: str, override: dict) -> None:
+    await conn.execute(
+        """INSERT INTO daily_plan_overrides(user_id, day, override_json, created_at)
+           VALUES(?,?,?,?)
+           ON CONFLICT(user_id, day) DO UPDATE SET
+             override_json=excluded.override_json,
+             created_at=excluded.created_at""",
+        (user_id, day, json.dumps(override, ensure_ascii=False), utc_now_iso()),
+    )
+    await conn.commit()
+
+async def get_daily_plan_override(conn: aiosqlite.Connection, user_id: int, day: str) -> dict | None:
+    row = await fetchone(
+        conn,
+        "SELECT override_json FROM daily_plan_overrides WHERE user_id=? AND day=?",
+        (user_id, day),
+    )
+    if not row:
+        return None
+    raw = row["override_json"]
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return None
 
 # AI limiter
 async def ai_can_use_today(conn: aiosqlite.Connection, user_id: int, date: str, max_per_day: int) -> bool:

@@ -32,7 +32,13 @@ from keyboards import (
     settings_menu,
 )
 import tz
-from openai_client import OpenAIConfig, OpenAITranscribeConfig, suggest_stack_v1, transcribe_voice_v1
+from openai_client import (
+    OpenAIConfig,
+    OpenAITranscribeConfig,
+    suggest_stack_v1,
+    transcribe_voice_v1,
+    checkin_plan_v1,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("supply-bot")
@@ -67,6 +73,54 @@ async def _download_voice_bytes(update: Update, context: ContextTypes.DEFAULT_TY
     data = await file.download_as_bytearray()
     filename = f"voice_{update.message.message_id}.ogg"
     return bytes(data), filename
+
+def _format_day_ru(day: str) -> str:
+    try:
+        return datetime.strptime(day, "%Y-%m-%d").strftime("%d.%m.%Y")
+    except ValueError:
+        return day
+
+def _checkin_intro_text() -> str:
+    return (
+        "📝 <b>Опрос дня</b>\n\n"
+        "Можно:\n"
+        "• ответить текстом (1–5 предложений)\n"
+        "• или отправить голосовое\n\n"
+        "Напиши: сон, стресс, тренировка, самочувствие, что беспокоит.\n\n"
+        "<i>Не медицинский совет.</i>"
+    )
+
+def _format_checkin_change(idx: int, change: dict) -> str:
+    change_type = str(change.get("type") or "").strip()
+    name = str(change.get("supplement_name") or "").strip()
+    reason = str(change.get("reason_ru") or "").strip()
+    dose = str(change.get("dose_ru") or "").strip()
+    timing = str(change.get("timing_ru") or "").strip()
+    confidence = change.get("confidence")
+    type_map = {
+        "add": "➕ Добавить",
+        "remove": "➖ Убрать",
+        "adjust_dose": "⚖️ Изменить дозу",
+        "adjust_timing": "⏰ Сдвинуть время",
+    }
+    label = type_map.get(change_type, change_type or "Изменение")
+    line = f"{idx}) {label}: <b>{name}</b>"
+    details = []
+    if dose:
+        details.append(f"доза: {dose}")
+    if timing:
+        details.append(f"время: {timing}")
+    if details:
+        line = f"{line} — " + " · ".join(details)
+    if reason:
+        line = f"{line}\n{reason}"
+    try:
+        confidence_int = int(confidence)
+    except (TypeError, ValueError):
+        confidence_int = None
+    if confidence_int is not None:
+        line = f"{line}\nУверенность: {confidence_int}%"
+    return line
 
 async def _render_ai_suggestions(
     update: Update,
@@ -200,6 +254,254 @@ async def _render_ai_suggestions(
             route="menu:ai",
         )
     return False
+
+async def _build_checkin_context(conn, tg_uid: int, user_id: int, day: str, tz_name: str | None) -> str:
+    local_date = day
+    stack_rows = await db.list_user_stack_details(conn, tg_uid, local_date=local_date)
+    base_stack = []
+    today_marks = []
+    for row in stack_rows:
+        base_stack.append(
+            {
+                "name": row["name"],
+                "dose_ru": row["dose_text"] or "",
+                "timing_ru": row["time_hhmm"] or "",
+                "is_active": bool(row["is_active"]),
+            }
+        )
+        if row["today_status"]:
+            today_marks.append(
+                {
+                    "name": row["name"],
+                    "status": row["today_status"],
+                }
+            )
+
+    recent_rows = await db.list_recent_checkins(conn, user_id, limit=3)
+    recent_checkins = []
+    for row in recent_rows:
+        raw = row["payload_json"]
+        if not raw:
+            continue
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        text = str(payload.get("text") or "").strip()
+        if text:
+            recent_checkins.append({"text": text, "day": row["day"], "created_at": row["created_at"]})
+
+    context_payload = {
+        "local_day": day,
+        "user_tz": tz_name or "UTC",
+        "base_stack": base_stack,
+        "today_marks": today_marks,
+        "recent_checkins": recent_checkins,
+    }
+    return json.dumps(context_payload, ensure_ascii=False)
+
+async def _render_checkin_plan(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    conn,
+    day: str,
+    ai_data: dict,
+) -> None:
+    summary = str(ai_data.get("summary_ru") or "").strip() or "Краткое резюме недоступно."
+    changes = ai_data.get("changes") or []
+    warnings = ai_data.get("warnings_ru") or []
+    questions = ai_data.get("questions_ru") or []
+    if not isinstance(changes, list):
+        changes = []
+    if not isinstance(warnings, list):
+        warnings = []
+    if not isinstance(questions, list):
+        questions = []
+
+    found_map: dict[int, int] = {}
+    missing = []
+    for idx, change in enumerate(changes, start=1):
+        if not isinstance(change, dict):
+            continue
+        name = str(change.get("supplement_name") or "").strip()
+        if not name:
+            continue
+        rows = await db.search_supplements(conn, name, limit=1)
+        if rows:
+            found_map[idx] = int(rows[0]["id"])
+        else:
+            missing.append(name)
+
+    lines = [
+        f"📅 <b>План на сегодня</b> ({_format_day_ru(day)})",
+        "",
+        summary,
+        "",
+        "Изменения:",
+    ]
+    if changes:
+        for idx, change in enumerate(changes, start=1):
+            if not isinstance(change, dict):
+                continue
+            lines.append(_format_checkin_change(idx, change))
+    else:
+        lines.append("Нет предложенных изменений.")
+
+    if missing:
+        lines.append("")
+        lines.append("Не нашёл в каталоге:")
+        lines.append(", ".join(missing))
+
+    if warnings:
+        lines.append("")
+        lines.append("⚠️ Предупреждения:")
+        for w in warnings:
+            lines.append(f"• {w}")
+
+    if questions:
+        lines.append("")
+        lines.append("❓ Вопросы:")
+        for q in questions:
+            lines.append(f"• {q}")
+
+    buttons = []
+    for idx in sorted(found_map.keys()):
+        buttons.append(
+            [
+                InlineKeyboardButton(f"✅ Применить #{idx}", callback_data=f"chkapply:{day}:{idx}"),
+                InlineKeyboardButton(f"❌ Отклонить #{idx}", callback_data=f"chkdeny:{day}:{idx}"),
+            ]
+        )
+    buttons.append([InlineKeyboardButton("🧾 Посмотреть план на сегодня", callback_data="menu:todayplan")])
+    buttons.append([InlineKeyboardButton("⬅️ В меню", callback_data="menu:home")])
+
+    context.user_data["last_checkin_ai"] = {
+        "day": day,
+        "data": ai_data,
+        "found_map": found_map,
+    }
+
+    await show(
+        update,
+        context,
+        "\n".join(lines),
+        InlineKeyboardMarkup(buttons),
+        route="menu:checkin",
+    )
+
+async def _handle_checkin_submission(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    conn,
+    tg_uid: int,
+    user_id: int,
+    tz_name: str | None,
+    checkin_text: str,
+    source: str,
+) -> bool:
+    day = await db.get_user_local_day(conn, user_id)
+    payload = {
+        "text": checkin_text,
+        "source": source,
+    }
+    await db.save_daily_checkin(conn, user_id, day, payload)
+
+    s = context.application.bot_data["settings"]
+    if not s.OPENAI_API_KEY:
+        await show(
+            update,
+            context,
+            "AI отключен: добавь OPENAI_API_KEY в .env.",
+            back(),
+            route="menu:checkin",
+        )
+        return False
+
+    context_json = await _build_checkin_context(conn, tg_uid, user_id, day, tz_name)
+    cfg = OpenAIConfig(api_key=s.OPENAI_API_KEY, model=s.OPENAI_MODEL)
+    await show(update, context, "🤖 Думаю… (AI)", back(), route="menu:checkin")
+    raw = None
+    try:
+        raw = await checkin_plan_v1(cfg, checkin_text, context_json)
+    except Exception:
+        log.exception("OpenAI checkin plan request failed")
+        await show(update, context, "AI временно недоступен.", back(), route="menu:checkin")
+        return False
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        await show(update, context, "AI вернул неожиданный формат. Попробуй ещё раз.", back(), route="menu:checkin")
+        return False
+
+    if not isinstance(data, dict):
+        await show(update, context, "AI вернул неожиданный формат. Попробуй ещё раз.", back(), route="menu:checkin")
+        return False
+
+    await _render_checkin_plan(update, context, conn, day, data)
+    context.user_data.pop(WAITING_KEY, None)
+    return True
+
+async def _show_today_plan(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    conn,
+    tg_uid: int,
+) -> None:
+    user_id = await db.get_or_create_user(conn, tg_uid)
+    day = await db.get_user_local_day(conn, user_id)
+    stack_rows = await db.list_user_stack_details(conn, tg_uid, local_date=day)
+    override = await db.get_daily_plan_override(conn, user_id, day)
+    applied = override.get("applied_changes", []) if isinstance(override, dict) else []
+    denied = override.get("denied_changes", []) if isinstance(override, dict) else []
+
+    lines = [f"📅 <b>План на сегодня</b> ({_format_day_ru(day)})", ""]
+    if stack_rows:
+        lines.append("Базовый стек:")
+        for idx, row in enumerate(stack_rows, start=1):
+            dose = row["dose_text"] or ""
+            timing = row["time_hhmm"] or ""
+            bits = []
+            if dose:
+                bits.append(f"доза: {dose}")
+            if timing:
+                bits.append(f"время: {timing}")
+            detail = " · ".join(bits)
+            line = f"{idx}) <b>{row['name']}</b>"
+            if detail:
+                line = f"{line} — {detail}"
+            lines.append(line)
+    else:
+        lines.append("Базовый стек: пусто.")
+
+    if applied:
+        lines.append("")
+        lines.append("Применённые изменения:")
+        for idx, change in enumerate(applied, start=1):
+            if not isinstance(change, dict):
+                continue
+            label_idx = int(change.get("idx") or idx)
+            lines.append(_format_checkin_change(label_idx, change))
+
+    if denied:
+        lines.append("")
+        lines.append("Отклонённые изменения:")
+        for idx, change in enumerate(denied, start=1):
+            if not isinstance(change, dict):
+                continue
+            label_idx = int(change.get("idx") or idx)
+            lines.append(_format_checkin_change(label_idx, change))
+
+    lines.append("")
+    lines.append("Это план только на сегодня. Завтра вернётся базовый стек, если не изменишь вручную.")
+
+    await show(
+        update,
+        context,
+        "\n".join(lines),
+        InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ В меню", callback_data="menu:home")]]),
+        route="menu:todayplan",
+    )
 
 async def home(
     update: Update,
@@ -394,7 +696,7 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     conn = await db.connect(s.DB_PATH)
     try:
-        await db.get_or_create_user(conn, tg_uid, tz_name="")
+        user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
         tz_name = await db.get_user_tz(conn, tg_uid)
         if not tz_name:
             context.user_data.pop("tz_back_data", None)
@@ -629,13 +931,19 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await show(update, context, text, supplement_compat_back(slug, int(page)), route=f"supp:compat:{slug}:{page}")
             return
 
-        if data == "menu:checkin_demo":
-            tz = await db.get_user_tz(conn, tg_uid)
-            today = db.get_user_local_date(tz)
-            await db.upsert_checkin(conn, user_id, today, {
-                "energy": 7, "sleep": 7, "mood": 7, "stress": 4, "training": 0, "note": "demo"
-            })
-            await show(update, context, "📝 Чекин записан (демо). Потом сделаем нормальный опрос.", back(), route="menu:checkin_demo")
+        if data == "menu:checkin":
+            context.user_data[WAITING_KEY] = "checkin"
+            await show(
+                update,
+                context,
+                _checkin_intro_text(),
+                back(),
+                route="menu:checkin",
+            )
+            return
+
+        if data == "menu:todayplan":
+            await _show_today_plan(update, context, conn, tg_uid)
             return
 
         if data == "menu:ai":
@@ -696,6 +1004,101 @@ async def on_ai_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
     finally:
         await conn.close()
+
+async def on_checkin_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    if not q:
+        return
+    await q.answer()
+    data = q.data or ""
+    if not (data.startswith("chkapply:") or data.startswith("chkdeny:")):
+        return
+    parts = data.split(":", 2)
+    if len(parts) != 3:
+        return
+    action = parts[0]
+    day = parts[1]
+    try:
+        idx = int(parts[2])
+    except ValueError:
+        return
+
+    last_ai = context.user_data.get("last_checkin_ai") if isinstance(context.user_data, dict) else None
+    if not isinstance(last_ai, dict):
+        await show(update, context, "Сначала пройди опрос дня.", back(), route="menu:checkin")
+        return
+    if last_ai.get("day") != day:
+        await show(update, context, "Данные опроса устарели. Пройди опрос ещё раз.", back(), route="menu:checkin")
+        return
+    ai_data = last_ai.get("data") or {}
+    changes = ai_data.get("changes") if isinstance(ai_data, dict) else None
+    if not isinstance(changes, list) or idx < 1 or idx > len(changes):
+        await show(update, context, "Не нашёл выбранное изменение.", back(), route="menu:checkin")
+        return
+
+    change = changes[idx - 1]
+    if not isinstance(change, dict):
+        await show(update, context, "Не нашёл выбранное изменение.", back(), route="menu:checkin")
+        return
+    found_map = last_ai.get("found_map") if isinstance(last_ai.get("found_map"), dict) else {}
+    if action == "chkapply" and idx not in found_map:
+        await show(update, context, "Этой добавки нет в каталоге, применить нельзя.", back(), route="menu:checkin")
+        return
+
+    s = context.application.bot_data["settings"]
+    tg_uid = update.effective_user.id
+    conn = await db.connect(s.DB_PATH)
+    try:
+        user_id = await db.get_or_create_user(conn, tg_uid)
+        override = await db.get_daily_plan_override(conn, user_id, day) or {}
+        applied = override.get("applied_changes", [])
+        denied = override.get("denied_changes", [])
+        if not isinstance(applied, list):
+            applied = []
+        if not isinstance(denied, list):
+            denied = []
+
+        change_payload = dict(change)
+        change_payload["idx"] = idx
+        if idx in found_map:
+            change_payload["supplement_id"] = int(found_map[idx])
+
+        def _strip_existing(items: list[dict]) -> list[dict]:
+            cleaned = []
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                if int(item.get("idx") or -1) == idx:
+                    continue
+                cleaned.append(item)
+            return cleaned
+
+        applied = _strip_existing(applied)
+        denied = _strip_existing(denied)
+
+        if action == "chkapply":
+            applied.append(change_payload)
+            message = f"✅ Применено для {day}. Это влияет только на сегодня."
+        else:
+            denied.append(change_payload)
+            message = "Ок, не применяю."
+
+        override = {
+            "applied_changes": applied,
+            "denied_changes": denied,
+            "final_notes_ru": str(override.get("final_notes_ru") or ""),
+        }
+        await db.upsert_daily_plan_override(conn, user_id, day, override)
+    finally:
+        await conn.close()
+
+    kb = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🧾 Посмотреть план на сегодня", callback_data="menu:todayplan")],
+            [InlineKeyboardButton("⬅️ В меню", callback_data="menu:home")],
+        ]
+    )
+    await show(update, context, message, kb, route="menu:todayplan")
 
 async def on_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
@@ -837,6 +1240,21 @@ async def _render_route(
             target_chat_id=target_chat_id,
             target_message_id=target_message_id,
         )
+        return
+    if route == "menu:checkin":
+        context.user_data[WAITING_KEY] = "checkin"
+        await show(
+            update,
+            context,
+            _checkin_intro_text(),
+            back(),
+            route=route,
+            target_chat_id=target_chat_id,
+            target_message_id=target_message_id,
+        )
+        return
+    if route == "menu:todayplan":
+        await _show_today_plan(update, context, conn, tg_uid)
         return
     if route == "my:search":
         await show(
@@ -1007,17 +1425,6 @@ async def _render_route(
             target_message_id=target_message_id,
         )
         return
-    if route == "menu:checkin_demo":
-        await show(
-            update,
-            context,
-            "📝 Чекин записан (демо). Потом сделаем нормальный опрос.",
-            back(),
-            route=route,
-            target_chat_id=target_chat_id,
-            target_message_id=target_message_id,
-        )
-        return
     if route == "menu:ai":
         await home(update, context, target_chat_id=target_chat_id, target_message_id=target_message_id)
         return
@@ -1158,6 +1565,26 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     await show(update, context, "AI временно недоступен.", back(), route="menu:ai")
 
                 await _render_ai_suggestions(update, context, conn, txt, raw)
+        elif waiting == "checkin":
+            if not txt:
+                await show(
+                    update,
+                    context,
+                    "Похоже, сообщение пустое. Попробуй ещё раз.",
+                    back(),
+                    route="menu:checkin",
+                )
+            else:
+                await _handle_checkin_submission(
+                    update,
+                    context,
+                    conn,
+                    tg_uid,
+                    user_id,
+                    tz_name,
+                    txt,
+                    "text",
+                )
 
     finally:
         await conn.close()
@@ -1171,14 +1598,14 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.message.voice:
         return
     waiting = context.user_data.get(WAITING_KEY)
-    if waiting != "ai_goal":
+    if waiting not in ("ai_goal", "checkin"):
         return
 
     s = context.application.bot_data["settings"]
     tg_uid = update.effective_user.id
     conn = await db.connect(s.DB_PATH)
     try:
-        await db.get_or_create_user(conn, tg_uid, tz_name="")
+        user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
         tz_name = await db.get_user_tz(conn, tg_uid)
         if not tz_name:
             context.user_data.pop("tz_back_data", None)
@@ -1186,10 +1613,12 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
 
         if not s.OPENAI_API_KEY:
-            await show(update, context, "AI отключен: добавь OPENAI_API_KEY в .env.", back(), route="menu:ai")
+            route = "menu:checkin" if waiting == "checkin" else "menu:ai"
+            await show(update, context, "AI отключен: добавь OPENAI_API_KEY в .env.", back(), route=route)
             return
 
-        await show(update, context, "🎙️ Принял голосовое. Расшифровываю...", back(), route="menu:ai")
+        route = "menu:checkin" if waiting == "checkin" else "menu:ai"
+        await show(update, context, "🎙️ Принял голосовое. Расшифровываю...", back(), route=route)
         try:
             audio_bytes, filename = await _download_voice_bytes(update, context)
         except Exception:
@@ -1198,7 +1627,7 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 context,
                 "Не смог скачать голосовое. Попробуй ещё раз.",
                 back(),
-                route="menu:ai",
+                route=route,
             )
             return
 
@@ -1215,7 +1644,7 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 context,
                 "AI сейчас недоступен для расшифровки. Попробуй позже.",
                 back(),
-                route="menu:ai",
+                route=route,
             )
             return
 
@@ -1226,32 +1655,43 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 context,
                 "Не смог распознать речь. Попробуй ещё раз.",
                 back(),
-                route="menu:ai",
+                route=route,
             )
             return
+        if waiting == "checkin":
+            await _handle_checkin_submission(
+                update,
+                context,
+                conn,
+                tg_uid,
+                user_id,
+                tz_name,
+                transcription,
+                "voice",
+            )
+        else:
+            sups = await db.list_user_supplements(conn, tg_uid, limit=100)
+            user_supp_text = ", ".join([r["name"] for r in sups]) or "нет"
+            cfg = OpenAIConfig(api_key=s.OPENAI_API_KEY, model=s.OPENAI_MODEL)
+            await show(update, context, "🤖 Думаю… (AI)", back(), route="menu:ai")
+            raw = None
+            try:
+                raw = await suggest_stack_v1(cfg, transcription, user_supp_text)
+            except Exception:
+                log.exception("OpenAI request failed")
+                await show(update, context, "AI временно недоступен.", back(), route="menu:ai")
+                return
 
-        sups = await db.list_user_supplements(conn, tg_uid, limit=100)
-        user_supp_text = ", ".join([r["name"] for r in sups]) or "нет"
-        cfg = OpenAIConfig(api_key=s.OPENAI_API_KEY, model=s.OPENAI_MODEL)
-        await show(update, context, "🤖 Думаю… (AI)", back(), route="menu:ai")
-        raw = None
-        try:
-            raw = await suggest_stack_v1(cfg, transcription, user_supp_text)
-        except Exception:
-            log.exception("OpenAI request failed")
-            await show(update, context, "AI временно недоступен.", back(), route="menu:ai")
-            return
-
-        rendered = await _render_ai_suggestions(
-            update,
-            context,
-            conn,
-            transcription,
-            raw,
-            prefix_line=f"🎙️ Понял цель: <b>{transcription}</b>",
-        )
-        if rendered:
-            context.user_data.pop(WAITING_KEY, None)
+            rendered = await _render_ai_suggestions(
+                update,
+                context,
+                conn,
+                transcription,
+                raw,
+                prefix_line=f"🎙️ Понял цель: <b>{transcription}</b>",
+            )
+            if rendered:
+                context.user_data.pop(WAITING_KEY, None)
     finally:
         await conn.close()
         try:
@@ -1304,6 +1744,7 @@ async def _bootstrap() -> Application:
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(on_menu, pattern=r"^(menu:|settings:|add_pick:|compat_pick:|cat:page:|supp:|my:)"))
     app.add_handler(CallbackQueryHandler(on_ai_add, pattern=r"^aiadd:"))
+    app.add_handler(CallbackQueryHandler(on_checkin_action, pattern=r"^chk(apply|deny):"))
     app.add_handler(CallbackQueryHandler(on_timezone, pattern=r"^tz:"))
     app.add_handler(CallbackQueryHandler(on_reminder_action, pattern=r"^rem:"))
     app.add_handler(MessageHandler(filters.VOICE, on_voice))

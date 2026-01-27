@@ -115,3 +115,38 @@ def my_supplement_hub(
         [InlineKeyboardButton("🗑 Удалить из моих", callback_data=f"my:remove:{supplement_id}")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="my:list:0")],
     ])
+
+def timezone_picker(page: int, *, per_page: int = 8) -> InlineKeyboardMarkup:
+    offsets = list(range(-12, 15))
+    page = max(page, 0)
+    start = page * per_page
+    end = start + per_page
+    sliced = offsets[start:end]
+    btns: list[list[InlineKeyboardButton]] = []
+    row: list[InlineKeyboardButton] = []
+    for offset in sliced:
+        sign = "+" if offset >= 0 else "-"
+        hours = abs(offset)
+        label = f"UTC{sign}{hours}"
+        value = f"{sign}{hours:02d}:00"
+        row.append(InlineKeyboardButton(label, callback_data=f"tz:set:{value}"))
+        if len(row) == 2:
+            btns.append(row)
+            row = []
+    if row:
+        btns.append(row)
+    nav = []
+    if start > 0:
+        nav.append(InlineKeyboardButton("⬅️ Назад", callback_data=f"tz:page:{page - 1}"))
+    if end < len(offsets):
+        nav.append(InlineKeyboardButton("➡️ Далее", callback_data=f"tz:page:{page + 1}"))
+    if nav:
+        btns.append(nav)
+    return InlineKeyboardMarkup(btns)
+
+def reminder_actions(supplement_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Выпил", callback_data=f"rem:taken:{supplement_id}")],
+        [InlineKeyboardButton("⏰ Через 15 минут", callback_data=f"rem:snooze:{supplement_id}")],
+        [InlineKeyboardButton("❌ Сегодня не пью", callback_data=f"rem:skip:{supplement_id}")],
+    ])

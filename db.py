@@ -1,7 +1,8 @@
 from __future__ import annotations
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
+import re
 import aiosqlite
 
 def utc_now_iso() -> str:
@@ -30,7 +31,7 @@ PRAGMA foreign_keys=ON;
 CREATE TABLE IF NOT EXISTS users (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   tg_user_id    INTEGER UNIQUE NOT NULL,
-  tz_name       TEXT NOT NULL DEFAULT 'UTC',
+  tz_name       TEXT DEFAULT '',
   created_at    TEXT NOT NULL
 );
 
@@ -168,6 +169,7 @@ async def init_db(db_path: str) -> None:
         await conn.close()
 
 async def _apply_migrations(conn: aiosqlite.Connection) -> None:
+    await _ensure_column(conn, "users", "tz_name", "TEXT")
     await _ensure_column(conn, "supplements", "name_ru", "TEXT")
     await _ensure_column(conn, "supplements", "name_en", "TEXT")
     await _ensure_column(conn, "supplements", "summary_ru", "TEXT")
@@ -346,24 +348,63 @@ async def _backfill_alias_norm(conn: aiosqlite.Connection) -> None:
         await conn.execute("UPDATE supplement_aliases SET alias_norm=? WHERE id=?", (alias_norm, int(row["id"])))
 
 # users
-async def get_or_create_user(conn: aiosqlite.Connection, tg_user_id: int, tz_name: str = "UTC") -> int:
+async def get_or_create_user(conn: aiosqlite.Connection, tg_user_id: int, tz_name: str | None = "") -> int:
     row = await fetchone(conn, "SELECT id FROM users WHERE tg_user_id=?", (tg_user_id,))
     if row:
         return int(row["id"])
+    tz_value = tz_name or ""
     await conn.execute(
         "INSERT INTO users(tg_user_id, tz_name, created_at) VALUES(?,?,?)",
-        (tg_user_id, tz_name, utc_now_iso()),
+        (tg_user_id, tz_value, utc_now_iso()),
     )
     await conn.commit()
     row2 = await fetchone(conn, "SELECT id FROM users WHERE tg_user_id=?", (tg_user_id,))
     return int(row2["id"])
 
-async def get_user_tz(conn: aiosqlite.Connection, user_id: int) -> str:
-    row = await fetchone(conn, "SELECT tz_name FROM users WHERE id=?", (user_id,))
-    return str(row["tz_name"]) if row else "UTC"
+async def get_user_tz(conn: aiosqlite.Connection, tg_user_id: int) -> str | None:
+    row = await fetchone(conn, "SELECT tz_name FROM users WHERE tg_user_id=?", (tg_user_id,))
+    if not row:
+        return None
+    tz_name = str(row["tz_name"] or "").strip()
+    return tz_name or None
 
-def get_user_local_date(tz_name: str) -> str:
-    return datetime.now(ZoneInfo(tz_name)).date().isoformat()
+async def set_user_tz(conn: aiosqlite.Connection, tg_user_id: int, tz_name: str) -> None:
+    await conn.execute(
+        "UPDATE users SET tz_name=? WHERE tg_user_id=?",
+        (tz_name, tg_user_id),
+    )
+    await conn.commit()
+
+def parse_offset_tz(tz_name: str | None):
+    if not tz_name:
+        return timezone.utc
+    if re.fullmatch(r"[+-](?:0\\d|1\\d|2[0-3]):[0-5]\\d", tz_name):
+        sign = 1 if tz_name[0] == "+" else -1
+        hours_str, minutes_str = tz_name[1:].split(":")
+        offset = timedelta(hours=int(hours_str), minutes=int(minutes_str))
+        return timezone(sign * offset)
+    try:
+        return ZoneInfo(tz_name)
+    except Exception:
+        return timezone.utc
+
+def local_now(tz_name: str | None) -> datetime:
+    return datetime.now(parse_offset_tz(tz_name))
+
+def local_date(tz_name: str | None) -> str:
+    return local_now(tz_name).date().isoformat()
+
+def next_run_datetime_for_hhmm(hhmm: str, tz_name: str | None) -> datetime:
+    tzinfo = parse_offset_tz(tz_name)
+    now_local = datetime.now(tzinfo)
+    hour, minute = map(int, hhmm.split(":"))
+    candidate = now_local.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if candidate <= now_local:
+        candidate += timedelta(days=1)
+    return candidate.astimezone(timezone.utc)
+
+def get_user_local_date(tz_name: str | None) -> str:
+    return local_date(tz_name)
 
 # catalog
 async def upsert_supplement(conn: aiosqlite.Connection, s: dict) -> int:
@@ -714,12 +755,34 @@ async def user_has_supplement(conn: aiosqlite.Connection, tg_user_id: int, suppl
     )
     return row is not None
 
+async def get_supplement_name(conn: aiosqlite.Connection, supplement_id: int) -> str | None:
+    row = await fetchone(conn, "SELECT name FROM supplements WHERE id=?", (supplement_id,))
+    return str(row["name"]) if row else None
+
 async def get_user_schedule(conn: aiosqlite.Connection, tg_user_id: int, supplement_id: int):
     user_id = await get_or_create_user(conn, tg_user_id)
     return await fetchone(
         conn,
         "SELECT * FROM user_schedules WHERE user_id=? AND supplement_id=?",
         (user_id, supplement_id),
+    )
+
+async def list_user_schedules(conn: aiosqlite.Connection, tg_user_id: int):
+    user_id = await get_or_create_user(conn, tg_user_id)
+    return await fetchall(
+        conn,
+        "SELECT * FROM user_schedules WHERE user_id=?",
+        (user_id,),
+    )
+
+async def list_enabled_schedules(conn: aiosqlite.Connection):
+    return await fetchall(
+        conn,
+        """SELECT u.tg_user_id, u.tz_name, sch.supplement_id, sch.time_hhmm
+           FROM user_schedules sch
+           JOIN users u ON u.id=sch.user_id
+           WHERE sch.is_enabled=1 AND sch.time_hhmm IS NOT NULL AND sch.time_hhmm!=''
+             AND u.tz_name IS NOT NULL AND u.tz_name!=''""",
     )
 
 async def set_user_schedule_time(

@@ -6,7 +6,7 @@ import os
 import re
 from datetime import datetime, timedelta
 
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters
 )
@@ -30,7 +30,7 @@ from keyboards import (
     timezone_picker,
     reminder_actions,
 )
-from openai_client import OpenAIConfig, daily_advice
+from openai_client import OpenAIConfig, suggest_stack_v1
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("supply-bot")
@@ -71,7 +71,7 @@ async def home(
         "💊 <b>Supply Bot</b>\n\n"
         "Я справочник + дневник добавок.\n"
         "— Совместимость из базы\n"
-        "— AI-совет (опционально) с лимитом в день\n\n"
+        "— AI-подбор (опционально)\n\n"
         "<i>Не медицинский совет.</i>",
         main_menu(),
         route="menu:home",
@@ -470,52 +470,58 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 await show(update, context, "AI отключен: добавь OPENAI_API_KEY в .env.", back(), route="menu:ai")
                 return
 
-            tz = await db.get_user_tz(conn, tg_uid)
-            today = db.get_user_local_date(tz)
-            can = await db.ai_can_use_today(conn, user_id, today, s.AI_MAX_PER_DAY)
-            if not can:
-                await show(update, context, f"Лимит AI на сегодня исчерпан (max={s.AI_MAX_PER_DAY}/день).", back(), route="menu:ai")
-                return
-
-            sups = await db.list_user_supplements(conn, tg_uid, limit=100)
-            checkins = await db.list_checkins(conn, user_id, limit=7)
-
-            user_supp_text = ", ".join([r["name"] for r in sups]) or "нет"
-            chk = []
-            for c in reversed(checkins):
-                chk.append(f"{c['date']}: energy={c['energy']} sleep={c['sleep']} mood={c['mood']} stress={c['stress']} training={c['training']} note={c['note']}")
-            checkins_text = "\n".join(chk) or "нет"
-
-            interactions_hint = "Подсказки по конфликтам/синергиям по набору добавим позже (агрегация по твоему стэку)."
-
-            cfg = OpenAIConfig(api_key=s.OPENAI_API_KEY, model=s.OPENAI_MODEL)
-            await show(update, context, "🤖 Думаю… (AI)", back(), route="menu:ai")
-
-            try:
-                advice = await daily_advice(
-                    cfg,
-                    user_summary="Пользователь ведёт дневник добавок в Telegram.",
-                    checkins_text=checkins_text,
-                    user_supplements=user_supp_text,
-                    interactions_hint=interactions_hint,
-                )
-            except Exception:
-                log.exception("OpenAI request failed")
-                await show(update, context, "AI временно недоступен.", back(), route="menu:ai")
-                return
-
-            if not advice or not advice.strip():
-                await show(update, context, "AI не вернул ответ. Попробуй позже.", back(), route="menu:ai")
-                return
-
-            await db.ai_inc_today(conn, user_id, today)
-            await show(update, context, f"🤖 <b>AI-совет</b>\n\n{advice}", back(), route="menu:ai")
+            context.user_data[WAITING_KEY] = "ai_goal"
+            await show(
+                update,
+                context,
+                "🤖 <b>Подбор стека (AI)</b>\n\n"
+                "Опиши цель одной фразой.\n"
+                "Пример: «Больше энергии утром, но без тревожности».\n\n"
+                "<i>Не медицинский совет.</i>",
+                back(),
+                route="menu:ai",
+            )
             return
 
     finally:
         await conn.close()
 
     await home(update, context)
+
+async def on_ai_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    if not q:
+        return
+    await q.answer()
+    data = q.data or ""
+    if not data.startswith("aiadd:"):
+        return
+    parts = data.split(":", 1)
+    if len(parts) != 2:
+        return
+    try:
+        supplement_id = int(parts[1])
+    except ValueError:
+        return
+
+    s = context.application.bot_data["settings"]
+    tg_uid = update.effective_user.id
+    conn = await db.connect(s.DB_PATH)
+    try:
+        await db.add_user_supplement(conn, tg_uid, supplement_id)
+        name = await db.get_supplement_name(conn, supplement_id)
+        name = name or "добавка"
+        await show(
+            update,
+            context,
+            "✅ Добавлено в «Мои БАДы»: "
+            f"<b>{name}</b>\n\n"
+            "Хочешь добавить ещё из рекомендаций?",
+            back(),
+            route="menu:ai",
+        )
+    finally:
+        await conn.close()
 
 async def on_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
@@ -933,6 +939,139 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             else:
                 context.user_data.pop(MY_SEARCH_KEY, None)
                 await _show_my_list(update, context, conn, tg_uid, 0)
+        elif waiting == "ai_goal":
+            context.user_data.pop(WAITING_KEY, None)
+            if not s.OPENAI_API_KEY:
+                await show(update, context, "AI отключен: добавь OPENAI_API_KEY в .env.", back(), route="menu:ai")
+            else:
+                sups = await db.list_user_supplements(conn, tg_uid, limit=100)
+                user_supp_text = ", ".join([r["name"] for r in sups]) or "нет"
+                cfg = OpenAIConfig(api_key=s.OPENAI_API_KEY, model=s.OPENAI_MODEL)
+                await show(update, context, "🤖 Думаю… (AI)", back(), route="menu:ai")
+                raw = None
+                try:
+                    raw = await suggest_stack_v1(cfg, txt, user_supp_text)
+                except Exception:
+                    log.exception("OpenAI request failed")
+                    await show(update, context, "AI временно недоступен.", back(), route="menu:ai")
+
+                data = None
+                format_error_shown = False
+                if raw:
+                    try:
+                        data = json.loads(raw)
+                    except json.JSONDecodeError:
+                        await show(
+                            update,
+                            context,
+                            "AI вернул неожиданный формат. Попробуй ещё раз.",
+                            back(),
+                            route="menu:ai",
+                        )
+                        format_error_shown = True
+                else:
+                    await show(update, context, "AI не вернул ответ. Попробуй ещё раз.", back(), route="menu:ai")
+
+                if isinstance(data, dict):
+                    candidates = data.get("candidates") or []
+                    warnings = data.get("warnings_ru") or []
+                    questions = data.get("questions_ru") or []
+                    if not isinstance(warnings, list):
+                        warnings = []
+                    if not isinstance(questions, list):
+                        questions = []
+                    found = []
+                    missing = []
+                    for cand in candidates:
+                        if not isinstance(cand, dict):
+                            continue
+                        name = str(cand.get("name") or "").strip()
+                        if not name:
+                            continue
+                        rows = await db.search_supplements(conn, name, limit=1)
+                        if rows:
+                            found.append({"row": rows[0], "cand": cand})
+                        else:
+                            missing.append(name)
+
+                    lines = [
+                        "🤖 <b>Подбор стека (AI)</b>",
+                        "",
+                        f"Цель: <b>{txt}</b>",
+                        "",
+                    ]
+                    if found:
+                        lines.append("Найдено в каталоге:")
+                        for idx, item in enumerate(found, start=1):
+                            row = item["row"]
+                            cand = item["cand"]
+                            dose = str(cand.get("dose_ru") or "").strip()
+                            timing = str(cand.get("timing_ru") or "").strip()
+                            why = str(cand.get("why_ru") or "").strip()
+                            confidence = cand.get("confidence")
+                            try:
+                                confidence = int(confidence)
+                            except (TypeError, ValueError):
+                                confidence = None
+                            detail_bits = []
+                            if dose:
+                                detail_bits.append(f"доза: {dose}")
+                            if timing:
+                                detail_bits.append(f"время: {timing}")
+                            detail = " · ".join(detail_bits)
+                            line = f"{idx}) <b>{row['name']}</b>"
+                            if detail:
+                                line = f"{line} — {detail}"
+                            if why:
+                                line = f"{line}\n{why}"
+                            if confidence is not None:
+                                line = f"{line}\nУверенность: {confidence}%"
+                            lines.append(line)
+                    else:
+                        lines.append("Найдено в каталоге: ничего.")
+
+                    if missing:
+                        lines.append("")
+                        lines.append("Не нашёл в каталоге:")
+                        lines.append(", ".join(missing))
+
+                    if warnings:
+                        lines.append("")
+                        lines.append("Предупреждения:")
+                        for w in warnings:
+                            lines.append(f"• {w}")
+
+                    if questions:
+                        lines.append("")
+                        lines.append("Вопросы:")
+                        for q in questions:
+                            lines.append(f"• {q}")
+
+                    lines.append("")
+                    lines.append("Выбери, что добавить в «Мои БАДы».")
+
+                    buttons = []
+                    for item in found:
+                        row = item["row"]
+                        buttons.append(
+                            [InlineKeyboardButton(f"➕ Добавить: {row['name']}", callback_data=f"aiadd:{row['id']}")]
+                        )
+                    buttons.append([InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")])
+                    await show(
+                        update,
+                        context,
+                        "\n".join(lines),
+                        InlineKeyboardMarkup(buttons),
+                        route="menu:ai",
+                    )
+                elif raw and not format_error_shown:
+                    await show(
+                        update,
+                        context,
+                        "AI вернул неожиданный формат. Попробуй ещё раз.",
+                        back(),
+                        route="menu:ai",
+                    )
 
     finally:
         await conn.close()
@@ -941,29 +1080,6 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.delete()
     except Exception:
         pass
-
-async def ai_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    s = context.application.bot_data["settings"]
-    tg_uid = update.effective_user.id
-    if tg_uid not in s.ADMIN_IDS:
-        await show(update, context, "Недостаточно прав.", route="admin:denied")
-        return
-
-    conn = await db.connect(s.DB_PATH)
-    try:
-        user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
-        args = context.args or []
-        if args and args[0].lower() == "all":
-            await db.ai_reset_all_usage(conn)
-            await show(update, context, "AI-лимиты сброшены для всех пользователей.", route="admin:ai_reset:all")
-            return
-
-        tz = await db.get_user_tz(conn, tg_uid)
-        today = db.get_user_local_date(tz)
-        await db.ai_reset_user_today(conn, user_id, today)
-        await show(update, context, f"AI-лимит сброшен на сегодня ({today}).", route="admin:ai_reset")
-    finally:
-        await conn.close()
 
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     log.exception("Unhandled error while processing update: %s", update, exc_info=context.error)
@@ -1008,8 +1124,8 @@ async def _bootstrap() -> Application:
     app.bot_data["render_route"] = _render_route
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("ai_reset", ai_reset))
     app.add_handler(CallbackQueryHandler(on_menu, pattern=r"^(menu:|add_pick:|compat_pick:|cat:page:|supp:|my:)"))
+    app.add_handler(CallbackQueryHandler(on_ai_add, pattern=r"^aiadd:"))
     app.add_handler(CallbackQueryHandler(on_timezone, pattern=r"^tz:"))
     app.add_handler(CallbackQueryHandler(on_reminder_action, pattern=r"^rem:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))

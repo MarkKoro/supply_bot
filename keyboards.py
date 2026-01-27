@@ -59,7 +59,7 @@ def my_supplements_list(rows, page: int, has_prev: bool, has_next: bool, *, show
 def catalog_page(rows, page: int, has_prev: bool, has_next: bool) -> InlineKeyboardMarkup:
     btns = []
     for r in rows:
-        btns.append([InlineKeyboardButton(r["name"], callback_data=f"supp:view:{r['slug']}:{page}")])
+        btns.append([InlineKeyboardButton(r["name"], callback_data=f"supp:open:{r['id']}")])
     nav = []
     if has_prev:
         nav.append(InlineKeyboardButton("⬅️ Назад", callback_data=f"cat:page:{page - 1}"))
@@ -94,26 +94,46 @@ def curated_stack_card(slug: str, *, source_url: str | None, back_page: int) -> 
 
 def supplement_page(
     supplement_id: int,
-    slug: str,
-    back_page: int,
     in_stack: bool,
     show_buy: str | None,
+    back_route: str,
 ) -> InlineKeyboardMarkup:
     btns = []
     if in_stack:
         btns.append([InlineKeyboardButton("✅ Уже в моих — Управлять", callback_data=f"my:open:{supplement_id}")])
     else:
-        btns.append([InlineKeyboardButton("➕ Добавить в мои БАДы", callback_data=f"my:add:{supplement_id}")])
-    btns.append([InlineKeyboardButton("🧩 Совместимость", callback_data=f"supp:compat:{slug}:{back_page}")])
+        btns.append([InlineKeyboardButton("➕ Добавить в Мои БАДы", callback_data=f"my:add:{supplement_id}")])
+    btns.append([
+        InlineKeyboardButton("✅ Совместимо", callback_data=f"supp:compat:{supplement_id}:synergy:0"),
+        InlineKeyboardButton("⛔ Несовместимо", callback_data=f"supp:compat:{supplement_id}:antagonism:0"),
+    ])
+    btns.append([InlineKeyboardButton("⚠️ Осторожно", callback_data=f"supp:compat:{supplement_id}:caution:0")])
     if show_buy:
         btns.append([InlineKeyboardButton("🛒 Купить", url=show_buy)])
-    btns.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"cat:page:{back_page}")])
+    btns.append([InlineKeyboardButton("⬅️ Назад", callback_data=back_route)])
     return InlineKeyboardMarkup(btns)
 
-def supplement_compat_back(slug: str, back_page: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("⬅️ Назад", callback_data=f"supp:view:{slug}:{back_page}")],
-    ])
+def supplement_compat_list(
+    supplement_id: int,
+    items: list[dict],
+    *,
+    kind: str,
+    page: int,
+    has_prev: bool,
+    has_next: bool,
+) -> InlineKeyboardMarkup:
+    btns: list[list[InlineKeyboardButton]] = []
+    for item in items:
+        btns.append([InlineKeyboardButton(item["title"], callback_data=f"supp:open:{item['other_id']}")])
+    nav: list[InlineKeyboardButton] = []
+    if has_prev:
+        nav.append(InlineKeyboardButton("◀️", callback_data=f"supp:compat:{supplement_id}:{kind}:{page - 1}"))
+    if has_next:
+        nav.append(InlineKeyboardButton("▶️", callback_data=f"supp:compat:{supplement_id}:{kind}:{page + 1}"))
+    if nav:
+        btns.append(nav)
+    btns.append([InlineKeyboardButton("⬅️ К карточке", callback_data=f"supp:open:{supplement_id}")])
+    return InlineKeyboardMarkup(btns)
 
 def my_supplement_hub(
     supplement_id: int,

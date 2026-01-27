@@ -27,7 +27,7 @@ from keyboards import (
     curated_stacks_list,
     curated_stack_card,
     supplement_page,
-    supplement_compat_back,
+    supplement_compat_list,
     my_supplement_hub,
     timezone_picker,
     reminder_actions,
@@ -848,9 +848,23 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             return
 
+        if data.startswith("supp:open:"):
+            supplement_id = int(data.split(":")[-1])
+            back_route = context.user_data.get("last_route")
+            await _show_supplement_page(update, context, conn, tg_uid, supplement_id, back_route=back_route)
+            return
+
         if data.startswith("supp:view:"):
             _, _, slug, page = data.split(":", 3)
-            await _show_supplement_page(update, context, conn, tg_uid, slug, int(page))
+            row = await db.get_supplement_by_slug(conn, slug)
+            if row:
+                back_route = f"cat:page:{int(page)}"
+                await _show_supplement_page(update, context, conn, tg_uid, int(row["id"]), back_route=back_route)
+            return
+
+        if data.startswith("supp:compat:"):
+            _, _, sid, kind, page = data.split(":", 4)
+            await _show_supplement_compat(update, context, conn, int(sid), kind, int(page))
             return
 
         if data.startswith("my:list:"):
@@ -989,17 +1003,6 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 delay_seconds,
             )
             await _show_my_hub(update, context, conn, tg_uid, int(supplement_id))
-            return
-
-        if data.startswith("supp:compat:"):
-            _, _, slug, page = data.split(":", 3)
-            row = await db.get_supplement_by_slug(conn, slug)
-            if not row:
-                await show(update, context, "Не нашёл в каталоге.", back(), route=f"supp:view:{slug}:{page}")
-                return
-            groups = await engine.describe_interactions(conn, row, limit_each=8)
-            text = engine.format_interactions(row["name"], groups)
-            await show(update, context, text, supplement_compat_back(slug, int(page)), route=f"supp:compat:{slug}:{page}")
             return
 
         if data == "menu:checkin":
@@ -1416,33 +1419,44 @@ async def _render_route(
             target_message_id=target_message_id,
         )
         return
-    if route.startswith("supp:view:"):
-        _, _, slug, page = route.split(":", 3)
+    if route.startswith("supp:open:"):
+        supplement_id = int(route.split(":")[-1])
         await _show_supplement_page(
             update,
             context,
             conn,
             tg_uid,
-            slug,
-            int(page),
+            supplement_id,
             target_chat_id=target_chat_id,
             target_message_id=target_message_id,
         )
         return
-    if route.startswith("supp:compat:"):
+    if route.startswith("supp:view:"):
         _, _, slug, page = route.split(":", 3)
         row = await db.get_supplement_by_slug(conn, slug)
         if not row:
             await home(update, context, target_chat_id=target_chat_id, target_message_id=target_message_id)
             return
-        groups = await engine.describe_interactions(conn, row, limit_each=8)
-        text = engine.format_interactions(row["name"], groups)
-        await show(
+        await _show_supplement_page(
             update,
             context,
-            text,
-            supplement_compat_back(slug, int(page)),
-            route=route,
+            conn,
+            tg_uid,
+            int(row["id"]),
+            back_route=f"cat:page:{int(page)}",
+            target_chat_id=target_chat_id,
+            target_message_id=target_message_id,
+        )
+        return
+    if route.startswith("supp:compat:"):
+        _, _, sid, kind, page = route.split(":", 4)
+        await _show_supplement_compat(
+            update,
+            context,
+            conn,
+            int(sid),
+            kind,
+            int(page),
             target_chat_id=target_chat_id,
             target_message_id=target_message_id,
         )
@@ -2118,24 +2132,85 @@ async def _show_supplement_page(
     context: ContextTypes.DEFAULT_TYPE,
     conn,
     tg_uid: int,
-    slug: str,
-    back_page: int,
+    supplement_id: int,
     *,
+    back_route: str | None = None,
     target_chat_id: int | None = None,
     target_message_id: int | None = None,
 ) -> None:
-    row = await db.get_supplement_by_slug(conn, slug)
+    row = await db.get_supplement_by_id(conn, supplement_id)
     if not row:
-        await show(update, context, "Не нашёл в каталоге.", back(), route=f"cat:page:{back_page}")
+        await show(update, context, "Не нашёл в каталоге.", back(), route="menu:catalog")
         return
     text = engine.format_supplement_details(row)
     in_stack = await db.user_has_supplement(conn, tg_uid, int(row["id"]))
+    fallback_route = "menu:catalog"
+    if back_route and isinstance(back_route, str):
+        fallback_route = back_route
     await show(
         update,
         context,
         text,
-        supplement_page(int(row["id"]), slug, back_page, in_stack, row["purchase_url"]),
-        route=f"supp:view:{slug}:{back_page}",
+        supplement_page(int(row["id"]), in_stack, row["purchase_url"], fallback_route),
+        route=f"supp:open:{row['id']}",
+        target_chat_id=target_chat_id,
+        target_message_id=target_message_id,
+    )
+
+async def _show_supplement_compat(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    conn,
+    supplement_id: int,
+    kind: str,
+    page: int,
+    *,
+    target_chat_id: int | None = None,
+    target_message_id: int | None = None,
+) -> None:
+    kind = kind if kind in {"synergy", "antagonism", "caution"} else "synergy"
+    row = await db.get_supplement_by_id(conn, supplement_id)
+    if not row:
+        await home(update, context, target_chat_id=target_chat_id, target_message_id=target_message_id)
+        return
+    title = engine._supp_title(row)
+    compat = await engine.build_compatibility(conn, supplement_id)
+    items = compat.get(kind) or []
+    page = max(page, 0)
+    page_size = 8
+    start = page * page_size
+    end = start + page_size
+    page_items = items[start:end]
+    has_prev = page > 0
+    has_next = end < len(items)
+    icon = {"synergy": "✅", "antagonism": "⛔", "caution": "⚠️"}.get(kind, "✅")
+    header = f"{icon} {('Совместимо' if kind == 'synergy' else 'Несовместимо' if kind == 'antagonism' else 'Осторожно')} с {title}"
+    lines = [f"<b>{header}</b>"]
+    if not page_items:
+        lines.append("")
+        lines.append("Пока нет данных. Мы добавим позже.")
+    else:
+        lines.append("")
+        for item in page_items:
+            reason = (item.get("reason_ru") or "").strip()
+            reason_text = f" — {reason}" if reason else ""
+            lines.append(f"• {item['title']}{reason_text}")
+    source_map = {"db": "DB", "rules": "Правила", "mixed": "Смешано"}
+    lines.append("")
+    lines.append(f"Источник: {source_map.get(compat.get('source'), 'DB')}")
+    await show(
+        update,
+        context,
+        "\n".join(lines),
+        supplement_compat_list(
+            supplement_id,
+            page_items,
+            kind=kind,
+            page=page,
+            has_prev=has_prev,
+            has_next=has_next,
+        ),
+        route=f"supp:compat:{supplement_id}:{kind}:{page}",
         target_chat_id=target_chat_id,
         target_message_id=target_message_id,
     )

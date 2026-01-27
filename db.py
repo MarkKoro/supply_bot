@@ -638,6 +638,128 @@ async def upsert_supplement(conn: aiosqlite.Connection, s: dict) -> int:
 async def get_supplement_by_slug(conn: aiosqlite.Connection, slug: str):
     return await fetchone(conn, "SELECT * FROM supplements WHERE slug=?", (slug,))
 
+async def get_supplement_by_id(conn: aiosqlite.Connection, sid: int):
+    return await fetchone(conn, "SELECT * FROM supplements WHERE id=?", (sid,))
+
+async def list_supplements_by_ids(conn: aiosqlite.Connection, ids: list[int]) -> list[aiosqlite.Row]:
+    if not ids:
+        return []
+    cleaned = [int(i) for i in ids]
+    placeholders = ",".join("?" for _ in cleaned)
+    rows = await fetchall(conn, f"SELECT * FROM supplements WHERE id IN ({placeholders})", tuple(cleaned))
+    rows_by_id = {int(r["id"]): r for r in rows}
+    return [rows_by_id[i] for i in cleaned if i in rows_by_id]
+
+def _relation_to_kind(relation: str | None) -> str | None:
+    rel = (relation or "").strip().lower()
+    if rel in {"synergy"}:
+        return "synergy"
+    if rel in {"avoid", "antagonism"}:
+        return "antagonism"
+    if rel in {"caution"}:
+        return "caution"
+    return None
+
+def _severity_to_strength(severity: int | None) -> int | None:
+    if severity is None:
+        return None
+    try:
+        value = int(severity)
+    except (TypeError, ValueError):
+        return None
+    if 0 <= value <= 4:
+        return min(100, value * 25)
+    if 0 <= value <= 100:
+        return value
+    return None
+
+async def _resolve_supplement_id(conn: aiosqlite.Connection, slug: str | None, name: str | None, raw_id) -> int | None:
+    if raw_id is not None:
+        try:
+            return int(raw_id)
+        except (TypeError, ValueError):
+            pass
+    if slug:
+        row = await get_supplement_by_slug(conn, slug)
+        if row:
+            return int(row["id"])
+    if name:
+        row = await find_supplement_by_slug_or_name(conn, None, name)
+        if row:
+            return int(row["id"])
+    return None
+
+async def get_interactions_for_supplement(conn: aiosqlite.Connection, sid: int) -> list[dict]:
+    interactions: list[dict] = []
+    seen: set[tuple[int, str, str]] = set()
+    rows = await fetchall(
+        conn,
+        """SELECT * FROM interactions
+           WHERE a_id=? OR b_id=?
+           ORDER BY severity DESC, id DESC""",
+        (sid, sid),
+    )
+    for row in rows:
+        a_id = int(row["a_id"])
+        b_id = int(row["b_id"])
+        other_id = b_id if a_id == sid else a_id
+        kind = _relation_to_kind(row["relation"])
+        if not kind:
+            continue
+        reason = (row["note"] or "").strip()
+        strength = _severity_to_strength(row["severity"])
+        key = (other_id, kind, reason)
+        if key in seen:
+            continue
+        seen.add(key)
+        interactions.append(
+            {
+                "other_supplement_id": other_id,
+                "kind": kind,
+                "reason_ru": reason,
+                "strength": strength,
+            }
+        )
+
+    supp_row = await get_supplement_by_id(conn, sid)
+    payload_raw = (supp_row["payload_json"] if supp_row and "payload_json" in supp_row.keys() else None) or ""
+    if payload_raw:
+        try:
+            payload = json.loads(payload_raw)
+        except json.JSONDecodeError:
+            payload = {}
+        if isinstance(payload, dict):
+            for item in payload.get("explicit_interactions") or []:
+                if not isinstance(item, dict):
+                    continue
+                kind = _relation_to_kind(item.get("relation"))
+                if not kind:
+                    continue
+                other_id = await _resolve_supplement_id(
+                    conn,
+                    item.get("other_slug"),
+                    item.get("other_name") or item.get("other_title"),
+                    item.get("other_id"),
+                )
+                if not other_id:
+                    continue
+                reason = (item.get("note_ru") or item.get("note") or "").strip()
+                strength = _severity_to_strength(item.get("severity"))
+                key = (other_id, kind, reason)
+                if key in seen:
+                    continue
+                seen.add(key)
+                interactions.append(
+                    {
+                        "other_supplement_id": int(other_id),
+                        "kind": kind,
+                        "reason_ru": reason,
+                        "strength": strength,
+                    }
+                )
+
+    return interactions
+
 async def search_supplements(conn: aiosqlite.Connection, q: str, limit: int = 10):
     if not q or not q.strip():
         return []

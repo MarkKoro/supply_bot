@@ -1,6 +1,8 @@
 from __future__ import annotations
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
+import tz
+
 def main_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("➕ Добавить добавку", callback_data="menu:add")],
@@ -9,6 +11,7 @@ def main_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🧩 Совместимость", callback_data="menu:compat")],
         [InlineKeyboardButton("📝 Чекин (демо)", callback_data="menu:checkin_demo")],
         [InlineKeyboardButton("🤖 AI-подбор", callback_data="menu:ai")],
+        [InlineKeyboardButton("⚙️ Настройки", callback_data="menu:settings")],
     ])
 
 def back() -> InlineKeyboardMarkup:
@@ -94,6 +97,8 @@ def my_supplement_hub(
     is_active: bool,
     has_time: bool,
     today_status: str | None,
+    *,
+    show_debug: bool = False,
 ) -> InlineKeyboardMarkup:
     toggle_label = "⏸ Пауза" if is_active else "▶️ Активировать"
     schedule_row = [InlineKeyboardButton("⏰ Время", callback_data=f"my:settime:{supplement_id}")]
@@ -105,7 +110,7 @@ def my_supplement_hub(
         InlineKeyboardButton("❌ Не выпил", callback_data=f"my:markskipped:{supplement_id}"),
     ]
     reset_row = [InlineKeyboardButton("↩️ Сбросить", callback_data=f"my:markreset:{supplement_id}")]
-    return InlineKeyboardMarkup([
+    btns = [
         schedule_row,
         today_row,
         reset_row,
@@ -113,13 +118,22 @@ def my_supplement_hub(
         [InlineKeyboardButton("📝 Заметка", callback_data=f"my:setnote:{supplement_id}")],
         [InlineKeyboardButton(toggle_label, callback_data=f"my:toggle:{supplement_id}")],
         [InlineKeyboardButton("🗑 Удалить из моих", callback_data=f"my:remove:{supplement_id}")],
-        [InlineKeyboardButton("🧪 Тест напоминания (10 сек)", callback_data=f"my:debugrem:10:{supplement_id}")],
-        [InlineKeyboardButton("🧪 Тест (через 3 сек)", callback_data=f"my:debugrem:3:{supplement_id}")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="my:list:0")],
-    ])
+    ]
+    if show_debug:
+        btns.insert(-1, [InlineKeyboardButton("🧪 Тест напоминания (10 сек)", callback_data=f"my:debugrem:10:{supplement_id}")])
+        btns.insert(-1, [InlineKeyboardButton("🧪 Тест (через 3 сек)", callback_data=f"my:debugrem:3:{supplement_id}")])
+    return InlineKeyboardMarkup(btns)
 
-def timezone_picker(page: int, *, per_page: int = 8) -> InlineKeyboardMarkup:
-    offsets = list(range(-12, 15))
+def timezone_picker(
+    mode: str,
+    page: int,
+    *,
+    per_page: int = 8,
+    back_data: str | None = None,
+) -> InlineKeyboardMarkup:
+    mode = "ru" if mode == "ru" else "all"
+    offsets = tz.catalog(mode)
     page = max(page, 0)
     start = page * per_page
     end = start + per_page
@@ -127,11 +141,8 @@ def timezone_picker(page: int, *, per_page: int = 8) -> InlineKeyboardMarkup:
     btns: list[list[InlineKeyboardButton]] = []
     row: list[InlineKeyboardButton] = []
     for offset in sliced:
-        sign = "+" if offset >= 0 else "-"
-        hours = abs(offset)
-        label = f"UTC{sign}{hours}"
-        value = f"{sign}{hours:02d}:00"
-        row.append(InlineKeyboardButton(label, callback_data=f"tz:set:{value}"))
+        label = tz.format_offset_label(offset)
+        row.append(InlineKeyboardButton(label, callback_data=f"tz:pick:{offset}"))
         if len(row) == 2:
             btns.append(row)
             row = []
@@ -139,11 +150,17 @@ def timezone_picker(page: int, *, per_page: int = 8) -> InlineKeyboardMarkup:
         btns.append(row)
     nav = []
     if start > 0:
-        nav.append(InlineKeyboardButton("⬅️ Назад", callback_data=f"tz:page:{page - 1}"))
+        nav.append(InlineKeyboardButton("⬅️", callback_data=f"tz:page:{mode}:{page - 1}"))
     if end < len(offsets):
-        nav.append(InlineKeyboardButton("➡️ Далее", callback_data=f"tz:page:{page + 1}"))
+        nav.append(InlineKeyboardButton("➡️", callback_data=f"tz:page:{mode}:{page + 1}"))
     if nav:
         btns.append(nav)
+    if mode == "ru":
+        btns.append([InlineKeyboardButton("🌍 Другие часовые пояса", callback_data="tz:page:all:0")])
+    else:
+        btns.append([InlineKeyboardButton("🇷🇺 Часовые пояса РФ", callback_data="tz:page:ru:0")])
+    if back_data:
+        btns.append([InlineKeyboardButton("⬅️ Назад", callback_data=back_data)])
     return InlineKeyboardMarkup(btns)
 
 def reminder_actions(supplement_id: int) -> InlineKeyboardMarkup:
@@ -151,4 +168,10 @@ def reminder_actions(supplement_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("✅ Выпил", callback_data=f"rem:taken:{supplement_id}")],
         [InlineKeyboardButton("⏰ Через 15 минут", callback_data=f"rem:snooze:{supplement_id}")],
         [InlineKeyboardButton("❌ Сегодня не пью", callback_data=f"rem:skip:{supplement_id}")],
+    ])
+
+def settings_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🕒 Часовой пояс", callback_data="settings:tz")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")],
     ])

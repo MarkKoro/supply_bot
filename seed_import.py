@@ -100,6 +100,8 @@ async def _import(
     supp_path: str | None,
     inter_path: str | None,
     rich_supp_path: str | None = None,
+    curated_stacks_path: str | None = None,
+    curated_items_path: str | None = None,
 ) -> None:
     if rich_supp_path is None and supp_path:
         if "rich" in Path(supp_path).name:
@@ -114,6 +116,12 @@ async def _import(
     if inter_path and not Path(inter_path).exists():
         print(f"Warning: interactions seed file missing, skipping: {inter_path}", file=sys.stderr)
         inter_path = None
+    if curated_stacks_path and not Path(curated_stacks_path).exists():
+        print(f"Warning: curated stacks seed file missing, skipping: {curated_stacks_path}", file=sys.stderr)
+        curated_stacks_path = None
+    if curated_items_path and not Path(curated_items_path).exists():
+        print(f"Warning: curated stack items seed file missing, skipping: {curated_items_path}", file=sys.stderr)
+        curated_items_path = None
     s = get_settings()
     conn = await db.connect(s.DB_PATH)
     try:
@@ -163,6 +171,69 @@ async def _import(
                     "note": item.get("note_ru") or item.get("note", ""),
                     "source_url": item.get("source") or item.get("source_url", ""),
                 })
+
+        if curated_stacks_path:
+            for item in _read_jsonl(curated_stacks_path):
+                tags_json = json.dumps(item.get("tags_json") or item.get("tags") or [], ensure_ascii=False)
+                await conn.execute(
+                    """INSERT INTO curated_stacks(
+                      slug,title_ru,author_ru,description_ru,source_url,tags_json,is_active,created_at,updated_at
+                    )
+                    VALUES(?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT(slug) DO UPDATE SET
+                      title_ru=excluded.title_ru,
+                      author_ru=excluded.author_ru,
+                      description_ru=excluded.description_ru,
+                      source_url=excluded.source_url,
+                      tags_json=excluded.tags_json,
+                      is_active=excluded.is_active,
+                      updated_at=excluded.updated_at""",
+                    (
+                        item["slug"],
+                        item.get("title_ru") or item.get("title") or item["slug"],
+                        item.get("author_ru") or "",
+                        item.get("description_ru") or "",
+                        item.get("source_url"),
+                        tags_json,
+                        int(item.get("is_active", 1)),
+                        db.utc_now_iso(),
+                        db.utc_now_iso(),
+                    ),
+                )
+            await conn.commit()
+
+        if curated_items_path:
+            items_by_stack: dict[str, list[dict]] = {}
+            for item in _read_jsonl(curated_items_path):
+                stack_slug = item.get("stack_slug")
+                if not stack_slug:
+                    continue
+                items_by_stack.setdefault(stack_slug, []).append(item)
+
+            for stack_slug, items in items_by_stack.items():
+                stack_row = await db.fetchone(conn, "SELECT id FROM curated_stacks WHERE slug=?", (stack_slug,))
+                if not stack_row:
+                    print(f"Warning: unknown curated stack slug for items: {stack_slug}", file=sys.stderr)
+                    continue
+                stack_id = int(stack_row["id"])
+                await conn.execute("DELETE FROM curated_stack_items WHERE stack_id=?", (stack_id,))
+                for item in items:
+                    await conn.execute(
+                        """INSERT INTO curated_stack_items(
+                          stack_id,supplement_slug,supplement_name,dose_ru,timing_ru,notes_ru,sort_order
+                        )
+                        VALUES(?,?,?,?,?,?,?)""",
+                        (
+                            stack_id,
+                            item.get("supplement_slug"),
+                            item.get("supplement_name"),
+                            item.get("dose_ru"),
+                            item.get("timing_ru"),
+                            item.get("notes_ru"),
+                            int(item.get("sort_order", 0)),
+                        ),
+                    )
+            await conn.commit()
     finally:
         await conn.close()
 
@@ -171,8 +242,18 @@ def main():
     ap.add_argument("--supplements", default=None)
     ap.add_argument("--interactions", default=None)
     ap.add_argument("--rich-supplements", default=None)
+    ap.add_argument("--curated-stacks", default=None)
+    ap.add_argument("--curated-items", default=None)
     args = ap.parse_args()
-    asyncio.run(_import(args.supplements, args.interactions, args.rich_supplements))
+    asyncio.run(
+        _import(
+            args.supplements,
+            args.interactions,
+            args.rich_supplements,
+            args.curated_stacks,
+            args.curated_items,
+        )
+    )
     print("Import done.")
 
 if __name__ == "__main__":

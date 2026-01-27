@@ -155,6 +155,32 @@ CREATE TABLE IF NOT EXISTS user_intake_log (
   updated_at    TEXT NOT NULL,
   UNIQUE(user_id, supplement_id, local_date)
 );
+
+CREATE TABLE IF NOT EXISTS curated_stacks (
+  id INTEGER PRIMARY KEY,
+  slug TEXT UNIQUE NOT NULL,
+  title_ru TEXT NOT NULL,
+  author_ru TEXT,
+  description_ru TEXT,
+  source_url TEXT,
+  tags_json TEXT,
+  is_active INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_curated_stacks_active ON curated_stacks(is_active);
+
+CREATE TABLE IF NOT EXISTS curated_stack_items (
+  id INTEGER PRIMARY KEY,
+  stack_id INTEGER NOT NULL REFERENCES curated_stacks(id) ON DELETE CASCADE,
+  supplement_slug TEXT,
+  supplement_name TEXT,
+  dose_ru TEXT,
+  timing_ru TEXT,
+  notes_ru TEXT,
+  sort_order INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_curated_stack_items_stack_sort ON curated_stack_items(stack_id, sort_order);
 """
 
 async def connect(db_path: str) -> aiosqlite.Connection:
@@ -195,6 +221,8 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     await _ensure_user_intake_log(conn)
     await _ensure_daily_checkins(conn)
     await _ensure_daily_plan_overrides(conn)
+    await _ensure_curated_stacks(conn)
+    await _ensure_curated_stack_items(conn)
     await conn.execute(
         "UPDATE supplements SET interaction_classes='[]' WHERE interaction_classes IS NULL OR interaction_classes=''"
     )
@@ -348,6 +376,74 @@ async def _ensure_daily_plan_overrides(conn: aiosqlite.Connection) -> None:
         )
     await conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_plan_overrides_user_day ON daily_plan_overrides(user_id, day)"
+    )
+
+async def _ensure_curated_stacks(conn: aiosqlite.Connection) -> None:
+    table = await fetchone(
+        conn,
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='curated_stacks'",
+    )
+    if not table:
+        await conn.execute(
+            """CREATE TABLE IF NOT EXISTS curated_stacks (
+              id INTEGER PRIMARY KEY,
+              slug TEXT UNIQUE NOT NULL,
+              title_ru TEXT NOT NULL,
+              author_ru TEXT,
+              description_ru TEXT,
+              source_url TEXT,
+              tags_json TEXT,
+              is_active INTEGER NOT NULL DEFAULT 1,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            )"""
+        )
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_curated_stacks_active ON curated_stacks(is_active)")
+        return
+
+    await _ensure_column(conn, "curated_stacks", "slug", "TEXT")
+    await _ensure_column(conn, "curated_stacks", "title_ru", "TEXT")
+    await _ensure_column(conn, "curated_stacks", "author_ru", "TEXT")
+    await _ensure_column(conn, "curated_stacks", "description_ru", "TEXT")
+    await _ensure_column(conn, "curated_stacks", "source_url", "TEXT")
+    await _ensure_column(conn, "curated_stacks", "tags_json", "TEXT")
+    await _ensure_column(conn, "curated_stacks", "is_active", "INTEGER NOT NULL DEFAULT 1")
+    await _ensure_column(conn, "curated_stacks", "created_at", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "curated_stacks", "updated_at", "TEXT NOT NULL DEFAULT ''")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_curated_stacks_active ON curated_stacks(is_active)")
+
+async def _ensure_curated_stack_items(conn: aiosqlite.Connection) -> None:
+    table = await fetchone(
+        conn,
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='curated_stack_items'",
+    )
+    if not table:
+        await conn.execute(
+            """CREATE TABLE IF NOT EXISTS curated_stack_items (
+              id INTEGER PRIMARY KEY,
+              stack_id INTEGER NOT NULL REFERENCES curated_stacks(id) ON DELETE CASCADE,
+              supplement_slug TEXT,
+              supplement_name TEXT,
+              dose_ru TEXT,
+              timing_ru TEXT,
+              notes_ru TEXT,
+              sort_order INTEGER NOT NULL DEFAULT 0
+            )"""
+        )
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_curated_stack_items_stack_sort ON curated_stack_items(stack_id, sort_order)"
+        )
+        return
+
+    await _ensure_column(conn, "curated_stack_items", "stack_id", "INTEGER")
+    await _ensure_column(conn, "curated_stack_items", "supplement_slug", "TEXT")
+    await _ensure_column(conn, "curated_stack_items", "supplement_name", "TEXT")
+    await _ensure_column(conn, "curated_stack_items", "dose_ru", "TEXT")
+    await _ensure_column(conn, "curated_stack_items", "timing_ru", "TEXT")
+    await _ensure_column(conn, "curated_stack_items", "notes_ru", "TEXT")
+    await _ensure_column(conn, "curated_stack_items", "sort_order", "INTEGER NOT NULL DEFAULT 0")
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_curated_stack_items_stack_sort ON curated_stack_items(stack_id, sort_order)"
     )
 
 async def _backfill_user_supplements(conn: aiosqlite.Connection) -> None:
@@ -612,6 +708,124 @@ async def list_supplements_page(conn: aiosqlite.Connection, offset: int, limit: 
         "SELECT * FROM supplements ORDER BY name LIMIT ? OFFSET ?",
         (limit, offset),
     )
+
+# curated stacks
+async def list_curated_stacks(conn: aiosqlite.Connection, limit: int, offset: int = 0):
+    return await fetchall(
+        conn,
+        """SELECT * FROM curated_stacks
+           WHERE is_active=1
+           ORDER BY created_at DESC, title_ru
+           LIMIT ? OFFSET ?""",
+        (limit, offset),
+    )
+
+async def get_curated_stack(conn: aiosqlite.Connection, slug: str):
+    return await fetchone(
+        conn,
+        "SELECT * FROM curated_stacks WHERE slug=? AND is_active=1",
+        (slug,),
+    )
+
+async def list_curated_stack_items(conn: aiosqlite.Connection, stack_id: int):
+    return await fetchall(
+        conn,
+        """SELECT * FROM curated_stack_items
+           WHERE stack_id=?
+           ORDER BY sort_order, id""",
+        (stack_id,),
+    )
+
+async def find_supplement_by_slug_or_name(
+    conn: aiosqlite.Connection,
+    slug: str | None,
+    name: str | None,
+):
+    if slug:
+        row = await get_supplement_by_slug(conn, slug)
+        if row:
+            return row
+    if not name:
+        return None
+    name = str(name).strip()
+    if not name:
+        return None
+    norm = normalize(name)
+    row = await fetchone(
+        conn,
+        """SELECT s.* FROM supplements s
+           JOIN supplement_aliases a ON a.supplement_id=s.id
+           WHERE a.alias_norm=?
+           LIMIT 1""",
+        (norm,),
+    )
+    if row:
+        return row
+    row = await fetchone(
+        conn,
+        """SELECT * FROM supplements
+           WHERE lower(name)=lower(?) OR lower(name_ru)=lower(?) OR lower(name_en)=lower(?)
+           LIMIT 1""",
+        (name, name, name),
+    )
+    if row:
+        return row
+    rows = await search_supplements(conn, name, limit=1)
+    return rows[0] if rows else None
+
+async def add_stack_items_to_user(conn: aiosqlite.Connection, user_id: int, items: list[dict]) -> dict:
+    added = 0
+    updated = 0
+    for item in items:
+        supplement_id = int(item["supplement_id"])
+        existing = await fetchone(
+            conn,
+            "SELECT note_text FROM user_supplements WHERE user_id=? AND supplement_id=?",
+            (user_id, supplement_id),
+        )
+        if existing:
+            updated += 1
+        else:
+            added += 1
+
+        await conn.execute(
+            """INSERT INTO user_supplements(user_id, supplement_id, is_active, created_at)
+               VALUES(?,?,1,?)
+               ON CONFLICT(user_id, supplement_id) DO UPDATE SET
+                 is_active=1""",
+            (user_id, supplement_id, utc_now_iso()),
+        )
+
+        dose_text = str(item.get("dose_ru") or "").strip()
+        timing_text = str(item.get("timing_ru") or "").strip()
+        notes_text = str(item.get("notes_ru") or "").strip()
+        if dose_text:
+            await conn.execute(
+                """UPDATE user_supplements
+                   SET dose_text=?
+                   WHERE user_id=? AND supplement_id=? AND (dose_text IS NULL OR dose_text='')""",
+                (dose_text, user_id, supplement_id),
+            )
+        note_bits = []
+        if dose_text:
+            note_bits.append(f"Доза: {dose_text}")
+        if timing_text:
+            note_bits.append(f"Время: {timing_text}")
+        if notes_text:
+            note_bits.append(f"Примечание: {notes_text}")
+        if note_bits:
+            addition = "\n".join(note_bits)
+            if existing and existing["note_text"]:
+                combined = f"{str(existing['note_text']).rstrip()}\n\n{addition}"
+            else:
+                combined = addition
+            await conn.execute(
+                "UPDATE user_supplements SET note_text=? WHERE user_id=? AND supplement_id=?",
+                (combined, user_id, supplement_id),
+            )
+
+    await conn.commit()
+    return {"added": added, "updated": updated, "total": added + updated}
 
 # interactions
 def canon_pair(a_id: int, b_id: int) -> tuple[int, int]:

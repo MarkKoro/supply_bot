@@ -10,6 +10,8 @@ _last_screen: dict[int, int] = {}
 def _payload_from_route(route: str) -> dict | None:
     if route == "menu:home":
         return {}
+    if route == "menu:settings":
+        return {}
     if route.startswith("cat:page:"):
         return {"page": int(route.split(":")[-1])}
     if route.startswith("my:list:"):
@@ -25,7 +27,8 @@ def _payload_from_route(route: str) -> dict | None:
     if route.startswith("my:setdose:") or route.startswith("my:setnote:") or route.startswith("my:settime:"):
         return {"supplement_id": int(route.split(":")[-1])}
     if route.startswith("tz:page:"):
-        return {"page": int(route.split(":")[-1])}
+        _, _, mode, page = route.split(":", 3)
+        return {"mode": mode, "page": int(page)}
     if route.startswith("add_pick:"):
         return {"slug": route.split(":", 1)[1]}
     if route.startswith("compat_pick:"):

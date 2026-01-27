@@ -29,7 +29,9 @@ from keyboards import (
     my_supplement_hub,
     timezone_picker,
     reminder_actions,
+    settings_menu,
 )
+import tz
 from openai_client import OpenAIConfig, suggest_stack_v1
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -68,15 +70,20 @@ async def home(
 ) -> None:
     await show(
         update, context,
-        "💊 <b>Supply Bot</b>\n\n"
-        "Я справочник + дневник добавок.\n"
-        "— Совместимость из базы\n"
-        "— AI-подбор (опционально)\n\n"
-        "<i>Не медицинский совет.</i>",
+        _home_text(),
         main_menu(),
         route="menu:home",
         target_chat_id=target_chat_id,
         target_message_id=target_message_id,
+    )
+
+def _home_text() -> str:
+    return (
+        "💊 <b>Supply Bot</b>\n\n"
+        "Я справочник + дневник добавок.\n"
+        "— Совместимость из базы\n"
+        "— AI-подбор (опционально)\n\n"
+        "<i>Не медицинский совет.</i>"
     )
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -86,7 +93,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await db.get_or_create_user(conn, update.effective_user.id, tz_name="")
         tz = await db.get_user_tz(conn, update.effective_user.id)
         if not tz:
-            await _show_timezone_picker(update, context, 0)
+            context.user_data.pop("tz_back_data", None)
+            await _show_timezone_picker(update, context, "ru", 0)
             return
     finally:
         await conn.close()
@@ -95,20 +103,28 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def _show_timezone_picker(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
+    mode: str,
     page: int,
     *,
     target_chat_id: int | None = None,
     target_message_id: int | None = None,
+    back_data: str | None = None,
 ) -> None:
+    utc_now = tz.now_utc_hhmm()
     await show(
         update,
         context,
-        "Выбери свой часовой пояс (это нужно для напоминаний):",
-        timezone_picker(page),
-        route=f"tz:page:{page}",
+        "Выбери часовой пояс.\n\n"
+        f"Сейчас по UTC: {utc_now}\n"
+        "После выбора мы будем присылать напоминания по твоему местному времени.",
+        timezone_picker(mode, page, back_data=back_data),
+        route=f"tz:page:{mode}:{page}",
         target_chat_id=target_chat_id,
         target_message_id=target_message_id,
     )
+
+def _is_debug_user(settings, tg_uid: int) -> bool:
+    return bool(settings.DEBUG or (tg_uid in settings.ADMIN_IDS))
 
 async def _remove_reminder_job(job_queue, tg_user_id: int, supplement_id: int) -> None:
     name = _job_name(tg_user_id, supplement_id)
@@ -241,11 +257,25 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await db.get_or_create_user(conn, tg_uid, tz_name="")
         tz_name = await db.get_user_tz(conn, tg_uid)
         if not tz_name:
-            await _show_timezone_picker(update, context, 0)
+            context.user_data.pop("tz_back_data", None)
+            await _show_timezone_picker(update, context, "ru", 0)
             return
 
         if data == "menu:home":
             await home(update, context)
+            return
+        if data == "menu:settings":
+            await show(
+                update,
+                context,
+                "⚙️ <b>Настройки</b>",
+                settings_menu(),
+                route="menu:settings",
+            )
+            return
+        if data == "settings:tz":
+            context.user_data["tz_back_data"] = "menu:settings"
+            await _show_timezone_picker(update, context, "ru", 0, back_data="menu:settings")
             return
 
         if data == "menu:add":
@@ -434,6 +464,9 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
 
         if data.startswith("my:debugrem:"):
+            if not _is_debug_user(s, tg_uid):
+                await _show_my_hub(update, context, conn, tg_uid, int(data.split(":")[-1]))
+                return
             _, _, delay, supplement_id = data.split(":", 3)
             delay_seconds = int(delay)
             await schedule_debug_reminder(
@@ -530,10 +563,11 @@ async def on_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await q.answer()
     data = q.data or ""
     if data.startswith("tz:page:"):
-        page = int(data.split(":")[-1])
-        await _show_timezone_picker(update, context, page)
+        _, _, mode, page = data.split(":", 3)
+        back_data = context.user_data.get("tz_back_data") if isinstance(context.user_data, dict) else None
+        await _show_timezone_picker(update, context, mode, int(page), back_data=back_data)
         return
-    if data.startswith("tz:set:"):
+    if data.startswith("tz:pick:"):
         tz_value = data.split(":", 2)[2]
         s = context.application.bot_data["settings"]
         tg_uid = update.effective_user.id
@@ -554,7 +588,19 @@ async def on_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 )
         finally:
             await conn.close()
-        await home(update, context)
+        context.user_data.pop("tz_back_data", None)
+        local_now = tz.now_local_hhmm(tz_value)
+        label = tz.format_confirmation_label(tz_value)
+        await show(
+            update,
+            context,
+            "✅ Часовой пояс установлен: "
+            f"{label}\n"
+            f"Сейчас у тебя будет: {local_now}\n\n"
+            f"{_home_text()}",
+            main_menu(),
+            route="menu:home",
+        )
 
 async def on_reminder_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
@@ -617,6 +663,17 @@ async def _render_route(
 ) -> None:
     if route == "menu:home":
         await home(update, context, target_chat_id=target_chat_id, target_message_id=target_message_id)
+        return
+    if route == "menu:settings":
+        await show(
+            update,
+            context,
+            "⚙️ <b>Настройки</b>",
+            settings_menu(),
+            route=route,
+            target_chat_id=target_chat_id,
+            target_message_id=target_message_id,
+        )
         return
     if route == "menu:add":
         await show(
@@ -754,11 +811,14 @@ async def _render_route(
         )
         return
     if route.startswith("tz:page:"):
-        page = int(route.split(":")[-1])
+        _, _, mode, page = route.split(":", 3)
+        back_data = context.user_data.get("tz_back_data") if isinstance(context.user_data, dict) else None
         await _show_timezone_picker(
             update,
             context,
-            page,
+            mode,
+            int(page),
+            back_data=back_data,
             target_chat_id=target_chat_id,
             target_message_id=target_message_id,
         )
@@ -900,7 +960,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
         tz_name = await db.get_user_tz(conn, tg_uid)
         if not tz_name:
-            await _show_timezone_picker(update, context, 0)
+            context.user_data.pop("tz_back_data", None)
+            await _show_timezone_picker(update, context, "ru", 0)
             return
 
         if waiting == "add_query":
@@ -1124,7 +1185,7 @@ async def _bootstrap() -> Application:
     app.bot_data["render_route"] = _render_route
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(on_menu, pattern=r"^(menu:|add_pick:|compat_pick:|cat:page:|supp:|my:)"))
+    app.add_handler(CallbackQueryHandler(on_menu, pattern=r"^(menu:|settings:|add_pick:|compat_pick:|cat:page:|supp:|my:)"))
     app.add_handler(CallbackQueryHandler(on_ai_add, pattern=r"^aiadd:"))
     app.add_handler(CallbackQueryHandler(on_timezone, pattern=r"^tz:"))
     app.add_handler(CallbackQueryHandler(on_reminder_action, pattern=r"^rem:"))
@@ -1237,6 +1298,7 @@ async def _show_my_hub(
     target_message_id: int | None = None,
 ) -> None:
     user_id = await db.get_or_create_user(conn, tg_uid)
+    s = context.application.bot_data["settings"]
     tz = await db.get_user_tz(conn, tg_uid)
     local_date = db.get_user_local_date(tz)
     row = await db.get_user_supplement_with_status(conn, tg_uid, supplement_id, local_date)
@@ -1266,6 +1328,7 @@ async def _show_my_hub(
             bool(row["is_active"]),
             bool(row["time_hhmm"]),
             row["today_status"],
+            show_debug=_is_debug_user(s, tg_uid),
         ),
         route=f"my:open:{supplement_id}",
         target_chat_id=target_chat_id,

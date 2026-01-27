@@ -16,6 +16,7 @@ class Settings:
     OPENAI_API_KEY: str | None
     OPENAI_MODEL: str
     AI_MAX_PER_DAY: int
+    DEBUG: bool
     ADMIN_IDS: list[int]
 
 def _parse_admin_ids(value: str) -> list[int]:
@@ -29,6 +30,9 @@ def _parse_admin_ids(value: str) -> list[int]:
         except ValueError:
             continue
     return ids
+
+def _parse_bool(value: str) -> bool:
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 def get_settings() -> Settings:
     tg = os.getenv("TG_TOKEN", "").strip()
@@ -51,5 +55,6 @@ def get_settings() -> Settings:
         OPENAI_API_KEY=os.getenv("OPENAI_API_KEY", "").strip() or None,
         OPENAI_MODEL=os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip(),
         AI_MAX_PER_DAY=int(os.getenv("AI_MAX_PER_DAY", "1").strip()),
+        DEBUG=_parse_bool(os.getenv("DEBUG", "")),
         ADMIN_IDS=_parse_admin_ids(os.getenv("ADMIN_IDS", "")),
     )

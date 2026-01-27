@@ -8,14 +8,27 @@ class OpenAIConfig:
     api_key: str
     model: str
 
-def _sync_call(cfg: OpenAIConfig, *, instructions: str, input_text: str) -> str:
+def _sync_call(
+    cfg: OpenAIConfig,
+    *,
+    instructions: str,
+    input_text: str,
+    max_output_tokens: int | None = None,
+    timeout_s: float | None = None,
+) -> str:
     from openai import OpenAI
-    client = OpenAI(api_key=cfg.api_key)
-    resp = client.responses.create(
-        model=cfg.model,
-        instructions=instructions,
-        input=input_text,
-    )
+    if timeout_s is not None:
+        client = OpenAI(api_key=cfg.api_key, timeout=timeout_s)
+    else:
+        client = OpenAI(api_key=cfg.api_key)
+    params = {
+        "model": cfg.model,
+        "instructions": instructions,
+        "input": input_text,
+    }
+    if max_output_tokens is not None:
+        params["max_output_tokens"] = max_output_tokens
+    resp = client.responses.create(**params)
     return (resp.output_text or "").strip()
 
 async def daily_advice(
@@ -58,3 +71,53 @@ async def daily_advice(
 """
 
     return await asyncio.to_thread(_sync_call, cfg, instructions=instructions, input_text=prompt)
+
+async def suggest_stack_v1(
+    cfg: Optional[OpenAIConfig],
+    goal_text: str,
+    user_supplements_text: str,
+) -> str:
+    if not cfg:
+        return "AI отключен: добавь OPENAI_API_KEY в .env."
+
+    instructions = (
+        "Ты помощник по подбору добавок. "
+        "НЕ назначай лечение и НЕ ставь диагнозы. "
+        "Формат ответа: строго JSON, без Markdown и без лишнего текста. "
+        "Поля *why_ru*, *dose_ru*, *timing_ru*, *warnings_ru*, *questions_ru* — на русском. "
+        "Названия добавок в поле *name* — только латиницей/английские."
+    )
+
+    prompt = f"""ЦЕЛЬ ПОЛЬЗОВАТЕЛЯ:
+{goal_text}
+
+ТЕКУЩИЕ ДОБАВКИ ПОЛЬЗОВАТЕЛЯ:
+{user_supplements_text}
+
+ЗАДАЧА:
+Сформируй список кандидатов для стека (5–8 пунктов), если уместно.
+Верни СТРОГО JSON по схеме:
+{{
+  "candidates": [
+    {{
+      "name": "L-theanine",
+      "why_ru": "кратко почему подходит",
+      "dose_ru": "рекомендуемая доза текстом",
+      "timing_ru": "утро/день/вечер/перед сном/с едой/натощак/по ситуации",
+      "confidence": 0
+    }}
+  ],
+  "warnings_ru": ["..."],
+  "questions_ru": ["..."]
+}}
+Если данных мало — задавай уточняющие вопросы в questions_ru. В confidence используй число 0–100.
+"""
+
+    return await asyncio.to_thread(
+        _sync_call,
+        cfg,
+        instructions=instructions,
+        input_text=prompt,
+        max_output_tokens=900,
+        timeout_s=20,
+    )

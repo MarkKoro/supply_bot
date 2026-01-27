@@ -156,6 +156,18 @@ CREATE TABLE IF NOT EXISTS user_intake_log (
   UNIQUE(user_id, supplement_id, local_date)
 );
 
+CREATE TABLE IF NOT EXISTS user_supp_settings (
+  user_id       INTEGER NOT NULL,
+  supplement_id INTEGER NOT NULL,
+  dose_text     TEXT NOT NULL DEFAULT '',
+  reminder_time TEXT NOT NULL DEFAULT '',
+  reminder_enabled INTEGER NOT NULL DEFAULT 0,
+  taken_date    TEXT NOT NULL DEFAULT '',
+  skip_date     TEXT NOT NULL DEFAULT '',
+  updated_at    TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY(user_id, supplement_id)
+);
+
 CREATE TABLE IF NOT EXISTS curated_stacks (
   id INTEGER PRIMARY KEY,
   slug TEXT UNIQUE NOT NULL,
@@ -219,6 +231,7 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     await _ensure_user_supplements(conn)
     await _ensure_user_schedules(conn)
     await _ensure_user_intake_log(conn)
+    await _ensure_user_supp_settings(conn)
     await _ensure_daily_checkins(conn)
     await _ensure_daily_plan_overrides(conn)
     await _ensure_curated_stacks(conn)
@@ -323,6 +336,33 @@ async def _ensure_user_intake_log(conn: aiosqlite.Connection) -> None:
     await conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_user_intake_unique ON user_intake_log(user_id, supplement_id, local_date)"
     )
+
+async def _ensure_user_supp_settings(conn: aiosqlite.Connection) -> None:
+    table = await fetchone(
+        conn,
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='user_supp_settings'",
+    )
+    if not table:
+        await conn.execute(
+            """CREATE TABLE IF NOT EXISTS user_supp_settings (
+              user_id       INTEGER NOT NULL,
+              supplement_id INTEGER NOT NULL,
+              dose_text     TEXT NOT NULL DEFAULT '',
+              reminder_time TEXT NOT NULL DEFAULT '',
+              reminder_enabled INTEGER NOT NULL DEFAULT 0,
+              taken_date    TEXT NOT NULL DEFAULT '',
+              skip_date     TEXT NOT NULL DEFAULT '',
+              updated_at    TEXT NOT NULL DEFAULT '',
+              PRIMARY KEY(user_id, supplement_id)
+            )"""
+        )
+        return
+    await _ensure_column(conn, "user_supp_settings", "dose_text", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "user_supp_settings", "reminder_time", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "user_supp_settings", "reminder_enabled", "INTEGER NOT NULL DEFAULT 0")
+    await _ensure_column(conn, "user_supp_settings", "taken_date", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "user_supp_settings", "skip_date", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "user_supp_settings", "updated_at", "TEXT NOT NULL DEFAULT ''")
 
 async def _ensure_daily_checkins(conn: aiosqlite.Connection) -> None:
     table = await fetchone(
@@ -1264,6 +1304,126 @@ async def set_today_intake_status(
         (user_id, supplement_id, local_date, status, utc_now_iso()),
     )
     await conn.commit()
+
+async def get_user_supp_settings(conn: aiosqlite.Connection, user_id: int, supplement_id: int) -> dict:
+    row = await fetchone(
+        conn,
+        """SELECT dose_text, reminder_time, reminder_enabled, taken_date, skip_date
+           FROM user_supp_settings
+           WHERE user_id=? AND supplement_id=?""",
+        (user_id, supplement_id),
+    )
+    defaults = {
+        "dose_text": "",
+        "reminder_time": "",
+        "reminder_enabled": 0,
+        "taken_date": "",
+        "skip_date": "",
+    }
+    if not row:
+        return defaults
+    return {
+        "dose_text": str(row["dose_text"] or ""),
+        "reminder_time": str(row["reminder_time"] or ""),
+        "reminder_enabled": int(row["reminder_enabled"] or 0),
+        "taken_date": str(row["taken_date"] or ""),
+        "skip_date": str(row["skip_date"] or ""),
+    }
+
+async def upsert_user_supp_settings(
+    conn: aiosqlite.Connection,
+    user_id: int,
+    supplement_id: int,
+    patch: dict,
+) -> None:
+    text_fields = {"dose_text", "reminder_time", "taken_date", "skip_date"}
+    int_fields = {"reminder_enabled"}
+    updates: dict[str, object] = {}
+    for key, value in (patch or {}).items():
+        if key in text_fields:
+            updates[key] = "" if value is None else str(value)
+        elif key in int_fields:
+            updates[key] = 1 if bool(value) else 0
+
+    await conn.execute(
+        """INSERT OR IGNORE INTO user_supp_settings(user_id, supplement_id, updated_at)
+           VALUES(?,?,?)""",
+        (user_id, supplement_id, utc_now_iso()),
+    )
+    update_cols = ["updated_at=?"] + [f"{key}=?" for key in updates.keys()]
+    params = [utc_now_iso(), *updates.values(), user_id, supplement_id]
+    await conn.execute(
+        f"""UPDATE user_supp_settings
+            SET {", ".join(update_cols)}
+            WHERE user_id=? AND supplement_id=?""",
+        tuple(params),
+    )
+    await conn.commit()
+
+async def set_user_supp_dose(
+    conn: aiosqlite.Connection,
+    user_id: int,
+    supplement_id: int,
+    dose_text: str | None,
+) -> None:
+    await upsert_user_supp_settings(
+        conn,
+        user_id,
+        supplement_id,
+        {"dose_text": dose_text},
+    )
+
+async def set_user_supp_reminder_time(
+    conn: aiosqlite.Connection,
+    user_id: int,
+    supplement_id: int,
+    reminder_time: str | None,
+) -> None:
+    await upsert_user_supp_settings(
+        conn,
+        user_id,
+        supplement_id,
+        {"reminder_time": reminder_time},
+    )
+
+async def set_user_supp_reminder_enabled(
+    conn: aiosqlite.Connection,
+    user_id: int,
+    supplement_id: int,
+    reminder_enabled: bool | int,
+) -> None:
+    await upsert_user_supp_settings(
+        conn,
+        user_id,
+        supplement_id,
+        {"reminder_enabled": reminder_enabled},
+    )
+
+async def set_user_supp_taken_date(
+    conn: aiosqlite.Connection,
+    user_id: int,
+    supplement_id: int,
+    taken_date: str | None,
+) -> None:
+    await upsert_user_supp_settings(
+        conn,
+        user_id,
+        supplement_id,
+        {"taken_date": taken_date},
+    )
+
+async def set_user_supp_skip_date(
+    conn: aiosqlite.Connection,
+    user_id: int,
+    supplement_id: int,
+    skip_date: str | None,
+) -> None:
+    await upsert_user_supp_settings(
+        conn,
+        user_id,
+        supplement_id,
+        {"skip_date": skip_date},
+    )
 
 # checkins
 async def save_daily_checkin(conn: aiosqlite.Connection, user_id: int, day: str, payload: dict) -> None:

@@ -113,6 +113,8 @@ def my_supplement_hub(
         [InlineKeyboardButton("📝 Заметка", callback_data=f"my:setnote:{supplement_id}")],
         [InlineKeyboardButton(toggle_label, callback_data=f"my:toggle:{supplement_id}")],
         [InlineKeyboardButton("🗑 Удалить из моих", callback_data=f"my:remove:{supplement_id}")],
+        [InlineKeyboardButton("🧪 Тест напоминания (10 сек)", callback_data=f"my:debugrem:10:{supplement_id}")],
+        [InlineKeyboardButton("🧪 Тест (через 3 сек)", callback_data=f"my:debugrem:3:{supplement_id}")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="my:list:0")],
     ])
 

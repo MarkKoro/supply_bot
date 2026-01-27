@@ -15,7 +15,7 @@ from settings import get_settings
 import db
 import engine
 import seed_import
-from ux import show
+from ux import show, restore_last_screen
 from keyboards import (
     main_menu,
     back,
@@ -55,6 +55,9 @@ def _format_tz_label(tz_name: str | None) -> str:
 
 def _job_name(tg_user_id: int, supplement_id: int) -> str:
     return f"rem:{tg_user_id}:{supplement_id}"
+
+def _debug_job_name(tg_user_id: int, supplement_id: int) -> str:
+    return f"dbg:{tg_user_id}:{supplement_id}:{int(datetime.utcnow().timestamp())}"
 
 async def home(
     update: Update,
@@ -135,6 +138,25 @@ async def _schedule_reminder_job(
         },
     )
 
+async def schedule_debug_reminder(
+    job_queue,
+    tg_user_id: int,
+    supplement_id: int,
+    delay_seconds: int,
+) -> None:
+    job_queue.run_once(
+        _send_reminder_job,
+        when=timedelta(seconds=delay_seconds),
+        name=_debug_job_name(tg_user_id, supplement_id),
+        data={
+            "tg_user_id": tg_user_id,
+            "supplement_id": supplement_id,
+            "delay_seconds": delay_seconds,
+            "debug": True,
+            "reschedule_daily": False,
+        },
+    )
+
 async def _schedule_all_reminders(app: Application) -> None:
     s = app.bot_data["settings"]
     conn = await db.connect(s.DB_PATH)
@@ -155,16 +177,12 @@ async def _send_reminder_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     data = context.job.data or {}
     tg_user_id = int(data.get("tg_user_id"))
     supplement_id = int(data.get("supplement_id"))
-    hhmm = str(data.get("hhmm"))
+    debug = bool(data.get("debug"))
+    hhmm = str(data.get("hhmm")) if data.get("hhmm") is not None else None
     tz_name: str | None = None
     s = context.application.bot_data["settings"]
     conn = await db.connect(s.DB_PATH)
     try:
-        schedule = await db.get_user_schedule(conn, tg_user_id, supplement_id)
-        if not schedule or not schedule["time_hhmm"] or int(schedule["is_enabled"]) != 1:
-            return
-        if str(schedule["time_hhmm"]) != hhmm:
-            return
         tz_name = await db.get_user_tz(conn, tg_user_id)
         if not tz_name:
             return
@@ -172,19 +190,22 @@ async def _send_reminder_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         if not supplement_name:
             return
 
-        user_data = context.application.user_data.get(tg_user_id, {})
-        last_menu = user_data.get("last_menu") if isinstance(user_data, dict) else None
-        if last_menu and last_menu.get("chat_id") and last_menu.get("message_id"):
-            try:
-                await context.bot.delete_message(
-                    chat_id=int(last_menu["chat_id"]),
-                    message_id=int(last_menu["message_id"]),
-                )
-            except Exception:
-                pass
-
-        tz_label = _format_tz_label(tz_name)
-        text = f"Пора принять: <b>{supplement_name}</b>\nВремя: {hhmm} ({tz_label})"
+        if debug:
+            delay_seconds = int(data.get("delay_seconds") or 0)
+            delay_label = f"через {delay_seconds} сек" if delay_seconds else "скоро"
+            text = (
+                "🧪 Тестовое напоминание\n"
+                f"Пора принять: <b>{supplement_name}</b>\n"
+                f"Время: {delay_label}"
+            )
+        else:
+            schedule = await db.get_user_schedule(conn, tg_user_id, supplement_id)
+            if not schedule or not schedule["time_hhmm"] or int(schedule["is_enabled"]) != 1:
+                return
+            if hhmm is None or str(schedule["time_hhmm"]) != hhmm:
+                return
+            tz_label = _format_tz_label(tz_name)
+            text = f"Пора принять: <b>{supplement_name}</b>\nВремя: {hhmm} ({tz_label})"
         await context.bot.send_message(
             chat_id=tg_user_id,
             text=text,
@@ -195,7 +216,7 @@ async def _send_reminder_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     finally:
         await conn.close()
 
-    if data.get("reschedule_daily", True) and tz_name:
+    if not debug and data.get("reschedule_daily", True) and tz_name and hhmm:
         await _schedule_reminder_job(
             context.application.job_queue,
             tg_user_id,
@@ -412,6 +433,18 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await _show_my_hub(update, context, conn, tg_uid, supplement_id)
             return
 
+        if data.startswith("my:debugrem:"):
+            _, _, delay, supplement_id = data.split(":", 3)
+            delay_seconds = int(delay)
+            await schedule_debug_reminder(
+                context.application.job_queue,
+                tg_uid,
+                int(supplement_id),
+                delay_seconds,
+            )
+            await _show_my_hub(update, context, conn, tg_uid, int(supplement_id))
+            return
+
         if data.startswith("supp:compat:"):
             _, _, slug, page = data.split(":", 3)
             row = await db.get_supplement_by_slug(conn, slug)
@@ -563,31 +596,7 @@ async def on_reminder_action(update: Update, context: ContextTypes.DEFAULT_TYPE)
         except Exception:
             pass
 
-    await _restore_last_menu(update, context)
-
-async def _restore_last_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    last_menu = context.user_data.get("last_menu") if isinstance(context.user_data, dict) else None
-    route = last_menu.get("route") if last_menu else None
-    chat_id = last_menu.get("chat_id") if last_menu else None
-    message_id = last_menu.get("message_id") if last_menu else None
-    s = context.application.bot_data["settings"]
-    tg_uid = update.effective_user.id
-    conn = await db.connect(s.DB_PATH)
-    try:
-        if not route:
-            await home(update, context)
-            return
-        await _render_route(
-            update,
-            context,
-            conn,
-            tg_uid,
-            route,
-            chat_id,
-            message_id,
-        )
-    finally:
-        await conn.close()
+    await restore_last_screen(update, context)
 
 async def _render_route(
     update: Update,
@@ -597,6 +606,8 @@ async def _render_route(
     route: str,
     target_chat_id: int | None,
     target_message_id: int | None,
+    *,
+    payload: dict | None = None,
 ) -> None:
     if route == "menu:home":
         await home(update, context, target_chat_id=target_chat_id, target_message_id=target_message_id)
@@ -994,6 +1005,7 @@ async def _bootstrap() -> Application:
 
     app = Application.builder().token(s.TG_TOKEN).build()
     app.bot_data["settings"] = s
+    app.bot_data["render_route"] = _render_route
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("ai_reset", ai_reset))

@@ -32,7 +32,7 @@ from keyboards import (
     settings_menu,
 )
 import tz
-from openai_client import OpenAIConfig, suggest_stack_v1
+from openai_client import OpenAIConfig, OpenAITranscribeConfig, suggest_stack_v1, transcribe_voice_v1
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("supply-bot")
@@ -60,6 +60,146 @@ def _job_name(tg_user_id: int, supplement_id: int) -> str:
 
 def _debug_job_name(tg_user_id: int, supplement_id: int) -> str:
     return f"dbg:{tg_user_id}:{supplement_id}:{int(datetime.utcnow().timestamp())}"
+
+async def _download_voice_bytes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> tuple[bytes, str]:
+    voice = update.message.voice
+    file = await context.bot.get_file(voice.file_id)
+    data = await file.download_as_bytearray()
+    filename = f"voice_{update.message.message_id}.ogg"
+    return bytes(data), filename
+
+async def _render_ai_suggestions(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    conn,
+    goal_text: str,
+    raw: str | None,
+    *,
+    prefix_line: str | None = None,
+) -> bool:
+    data = None
+    format_error_shown = False
+    if raw:
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            await show(
+                update,
+                context,
+                "AI вернул неожиданный формат. Попробуй ещё раз.",
+                back(),
+                route="menu:ai",
+            )
+            format_error_shown = True
+    else:
+        await show(update, context, "AI не вернул ответ. Попробуй ещё раз.", back(), route="menu:ai")
+
+    if isinstance(data, dict):
+        candidates = data.get("candidates") or []
+        warnings = data.get("warnings_ru") or []
+        questions = data.get("questions_ru") or []
+        if not isinstance(warnings, list):
+            warnings = []
+        if not isinstance(questions, list):
+            questions = []
+        found = []
+        missing = []
+        for cand in candidates:
+            if not isinstance(cand, dict):
+                continue
+            name = str(cand.get("name") or "").strip()
+            if not name:
+                continue
+            rows = await db.search_supplements(conn, name, limit=1)
+            if rows:
+                found.append({"row": rows[0], "cand": cand})
+            else:
+                missing.append(name)
+
+        lines = [
+            "🤖 <b>Подбор стека (AI)</b>",
+            "",
+        ]
+        if prefix_line:
+            lines.extend([prefix_line, ""])
+        lines.extend([
+            f"Цель: <b>{goal_text}</b>",
+            "",
+        ])
+        if found:
+            lines.append("Найдено в каталоге:")
+            for idx, item in enumerate(found, start=1):
+                row = item["row"]
+                cand = item["cand"]
+                dose = str(cand.get("dose_ru") or "").strip()
+                timing = str(cand.get("timing_ru") or "").strip()
+                why = str(cand.get("why_ru") or "").strip()
+                confidence = cand.get("confidence")
+                try:
+                    confidence = int(confidence)
+                except (TypeError, ValueError):
+                    confidence = None
+                detail_bits = []
+                if dose:
+                    detail_bits.append(f"доза: {dose}")
+                if timing:
+                    detail_bits.append(f"время: {timing}")
+                detail = " · ".join(detail_bits)
+                line = f"{idx}) <b>{row['name']}</b>"
+                if detail:
+                    line = f"{line} — {detail}"
+                if why:
+                    line = f"{line}\n{why}"
+                if confidence is not None:
+                    line = f"{line}\nУверенность: {confidence}%"
+                lines.append(line)
+        else:
+            lines.append("Найдено в каталоге: ничего.")
+
+        if missing:
+            lines.append("")
+            lines.append("Не нашёл в каталоге:")
+            lines.append(", ".join(missing))
+
+        if warnings:
+            lines.append("")
+            lines.append("Предупреждения:")
+            for w in warnings:
+                lines.append(f"• {w}")
+
+        if questions:
+            lines.append("")
+            lines.append("Вопросы:")
+            for q in questions:
+                lines.append(f"• {q}")
+
+        lines.append("")
+        lines.append("Выбери, что добавить в «Мои БАДы».")
+
+        buttons = []
+        for item in found:
+            row = item["row"]
+            buttons.append(
+                [InlineKeyboardButton(f"➕ Добавить: {row['name']}", callback_data=f"aiadd:{row['id']}")]
+            )
+        buttons.append([InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")])
+        await show(
+            update,
+            context,
+            "\n".join(lines),
+            InlineKeyboardMarkup(buttons),
+            route="menu:ai",
+        )
+        return True
+    if raw and not format_error_shown:
+        await show(
+            update,
+            context,
+            "AI вернул неожиданный формат. Попробуй ещё раз.",
+            back(),
+            route="menu:ai",
+        )
+    return False
 
 async def home(
     update: Update,
@@ -510,6 +650,7 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "🤖 <b>Подбор стека (AI)</b>\n\n"
                 "Опиши цель одной фразой.\n"
                 "Пример: «Больше энергии утром, но без тревожности».\n\n"
+                "Можно написать текстом или отправить голосовое сообщение.\n\n"
                 "<i>Не медицинский совет.</i>",
                 back(),
                 route="menu:ai",
@@ -1016,123 +1157,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     log.exception("OpenAI request failed")
                     await show(update, context, "AI временно недоступен.", back(), route="menu:ai")
 
-                data = None
-                format_error_shown = False
-                if raw:
-                    try:
-                        data = json.loads(raw)
-                    except json.JSONDecodeError:
-                        await show(
-                            update,
-                            context,
-                            "AI вернул неожиданный формат. Попробуй ещё раз.",
-                            back(),
-                            route="menu:ai",
-                        )
-                        format_error_shown = True
-                else:
-                    await show(update, context, "AI не вернул ответ. Попробуй ещё раз.", back(), route="menu:ai")
-
-                if isinstance(data, dict):
-                    candidates = data.get("candidates") or []
-                    warnings = data.get("warnings_ru") or []
-                    questions = data.get("questions_ru") or []
-                    if not isinstance(warnings, list):
-                        warnings = []
-                    if not isinstance(questions, list):
-                        questions = []
-                    found = []
-                    missing = []
-                    for cand in candidates:
-                        if not isinstance(cand, dict):
-                            continue
-                        name = str(cand.get("name") or "").strip()
-                        if not name:
-                            continue
-                        rows = await db.search_supplements(conn, name, limit=1)
-                        if rows:
-                            found.append({"row": rows[0], "cand": cand})
-                        else:
-                            missing.append(name)
-
-                    lines = [
-                        "🤖 <b>Подбор стека (AI)</b>",
-                        "",
-                        f"Цель: <b>{txt}</b>",
-                        "",
-                    ]
-                    if found:
-                        lines.append("Найдено в каталоге:")
-                        for idx, item in enumerate(found, start=1):
-                            row = item["row"]
-                            cand = item["cand"]
-                            dose = str(cand.get("dose_ru") or "").strip()
-                            timing = str(cand.get("timing_ru") or "").strip()
-                            why = str(cand.get("why_ru") or "").strip()
-                            confidence = cand.get("confidence")
-                            try:
-                                confidence = int(confidence)
-                            except (TypeError, ValueError):
-                                confidence = None
-                            detail_bits = []
-                            if dose:
-                                detail_bits.append(f"доза: {dose}")
-                            if timing:
-                                detail_bits.append(f"время: {timing}")
-                            detail = " · ".join(detail_bits)
-                            line = f"{idx}) <b>{row['name']}</b>"
-                            if detail:
-                                line = f"{line} — {detail}"
-                            if why:
-                                line = f"{line}\n{why}"
-                            if confidence is not None:
-                                line = f"{line}\nУверенность: {confidence}%"
-                            lines.append(line)
-                    else:
-                        lines.append("Найдено в каталоге: ничего.")
-
-                    if missing:
-                        lines.append("")
-                        lines.append("Не нашёл в каталоге:")
-                        lines.append(", ".join(missing))
-
-                    if warnings:
-                        lines.append("")
-                        lines.append("Предупреждения:")
-                        for w in warnings:
-                            lines.append(f"• {w}")
-
-                    if questions:
-                        lines.append("")
-                        lines.append("Вопросы:")
-                        for q in questions:
-                            lines.append(f"• {q}")
-
-                    lines.append("")
-                    lines.append("Выбери, что добавить в «Мои БАДы».")
-
-                    buttons = []
-                    for item in found:
-                        row = item["row"]
-                        buttons.append(
-                            [InlineKeyboardButton(f"➕ Добавить: {row['name']}", callback_data=f"aiadd:{row['id']}")]
-                        )
-                    buttons.append([InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")])
-                    await show(
-                        update,
-                        context,
-                        "\n".join(lines),
-                        InlineKeyboardMarkup(buttons),
-                        route="menu:ai",
-                    )
-                elif raw and not format_error_shown:
-                    await show(
-                        update,
-                        context,
-                        "AI вернул неожиданный формат. Попробуй ещё раз.",
-                        back(),
-                        route="menu:ai",
-                    )
+                await _render_ai_suggestions(update, context, conn, txt, raw)
 
     finally:
         await conn.close()
@@ -1141,6 +1166,98 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.delete()
     except Exception:
         pass
+
+async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.message.voice:
+        return
+    waiting = context.user_data.get(WAITING_KEY)
+    if waiting != "ai_goal":
+        return
+
+    s = context.application.bot_data["settings"]
+    tg_uid = update.effective_user.id
+    conn = await db.connect(s.DB_PATH)
+    try:
+        await db.get_or_create_user(conn, tg_uid, tz_name="")
+        tz_name = await db.get_user_tz(conn, tg_uid)
+        if not tz_name:
+            context.user_data.pop("tz_back_data", None)
+            await _show_timezone_picker(update, context, "ru", 0)
+            return
+
+        if not s.OPENAI_API_KEY:
+            await show(update, context, "AI отключен: добавь OPENAI_API_KEY в .env.", back(), route="menu:ai")
+            return
+
+        await show(update, context, "🎙️ Принял голосовое. Расшифровываю...", back(), route="menu:ai")
+        try:
+            audio_bytes, filename = await _download_voice_bytes(update, context)
+        except Exception:
+            await show(
+                update,
+                context,
+                "Не смог скачать голосовое. Попробуй ещё раз.",
+                back(),
+                route="menu:ai",
+            )
+            return
+
+        transcribe_cfg = OpenAITranscribeConfig(
+            api_key=s.OPENAI_API_KEY,
+            model=s.OPENAI_TRANSCRIBE_MODEL,
+        )
+        transcription = ""
+        try:
+            transcription = await transcribe_voice_v1(transcribe_cfg, audio_bytes, filename)
+        except Exception:
+            await show(
+                update,
+                context,
+                "AI сейчас недоступен для расшифровки. Попробуй позже.",
+                back(),
+                route="menu:ai",
+            )
+            return
+
+        transcription = transcription.strip()
+        if not transcription:
+            await show(
+                update,
+                context,
+                "Не смог распознать речь. Попробуй ещё раз.",
+                back(),
+                route="menu:ai",
+            )
+            return
+
+        sups = await db.list_user_supplements(conn, tg_uid, limit=100)
+        user_supp_text = ", ".join([r["name"] for r in sups]) or "нет"
+        cfg = OpenAIConfig(api_key=s.OPENAI_API_KEY, model=s.OPENAI_MODEL)
+        await show(update, context, "🤖 Думаю… (AI)", back(), route="menu:ai")
+        raw = None
+        try:
+            raw = await suggest_stack_v1(cfg, transcription, user_supp_text)
+        except Exception:
+            log.exception("OpenAI request failed")
+            await show(update, context, "AI временно недоступен.", back(), route="menu:ai")
+            return
+
+        rendered = await _render_ai_suggestions(
+            update,
+            context,
+            conn,
+            transcription,
+            raw,
+            prefix_line=f"🎙️ Понял цель: <b>{transcription}</b>",
+        )
+        if rendered:
+            context.user_data.pop(WAITING_KEY, None)
+    finally:
+        await conn.close()
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
 
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     log.exception("Unhandled error while processing update: %s", update, exc_info=context.error)
@@ -1189,6 +1306,7 @@ async def _bootstrap() -> Application:
     app.add_handler(CallbackQueryHandler(on_ai_add, pattern=r"^aiadd:"))
     app.add_handler(CallbackQueryHandler(on_timezone, pattern=r"^tz:"))
     app.add_handler(CallbackQueryHandler(on_reminder_action, pattern=r"^rem:"))
+    app.add_handler(MessageHandler(filters.VOICE, on_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_error_handler(on_error)
     await _schedule_all_reminders(app)

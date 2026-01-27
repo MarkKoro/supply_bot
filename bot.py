@@ -46,7 +46,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 log = logging.getLogger("supply-bot")
 
 WAITING_KEY = "waiting"
-AWAITING_INPUT_KEY = "awaiting_input"
 MY_SEARCH_KEY = "my_search_q"
 CATALOG_PAGE_SIZE = 8
 MY_PAGE_SIZE = 10
@@ -867,142 +866,131 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await _show_supplement_compat(update, context, conn, int(sid), kind, int(page))
             return
 
-        if data.startswith("my:list:"):
+        if data.startswith("mine:list:"):
             page = int(data.split(":")[-1])
             await _show_my_list(update, context, conn, tg_uid, page)
             return
 
-        if data == "my:search":
+        if data == "mine:search":
             context.user_data[WAITING_KEY] = "my_search_query"
             await show(
                 update,
                 context,
                 "Введи название БАДА для поиска в твоём списке.",
                 my_list_back(),
-                route="my:search",
+                route="mine:search",
             )
             return
 
-        if data == "my:clear":
+        if data == "mine:clear":
             context.user_data.pop(MY_SEARCH_KEY, None)
             await _show_my_list(update, context, conn, tg_uid, 0)
             return
 
-        if data.startswith("my:open:"):
+        if data.startswith("mine:open:") or data.startswith("mine:hub:"):
             supplement_id = int(data.split(":")[-1])
-            await _show_my_hub(update, context, conn, tg_uid, supplement_id)
+            await show_my_supp_hub(update, context, tg_uid, supplement_id, conn=conn)
             return
 
         if data.startswith("my:add:"):
             supplement_id = int(data.split(":")[-1])
             await db.add_user_supplement(conn, tg_uid, supplement_id)
-            await _show_my_hub(update, context, conn, tg_uid, supplement_id)
+            await show_my_supp_hub(update, context, tg_uid, supplement_id, conn=conn)
             return
 
-        if data.startswith("my:remove:"):
-            supplement_id = int(data.split(":")[-1])
-            await db.remove_user_supplement(conn, tg_uid, supplement_id)
+        if data == "mine:back":
             await _show_my_list(update, context, conn, tg_uid, 0)
             return
 
-        if data.startswith("my:toggle:"):
+        if data.startswith("mine:hub:toggle:"):
             supplement_id = int(data.split(":")[-1])
-            await db.toggle_user_supplement_active(conn, tg_uid, supplement_id)
-            await _show_my_hub(update, context, conn, tg_uid, supplement_id)
+            internal_user_id = await db.get_or_create_user(conn, tg_uid)
+            settings = await db.get_user_supp_settings(conn, internal_user_id, supplement_id)
+            await db.set_user_supp_reminder_enabled(
+                conn,
+                internal_user_id,
+                supplement_id,
+                not bool(settings.get("reminder_enabled")),
+            )
+            await show_my_supp_hub(update, context, tg_uid, supplement_id, conn=conn)
             return
 
-        if data.startswith("my:setdose:"):
+        if data.startswith("mine:hub:set_time:"):
             supplement_id = int(data.split(":")[-1])
-            context.user_data[AWAITING_INPUT_KEY] = {
-                "kind": "dose",
-                "supplement_id": supplement_id,
-                "return": f"my:open:{supplement_id}",
-            }
+            context.user_data[WAITING_KEY] = f"set_time:{supplement_id}"
             await show(
                 update,
                 context,
-                "Введи дозу (до 200 символов).",
+                "Напиши время в формате ЧЧ:ММ, например 09:30",
                 my_hub_back(supplement_id),
-                route=f"my:setdose:{supplement_id}",
+                route=f"mine:hub:set_time:{supplement_id}",
             )
             return
 
-        if data.startswith("my:setnote:"):
+        if data.startswith("mine:hub:set_dose:"):
             supplement_id = int(data.split(":")[-1])
-            context.user_data[AWAITING_INPUT_KEY] = {
-                "kind": "note",
-                "supplement_id": supplement_id,
-                "return": f"my:open:{supplement_id}",
-            }
+            context.user_data[WAITING_KEY] = f"set_dose:{supplement_id}"
             await show(
                 update,
                 context,
-                "Введи заметку (до 200 символов).",
+                "Напиши дозу (до 80 символов).",
                 my_hub_back(supplement_id),
-                route=f"my:setnote:{supplement_id}",
+                route=f"mine:hub:set_dose:{supplement_id}",
             )
             return
 
-        if data.startswith("my:settime:"):
+        if data.startswith("mine:hub:taken:"):
             supplement_id = int(data.split(":")[-1])
-            context.user_data[AWAITING_INPUT_KEY] = {
-                "kind": "time",
-                "supplement_id": supplement_id,
-                "return": f"my:open:{supplement_id}",
-            }
-            await show(
+            internal_user_id = await db.get_or_create_user(conn, tg_uid)
+            tz_name = await db.get_user_tz(conn, tg_uid) or "UTC"
+            try:
+                today = datetime.now(db.parse_offset_tz(tz_name)).date().isoformat()
+            except Exception:
+                today = datetime.utcnow().date().isoformat()
+            await db.set_user_supp_taken_date(conn, internal_user_id, supplement_id, today)
+            await db.set_user_supp_skip_date(conn, internal_user_id, supplement_id, "")
+            await show_my_supp_hub(update, context, tg_uid, supplement_id, conn=conn)
+            return
+
+        if data.startswith("mine:hub:skip:"):
+            supplement_id = int(data.split(":")[-1])
+            internal_user_id = await db.get_or_create_user(conn, tg_uid)
+            tz_name = await db.get_user_tz(conn, tg_uid) or "UTC"
+            try:
+                today = datetime.now(db.parse_offset_tz(tz_name)).date().isoformat()
+            except Exception:
+                today = datetime.utcnow().date().isoformat()
+            await db.set_user_supp_skip_date(conn, internal_user_id, supplement_id, today)
+            await db.set_user_supp_taken_date(conn, internal_user_id, supplement_id, "")
+            await show_my_supp_hub(update, context, tg_uid, supplement_id, conn=conn)
+            return
+
+        if data.startswith("mine:hub:remove:"):
+            supplement_id = int(data.split(":")[-1])
+            internal_user_id = await db.get_or_create_user(conn, tg_uid)
+            await db.remove_user_supplement(conn, tg_uid, supplement_id)
+            await db.delete_user_supp_settings(conn, internal_user_id, supplement_id)
+            await _show_my_list(update, context, conn, tg_uid, 0)
+            return
+
+        if data.startswith("mine:hub:compat:"):
+            parts = data.split(":")
+            supplement_id = int(parts[3])
+            kind = "synergy"
+            page = 0
+            if len(parts) >= 6:
+                kind = parts[4]
+                page = int(parts[5])
+            await _show_supplement_compat(
                 update,
                 context,
-                "Введите время в формате ЧЧ:ММ, например 08:30",
-                my_hub_back(supplement_id),
-                route=f"my:settime:{supplement_id}",
+                conn,
+                supplement_id,
+                kind,
+                page,
+                back_data=f"mine:hub:{supplement_id}",
+                route_prefix=f"mine:hub:compat:{supplement_id}",
             )
-            return
-
-        if data.startswith("my:cleartime:"):
-            supplement_id = int(data.split(":")[-1])
-            await db.set_user_schedule_time(conn, tg_uid, supplement_id, None)
-            await _remove_reminder_job(context.application.job_queue, tg_uid, supplement_id)
-            await _show_my_hub(update, context, conn, tg_uid, supplement_id)
-            return
-
-        if data.startswith("my:marktaken:"):
-            supplement_id = int(data.split(":")[-1])
-            tz = await db.get_user_tz(conn, tg_uid)
-            local_date = db.get_user_local_date(tz)
-            await db.set_today_intake_status(conn, tg_uid, supplement_id, local_date, "taken")
-            await _show_my_hub(update, context, conn, tg_uid, supplement_id)
-            return
-
-        if data.startswith("my:markskipped:"):
-            supplement_id = int(data.split(":")[-1])
-            tz = await db.get_user_tz(conn, tg_uid)
-            local_date = db.get_user_local_date(tz)
-            await db.set_today_intake_status(conn, tg_uid, supplement_id, local_date, "skipped")
-            await _show_my_hub(update, context, conn, tg_uid, supplement_id)
-            return
-
-        if data.startswith("my:markreset:"):
-            supplement_id = int(data.split(":")[-1])
-            tz = await db.get_user_tz(conn, tg_uid)
-            local_date = db.get_user_local_date(tz)
-            await db.set_today_intake_status(conn, tg_uid, supplement_id, local_date, None)
-            await _show_my_hub(update, context, conn, tg_uid, supplement_id)
-            return
-
-        if data.startswith("my:debugrem:"):
-            if not _is_debug_user(s, tg_uid):
-                await _show_my_hub(update, context, conn, tg_uid, int(data.split(":")[-1]))
-                return
-            _, _, delay, supplement_id = data.split(":", 3)
-            delay_seconds = int(delay)
-            await schedule_debug_reminder(
-                context.application.job_queue,
-                tg_uid,
-                int(supplement_id),
-                delay_seconds,
-            )
-            await _show_my_hub(update, context, conn, tg_uid, int(supplement_id))
             return
 
         if data == "menu:checkin":
@@ -1340,7 +1328,8 @@ async def _render_route(
     if route == "menu:todayplan":
         await _show_today_plan(update, context, conn, tg_uid)
         return
-    if route == "my:search":
+    if route == "mine:search":
+        context.user_data[WAITING_KEY] = "my_search_query"
         await show(
             update,
             context,
@@ -1395,7 +1384,7 @@ async def _render_route(
             target_message_id=target_message_id,
         )
         return
-    if route.startswith("my:list:"):
+    if route.startswith("mine:list:"):
         page = int(route.split(":")[-1])
         await _show_my_list(
             update,
@@ -1407,14 +1396,14 @@ async def _render_route(
             target_message_id=target_message_id,
         )
         return
-    if route.startswith("my:open:"):
+    if route.startswith("mine:open:") or route.startswith("mine:hub:"):
         supplement_id = int(route.split(":")[-1])
-        await _show_my_hub(
+        await show_my_supp_hub(
             update,
             context,
-            conn,
             tg_uid,
             supplement_id,
+            conn=conn,
             target_chat_id=target_chat_id,
             target_message_id=target_message_id,
         )
@@ -1461,38 +1450,43 @@ async def _render_route(
             target_message_id=target_message_id,
         )
         return
-    if route.startswith("my:setdose:"):
+    if route.startswith("mine:hub:set_dose:"):
         supplement_id = int(route.split(":")[-1])
+        context.user_data[WAITING_KEY] = f"set_dose:{supplement_id}"
         await show(
             update,
             context,
-            "Введи дозу (до 200 символов).",
+            "Напиши дозу (до 80 символов).",
             my_hub_back(supplement_id),
             route=route,
             target_chat_id=target_chat_id,
             target_message_id=target_message_id,
         )
         return
-    if route.startswith("my:setnote:"):
+    if route.startswith("mine:hub:set_time:"):
         supplement_id = int(route.split(":")[-1])
+        context.user_data[WAITING_KEY] = f"set_time:{supplement_id}"
         await show(
             update,
             context,
-            "Введи заметку (до 200 символов).",
+            "Напиши время в формате ЧЧ:ММ, например 09:30",
             my_hub_back(supplement_id),
             route=route,
             target_chat_id=target_chat_id,
             target_message_id=target_message_id,
         )
         return
-    if route.startswith("my:settime:"):
-        supplement_id = int(route.split(":")[-1])
-        await show(
+    if route.startswith("mine:hub:compat:"):
+        _, _, _, supplement_id, kind, page = route.split(":", 5)
+        await _show_supplement_compat(
             update,
             context,
-            "Введите время в формате ЧЧ:ММ, например 08:30",
-            my_hub_back(supplement_id),
-            route=route,
+            conn,
+            int(supplement_id),
+            kind,
+            int(page),
+            back_data=f"mine:hub:{supplement_id}",
+            route_prefix=f"mine:hub:compat:{supplement_id}",
             target_chat_id=target_chat_id,
             target_message_id=target_message_id,
         )
@@ -1563,61 +1557,44 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.message.text:
         return
     txt = update.message.text.strip()
-    awaiting = context.user_data.get(AWAITING_INPUT_KEY)
-    if awaiting:
-        kind = awaiting.get("kind")
-        supplement_id = int(awaiting["supplement_id"])
-        if kind == "time":
-            if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", txt):
-                await show(
-                    update,
-                    context,
-                    "Введите время в формате ЧЧ:ММ, например 08:30",
-                    my_hub_back(supplement_id),
-                    route=f"my:settime:{supplement_id}",
-                )
-            else:
-                s = context.application.bot_data["settings"]
-                tg_uid = update.effective_user.id
-                conn = await db.connect(s.DB_PATH)
-                try:
-                    await db.set_user_schedule_time(conn, tg_uid, supplement_id, txt)
-                    tz_name = await db.get_user_tz(conn, tg_uid)
-                    if tz_name:
-                        await _schedule_reminder_job(
-                            context.application.job_queue,
-                            tg_uid,
-                            supplement_id,
-                            txt,
-                            tz_name,
-                        )
-                    context.user_data.pop(AWAITING_INPUT_KEY, None)
-                    await _show_my_hub(update, context, conn, tg_uid, supplement_id)
-                finally:
-                    await conn.close()
-        elif len(txt) > 200:
-            prompt = "Введи дозу (до 200 символов)." if kind == "dose" else "Введи заметку (до 200 символов)."
-            await show(
-                update,
-                context,
-                f"Слишком длинный текст. {prompt}",
-                my_hub_back(supplement_id),
-                route=f"my:set{kind}:{supplement_id}",
-            )
-        else:
-            s = context.application.bot_data["settings"]
-            tg_uid = update.effective_user.id
-            conn = await db.connect(s.DB_PATH)
-            try:
-                value = txt if txt else None
-                if awaiting.get("kind") == "dose":
-                    await db.set_user_supplement_dose(conn, tg_uid, supplement_id, value)
+    waiting = context.user_data.get(WAITING_KEY)
+    if waiting and waiting.startswith(("set_time:", "set_dose:")):
+        _, supplement_id_text = waiting.split(":", 1)
+        supplement_id = int(supplement_id_text)
+        s = context.application.bot_data["settings"]
+        tg_uid = update.effective_user.id
+        conn = await db.connect(s.DB_PATH)
+        try:
+            internal_user_id = await db.get_or_create_user(conn, tg_uid)
+            if waiting.startswith("set_time:"):
+                if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", txt):
+                    await show(
+                        update,
+                        context,
+                        "Напиши время в формате ЧЧ:ММ, например 09:30",
+                        my_hub_back(supplement_id),
+                        route=f"mine:hub:set_time:{supplement_id}",
+                    )
                 else:
-                    await db.set_user_supplement_note(conn, tg_uid, supplement_id, value)
-                context.user_data.pop(AWAITING_INPUT_KEY, None)
-                await _show_my_hub(update, context, conn, tg_uid, supplement_id)
-            finally:
-                await conn.close()
+                    await db.set_user_supp_reminder_time(conn, internal_user_id, supplement_id, txt)
+                    context.user_data.pop(WAITING_KEY, None)
+                    await show_my_supp_hub(update, context, tg_uid, supplement_id, conn=conn)
+            else:
+                trimmed = txt.strip()
+                if not trimmed or len(trimmed) > 80:
+                    await show(
+                        update,
+                        context,
+                        "Напиши дозу (до 80 символов).",
+                        my_hub_back(supplement_id),
+                        route=f"mine:hub:set_dose:{supplement_id}",
+                    )
+                else:
+                    await db.set_user_supp_dose(conn, internal_user_id, supplement_id, trimmed)
+                    context.user_data.pop(WAITING_KEY, None)
+                    await show_my_supp_hub(update, context, tg_uid, supplement_id, conn=conn)
+        finally:
+            await conn.close()
 
         try:
             await update.message.delete()
@@ -1625,7 +1602,6 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             pass
         return
 
-    waiting = context.user_data.get(WAITING_KEY)
     if not waiting:
         return
 
@@ -1872,7 +1848,7 @@ async def _bootstrap() -> Application:
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(
         on_menu,
-        pattern=r"^(menu:|settings:|add_pick:|compat_pick:|cat:page:|curated:|supp:|my:)",
+        pattern=r"^(menu:|settings:|add_pick:|compat_pick:|cat:page:|curated:|supp:|my:|mine:)",
     ))
     app.add_handler(CallbackQueryHandler(on_ai_add, pattern=r"^aiadd:"))
     app.add_handler(CallbackQueryHandler(on_checkin_action, pattern=r"^chk(apply|deny):"))
@@ -2049,7 +2025,7 @@ async def _show_my_list(
                 context,
                 f"Ничего не найдено по запросу: <b>{q}</b>",
                 my_supplements_list([], 0, False, False, show_clear=True),
-                route="my:list:0",
+                route="mine:list:0",
                 target_chat_id=target_chat_id,
                 target_message_id=target_message_id,
             )
@@ -2059,73 +2035,94 @@ async def _show_my_list(
                 context,
                 "Пока список пуст. Добавь БАД из каталога.",
                 my_supplements_list([], 0, False, False, show_clear=False),
-                route="my:list:0",
+                route="mine:list:0",
                 target_chat_id=target_chat_id,
                 target_message_id=target_message_id,
             )
         return
 
     suffix = f" (стр. {page + 1})" if total > MY_PAGE_SIZE else ""
-    title = "📦 <b>Мои БАДы</b>"
+    title = "📦 <b>Мои БАДы</b>\nНажми на добавку, чтобы открыть управление."
     if q:
-        title = f"📦 <b>Мои БАДы</b>\nПоиск: <b>{q}</b>"
+        title = f"📦 <b>Мои БАДы</b>\nПоиск: <b>{q}</b>\nНажми на добавку, чтобы открыть управление."
     await show(
         update,
         context,
         f"{title}{suffix}",
         my_supplements_list(rows, page, has_prev=page > 0, has_next=has_next, show_clear=bool(q)),
-        route=f"my:list:{page}",
+        route=f"mine:list:{page}",
         target_chat_id=target_chat_id,
         target_message_id=target_message_id,
     )
 
-async def _show_my_hub(
+async def show_my_supp_hub(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
-    conn,
-    tg_uid: int,
+    user_id: int,
     supplement_id: int,
     *,
+    conn=None,
     target_chat_id: int | None = None,
     target_message_id: int | None = None,
 ) -> None:
-    user_id = await db.get_or_create_user(conn, tg_uid)
-    s = context.application.bot_data["settings"]
-    tz = await db.get_user_tz(conn, tg_uid)
-    local_date = db.get_user_local_date(tz)
-    row = await db.get_user_supplement_with_status(conn, tg_uid, supplement_id, local_date)
-    if not row:
+    close_conn = False
+    if conn is None:
+        s = context.application.bot_data["settings"]
+        conn = await db.connect(s.DB_PATH)
+        close_conn = True
+    try:
+        internal_user_id = await db.get_or_create_user(conn, user_id)
+        row = await db.get_user_supplement(conn, user_id, supplement_id)
+        if not row:
+            await show(
+                update,
+                context,
+                "БАД не найден в твоём списке.",
+                my_supplements_list([], 0, False, False, show_clear=False),
+                route="mine:list:0",
+                target_chat_id=target_chat_id,
+                target_message_id=target_message_id,
+            )
+            return
+        settings = await db.get_user_supp_settings(conn, internal_user_id, supplement_id)
+        tz_name = await db.get_user_tz(conn, user_id) or "UTC"
+        try:
+            today = datetime.now(db.parse_offset_tz(tz_name)).date().isoformat()
+        except Exception:
+            today = datetime.utcnow().date().isoformat()
+
+        name_ru = (row.get("name_ru") or row.get("name") or "").strip()
+        name_en = (row.get("name_en") or "").strip()
+        name_line = f"💊 <b>{name_ru}</b>"
+        if name_en and name_en != name_ru:
+            name_line = f"{name_line} ({name_en})"
+        dose_text = (settings.get("dose_text") or "").strip() or "не задана"
+        reminder_enabled = bool(settings.get("reminder_enabled"))
+        reminder_time = (settings.get("reminder_time") or "").strip() or "не задано"
+        taken_today = settings.get("taken_date") == today
+        skip_today = settings.get("skip_date") == today
+
+        text = (
+            "⚙️ <b>Управление добавкой</b>\n\n"
+            f"{name_line}\n\n"
+            f"Доза: {dose_text}\n"
+            f"Напоминание: {'включено' if reminder_enabled else 'выключено'}\n"
+            f"Время: {reminder_time}\n\n"
+            f"✅ Выпил сегодня: {'да' if taken_today else 'нет'}\n"
+            f"🚫 Не пью сегодня: {'да' if skip_today else 'нет'}\n"
+        )
         await show(
             update,
             context,
-            "БАД не найден в твоём списке.",
-            my_supplements_list([], 0, False, False, show_clear=False),
-            route="my:list:0",
+            text,
+            my_supplement_hub(supplement_id, reminder_enabled),
+            route=f"mine:hub:{supplement_id}",
             target_chat_id=target_chat_id,
             target_message_id=target_message_id,
         )
-        return
-    text = engine.format_supplement_hub(
-        row,
-        row,
-        schedule_time=row["time_hhmm"] if "time_hhmm" in row.keys() else None,
-        today_status=row["today_status"] if "today_status" in row.keys() else None,
-    )
-    await show(
-        update,
-        context,
-        text,
-        my_supplement_hub(
-            supplement_id,
-            bool(row["is_active"]),
-            bool(row["time_hhmm"]),
-            row["today_status"],
-            show_debug=_is_debug_user(s, tg_uid),
-        ),
-        route=f"my:open:{supplement_id}",
-        target_chat_id=target_chat_id,
-        target_message_id=target_message_id,
-    )
+    finally:
+        if close_conn:
+            await conn.close()
 
 async def _show_supplement_page(
     update: Update,
@@ -2165,6 +2162,8 @@ async def _show_supplement_compat(
     kind: str,
     page: int,
     *,
+    back_data: str | None = None,
+    route_prefix: str | None = None,
     target_chat_id: int | None = None,
     target_message_id: int | None = None,
 ) -> None:
@@ -2209,8 +2208,10 @@ async def _show_supplement_compat(
             page=page,
             has_prev=has_prev,
             has_next=has_next,
+            back_data=back_data,
+            nav_prefix=route_prefix,
         ),
-        route=f"supp:compat:{supplement_id}:{kind}:{page}",
+        route=f"{route_prefix}:{kind}:{page}" if route_prefix else f"supp:compat:{supplement_id}:{kind}:{page}",
         target_chat_id=target_chat_id,
         target_message_id=target_message_id,
     )

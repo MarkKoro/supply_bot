@@ -19,10 +19,10 @@ def back() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")]])
 
 def my_list_back() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="my:list:0")]])
+    return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="mine:list:0")]])
 
 def my_hub_back(supplement_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"my:open:{supplement_id}")]])
+    return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"mine:hub:{supplement_id}")]])
 
 def pick_search_results(rows, prefix: str) -> InlineKeyboardMarkup:
     btns = []
@@ -42,17 +42,17 @@ def my_supplements_list(rows, page: int, has_prev: bool, has_next: bool, *, show
         else:
             marker = "…"
         label = f"{r['name']} {marker}"
-        btns.append([InlineKeyboardButton(label, callback_data=f"my:open:{r['supplement_id']}")])
-    search_row = [InlineKeyboardButton("🔎 Поиск", callback_data="my:search")]
+        btns.append([InlineKeyboardButton(label, callback_data=f"mine:open:{r['supplement_id']}")])
+    search_row = [InlineKeyboardButton("🔎 Поиск", callback_data="mine:search")]
     if show_clear:
-        search_row.append(InlineKeyboardButton("❌ Сбросить поиск", callback_data="my:clear"))
+        search_row.append(InlineKeyboardButton("❌ Сбросить поиск", callback_data="mine:clear"))
     btns.append(search_row)
     nav = []
     if has_prev:
-        nav.append(InlineKeyboardButton("⬅️ Назад", callback_data=f"my:list:{page - 1}"))
-    nav.append(InlineKeyboardButton("🏠 Меню", callback_data="menu:home"))
+        nav.append(InlineKeyboardButton("⬅️ Назад", callback_data=f"mine:list:{page - 1}"))
+    nav.append(InlineKeyboardButton("⬅️ Назад", callback_data="menu:home"))
     if has_next:
-        nav.append(InlineKeyboardButton("➡️ Далее", callback_data=f"my:list:{page + 1}"))
+        nav.append(InlineKeyboardButton("➡️ Далее", callback_data=f"mine:list:{page + 1}"))
     btns.append(nav)
     return InlineKeyboardMarkup(btns)
 
@@ -100,7 +100,7 @@ def supplement_page(
 ) -> InlineKeyboardMarkup:
     btns = []
     if in_stack:
-        btns.append([InlineKeyboardButton("✅ Уже в моих — Управлять", callback_data=f"my:open:{supplement_id}")])
+        btns.append([InlineKeyboardButton("✅ Уже в моих — Управлять", callback_data=f"mine:open:{supplement_id}")])
     else:
         btns.append([InlineKeyboardButton("➕ Добавить в Мои БАДы", callback_data=f"my:add:{supplement_id}")])
     btns.append([
@@ -121,51 +121,43 @@ def supplement_compat_list(
     page: int,
     has_prev: bool,
     has_next: bool,
+    back_data: str | None = None,
+    back_label: str | None = None,
+    nav_prefix: str | None = None,
 ) -> InlineKeyboardMarkup:
     btns: list[list[InlineKeyboardButton]] = []
     for item in items:
         btns.append([InlineKeyboardButton(item["title"], callback_data=f"supp:open:{item['other_id']}")])
     nav: list[InlineKeyboardButton] = []
+    nav_prefix = nav_prefix or f"supp:compat:{supplement_id}"
     if has_prev:
-        nav.append(InlineKeyboardButton("◀️", callback_data=f"supp:compat:{supplement_id}:{kind}:{page - 1}"))
+        nav.append(InlineKeyboardButton("◀️", callback_data=f"{nav_prefix}:{kind}:{page - 1}"))
     if has_next:
-        nav.append(InlineKeyboardButton("▶️", callback_data=f"supp:compat:{supplement_id}:{kind}:{page + 1}"))
+        nav.append(InlineKeyboardButton("▶️", callback_data=f"{nav_prefix}:{kind}:{page + 1}"))
     if nav:
         btns.append(nav)
-    btns.append([InlineKeyboardButton("⬅️ К карточке", callback_data=f"supp:open:{supplement_id}")])
+    if back_data:
+        btns.append([InlineKeyboardButton(back_label or "⬅️ Назад", callback_data=back_data)])
+    else:
+        btns.append([InlineKeyboardButton("⬅️ К карточке", callback_data=f"supp:open:{supplement_id}")])
     return InlineKeyboardMarkup(btns)
 
 def my_supplement_hub(
     supplement_id: int,
-    is_active: bool,
-    has_time: bool,
-    today_status: str | None,
+    reminder_enabled: bool,
     *,
-    show_debug: bool = False,
 ) -> InlineKeyboardMarkup:
-    toggle_label = "⏸ Пауза" if is_active else "▶️ Активировать"
-    schedule_row = [InlineKeyboardButton("⏰ Время", callback_data=f"my:settime:{supplement_id}")]
-    if has_time:
-        schedule_row.append(InlineKeyboardButton("🗑 Убрать время", callback_data=f"my:cleartime:{supplement_id}"))
-
-    today_row = [
-        InlineKeyboardButton("✅ Выпил", callback_data=f"my:marktaken:{supplement_id}"),
-        InlineKeyboardButton("❌ Не выпил", callback_data=f"my:markskipped:{supplement_id}"),
-    ]
-    reset_row = [InlineKeyboardButton("↩️ Сбросить", callback_data=f"my:markreset:{supplement_id}")]
+    toggle_label = "⏰ Напоминание: ВКЛ" if reminder_enabled else "⏰ Напоминание: ВЫКЛ"
     btns = [
-        schedule_row,
-        today_row,
-        reset_row,
-        [InlineKeyboardButton("✏️ Доза", callback_data=f"my:setdose:{supplement_id}")],
-        [InlineKeyboardButton("📝 Заметка", callback_data=f"my:setnote:{supplement_id}")],
-        [InlineKeyboardButton(toggle_label, callback_data=f"my:toggle:{supplement_id}")],
-        [InlineKeyboardButton("🗑 Удалить из моих", callback_data=f"my:remove:{supplement_id}")],
-        [InlineKeyboardButton("⬅️ Назад", callback_data="my:list:0")],
+        [InlineKeyboardButton(toggle_label, callback_data=f"mine:hub:toggle:{supplement_id}")],
+        [InlineKeyboardButton("🕒 Время", callback_data=f"mine:hub:set_time:{supplement_id}")],
+        [InlineKeyboardButton("💊 Доза", callback_data=f"mine:hub:set_dose:{supplement_id}")],
+        [InlineKeyboardButton("✅ Выпил сегодня", callback_data=f"mine:hub:taken:{supplement_id}")],
+        [InlineKeyboardButton("🚫 Не пью сегодня", callback_data=f"mine:hub:skip:{supplement_id}")],
+        [InlineKeyboardButton("🧩 Совместимость", callback_data=f"mine:hub:compat:{supplement_id}")],
+        [InlineKeyboardButton("🗑 Удалить из моих", callback_data=f"mine:hub:remove:{supplement_id}")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="mine:back")],
     ]
-    if show_debug:
-        btns.insert(-1, [InlineKeyboardButton("🧪 Тест напоминания (10 сек)", callback_data=f"my:debugrem:10:{supplement_id}")])
-        btns.insert(-1, [InlineKeyboardButton("🧪 Тест (через 3 сек)", callback_data=f"my:debugrem:3:{supplement_id}")])
     return InlineKeyboardMarkup(btns)
 
 def timezone_picker(

@@ -1425,6 +1425,17 @@ async def set_user_supp_skip_date(
         {"skip_date": skip_date},
     )
 
+async def delete_user_supp_settings(
+    conn: aiosqlite.Connection,
+    user_id: int,
+    supplement_id: int,
+) -> None:
+    await conn.execute(
+        "DELETE FROM user_supp_settings WHERE user_id=? AND supplement_id=?",
+        (user_id, supplement_id),
+    )
+    await conn.commit()
+
 # checkins
 async def save_daily_checkin(conn: aiosqlite.Connection, user_id: int, day: str, payload: dict) -> None:
     await conn.execute(

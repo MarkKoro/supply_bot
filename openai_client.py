@@ -166,3 +166,57 @@ async def transcribe_voice_v1(
     except Exception:
         log.exception("OpenAI transcription failed")
         raise
+
+async def checkin_plan_v1(
+    cfg: Optional[OpenAIConfig],
+    checkin_text: str,
+    context_json: str,
+) -> str:
+    if not cfg:
+        return "AI отключен: добавь OPENAI_API_KEY в .env."
+
+    instructions = (
+        "Ты помощник по ведению дневника добавок. "
+        "НЕ ставь диагнозы, НЕ давай медицинских назначений и не делай медицинских утверждений. "
+        "Будь консервативен в изменениях. "
+        "Если симптомы серьезные, предложи обратиться к врачу. "
+        "Формат ответа: строго JSON, без Markdown и без лишнего текста. "
+        "Все текстовые поля на русском. "
+        "supplement_name указывай латиницей/английским названием."
+    )
+
+    prompt = f"""ЧЕКИН ПОЛЬЗОВАТЕЛЯ:
+{checkin_text}
+
+КОНТЕКСТ (JSON):
+{context_json}
+
+ЗАДАЧА:
+Сформируй краткий план изменений только на сегодня.
+Строго соблюдай JSON-схему:
+{{
+  "summary_ru": "коротко что заметил",
+  "changes": [
+    {{
+      "type": "add" | "remove" | "adjust_dose" | "adjust_timing",
+      "supplement_name": "string (latin name)",
+      "reason_ru": "почему",
+      "confidence": 0,
+      "dose_ru": "если применимо",
+      "timing_ru": "если применимо (утро/день/вечер/перед сном/с едой/натощак)"
+    }}
+  ],
+  "warnings_ru": ["..."],
+  "questions_ru": ["..."]
+}}
+Верни ТОЛЬКО JSON. Если данных мало — добавь вопросы в questions_ru.
+"""
+
+    return await asyncio.to_thread(
+        _sync_call,
+        cfg,
+        instructions=instructions,
+        input_text=prompt,
+        max_output_tokens=900,
+        timeout_s=20,
+    )

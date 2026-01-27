@@ -21,9 +21,11 @@ def _payload_from_route(route: str) -> dict | None:
     if route.startswith("supp:view:"):
         _, _, slug, page = route.split(":", 3)
         return {"slug": slug, "page": int(page)}
+    if route.startswith("supp:open:"):
+        return {"supplement_id": int(route.split(":")[-1])}
     if route.startswith("supp:compat:"):
-        _, _, slug, page = route.split(":", 3)
-        return {"slug": slug, "page": int(page)}
+        _, _, sid, kind, page = route.split(":", 4)
+        return {"supplement_id": int(sid), "kind": kind, "page": int(page)}
     if route.startswith("my:setdose:") or route.startswith("my:setnote:") or route.startswith("my:settime:"):
         return {"supplement_id": int(route.split(":")[-1])}
     if route == "menu:curated":

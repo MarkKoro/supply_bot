@@ -30,7 +30,15 @@ def pick_search_results(rows, prefix: str) -> InlineKeyboardMarkup:
 def my_supplements_list(rows, page: int, has_prev: bool, has_next: bool, *, show_clear: bool) -> InlineKeyboardMarkup:
     btns = []
     for r in rows:
-        btns.append([InlineKeyboardButton(r["name"], callback_data=f"my:open:{r['supplement_id']}")])
+        status = r.get("today_status")
+        if status == "taken":
+            marker = "✅"
+        elif status == "skipped":
+            marker = "❌"
+        else:
+            marker = "…"
+        label = f"{r['name']} {marker}"
+        btns.append([InlineKeyboardButton(label, callback_data=f"my:open:{r['supplement_id']}")])
     search_row = [InlineKeyboardButton("🔎 Поиск", callback_data="my:search")]
     if show_clear:
         search_row.append(InlineKeyboardButton("❌ Сбросить поиск", callback_data="my:clear"))
@@ -81,9 +89,26 @@ def supplement_compat_back(slug: str, back_page: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("⬅️ Назад", callback_data=f"supp:view:{slug}:{back_page}")],
     ])
 
-def my_supplement_hub(supplement_id: int, is_active: bool) -> InlineKeyboardMarkup:
+def my_supplement_hub(
+    supplement_id: int,
+    is_active: bool,
+    has_time: bool,
+    today_status: str | None,
+) -> InlineKeyboardMarkup:
     toggle_label = "⏸ Пауза" if is_active else "▶️ Активировать"
+    schedule_row = [InlineKeyboardButton("⏰ Время", callback_data=f"my:settime:{supplement_id}")]
+    if has_time:
+        schedule_row.append(InlineKeyboardButton("🗑 Убрать время", callback_data=f"my:cleartime:{supplement_id}"))
+
+    today_row = [
+        InlineKeyboardButton("✅ Выпил", callback_data=f"my:marktaken:{supplement_id}"),
+        InlineKeyboardButton("❌ Не выпил", callback_data=f"my:markskipped:{supplement_id}"),
+    ]
+    reset_row = [InlineKeyboardButton("↩️ Сбросить", callback_data=f"my:markreset:{supplement_id}")]
     return InlineKeyboardMarkup([
+        schedule_row,
+        today_row,
+        reset_row,
         [InlineKeyboardButton("✏️ Доза", callback_data=f"my:setdose:{supplement_id}")],
         [InlineKeyboardButton("📝 Заметка", callback_data=f"my:setnote:{supplement_id}")],
         [InlineKeyboardButton(toggle_label, callback_data=f"my:toggle:{supplement_id}")],

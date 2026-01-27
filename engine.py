@@ -300,7 +300,12 @@ def format_supplement_details(row) -> str:
         parts.append("🏷️ " + ", ".join(tags))
     return "\n\n".join(parts)
 
-def format_supplement_hub(supp_row, user_row) -> str:
+def format_supplement_hub(
+    supp_row,
+    user_row,
+    schedule_time: str | None = None,
+    today_status: str | None = None,
+) -> str:
     name_ru = supp_row["name_ru"] or ""
     name_en = supp_row["name_en"] or ""
     if name_ru and name_en:
@@ -321,6 +326,14 @@ def format_supplement_hub(supp_row, user_row) -> str:
     dose_text = user_row["dose_text"] or "не указано"
     note_text = user_row["note_text"] or "нет"
     status = "Активен" if is_active else "Пауза"
+    schedule_time = schedule_time or ""
+    schedule_label = f"Напоминание: {schedule_time}" if schedule_time else "Напоминание: не задано"
+    if today_status == "taken":
+        today_label = "Сегодня: Выпил ✅"
+    elif today_status == "skipped":
+        today_label = "Сегодня: Не выпил ❌"
+    else:
+        today_label = "Сегодня: не отмечено"
 
     parts = [f"💊 <b>{title}</b>"]
     if summary:
@@ -328,4 +341,8 @@ def format_supplement_hub(supp_row, user_row) -> str:
     parts.append(f"Статус: <b>{status}</b>")
     parts.append(f"Доза: <b>{dose_text}</b>")
     parts.append(f"Заметка: <b>{note_text}</b>")
+    parts.append("<b>Расписание</b>")
+    parts.append(schedule_label)
+    parts.append("<b>Сегодня</b>")
+    parts.append(today_label)
     return "\n\n".join(parts)

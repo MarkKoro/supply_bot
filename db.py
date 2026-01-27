@@ -1,6 +1,7 @@
 from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 import aiosqlite
 
 def utc_now_iso() -> str:
@@ -130,6 +131,25 @@ CREATE TABLE IF NOT EXISTS ai_daily_usage (
   used_count    INTEGER NOT NULL DEFAULT 0,
   UNIQUE(user_id, date)
 );
+
+CREATE TABLE IF NOT EXISTS user_schedules (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  supplement_id INTEGER NOT NULL REFERENCES supplements(id) ON DELETE CASCADE,
+  time_hhmm     TEXT,
+  is_enabled    INTEGER NOT NULL DEFAULT 1,
+  UNIQUE(user_id, supplement_id)
+);
+
+CREATE TABLE IF NOT EXISTS user_intake_log (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  supplement_id INTEGER NOT NULL REFERENCES supplements(id) ON DELETE CASCADE,
+  local_date    TEXT NOT NULL,
+  status        TEXT NOT NULL,
+  updated_at    TEXT NOT NULL,
+  UNIQUE(user_id, supplement_id, local_date)
+);
 """
 
 async def connect(db_path: str) -> aiosqlite.Connection:
@@ -165,6 +185,8 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     await _ensure_column(conn, "supplements", "is_active", "INTEGER NOT NULL DEFAULT 1")
     await _ensure_aliases_table(conn)
     await _ensure_user_supplements(conn)
+    await _ensure_user_schedules(conn)
+    await _ensure_user_intake_log(conn)
     await conn.execute(
         "UPDATE supplements SET interaction_classes='[]' WHERE interaction_classes IS NULL OR interaction_classes=''"
     )
@@ -215,6 +237,56 @@ async def _ensure_user_supplements(conn: aiosqlite.Connection) -> None:
     await _ensure_column(conn, "user_supplements", "note_text", "TEXT")
     await _ensure_column(conn, "user_supplements", "created_at", "TEXT NOT NULL DEFAULT ''")
     await _backfill_user_supplements(conn)
+
+async def _ensure_user_schedules(conn: aiosqlite.Connection) -> None:
+    table = await fetchone(
+        conn,
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='user_schedules'",
+    )
+    if not table:
+        await conn.execute(
+            """CREATE TABLE IF NOT EXISTS user_schedules (
+              id            INTEGER PRIMARY KEY AUTOINCREMENT,
+              user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+              supplement_id INTEGER NOT NULL REFERENCES supplements(id) ON DELETE CASCADE,
+              time_hhmm     TEXT,
+              is_enabled    INTEGER NOT NULL DEFAULT 1,
+              UNIQUE(user_id, supplement_id)
+            )"""
+        )
+        return
+
+    await _ensure_column(conn, "user_schedules", "time_hhmm", "TEXT")
+    await _ensure_column(conn, "user_schedules", "is_enabled", "INTEGER NOT NULL DEFAULT 1")
+    await conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_user_schedules_unique ON user_schedules(user_id, supplement_id)"
+    )
+
+async def _ensure_user_intake_log(conn: aiosqlite.Connection) -> None:
+    table = await fetchone(
+        conn,
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='user_intake_log'",
+    )
+    if not table:
+        await conn.execute(
+            """CREATE TABLE IF NOT EXISTS user_intake_log (
+              id            INTEGER PRIMARY KEY AUTOINCREMENT,
+              user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+              supplement_id INTEGER NOT NULL REFERENCES supplements(id) ON DELETE CASCADE,
+              local_date    TEXT NOT NULL,
+              status        TEXT NOT NULL,
+              updated_at    TEXT NOT NULL,
+              UNIQUE(user_id, supplement_id, local_date)
+            )"""
+        )
+        return
+
+    await _ensure_column(conn, "user_intake_log", "local_date", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "user_intake_log", "status", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "user_intake_log", "updated_at", "TEXT NOT NULL DEFAULT ''")
+    await conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_user_intake_unique ON user_intake_log(user_id, supplement_id, local_date)"
+    )
 
 async def _backfill_user_supplements(conn: aiosqlite.Connection) -> None:
     cols = await fetchall(conn, "PRAGMA table_info(user_supplements)")
@@ -289,6 +361,9 @@ async def get_or_create_user(conn: aiosqlite.Connection, tg_user_id: int, tz_nam
 async def get_user_tz(conn: aiosqlite.Connection, user_id: int) -> str:
     row = await fetchone(conn, "SELECT tz_name FROM users WHERE id=?", (user_id,))
     return str(row["tz_name"]) if row else "UTC"
+
+def get_user_local_date(tz_name: str) -> str:
+    return datetime.now(ZoneInfo(tz_name)).date().isoformat()
 
 # catalog
 async def upsert_supplement(conn: aiosqlite.Connection, s: dict) -> int:
@@ -503,22 +578,53 @@ async def get_user_supplement(conn: aiosqlite.Connection, tg_user_id: int, suppl
         (user_id, supplement_id),
     )
 
+async def get_user_supplement_with_status(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    supplement_id: int,
+    local_date: str | None,
+):
+    user_id = await get_or_create_user(conn, tg_user_id)
+    params: list = [local_date or ""]
+    status_join = (
+        "LEFT JOIN user_intake_log uil ON uil.user_id=us.user_id "
+        "AND uil.supplement_id=us.supplement_id AND uil.local_date=?"
+    )
+    params.extend([user_id, supplement_id])
+    return await fetchone(
+        conn,
+        f"""SELECT us.*, s.slug, s.name, s.name_ru, s.name_en,
+                   s.summary_ru, s.summary_verified, s.summary_theoretical,
+                   s.molecular_mechanisms, s.mechanisms,
+                   sch.time_hhmm, sch.is_enabled,
+                   uil.status AS today_status
+            FROM user_supplements us
+            JOIN supplements s ON s.id=us.supplement_id
+            LEFT JOIN user_schedules sch ON sch.user_id=us.user_id AND sch.supplement_id=us.supplement_id
+            {status_join}
+            WHERE us.user_id=? AND us.supplement_id=?""",
+        tuple(params),
+    )
+
 async def list_user_supplements_page(
     conn: aiosqlite.Connection,
     tg_user_id: int,
     q: str | None = None,
     page: int = 0,
     page_size: int = 10,
+    local_date: str | None = None,
 ):
     user_id = await get_or_create_user(conn, tg_user_id)
     page = max(page, 0)
     offset = page * page_size
     q = (q or "").strip()
-    params = [user_id]
+    count_params = [user_id]
+    params: list = [local_date or "", user_id]
     filters = ""
     if q:
         filters = " AND (s.name LIKE ? OR s.slug LIKE ? OR s.name_ru LIKE ? OR s.name_en LIKE ?)"
         q_like = f"%{q}%"
+        count_params.extend([q_like, q_like, q_like, q_like])
         params.extend([q_like, q_like, q_like, q_like])
 
     count_row = await fetchone(
@@ -527,18 +633,24 @@ async def list_user_supplements_page(
             FROM user_supplements us
             JOIN supplements s ON s.id=us.supplement_id
             WHERE us.user_id=?{filters}""",
-        tuple(params),
+        tuple(count_params),
     )
     total = int(count_row["total"]) if count_row else 0
 
     params.extend([page_size, offset])
+    status_join = (
+        "LEFT JOIN user_intake_log uil ON uil.user_id=us.user_id "
+        "AND uil.supplement_id=us.supplement_id AND uil.local_date=?"
+    )
     rows = await fetchall(
         conn,
         f"""SELECT us.*, s.id AS supplement_id, s.slug, s.name, s.name_ru, s.name_en,
                   s.summary_ru, s.summary_verified, s.summary_theoretical,
-                  s.molecular_mechanisms, s.mechanisms
+                  s.molecular_mechanisms, s.mechanisms,
+                  uil.status AS today_status
            FROM user_supplements us
            JOIN supplements s ON s.id=us.supplement_id
+           {status_join}
            WHERE us.user_id=?{filters}
            ORDER BY s.name
            LIMIT ? OFFSET ?""",
@@ -601,6 +713,71 @@ async def user_has_supplement(conn: aiosqlite.Connection, tg_user_id: int, suppl
         (user_id, supplement_id),
     )
     return row is not None
+
+async def get_user_schedule(conn: aiosqlite.Connection, tg_user_id: int, supplement_id: int):
+    user_id = await get_or_create_user(conn, tg_user_id)
+    return await fetchone(
+        conn,
+        "SELECT * FROM user_schedules WHERE user_id=? AND supplement_id=?",
+        (user_id, supplement_id),
+    )
+
+async def set_user_schedule_time(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    supplement_id: int,
+    time_hhmm: str | None,
+) -> None:
+    user_id = await get_or_create_user(conn, tg_user_id)
+    await conn.execute(
+        """INSERT INTO user_schedules(user_id, supplement_id, time_hhmm, is_enabled)
+           VALUES(?,?,?,?)
+           ON CONFLICT(user_id, supplement_id) DO UPDATE SET
+             time_hhmm=excluded.time_hhmm,
+             is_enabled=excluded.is_enabled""",
+        (user_id, supplement_id, time_hhmm, 1 if time_hhmm else 0),
+    )
+    await conn.commit()
+
+async def get_today_intake_status(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    supplement_id: int,
+    local_date: str,
+) -> str | None:
+    user_id = await get_or_create_user(conn, tg_user_id)
+    row = await fetchone(
+        conn,
+        """SELECT status FROM user_intake_log
+           WHERE user_id=? AND supplement_id=? AND local_date=?""",
+        (user_id, supplement_id, local_date),
+    )
+    return str(row["status"]) if row else None
+
+async def set_today_intake_status(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    supplement_id: int,
+    local_date: str,
+    status: str | None,
+) -> None:
+    user_id = await get_or_create_user(conn, tg_user_id)
+    if status is None:
+        await conn.execute(
+            "DELETE FROM user_intake_log WHERE user_id=? AND supplement_id=? AND local_date=?",
+            (user_id, supplement_id, local_date),
+        )
+        await conn.commit()
+        return
+    await conn.execute(
+        """INSERT INTO user_intake_log(user_id, supplement_id, local_date, status, updated_at)
+           VALUES(?,?,?,?,?)
+           ON CONFLICT(user_id, supplement_id, local_date) DO UPDATE SET
+             status=excluded.status,
+             updated_at=excluded.updated_at""",
+        (user_id, supplement_id, local_date, status, utc_now_iso()),
+    )
+    await conn.commit()
 
 # checkins
 async def upsert_checkin(conn: aiosqlite.Connection, user_id: int, date: str, data: dict):

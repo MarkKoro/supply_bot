@@ -7,6 +7,7 @@ def main_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("➕ Добавить добавку", callback_data="menu:add")],
         [InlineKeyboardButton("📚 Каталог", callback_data="menu:catalog")],
+        [InlineKeyboardButton("🧠 Готовые стеки", callback_data="menu:curated")],
         [InlineKeyboardButton("📦 Мои БАДы", callback_data="menu:my")],
         [InlineKeyboardButton("🧩 Совместимость", callback_data="menu:compat")],
         [InlineKeyboardButton("📝 Опрос дня", callback_data="menu:checkin")],
@@ -67,6 +68,28 @@ def catalog_page(rows, page: int, has_prev: bool, has_next: bool) -> InlineKeybo
         nav.append(InlineKeyboardButton("➡️ Далее", callback_data=f"cat:page:{page + 1}"))
     if nav:
         btns.append(nav)
+    return InlineKeyboardMarkup(btns)
+
+def curated_stacks_list(rows, page: int, has_prev: bool, has_next: bool) -> InlineKeyboardMarkup:
+    btns = []
+    for r in rows:
+        label = f"🧠 {r['title_ru']}"
+        btns.append([InlineKeyboardButton(label, callback_data=f"curated:open:{r['slug']}")])
+    nav = []
+    if has_prev:
+        nav.append(InlineKeyboardButton("◀️", callback_data=f"curated:page:{page - 1}"))
+    nav.append(InlineKeyboardButton("⬅️ Назад", callback_data="menu:home"))
+    if has_next:
+        nav.append(InlineKeyboardButton("▶️", callback_data=f"curated:page:{page + 1}"))
+    btns.append(nav)
+    return InlineKeyboardMarkup(btns)
+
+def curated_stack_card(slug: str, *, source_url: str | None, back_page: int) -> InlineKeyboardMarkup:
+    btns = []
+    if source_url:
+        btns.append([InlineKeyboardButton("🔗 Источник", url=source_url)])
+    btns.append([InlineKeyboardButton("➕ Добавить себе", callback_data=f"curated:add:{slug}")])
+    btns.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"curated:page:{back_page}")])
     return InlineKeyboardMarkup(btns)
 
 def supplement_page(

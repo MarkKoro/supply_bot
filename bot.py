@@ -24,6 +24,8 @@ from keyboards import (
     pick_search_results,
     my_supplements_list,
     catalog_page,
+    curated_stacks_list,
+    curated_stack_card,
     supplement_page,
     supplement_compat_back,
     my_supplement_hub,
@@ -48,6 +50,7 @@ AWAITING_INPUT_KEY = "awaiting_input"
 MY_SEARCH_KEY = "my_search_q"
 CATALOG_PAGE_SIZE = 8
 MY_PAGE_SIZE = 10
+CURATED_PAGE_SIZE = 10
 
 def _format_tz_label(tz_name: str | None) -> str:
     if not tz_name:
@@ -735,6 +738,10 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await _show_catalog_page(update, context, conn, 0)
             return
 
+        if data == "menu:curated":
+            await _show_curated_page(update, context, conn, 0)
+            return
+
         if data == "menu:my":
             context.user_data.pop(MY_SEARCH_KEY, None)
             await _show_my_list(update, context, conn, tg_uid, 0)
@@ -775,6 +782,70 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if data.startswith("cat:page:"):
             page = int(data.split(":")[-1])
             await _show_catalog_page(update, context, conn, page)
+            return
+
+        if data.startswith("curated:page:"):
+            page = int(data.split(":")[-1])
+            await _show_curated_page(update, context, conn, page)
+            return
+
+        if data.startswith("curated:open:"):
+            slug = data.split(":", 2)[-1]
+            await _show_curated_stack(update, context, conn, slug)
+            return
+
+        if data.startswith("curated:add:"):
+            slug = data.split(":", 2)[-1]
+            stack = await db.get_curated_stack(conn, slug)
+            if not stack:
+                await show(update, context, "Стек не найден.", back(), route="menu:curated")
+                return
+            items = await db.list_curated_stack_items(conn, int(stack["id"]))
+            not_found: list[str] = []
+            to_add: list[dict] = []
+            for item in items:
+                supplement = await db.find_supplement_by_slug_or_name(
+                    conn,
+                    item["supplement_slug"],
+                    item["supplement_name"],
+                )
+                if not supplement:
+                    name = (
+                        str(item["supplement_name"] or "").strip()
+                        or str(item["supplement_slug"] or "").strip()
+                        or "Без названия"
+                    )
+                    not_found.append(name)
+                    continue
+                to_add.append(
+                    {
+                        "supplement_id": int(supplement["id"]),
+                        "dose_ru": item["dose_ru"],
+                        "timing_ru": item["timing_ru"],
+                        "notes_ru": item["notes_ru"],
+                    }
+                )
+            summary = await db.add_stack_items_to_user(conn, user_id, to_add)
+            lines = [f"✅ Добавлено: {summary['total']}"]
+            if not_found:
+                lines.append(f"⚠️ Не найдено в каталоге: {len(not_found)}")
+                lines.extend([f"• {name}" for name in not_found[:10]])
+                if len(not_found) > 10:
+                    lines.append("…и ещё")
+            else:
+                lines.append("⚠️ Не найдено в каталоге: 0")
+            lines.append("")
+            lines.append("<i>Это не медсовет.</i>")
+            back_kb = InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Назад", callback_data=f"curated:open:{slug}")]]
+            )
+            await show(
+                update,
+                context,
+                "\n".join(lines),
+                back_kb,
+                route=f"curated:add:{slug}",
+            )
             return
 
         if data.startswith("supp:view:"):
@@ -1253,6 +1324,16 @@ async def _render_route(
             target_message_id=target_message_id,
         )
         return
+    if route == "menu:curated":
+        await _show_curated_page(
+            update,
+            context,
+            conn,
+            0,
+            target_chat_id=target_chat_id,
+            target_message_id=target_message_id,
+        )
+        return
     if route == "menu:todayplan":
         await _show_today_plan(update, context, conn, tg_uid)
         return
@@ -1274,6 +1355,39 @@ async def _render_route(
             context,
             conn,
             page,
+            target_chat_id=target_chat_id,
+            target_message_id=target_message_id,
+        )
+        return
+    if route.startswith("curated:page:"):
+        page = int(route.split(":")[-1])
+        await _show_curated_page(
+            update,
+            context,
+            conn,
+            page,
+            target_chat_id=target_chat_id,
+            target_message_id=target_message_id,
+        )
+        return
+    if route.startswith("curated:open:"):
+        slug = route.split(":", 2)[-1]
+        await _show_curated_stack(
+            update,
+            context,
+            conn,
+            slug,
+            target_chat_id=target_chat_id,
+            target_message_id=target_message_id,
+        )
+        return
+    if route.startswith("curated:add:"):
+        slug = route.split(":", 2)[-1]
+        await _show_curated_stack(
+            update,
+            context,
+            conn,
+            slug,
             target_chat_id=target_chat_id,
             target_message_id=target_message_id,
         )
@@ -1742,7 +1856,10 @@ async def _bootstrap() -> Application:
     app.bot_data["render_route"] = _render_route
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(on_menu, pattern=r"^(menu:|settings:|add_pick:|compat_pick:|cat:page:|supp:|my:)"))
+    app.add_handler(CallbackQueryHandler(
+        on_menu,
+        pattern=r"^(menu:|settings:|add_pick:|compat_pick:|cat:page:|curated:|supp:|my:)",
+    ))
     app.add_handler(CallbackQueryHandler(on_ai_add, pattern=r"^aiadd:"))
     app.add_handler(CallbackQueryHandler(on_checkin_action, pattern=r"^chk(apply|deny):"))
     app.add_handler(CallbackQueryHandler(on_timezone, pattern=r"^tz:"))
@@ -1780,6 +1897,108 @@ async def _show_catalog_page(
         text,
         catalog_page(display_rows, page, has_prev=page > 0, has_next=has_next),
         route=f"cat:page:{page}",
+        target_chat_id=target_chat_id,
+        target_message_id=target_message_id,
+    )
+
+async def _show_curated_page(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    conn,
+    page: int,
+    *,
+    target_chat_id: int | None = None,
+    target_message_id: int | None = None,
+) -> None:
+    page = max(page, 0)
+    offset = page * CURATED_PAGE_SIZE
+    rows = await db.list_curated_stacks(conn, limit=CURATED_PAGE_SIZE + 1, offset=offset)
+    has_next = len(rows) > CURATED_PAGE_SIZE
+    display_rows = rows[:CURATED_PAGE_SIZE]
+    context.user_data["curated_page"] = page
+    if not display_rows:
+        await show(
+            update,
+            context,
+            "Пока нет готовых стеков.",
+            back(),
+            route="menu:curated",
+            target_chat_id=target_chat_id,
+            target_message_id=target_message_id,
+        )
+        return
+    text = f"🧠 <b>Готовые стеки</b> (стр. {page + 1})"
+    await show(
+        update,
+        context,
+        text,
+        curated_stacks_list(display_rows, page, has_prev=page > 0, has_next=has_next),
+        route=f"curated:page:{page}",
+        target_chat_id=target_chat_id,
+        target_message_id=target_message_id,
+    )
+
+async def _show_curated_stack(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    conn,
+    slug: str,
+    *,
+    target_chat_id: int | None = None,
+    target_message_id: int | None = None,
+) -> None:
+    stack = await db.get_curated_stack(conn, slug)
+    if not stack:
+        await show(
+            update,
+            context,
+            "Стек не найден.",
+            back(),
+            route="menu:curated",
+            target_chat_id=target_chat_id,
+            target_message_id=target_message_id,
+        )
+        return
+
+    items = await db.list_curated_stack_items(conn, int(stack["id"]))
+    lines = [f"🧠 <b>{stack['title_ru']}</b>"]
+    author = str(stack["author_ru"] or "").strip()
+    description = str(stack["description_ru"] or "").strip()
+    if author:
+        lines.append(f"Автор: {author}")
+    if description:
+        lines.extend(["", description])
+
+    if items:
+        lines.append("")
+        lines.append("Состав:")
+        max_items = 15
+        for item in items[:max_items]:
+            name = (
+                str(item["supplement_name"] or "").strip()
+                or str(item["supplement_slug"] or "").strip()
+                or "Без названия"
+            )
+            parts = [name]
+            dose = str(item["dose_ru"] or "").strip()
+            timing = str(item["timing_ru"] or "").strip()
+            if dose:
+                parts.append(dose)
+            if timing:
+                parts.append(timing)
+            lines.append("• " + " — ".join(parts))
+        if len(items) > max_items:
+            lines.append(f"…и ещё {len(items) - max_items} поз.")
+
+    lines.append("")
+    lines.append("<i>Это не медсовет.</i>")
+    back_page = int(context.user_data.get("curated_page") or 0)
+    await show(
+        update,
+        context,
+        "\n".join(lines),
+        curated_stack_card(slug, source_url=stack["source_url"], back_page=back_page),
+        route=f"curated:open:{slug}",
         target_chat_id=target_chat_id,
         target_message_id=target_message_id,
     )

@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -185,6 +186,46 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await show(update, context, "Введи заметку (до 200 символов).", my_hub_back(supplement_id))
             return
 
+        if data.startswith("my:settime:"):
+            supplement_id = int(data.split(":")[-1])
+            context.user_data[AWAITING_INPUT_KEY] = {
+                "kind": "time",
+                "supplement_id": supplement_id,
+                "return": f"my:open:{supplement_id}",
+            }
+            await show(update, context, "Введите время в формате ЧЧ:ММ, например 08:30", my_hub_back(supplement_id))
+            return
+
+        if data.startswith("my:cleartime:"):
+            supplement_id = int(data.split(":")[-1])
+            await db.set_user_schedule_time(conn, tg_uid, supplement_id, None)
+            await _show_my_hub(update, context, conn, tg_uid, supplement_id)
+            return
+
+        if data.startswith("my:marktaken:"):
+            supplement_id = int(data.split(":")[-1])
+            tz = await db.get_user_tz(conn, user_id)
+            local_date = db.get_user_local_date(tz)
+            await db.set_today_intake_status(conn, tg_uid, supplement_id, local_date, "taken")
+            await _show_my_hub(update, context, conn, tg_uid, supplement_id)
+            return
+
+        if data.startswith("my:markskipped:"):
+            supplement_id = int(data.split(":")[-1])
+            tz = await db.get_user_tz(conn, user_id)
+            local_date = db.get_user_local_date(tz)
+            await db.set_today_intake_status(conn, tg_uid, supplement_id, local_date, "skipped")
+            await _show_my_hub(update, context, conn, tg_uid, supplement_id)
+            return
+
+        if data.startswith("my:markreset:"):
+            supplement_id = int(data.split(":")[-1])
+            tz = await db.get_user_tz(conn, user_id)
+            local_date = db.get_user_local_date(tz)
+            await db.set_today_intake_status(conn, tg_uid, supplement_id, local_date, None)
+            await _show_my_hub(update, context, conn, tg_uid, supplement_id)
+            return
+
         if data.startswith("supp:compat:"):
             _, _, slug, page = data.split(":", 3)
             row = await db.get_supplement_by_slug(conn, slug)
@@ -263,9 +304,22 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     txt = update.message.text.strip()
     awaiting = context.user_data.get(AWAITING_INPUT_KEY)
     if awaiting:
-        if len(txt) > 200:
-            kind = awaiting.get("kind")
-            supplement_id = int(awaiting["supplement_id"])
+        kind = awaiting.get("kind")
+        supplement_id = int(awaiting["supplement_id"])
+        if kind == "time":
+            if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", txt):
+                await show(update, context, "Введите время в формате ЧЧ:ММ, например 08:30", my_hub_back(supplement_id))
+            else:
+                s = context.application.bot_data["settings"]
+                tg_uid = update.effective_user.id
+                conn = await db.connect(s.DB_PATH)
+                try:
+                    await db.set_user_schedule_time(conn, tg_uid, supplement_id, txt)
+                    context.user_data.pop(AWAITING_INPUT_KEY, None)
+                    await _show_my_hub(update, context, conn, tg_uid, supplement_id)
+                finally:
+                    await conn.close()
+        elif len(txt) > 200:
             prompt = "Введи дозу (до 200 символов)." if kind == "dose" else "Введи заметку (до 200 символов)."
             await show(update, context, f"Слишком длинный текст. {prompt}", my_hub_back(supplement_id))
         else:
@@ -273,7 +327,6 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             tg_uid = update.effective_user.id
             conn = await db.connect(s.DB_PATH)
             try:
-                supplement_id = int(awaiting["supplement_id"])
                 value = txt if txt else None
                 if awaiting.get("kind") == "dose":
                     await db.set_user_supplement_dose(conn, tg_uid, supplement_id, value)
@@ -434,7 +487,17 @@ async def _show_my_list(
 ) -> None:
     if q is None:
         q = context.user_data.get(MY_SEARCH_KEY)
-    rows, total = await db.list_user_supplements_page(conn, tg_uid, q=q, page=page, page_size=MY_PAGE_SIZE)
+    user_id = await db.get_or_create_user(conn, tg_uid)
+    tz = await db.get_user_tz(conn, user_id)
+    local_date = db.get_user_local_date(tz)
+    rows, total = await db.list_user_supplements_page(
+        conn,
+        tg_uid,
+        q=q,
+        page=page,
+        page_size=MY_PAGE_SIZE,
+        local_date=local_date,
+    )
     has_next = (page + 1) * MY_PAGE_SIZE < total
     if not rows:
         if q:
@@ -461,12 +524,30 @@ async def _show_my_hub(
     tg_uid: int,
     supplement_id: int,
 ) -> None:
-    row = await db.get_user_supplement(conn, tg_uid, supplement_id)
+    user_id = await db.get_or_create_user(conn, tg_uid)
+    tz = await db.get_user_tz(conn, user_id)
+    local_date = db.get_user_local_date(tz)
+    row = await db.get_user_supplement_with_status(conn, tg_uid, supplement_id, local_date)
     if not row:
         await show(update, context, "БАД не найден в твоём списке.", my_supplements_list([], 0, False, False, show_clear=False))
         return
-    text = engine.format_supplement_hub(row, row)
-    await show(update, context, text, my_supplement_hub(supplement_id, bool(row["is_active"])))
+    text = engine.format_supplement_hub(
+        row,
+        row,
+        schedule_time=row["time_hhmm"] if "time_hhmm" in row.keys() else None,
+        today_status=row["today_status"] if "today_status" in row.keys() else None,
+    )
+    await show(
+        update,
+        context,
+        text,
+        my_supplement_hub(
+            supplement_id,
+            bool(row["is_active"]),
+            bool(row["time_hhmm"]),
+            row["today_status"],
+        ),
+    )
 
 async def _show_supplement_page(
     update: Update,

@@ -200,9 +200,10 @@ def timezone_picker(
 
 def reminder_actions(supplement_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Выпил", callback_data=f"rem:taken:{supplement_id}")],
-        [InlineKeyboardButton("⏰ Через 15 минут", callback_data=f"rem:snooze:{supplement_id}")],
-        [InlineKeyboardButton("❌ Сегодня не пью", callback_data=f"rem:skip:{supplement_id}")],
+        [InlineKeyboardButton("✅ Выпил", callback_data=f"rem:done:{supplement_id}")],
+        [InlineKeyboardButton("⏱ Через 15 минут", callback_data=f"rem:snooze:15:{supplement_id}")],
+        [InlineKeyboardButton("🚫 Сегодня не пью", callback_data=f"rem:skip:{supplement_id}")],
+        [InlineKeyboardButton("↩️ Вернуться", callback_data="rem:back")],
     ])
 
 def settings_menu() -> InlineKeyboardMarkup:

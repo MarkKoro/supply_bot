@@ -33,7 +33,11 @@ CREATE TABLE IF NOT EXISTS users (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   tg_user_id    INTEGER UNIQUE NOT NULL,
   tz_name       TEXT DEFAULT '',
-  created_at    TEXT NOT NULL
+  created_at    TEXT NOT NULL,
+  last_view     TEXT NOT NULL DEFAULT 'menu',
+  last_view_payload TEXT NOT NULL DEFAULT '',
+  last_chat_id  INTEGER NOT NULL DEFAULT 0,
+  last_message_id INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS supplements (
@@ -212,6 +216,10 @@ async def init_db(db_path: str) -> None:
 
 async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     await _ensure_column(conn, "users", "tz_name", "TEXT")
+    await _ensure_column(conn, "users", "last_view", "TEXT NOT NULL DEFAULT 'menu'")
+    await _ensure_column(conn, "users", "last_view_payload", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "users", "last_chat_id", "INTEGER NOT NULL DEFAULT 0")
+    await _ensure_column(conn, "users", "last_message_id", "INTEGER NOT NULL DEFAULT 0")
     await _ensure_column(conn, "supplements", "name_ru", "TEXT")
     await _ensure_column(conn, "supplements", "name_en", "TEXT")
     await _ensure_column(conn, "supplements", "summary_ru", "TEXT")
@@ -241,6 +249,18 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     )
     await conn.execute(
         "UPDATE supplements SET interaction_classes_json='[]' WHERE interaction_classes_json IS NULL OR interaction_classes_json=''"
+    )
+    await conn.execute(
+        "UPDATE users SET last_view='menu' WHERE last_view IS NULL OR last_view=''"
+    )
+    await conn.execute(
+        "UPDATE users SET last_view_payload='' WHERE last_view_payload IS NULL"
+    )
+    await conn.execute(
+        "UPDATE users SET last_chat_id=0 WHERE last_chat_id IS NULL"
+    )
+    await conn.execute(
+        "UPDATE users SET last_message_id=0 WHERE last_message_id IS NULL"
     )
     await _backfill_alias_norm(conn)
 
@@ -570,6 +590,46 @@ async def set_user_tz(conn: aiosqlite.Connection, tg_user_id: int, tz_name: str)
         (tz_name, tg_user_id),
     )
     await conn.commit()
+
+async def set_user_last_view(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    view: str,
+    payload: str = "",
+) -> None:
+    await get_or_create_user(conn, tg_user_id)
+    await conn.execute(
+        "UPDATE users SET last_view=?, last_view_payload=? WHERE tg_user_id=?",
+        (view, payload, tg_user_id),
+    )
+    await conn.commit()
+
+async def get_user_last_view(conn: aiosqlite.Connection, tg_user_id: int) -> tuple[str, str]:
+    row = await fetchone(conn, "SELECT last_view, last_view_payload FROM users WHERE tg_user_id=?", (tg_user_id,))
+    if not row:
+        return ("menu", "")
+    view = str(row["last_view"] or "menu")
+    payload = str(row["last_view_payload"] or "")
+    return (view, payload)
+
+async def set_user_last_msg(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    chat_id: int,
+    message_id: int,
+) -> None:
+    await get_or_create_user(conn, tg_user_id)
+    await conn.execute(
+        "UPDATE users SET last_chat_id=?, last_message_id=? WHERE tg_user_id=?",
+        (int(chat_id), int(message_id), tg_user_id),
+    )
+    await conn.commit()
+
+async def get_user_last_msg(conn: aiosqlite.Connection, tg_user_id: int) -> tuple[int, int]:
+    row = await fetchone(conn, "SELECT last_chat_id, last_message_id FROM users WHERE tg_user_id=?", (tg_user_id,))
+    if not row:
+        return (0, 0)
+    return (int(row["last_chat_id"] or 0), int(row["last_message_id"] or 0))
 
 def parse_offset_tz(tz_name: str | None):
     if not tz_name:
@@ -1245,6 +1305,16 @@ async def list_enabled_schedules(conn: aiosqlite.Connection):
            FROM user_schedules sch
            JOIN users u ON u.id=sch.user_id
            WHERE sch.is_enabled=1 AND sch.time_hhmm IS NOT NULL AND sch.time_hhmm!=''
+             AND u.tz_name IS NOT NULL AND u.tz_name!=''""",
+    )
+
+async def list_enabled_reminders(conn: aiosqlite.Connection):
+    return await fetchall(
+        conn,
+        """SELECT u.tg_user_id, u.tz_name, uss.supplement_id, uss.reminder_time
+           FROM user_supp_settings uss
+           JOIN users u ON u.id=uss.user_id
+           WHERE uss.reminder_enabled=1 AND uss.reminder_time IS NOT NULL AND uss.reminder_time!=''
              AND u.tz_name IS NOT NULL AND u.tz_name!=''""",
     )
 

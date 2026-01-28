@@ -4,7 +4,8 @@ import json
 import logging
 import os
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time as dt_time
+from zoneinfo import ZoneInfo
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -15,7 +16,7 @@ from settings import get_settings
 import db
 import engine
 import seed_import
-from ux import show, restore_last_screen
+from ux import show
 from keyboards import (
     main_menu,
     back,
@@ -65,9 +66,6 @@ def _format_tz_label(tz_name: str | None) -> str:
 
 def _job_name(tg_user_id: int, supplement_id: int) -> str:
     return f"rem:{tg_user_id}:{supplement_id}"
-
-def _debug_job_name(tg_user_id: int, supplement_id: int) -> str:
-    return f"dbg:{tg_user_id}:{supplement_id}:{int(datetime.utcnow().timestamp())}"
 
 async def _download_voice_bytes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> tuple[bytes, str]:
     voice = update.message.voice
@@ -123,6 +121,14 @@ def _format_checkin_change(idx: int, change: dict) -> str:
     if confidence_int is not None:
         line = f"{line}\nУверенность: {confidence_int}%"
     return line
+
+def _tzinfo_from_name(tz_name: str | None):
+    if not tz_name:
+        return None
+    try:
+        return ZoneInfo(tz_name)
+    except Exception:
+        return db.parse_offset_tz(tz_name)
 
 async def _render_ai_suggestions(
     update: Update,
@@ -570,121 +576,137 @@ async def _show_timezone_picker(
 def _is_debug_user(settings, tg_uid: int) -> bool:
     return bool(settings.DEBUG or (tg_uid in settings.ADMIN_IDS))
 
-async def _remove_reminder_job(job_queue, tg_user_id: int, supplement_id: int) -> None:
-    name = _job_name(tg_user_id, supplement_id)
-    for job in job_queue.get_jobs_by_name(name):
-        job.schedule_removal()
-
-async def _schedule_reminder_job(
-    job_queue,
-    tg_user_id: int,
-    supplement_id: int,
-    time_hhmm: str,
-    tz_name: str,
-    *,
-    reschedule_daily: bool = True,
-) -> None:
-    await _remove_reminder_job(job_queue, tg_user_id, supplement_id)
-    run_at = db.next_run_datetime_for_hhmm(time_hhmm, tz_name)
-    job_queue.run_once(
-        _send_reminder_job,
-        when=run_at,
-        name=_job_name(tg_user_id, supplement_id),
-        data={
-            "tg_user_id": tg_user_id,
-            "supplement_id": supplement_id,
-            "hhmm": time_hhmm,
-            "reschedule_daily": reschedule_daily,
-        },
-    )
-
-async def schedule_debug_reminder(
-    job_queue,
-    tg_user_id: int,
-    supplement_id: int,
-    delay_seconds: int,
-) -> None:
-    job_queue.run_once(
-        _send_reminder_job,
-        when=timedelta(seconds=delay_seconds),
-        name=_debug_job_name(tg_user_id, supplement_id),
-        data={
-            "tg_user_id": tg_user_id,
-            "supplement_id": supplement_id,
-            "delay_seconds": delay_seconds,
-            "debug": True,
-            "reschedule_daily": False,
-        },
-    )
-
-async def _schedule_all_reminders(app: Application) -> None:
-    s = app.bot_data["settings"]
-    conn = await db.connect(s.DB_PATH)
-    try:
-        rows = await db.list_enabled_schedules(conn)
-        for row in rows:
-            await _schedule_reminder_job(
-                app.job_queue,
-                int(row["tg_user_id"]),
-                int(row["supplement_id"]),
-                str(row["time_hhmm"]),
-                str(row["tz_name"]),
-            )
-    finally:
-        await conn.close()
-
-async def _send_reminder_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    data = context.job.data or {}
-    tg_user_id = int(data.get("tg_user_id"))
-    supplement_id = int(data.get("supplement_id"))
-    debug = bool(data.get("debug"))
-    hhmm = str(data.get("hhmm")) if data.get("hhmm") is not None else None
-    tz_name: str | None = None
+async def reschedule_reminders_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    job_queue = context.application.job_queue
     s = context.application.bot_data["settings"]
     conn = await db.connect(s.DB_PATH)
     try:
-        tz_name = await db.get_user_tz(conn, tg_user_id)
+        rows = await db.list_enabled_reminders(conn)
+    finally:
+        await conn.close()
+
+    desired: dict[str, dict] = {}
+    for row in rows:
+        tz_name = str(row["tz_name"] or "").strip()
+        if not tz_name:
+            continue
+        reminder_time = str(row["reminder_time"] or "").strip()
+        if not reminder_time:
+            continue
+        if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", reminder_time):
+            continue
+        tzinfo = _tzinfo_from_name(tz_name)
+        if not tzinfo:
+            continue
+        tg_user_id = int(row["tg_user_id"])
+        supplement_id = int(row["supplement_id"])
+        job_name = _job_name(tg_user_id, supplement_id)
+        desired[job_name] = {
+            "tg_user_id": tg_user_id,
+            "supplement_id": supplement_id,
+            "reminder_time": reminder_time,
+            "tz_name": tz_name,
+            "tzinfo": tzinfo,
+        }
+
+    for job in job_queue.jobs("^rem:"):
+        if job.name not in desired:
+            job.schedule_removal()
+
+    for job_name, data in desired.items():
+        existing = job_queue.get_jobs_by_name(job_name)
+        if existing:
+            job = existing[0]
+            existing_data = job.data or {}
+            if (
+                existing_data.get("reminder_time") == data["reminder_time"]
+                and existing_data.get("tz_name") == data["tz_name"]
+            ):
+                continue
+            for old_job in existing:
+                old_job.schedule_removal()
+
+        hour, minute = map(int, str(data["reminder_time"]).split(":"))
+        job_queue.run_daily(
+            reminder_fire,
+            time=dt_time(hour=hour, minute=minute),
+            days=tuple(range(7)),
+            name=job_name,
+            data={
+                "tg_user_id": data["tg_user_id"],
+                "supplement_id": data["supplement_id"],
+                "reminder_time": data["reminder_time"],
+                "tz_name": data["tz_name"],
+            },
+            timezone=data["tzinfo"],
+        )
+
+async def reminder_fire(context: ContextTypes.DEFAULT_TYPE) -> None:
+    data = context.job.data or {}
+    tg_user_id = int(data.get("tg_user_id"))
+    supplement_id = int(data.get("supplement_id"))
+    s = context.application.bot_data["settings"]
+    conn = await db.connect(s.DB_PATH)
+    try:
+        user_row = await db.fetchone(
+            conn,
+            """SELECT id, tg_user_id, tz_name, last_chat_id, last_message_id,
+                      last_view, last_view_payload
+               FROM users WHERE tg_user_id=?""",
+            (tg_user_id,),
+        )
+        if not user_row:
+            return
+        tz_name = str(user_row["tz_name"] or "").strip()
         if not tz_name:
             return
-        supplement_name = await db.get_supplement_name(conn, supplement_id)
-        if not supplement_name:
+        tzinfo = _tzinfo_from_name(tz_name)
+        if not tzinfo:
+            return
+        today = datetime.now(tzinfo).date().isoformat()
+        user_id = int(user_row["id"])
+        settings = await db.get_user_supp_settings(conn, user_id, supplement_id)
+        if int(settings.get("reminder_enabled") or 0) != 1:
+            return
+        if not str(settings.get("reminder_time") or "").strip():
+            return
+        if settings.get("taken_date") == today or settings.get("skip_date") == today:
+            return
+        supplement = await db.get_supplement_by_id(conn, supplement_id)
+        if not supplement:
             return
 
-        if debug:
-            delay_seconds = int(data.get("delay_seconds") or 0)
-            delay_label = f"через {delay_seconds} сек" if delay_seconds else "скоро"
-            text = (
-                "🧪 Тестовое напоминание\n"
-                f"Пора принять: <b>{supplement_name}</b>\n"
-                f"Время: {delay_label}"
-            )
-        else:
-            schedule = await db.get_user_schedule(conn, tg_user_id, supplement_id)
-            if not schedule or not schedule["time_hhmm"] or int(schedule["is_enabled"]) != 1:
-                return
-            if hhmm is None or str(schedule["time_hhmm"]) != hhmm:
-                return
-            tz_label = _format_tz_label(tz_name)
-            text = f"Пора принять: <b>{supplement_name}</b>\nВремя: {hhmm} ({tz_label})"
-        await context.bot.send_message(
-            chat_id=tg_user_id,
+        last_chat_id = int(user_row["last_chat_id"] or 0)
+        last_message_id = int(user_row["last_message_id"] or 0)
+        if last_chat_id and last_message_id:
+            try:
+                await context.bot.delete_message(chat_id=last_chat_id, message_id=last_message_id)
+            except Exception:
+                pass
+
+        name_ru = (supplement["name_ru"] or supplement["name"] or "").strip()
+        name_en = (supplement["name_en"] or "").strip()
+        name_line = f"💊 <b>{name_ru}</b>"
+        if name_en and name_en != name_ru:
+            name_line = f"{name_line} ({name_en})"
+        dose_text = (settings.get("dose_text") or "").strip() or "не задана"
+        text = (
+            "⏰ <b>Пора принять добавку</b>\n\n"
+            f"{name_line}\n"
+            f"Доза: {dose_text}\n\n"
+            "Выбери действие:"
+        )
+        target_chat_id = last_chat_id or tg_user_id
+        msg = await context.bot.send_message(
+            chat_id=target_chat_id,
             text=text,
             reply_markup=reminder_actions(supplement_id),
             parse_mode="HTML",
             disable_web_page_preview=True,
         )
+        await db.set_user_last_msg(conn, tg_user_id, msg.chat_id, msg.message_id)
     finally:
         await conn.close()
-
-    if not debug and data.get("reschedule_daily", True) and tz_name and hhmm:
-        await _schedule_reminder_job(
-            context.application.job_queue,
-            tg_user_id,
-            supplement_id,
-            hhmm,
-            tz_name,
-            reschedule_daily=True,
-        )
 
 async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
@@ -1181,17 +1203,6 @@ async def on_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         try:
             await db.get_or_create_user(conn, tg_uid, tz_name="")
             await db.set_user_tz(conn, tg_uid, tz_value)
-            rows = await db.list_user_schedules(conn, tg_uid)
-            for row in rows:
-                if not row["time_hhmm"] or int(row["is_enabled"]) != 1:
-                    continue
-                await _schedule_reminder_job(
-                    context.application.job_queue,
-                    tg_uid,
-                    int(row["supplement_id"]),
-                    str(row["time_hhmm"]),
-                    tz_value,
-                )
         finally:
             await conn.close()
         context.user_data.pop("tz_back_data", None)
@@ -1215,46 +1226,96 @@ async def on_reminder_action(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await q.answer()
     data = q.data or ""
     parts = data.split(":")
-    if len(parts) < 3:
+    if len(parts) < 2:
         return
     action = parts[1]
-    supplement_id = int(parts[2])
+    supplement_id: int | None = None
+    snooze_minutes: int | None = None
+    if action in ("done", "taken", "skip"):
+        if len(parts) < 3:
+            return
+        supplement_id = int(parts[2])
+    elif action == "snooze":
+        if len(parts) >= 4:
+            snooze_minutes = int(parts[2])
+            supplement_id = int(parts[3])
+        elif len(parts) >= 3:
+            snooze_minutes = 15
+            supplement_id = int(parts[2])
+        else:
+            return
+    elif action == "back":
+        supplement_id = None
+    else:
+        return
+
     s = context.application.bot_data["settings"]
     tg_uid = update.effective_user.id
     conn = await db.connect(s.DB_PATH)
     try:
-        if action in ("taken", "skip"):
-            tz = await db.get_user_tz(conn, tg_uid)
-            local_date = db.get_user_local_date(tz)
-            status = "taken" if action == "taken" else "skipped"
-            await db.set_today_intake_status(conn, tg_uid, supplement_id, local_date, status)
-        elif action == "snooze":
-            tz_name = await db.get_user_tz(conn, tg_uid)
-            schedule = await db.get_user_schedule(conn, tg_uid, supplement_id)
-            hhmm = str(schedule["time_hhmm"]) if schedule and schedule["time_hhmm"] else None
-            if tz_name and hhmm:
-                snooze_name = f"snooze:{tg_uid}:{supplement_id}:{int(datetime.utcnow().timestamp())}"
-                context.application.job_queue.run_once(
-                    _send_reminder_job,
-                    when=timedelta(minutes=15),
-                    name=snooze_name,
-                    data={
-                        "tg_user_id": tg_uid,
-                        "supplement_id": supplement_id,
-                        "hhmm": hhmm,
-                        "reschedule_daily": False,
-                    },
-                )
+        tz_name = await db.get_user_tz(conn, tg_uid)
+        tzinfo = _tzinfo_from_name(tz_name)
+        today = datetime.now(tzinfo).date().isoformat() if tzinfo else datetime.utcnow().date().isoformat()
+        internal_user_id = await db.get_or_create_user(conn, tg_uid)
+        if action in ("done", "taken") and supplement_id is not None:
+            await db.set_user_supp_taken_date(conn, internal_user_id, supplement_id, today)
+            await db.set_user_supp_skip_date(conn, internal_user_id, supplement_id, "")
+        elif action == "skip" and supplement_id is not None:
+            await db.set_user_supp_skip_date(conn, internal_user_id, supplement_id, today)
+            await db.set_user_supp_taken_date(conn, internal_user_id, supplement_id, "")
+        elif action == "snooze" and supplement_id is not None:
+            minutes = snooze_minutes or 15
+            snooze_name = f"snooze:{tg_uid}:{supplement_id}"
+            for job in context.application.job_queue.get_jobs_by_name(snooze_name):
+                job.schedule_removal()
+            context.application.job_queue.run_once(
+                reminder_fire,
+                when=timedelta(minutes=minutes),
+                name=snooze_name,
+                data={
+                    "tg_user_id": tg_uid,
+                    "supplement_id": supplement_id,
+                },
+            )
+        view, payload = await db.get_user_last_view(conn, tg_uid)
     finally:
         await conn.close()
 
-    if q.message:
-        try:
-            await q.message.delete()
-        except Exception:
-            pass
+    await render_view(update, context, tg_uid, view, payload)
 
-    await restore_last_screen(update, context)
+async def render_view(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    tg_user_id: int,
+    view: str,
+    payload: str,
+) -> None:
+    try:
+        payload_data = json.loads(payload) if payload else {}
+    except json.JSONDecodeError:
+        payload_data = {}
+    if not isinstance(payload_data, dict):
+        payload_data = {}
+
+    s = context.application.bot_data["settings"]
+    conn = await db.connect(s.DB_PATH)
+    try:
+        if view == "catalog":
+            page = int(payload_data.get("page") or 0)
+            await _show_catalog_page(update, context, conn, page)
+            return
+        if view == "mine_list":
+            page = int(payload_data.get("page") or 0)
+            await _show_my_list(update, context, conn, tg_user_id, page)
+            return
+        if view == "mine_hub":
+            supplement_id = payload_data.get("supp_id")
+            if supplement_id is not None:
+                await show_my_supp_hub(update, context, tg_user_id, int(supplement_id), conn=conn)
+                return
+        await home(update, context)
+    finally:
+        await conn.close()
 
 async def _render_route(
     update: Update,
@@ -1857,7 +1918,7 @@ async def _bootstrap() -> Application:
     app.add_handler(MessageHandler(filters.VOICE, on_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_error_handler(on_error)
-    await _schedule_all_reminders(app)
+    app.job_queue.run_repeating(reschedule_reminders_job, interval=60, first=5, name="resched")
     return app
 
 def build_app() -> Application:

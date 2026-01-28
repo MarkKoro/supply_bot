@@ -1,4 +1,5 @@
 from __future__ import annotations
+import json
 from telegram import Update, InlineKeyboardMarkup, Message
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
@@ -66,6 +67,52 @@ def _set_last_menu(
         "payload": context.user_data.get("last_payload"),
     }
 
+def _view_payload_from_route(route: str, payload: dict | None) -> tuple[str, dict] | None:
+    if payload is not None and isinstance(payload, dict):
+        if route.startswith("cat:page:"):
+            return ("catalog", payload)
+        if route.startswith("mine:list:"):
+            return ("mine_list", payload)
+        if route.startswith("mine:hub:") or route.startswith("mine:open:"):
+            return ("mine_hub", payload)
+        if route.startswith("menu:"):
+            return ("menu", payload)
+    if route == "menu:home" or route.startswith("menu:"):
+        return ("menu", {})
+    if route.startswith("cat:page:"):
+        return ("catalog", {"page": int(route.split(":")[-1])})
+    if route.startswith("mine:list:"):
+        return ("mine_list", {"page": int(route.split(":")[-1])})
+    if route.startswith("mine:hub:") or route.startswith("mine:open:"):
+        return ("mine_hub", {"supp_id": int(route.split(":")[-1])})
+    return None
+
+async def _persist_last_state(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    route: str | None,
+    payload: dict | None,
+    chat_id: int,
+    message_id: int,
+) -> None:
+    tg_user = update.effective_user
+    if not tg_user:
+        return
+    s = context.application.bot_data.get("settings")
+    if not s:
+        return
+    conn = await db.connect(s.DB_PATH)
+    try:
+        view_payload = _view_payload_from_route(route, payload) if route else None
+        if view_payload:
+            view, payload_data = view_payload
+            payload_json = json.dumps(payload_data, ensure_ascii=False)
+            await db.set_user_last_view(conn, tg_user.id, view, payload_json)
+        await db.set_user_last_msg(conn, tg_user.id, chat_id, message_id)
+    finally:
+        await conn.close()
+
 async def show(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -97,6 +144,14 @@ async def show(
             )
             _last_screen[target_chat] = target_message
             _set_last_menu(context, route=route, payload=payload, chat_id=target_chat, message_id=target_message)
+            await _persist_last_state(
+                update,
+                context,
+                route=route,
+                payload=payload,
+                chat_id=target_chat,
+                message_id=target_message,
+            )
             return msg
         except BadRequest:
             pass
@@ -107,6 +162,14 @@ async def show(
             await q.message.edit_text(text=text, reply_markup=kb, parse_mode=parse_mode, disable_web_page_preview=True)
             _last_screen[chat_id] = q.message.message_id
             _set_last_menu(context, route=route, payload=payload, chat_id=chat_id, message_id=q.message.message_id)
+            await _persist_last_state(
+                update,
+                context,
+                route=route,
+                payload=payload,
+                chat_id=chat_id,
+                message_id=q.message.message_id,
+            )
             return q.message
         except BadRequest:
             pass
@@ -121,6 +184,14 @@ async def show(
     prev = _last_screen.get(chat_id)
     _last_screen[chat_id] = msg.message_id
     _set_last_menu(context, route=route, payload=payload, chat_id=chat_id, message_id=msg.message_id)
+    await _persist_last_state(
+        update,
+        context,
+        route=route,
+        payload=payload,
+        chat_id=chat_id,
+        message_id=msg.message_id,
+    )
     if prev and prev != msg.message_id:
         try:
             await context.bot.delete_message(chat_id=chat_id, message_id=prev)

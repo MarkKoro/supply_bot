@@ -198,14 +198,11 @@ def my_supplement_hub(
     return InlineKeyboardMarkup(btns)
 
 def timezone_picker(
-    mode: str,
     page: int,
     *,
     per_page: int = 8,
-    back_data: str | None = None,
 ) -> InlineKeyboardMarkup:
-    mode = "ru" if mode == "ru" else "all"
-    offsets = tz.catalog(mode)
+    offsets = tz.catalog()
     page = max(page, 0)
     start = page * per_page
     end = start + per_page
@@ -214,7 +211,8 @@ def timezone_picker(
     row: list[InlineKeyboardButton] = []
     for offset in sliced:
         label = tz.format_offset_label(offset)
-        row.append(InlineKeyboardButton(label, callback_data=f"tz:pick:{offset}"))
+        tag = tz.format_offset_tag(offset)
+        row.append(InlineKeyboardButton(label, callback_data=f"tz:set:{tag}"))
         if len(row) == 2:
             btns.append(row)
             row = []
@@ -222,17 +220,12 @@ def timezone_picker(
         btns.append(row)
     nav = []
     if start > 0:
-        nav.append(InlineKeyboardButton("⬅️", callback_data=f"tz:page:{mode}:{page - 1}"))
+        nav.append(InlineKeyboardButton("⬅️", callback_data=f"tz:page:{page - 1}"))
     if end < len(offsets):
-        nav.append(InlineKeyboardButton("➡️", callback_data=f"tz:page:{mode}:{page + 1}"))
+        nav.append(InlineKeyboardButton("➡️", callback_data=f"tz:page:{page + 1}"))
     if nav:
         btns.append(nav)
-    if mode == "ru":
-        btns.append([InlineKeyboardButton("🌍 Другие часовые пояса", callback_data="tz:page:all:0")])
-    else:
-        btns.append([InlineKeyboardButton("🇷🇺 Часовые пояса РФ", callback_data="tz:page:ru:0")])
-    if back_data:
-        btns.append([InlineKeyboardButton("⬅️ Назад", callback_data=back_data)])
+    btns.append([InlineKeyboardButton("⬅️ Назад", callback_data="tz:back")])
     return InlineKeyboardMarkup(btns)
 
 def reminder_actions(supplement_id: int) -> InlineKeyboardMarkup:

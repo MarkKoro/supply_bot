@@ -34,7 +34,7 @@ PRAGMA foreign_keys=ON;
 CREATE TABLE IF NOT EXISTS users (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   tg_user_id    INTEGER UNIQUE NOT NULL,
-  tz_name       TEXT DEFAULT '',
+  tz_name       TEXT NOT NULL DEFAULT 'UTC',
   created_at    TEXT NOT NULL,
   last_view     TEXT NOT NULL DEFAULT 'menu',
   last_view_payload TEXT NOT NULL DEFAULT '',
@@ -227,7 +227,8 @@ async def init_db(db_path: str) -> None:
         await conn.close()
 
 async def _apply_migrations(conn: aiosqlite.Connection) -> None:
-    await _ensure_column(conn, "users", "tz_name", "TEXT")
+    await _ensure_users_tz_name(conn)
+    await conn.execute("UPDATE users SET tz_name='UTC' WHERE tz_name IS NULL OR tz_name=''")
     await _ensure_column(conn, "users", "last_view", "TEXT NOT NULL DEFAULT 'menu'")
     await _ensure_column(conn, "users", "last_view_payload", "TEXT NOT NULL DEFAULT ''")
     await _ensure_column(conn, "users", "last_chat_id", "INTEGER NOT NULL DEFAULT 0")
@@ -576,6 +577,12 @@ async def _ensure_column(conn: aiosqlite.Connection, table: str, column: str, co
         return
     await conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
 
+async def _ensure_users_tz_name(conn: aiosqlite.Connection) -> None:
+    cols = await fetchall(conn, "PRAGMA table_info(users)")
+    if any(c["name"] == "tz_name" for c in cols):
+        return
+    await conn.execute("ALTER TABLE users ADD COLUMN tz_name TEXT NOT NULL DEFAULT 'UTC'")
+
 async def _backfill_alias_raw(conn: aiosqlite.Connection) -> None:
     cols = await fetchall(conn, "PRAGMA table_info(supplement_aliases)")
     col_names = {c["name"] for c in cols}
@@ -645,7 +652,7 @@ async def get_or_create_user(conn: aiosqlite.Connection, tg_user_id: int, tz_nam
     row = await fetchone(conn, "SELECT id FROM users WHERE tg_user_id=?", (tg_user_id,))
     if row:
         return int(row["id"])
-    tz_value = tz_name or ""
+    tz_value = tz_name.strip() if isinstance(tz_name, str) and tz_name.strip() else "UTC"
     await conn.execute(
         "INSERT INTO users(tg_user_id, tz_name, created_at) VALUES(?,?,?)",
         (tg_user_id, tz_value, utc_now_iso()),
@@ -708,27 +715,36 @@ async def get_user_last_msg(conn: aiosqlite.Connection, tg_user_id: int) -> tupl
         return (0, 0)
     return (int(row["last_chat_id"] or 0), int(row["last_message_id"] or 0))
 
-def parse_offset_tz(tz_name: str | None):
+def parse_utc_tz(tz_name: str | None):
     if not tz_name:
         return timezone.utc
-    if re.fullmatch(r"[+-](?:0\\d|1\\d|2[0-3]):[0-5]\\d", tz_name):
-        sign = 1 if tz_name[0] == "+" else -1
-        hours_str, minutes_str = tz_name[1:].split(":")
-        offset = timedelta(hours=int(hours_str), minutes=int(minutes_str))
+    value = str(tz_name).strip()
+    if value.upper() == "UTC":
+        return timezone.utc
+    match = re.fullmatch(r"(?:UTC)?([+-](?:0\\d|1\\d|2[0-3])):([0-5]\\d)", value)
+    if match:
+        sign_hours, minutes_str = match.groups()
+        sign = 1 if sign_hours[0] == "+" else -1
+        hours = int(sign_hours[1:])
+        minutes = int(minutes_str)
+        offset = timedelta(hours=hours, minutes=minutes)
         return timezone(sign * offset)
     try:
-        return ZoneInfo(tz_name)
+        return ZoneInfo(value)
     except Exception:
         return timezone.utc
 
+def parse_offset_tz(tz_name: str | None):
+    return parse_utc_tz(tz_name)
+
 def local_now(tz_name: str | None) -> datetime:
-    return datetime.now(parse_offset_tz(tz_name))
+    return datetime.now(parse_utc_tz(tz_name))
 
 def local_date(tz_name: str | None) -> str:
     return local_now(tz_name).date().isoformat()
 
 def next_run_datetime_for_hhmm(hhmm: str, tz_name: str | None) -> datetime:
-    tzinfo = parse_offset_tz(tz_name)
+    tzinfo = parse_utc_tz(tz_name)
     now_local = datetime.now(tzinfo)
     hour, minute = map(int, hhmm.split(":"))
     candidate = now_local.replace(hour=hour, minute=minute, second=0, microsecond=0)

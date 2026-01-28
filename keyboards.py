@@ -145,7 +145,6 @@ def supplement_compat_list(
 def my_supplement_hub(
     supplement_id: int,
     reminder_enabled: bool,
-    *,
 ) -> InlineKeyboardMarkup:
     toggle_label = "⏰ Напоминание: ВКЛ" if reminder_enabled else "⏰ Напоминание: ВЫКЛ"
     btns = [

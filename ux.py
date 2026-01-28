@@ -8,6 +8,10 @@ import db
 
 _last_screen: dict[int, int] = {}
 
+TODAY_STATUS_TAKEN = "✅ Отмечено: выпил(а) сегодня"
+TODAY_STATUS_SKIPPED = "✖️ Отмечено: не выпил(а) сегодня"
+TODAY_STATUS_ALREADY_MARKED = "Сегодня уже отмечено"
+
 def _payload_from_route(route: str) -> dict | None:
     if route == "menu:home":
         return {}

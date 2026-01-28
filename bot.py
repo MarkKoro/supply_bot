@@ -396,7 +396,7 @@ async def _handle_checkin_submission(
     checkin_text: str,
     source: str,
 ) -> bool:
-    day = await db.get_user_local_day(conn, user_id)
+    day = await db.ensure_daily_rollover(conn, tg_uid)
     payload = {
         "text": checkin_text,
         "source": source,
@@ -446,7 +446,7 @@ async def _show_today_plan(
     tg_uid: int,
 ) -> None:
     user_id = await db.get_or_create_user(conn, tg_uid)
-    day = await db.get_user_local_day(conn, user_id)
+    day = await db.ensure_daily_rollover(conn, tg_uid)
     stack_rows = await db.list_user_stack_details(conn, tg_uid, local_date=day)
     override = await db.get_daily_plan_override(conn, user_id, day)
     applied = override.get("applied_changes", []) if isinstance(override, dict) else []
@@ -637,6 +637,30 @@ async def reschedule_reminders_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             timezone=data["tzinfo"],
         )
 
+async def daily_rollover_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    s = context.application.bot_data["settings"]
+    conn = await db.connect(s.DB_PATH)
+    try:
+        rows = await db.fetchall(
+            conn,
+            "SELECT tg_user_id, tz_name, last_local_date FROM users",
+        )
+        updates = []
+        for row in rows:
+            tz_name = str(row["tz_name"] or "").strip()
+            today_local = db.get_local_date_str(tz_name or None)
+            last_local = str(row["last_local_date"] or "")
+            if last_local != today_local:
+                updates.append((today_local, int(row["tg_user_id"])))
+        if updates:
+            await conn.executemany(
+                "UPDATE users SET last_local_date=? WHERE tg_user_id=?",
+                updates,
+            )
+            await conn.commit()
+    finally:
+        await conn.close()
+
 async def reminder_fire(context: ContextTypes.DEFAULT_TYPE) -> None:
     data = context.job.data or {}
     tg_user_id = int(data.get("tg_user_id"))
@@ -659,14 +683,14 @@ async def reminder_fire(context: ContextTypes.DEFAULT_TYPE) -> None:
         tzinfo = _tzinfo_from_name(tz_name)
         if not tzinfo:
             return
-        today = datetime.now(tzinfo).date().isoformat()
         user_id = int(user_row["id"])
         settings = await db.get_user_supp_settings(conn, user_id, supplement_id)
         if int(settings.get("reminder_enabled") or 0) != 1:
             return
         if not str(settings.get("reminder_time") or "").strip():
             return
-        if settings.get("taken_date") == today or settings.get("skip_date") == today:
+        today_status = await db.get_today_status(conn, tg_user_id, supplement_id)
+        if today_status in {"taken", "skipped"}:
             return
         supplement = await db.get_supplement_by_id(conn, supplement_id)
         if not supplement:
@@ -1069,6 +1093,7 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 today = datetime.now(db.parse_utc_tz(tz_name)).date().isoformat()
             except Exception:
                 today = datetime.utcnow().date().isoformat()
+            await db.set_today_status(conn, tg_uid, supplement_id, "taken")
             await db.set_user_supp_taken_date(conn, internal_user_id, supplement_id, today)
             await db.set_user_supp_skip_date(conn, internal_user_id, supplement_id, "")
             await show_my_supp_hub(update, context, tg_uid, supplement_id, conn=conn)
@@ -1082,6 +1107,7 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 today = datetime.now(db.parse_utc_tz(tz_name)).date().isoformat()
             except Exception:
                 today = datetime.utcnow().date().isoformat()
+            await db.set_today_status(conn, tg_uid, supplement_id, "skipped")
             await db.set_user_supp_skip_date(conn, internal_user_id, supplement_id, today)
             await db.set_user_supp_taken_date(conn, internal_user_id, supplement_id, "")
             await show_my_supp_hub(update, context, tg_uid, supplement_id, conn=conn)
@@ -1381,9 +1407,11 @@ async def on_reminder_action(update: Update, context: ContextTypes.DEFAULT_TYPE)
         today = datetime.now(tzinfo).date().isoformat() if tzinfo else datetime.utcnow().date().isoformat()
         internal_user_id = await db.get_or_create_user(conn, tg_uid)
         if action in ("done", "taken") and supplement_id is not None:
+            await db.set_today_status(conn, tg_uid, supplement_id, "taken")
             await db.set_user_supp_taken_date(conn, internal_user_id, supplement_id, today)
             await db.set_user_supp_skip_date(conn, internal_user_id, supplement_id, "")
         elif action == "skip" and supplement_id is not None:
+            await db.set_today_status(conn, tg_uid, supplement_id, "skipped")
             await db.set_user_supp_skip_date(conn, internal_user_id, supplement_id, today)
             await db.set_user_supp_taken_date(conn, internal_user_id, supplement_id, "")
         elif action == "snooze" and supplement_id is not None:
@@ -2102,6 +2130,7 @@ async def _bootstrap() -> Application:
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_error_handler(on_error)
     app.job_queue.run_repeating(reschedule_reminders_job, interval=60, first=5, name="resched")
+    app.job_queue.run_repeating(daily_rollover_job, interval=600, first=30, name="daily_rollover")
     return app
 
 def build_app() -> Application:
@@ -2487,9 +2516,8 @@ async def _show_my_list(
 ) -> None:
     if q is None:
         q = context.user_data.get(MY_SEARCH_KEY)
-    user_id = await db.get_or_create_user(conn, tg_uid)
-    tz = await db.get_user_tz(conn, tg_uid)
-    local_date = db.get_user_local_date(tz)
+    await db.get_or_create_user(conn, tg_uid)
+    local_date = await db.ensure_daily_rollover(conn, tg_uid)
     rows, total = await db.list_user_supplements_page(
         conn,
         tg_uid,
@@ -2566,11 +2594,8 @@ async def show_my_supp_hub(
             )
             return
         settings = await db.get_user_supp_settings(conn, internal_user_id, supplement_id)
-        tz_name = await db.get_user_tz(conn, user_id) or "UTC"
-        try:
-            today = datetime.now(db.parse_utc_tz(tz_name)).date().isoformat()
-        except Exception:
-            today = datetime.utcnow().date().isoformat()
+        await db.ensure_daily_rollover(conn, user_id)
+        today_status = await db.get_today_status(conn, user_id, supplement_id)
 
         name_ru = (row.get("name_ru") or row.get("name") or "").strip()
         name_en = (row.get("name_en") or "").strip()
@@ -2580,8 +2605,8 @@ async def show_my_supp_hub(
         dose_text = (settings.get("dose_text") or "").strip() or "не задана"
         reminder_enabled = bool(settings.get("reminder_enabled"))
         reminder_time = (settings.get("reminder_time") or "").strip() or "не задано"
-        taken_today = settings.get("taken_date") == today
-        skip_today = settings.get("skip_date") == today
+        taken_today = today_status == "taken"
+        skip_today = today_status == "skipped"
 
         text = (
             "⚙️ <b>Управление добавкой</b>\n\n"

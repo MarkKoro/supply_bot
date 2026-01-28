@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS users (
   tg_user_id    INTEGER UNIQUE NOT NULL,
   tz_name       TEXT NOT NULL DEFAULT 'UTC',
   created_at    TEXT NOT NULL,
+  last_local_date TEXT NOT NULL DEFAULT '',
   last_view     TEXT NOT NULL DEFAULT 'menu',
   last_view_payload TEXT NOT NULL DEFAULT '',
   last_chat_id  INTEGER NOT NULL DEFAULT 0,
@@ -184,6 +185,18 @@ CREATE TABLE IF NOT EXISTS user_supp_settings (
   PRIMARY KEY(user_id, supplement_id)
 );
 
+CREATE TABLE IF NOT EXISTS supplement_day_state (
+  user_id       INTEGER NOT NULL,
+  supplement_id INTEGER NOT NULL,
+  day           TEXT NOT NULL,
+  status        TEXT NOT NULL,
+  dose_override TEXT NULL,
+  created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (user_id, supplement_id, day)
+);
+CREATE INDEX IF NOT EXISTS idx_sds_user_day ON supplement_day_state(user_id, day);
+CREATE INDEX IF NOT EXISTS idx_sds_user_sup_day ON supplement_day_state(user_id, supplement_id, day);
+
 CREATE TABLE IF NOT EXISTS curated_stacks (
   id INTEGER PRIMARY KEY,
   slug TEXT UNIQUE NOT NULL,
@@ -229,6 +242,7 @@ async def init_db(db_path: str) -> None:
 async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     await _ensure_users_tz_name(conn)
     await conn.execute("UPDATE users SET tz_name='UTC' WHERE tz_name IS NULL OR tz_name=''")
+    await _ensure_column(conn, "users", "last_local_date", "TEXT NOT NULL DEFAULT ''")
     await _ensure_column(conn, "users", "last_view", "TEXT NOT NULL DEFAULT 'menu'")
     await _ensure_column(conn, "users", "last_view_payload", "TEXT NOT NULL DEFAULT ''")
     await _ensure_column(conn, "users", "last_chat_id", "INTEGER NOT NULL DEFAULT 0")
@@ -262,6 +276,7 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     await _ensure_user_schedules(conn)
     await _ensure_user_intake_log(conn)
     await _ensure_user_supp_settings(conn)
+    await _ensure_supplement_day_state(conn)
     await _ensure_daily_checkins(conn)
     await _ensure_daily_plan_overrides(conn)
     await _ensure_curated_stacks(conn)
@@ -289,6 +304,9 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     )
     await conn.execute(
         "UPDATE users SET last_view='menu' WHERE last_view IS NULL OR last_view=''"
+    )
+    await conn.execute(
+        "UPDATE users SET last_local_date='' WHERE last_local_date IS NULL"
     )
     await conn.execute(
         "UPDATE users SET last_view_payload='' WHERE last_view_payload IS NULL"
@@ -422,6 +440,44 @@ async def _ensure_user_supp_settings(conn: aiosqlite.Connection) -> None:
     await _ensure_column(conn, "user_supp_settings", "taken_date", "TEXT NOT NULL DEFAULT ''")
     await _ensure_column(conn, "user_supp_settings", "skip_date", "TEXT NOT NULL DEFAULT ''")
     await _ensure_column(conn, "user_supp_settings", "updated_at", "TEXT NOT NULL DEFAULT ''")
+
+async def _ensure_supplement_day_state(conn: aiosqlite.Connection) -> None:
+    table = await fetchone(
+        conn,
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='supplement_day_state'",
+    )
+    if not table:
+        await conn.execute(
+            """CREATE TABLE IF NOT EXISTS supplement_day_state (
+              user_id       INTEGER NOT NULL,
+              supplement_id INTEGER NOT NULL,
+              day           TEXT NOT NULL,
+              status        TEXT NOT NULL,
+              dose_override TEXT NULL,
+              created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+              PRIMARY KEY (user_id, supplement_id, day)
+            )"""
+        )
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sds_user_day ON supplement_day_state(user_id, day)"
+        )
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sds_user_sup_day ON supplement_day_state(user_id, supplement_id, day)"
+        )
+        return
+
+    await _ensure_column(conn, "supplement_day_state", "user_id", "INTEGER NOT NULL")
+    await _ensure_column(conn, "supplement_day_state", "supplement_id", "INTEGER NOT NULL")
+    await _ensure_column(conn, "supplement_day_state", "day", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "supplement_day_state", "status", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "supplement_day_state", "dose_override", "TEXT")
+    await _ensure_column(conn, "supplement_day_state", "created_at", "TEXT NOT NULL DEFAULT ''")
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sds_user_day ON supplement_day_state(user_id, day)"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sds_user_sup_day ON supplement_day_state(user_id, supplement_id, day)"
+    )
 
 async def _ensure_daily_checkins(conn: aiosqlite.Connection) -> None:
     table = await fetchone(
@@ -743,6 +799,9 @@ def local_now(tz_name: str | None) -> datetime:
 def local_date(tz_name: str | None) -> str:
     return local_now(tz_name).date().isoformat()
 
+def get_local_date_str(tz_name: str | None) -> str:
+    return datetime.now(parse_utc_tz(tz_name)).date().isoformat()
+
 def next_run_datetime_for_hhmm(hhmm: str, tz_name: str | None) -> datetime:
     tzinfo = parse_utc_tz(tz_name)
     now_local = datetime.now(tzinfo)
@@ -759,6 +818,30 @@ async def get_user_local_day(conn: aiosqlite.Connection, user_id: int) -> str:
     row = await fetchone(conn, "SELECT tz_name FROM users WHERE id=?", (user_id,))
     tz_name = str(row["tz_name"] or "").strip() if row else ""
     return local_date(tz_name or None)
+
+async def ensure_daily_rollover(conn: aiosqlite.Connection, tg_user_id: int) -> str:
+    row = await fetchone(
+        conn,
+        "SELECT tz_name, last_local_date FROM users WHERE tg_user_id=?",
+        (tg_user_id,),
+    )
+    if not row:
+        await get_or_create_user(conn, tg_user_id, tz_name="")
+        row = await fetchone(
+            conn,
+            "SELECT tz_name, last_local_date FROM users WHERE tg_user_id=?",
+            (tg_user_id,),
+        )
+    tz_name = str(row["tz_name"] or "").strip() if row else ""
+    last_local_date = str(row["last_local_date"] or "") if row else ""
+    today_local = get_local_date_str(tz_name or None)
+    if last_local_date != today_local:
+        await conn.execute(
+            "UPDATE users SET last_local_date=? WHERE tg_user_id=?",
+            (today_local, tg_user_id),
+        )
+        await conn.commit()
+    return today_local
 
 # catalog
 def _extract_evidence_fields(evidence_json: str | None, payload_json: str | None) -> dict[str, str]:
@@ -1388,8 +1471,9 @@ async def get_user_supplement_with_status(
     user_id = await get_or_create_user(conn, tg_user_id)
     params: list = [local_date or ""]
     status_join = (
-        "LEFT JOIN user_intake_log uil ON uil.user_id=us.user_id "
-        "AND uil.supplement_id=us.supplement_id AND uil.local_date=?"
+        "LEFT JOIN users u ON u.id=us.user_id "
+        "LEFT JOIN supplement_day_state sds ON sds.user_id=u.tg_user_id "
+        "AND sds.supplement_id=us.supplement_id AND sds.day=?"
     )
     params.extend([user_id, supplement_id])
     return await fetchone(
@@ -1398,7 +1482,7 @@ async def get_user_supplement_with_status(
                    s.summary_ru, s.summary_verified, s.summary_theoretical,
                    s.molecular_mechanisms, s.mechanisms,
                    sch.time_hhmm, sch.is_enabled,
-                   uil.status AS today_status
+                   sds.status AS today_status
             FROM user_supplements us
             JOIN supplements s ON s.id=us.supplement_id
             LEFT JOIN user_schedules sch ON sch.user_id=us.user_id AND sch.supplement_id=us.supplement_id
@@ -1440,15 +1524,16 @@ async def list_user_supplements_page(
 
     params.extend([page_size, offset])
     status_join = (
-        "LEFT JOIN user_intake_log uil ON uil.user_id=us.user_id "
-        "AND uil.supplement_id=us.supplement_id AND uil.local_date=?"
+        "LEFT JOIN users u ON u.id=us.user_id "
+        "LEFT JOIN supplement_day_state sds ON sds.user_id=u.tg_user_id "
+        "AND sds.supplement_id=us.supplement_id AND sds.day=?"
     )
     rows = await fetchall(
         conn,
         f"""SELECT us.*, s.id AS supplement_id, s.slug, s.name, s.name_ru, s.name_en,
                   s.summary_ru, s.summary_verified, s.summary_theoretical,
                   s.molecular_mechanisms, s.mechanisms,
-                  uil.status AS today_status
+                  sds.status AS today_status
            FROM user_supplements us
            JOIN supplements s ON s.id=us.supplement_id
            {status_join}
@@ -1510,15 +1595,16 @@ async def list_user_stack_details(conn: aiosqlite.Connection, tg_user_id: int, l
     user_id = await get_or_create_user(conn, tg_user_id)
     params: list = [local_date or "", user_id]
     status_join = (
-        "LEFT JOIN user_intake_log uil ON uil.user_id=us.user_id "
-        "AND uil.supplement_id=us.supplement_id AND uil.local_date=?"
+        "LEFT JOIN users u ON u.id=us.user_id "
+        "LEFT JOIN supplement_day_state sds ON sds.user_id=u.tg_user_id "
+        "AND sds.supplement_id=us.supplement_id AND sds.day=?"
     )
     return await fetchall(
         conn,
         f"""SELECT us.supplement_id, us.dose_text, us.note_text, us.is_active,
                    s.name, s.slug,
                    sch.time_hhmm,
-                   uil.status AS today_status
+                   sds.status AS today_status
             FROM user_supplements us
             JOIN supplements s ON s.id=us.supplement_id
             LEFT JOIN user_schedules sch ON sch.user_id=us.user_id AND sch.supplement_id=us.supplement_id
@@ -1631,6 +1717,48 @@ async def set_today_intake_status(
              status=excluded.status,
              updated_at=excluded.updated_at""",
         (user_id, supplement_id, local_date, status, utc_now_iso()),
+    )
+    await conn.commit()
+
+async def set_today_status(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    supplement_id: int,
+    status: str,
+) -> None:
+    day = await ensure_daily_rollover(conn, tg_user_id)
+    await conn.execute(
+        """INSERT INTO supplement_day_state(user_id, supplement_id, day, status, dose_override)
+           VALUES(?,?,?,?,NULL)
+           ON CONFLICT(user_id, supplement_id, day) DO UPDATE SET
+             status=excluded.status""",
+        (tg_user_id, supplement_id, day, status),
+    )
+    await conn.commit()
+
+async def get_today_status(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    supplement_id: int,
+) -> str | None:
+    day = await ensure_daily_rollover(conn, tg_user_id)
+    row = await fetchone(
+        conn,
+        """SELECT status FROM supplement_day_state
+           WHERE user_id=? AND supplement_id=? AND day=?""",
+        (tg_user_id, supplement_id, day),
+    )
+    return str(row["status"]) if row else None
+
+async def clear_today_status(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    supplement_id: int,
+) -> None:
+    day = await ensure_daily_rollover(conn, tg_user_id)
+    await conn.execute(
+        "DELETE FROM supplement_day_state WHERE user_id=? AND supplement_id=? AND day=?",
+        (tg_user_id, supplement_id, day),
     )
     await conn.commit()
 

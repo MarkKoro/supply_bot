@@ -44,8 +44,8 @@ def _payload_from_route(route: str) -> dict | None:
     if route.startswith("curated:add:"):
         return {"slug": route.split(":")[-1]}
     if route.startswith("tz:page:"):
-        _, _, mode, page = route.split(":", 3)
-        return {"mode": mode, "page": int(page)}
+        _, _, page = route.split(":", 2)
+        return {"page": int(page)}
     if route.startswith("add_pick:"):
         return {"slug": route.split(":", 1)[1]}
     if route.startswith("compat_pick:"):

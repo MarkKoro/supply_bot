@@ -5,7 +5,6 @@ import logging
 import os
 import re
 from datetime import datetime, timedelta, time as dt_time
-from zoneinfo import ZoneInfo
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -56,17 +55,8 @@ CATALOG_CLASS_PAGE_SIZE = 8
 MY_PAGE_SIZE = 10
 CURATED_PAGE_SIZE = 10
 
-def _format_tz_label(tz_name: str | None) -> str:
-    if not tz_name:
-        return "UTC"
-    match = re.fullmatch(r"([+-])(\d{2}):(\d{2})", tz_name)
-    if match:
-        sign, hours, minutes = match.groups()
-        hours_int = int(hours)
-        if minutes == "00":
-            return f"UTC{sign}{hours_int}"
-        return f"UTC{sign}{hours_int}:{minutes}"
-    return tz_name
+def _is_tz_unset(tz_name: str | None) -> bool:
+    return not tz_name or str(tz_name).strip().upper() == "UTC"
 
 def _job_name(tg_user_id: int, supplement_id: int) -> str:
     return f"rem:{tg_user_id}:{supplement_id}"
@@ -127,12 +117,7 @@ def _format_checkin_change(idx: int, change: dict) -> str:
     return line
 
 def _tzinfo_from_name(tz_name: str | None):
-    if not tz_name:
-        return None
-    try:
-        return ZoneInfo(tz_name)
-    except Exception:
-        return db.parse_offset_tz(tz_name)
+    return db.parse_utc_tz(tz_name) if tz_name else None
 
 async def _render_ai_suggestions(
     update: Update,
@@ -546,9 +531,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         await db.get_or_create_user(conn, update.effective_user.id, tz_name="")
         tz = await db.get_user_tz(conn, update.effective_user.id)
-        if not tz:
+        if _is_tz_unset(tz):
             context.user_data.pop("tz_back_data", None)
-            await _show_timezone_picker(update, context, "ru", 0)
+            context.user_data["onboarding"] = "tz"
+            await _show_timezone_picker(
+                update,
+                context,
+                0,
+                message_text=(
+                    "Выбери свой часовой пояс, чтобы уведомления приходили вовремя.\n"
+                    "Пример: Москва — UTC+03."
+                ),
+            )
             return
     finally:
         await conn.close()
@@ -557,22 +551,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def _show_timezone_picker(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
-    mode: str,
     page: int,
     *,
+    message_text: str | None = None,
     target_chat_id: int | None = None,
     target_message_id: int | None = None,
-    back_data: str | None = None,
 ) -> None:
-    utc_now = tz.now_utc_hhmm()
+    context.user_data["tz_page"] = page
     await show(
         update,
         context,
-        "Выбери часовой пояс.\n\n"
-        f"Сейчас по UTC: {utc_now}\n"
-        "После выбора мы будем присылать напоминания по твоему местному времени.",
-        timezone_picker(mode, page, back_data=back_data),
-        route=f"tz:page:{mode}:{page}",
+        message_text
+        or "Выбери часовой пояс, чтобы уведомления приходили вовремя.",
+        timezone_picker(page),
+        route=f"tz:page:{page}",
         target_chat_id=target_chat_id,
         target_message_id=target_message_id,
     )
@@ -592,7 +584,7 @@ async def reschedule_reminders_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     desired: dict[str, dict] = {}
     for row in rows:
         tz_name = str(row["tz_name"] or "").strip()
-        if not tz_name:
+        if _is_tz_unset(tz_name):
             continue
         reminder_time = str(row["reminder_time"] or "").strip()
         if not reminder_time:
@@ -662,7 +654,7 @@ async def reminder_fire(context: ContextTypes.DEFAULT_TYPE) -> None:
         if not user_row:
             return
         tz_name = str(user_row["tz_name"] or "").strip()
-        if not tz_name:
+        if _is_tz_unset(tz_name):
             return
         tzinfo = _tzinfo_from_name(tz_name)
         if not tzinfo:
@@ -726,9 +718,10 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
         tz_name = await db.get_user_tz(conn, tg_uid)
-        if not tz_name:
+        if _is_tz_unset(tz_name):
             context.user_data.pop("tz_back_data", None)
-            await _show_timezone_picker(update, context, "ru", 0)
+            context.user_data["onboarding"] = "tz"
+            await _show_timezone_picker(update, context, 0)
             return
 
         if data == "menu:home":
@@ -745,7 +738,7 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
         if data == "settings:tz":
             context.user_data["tz_back_data"] = "menu:settings"
-            await _show_timezone_picker(update, context, "ru", 0, back_data="menu:settings")
+            await _show_timezone_picker(update, context, 0)
             return
 
         if data == "menu:add":
@@ -1073,7 +1066,7 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             internal_user_id = await db.get_or_create_user(conn, tg_uid)
             tz_name = await db.get_user_tz(conn, tg_uid) or "UTC"
             try:
-                today = datetime.now(db.parse_offset_tz(tz_name)).date().isoformat()
+                today = datetime.now(db.parse_utc_tz(tz_name)).date().isoformat()
             except Exception:
                 today = datetime.utcnow().date().isoformat()
             await db.set_user_supp_taken_date(conn, internal_user_id, supplement_id, today)
@@ -1086,7 +1079,7 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             internal_user_id = await db.get_or_create_user(conn, tg_uid)
             tz_name = await db.get_user_tz(conn, tg_uid) or "UTC"
             try:
-                today = datetime.now(db.parse_offset_tz(tz_name)).date().isoformat()
+                today = datetime.now(db.parse_utc_tz(tz_name)).date().isoformat()
             except Exception:
                 today = datetime.utcnow().date().isoformat()
             await db.set_user_supp_skip_date(conn, internal_user_id, supplement_id, today)
@@ -1298,12 +1291,34 @@ async def on_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await q.answer()
     data = q.data or ""
     if data.startswith("tz:page:"):
-        _, _, mode, page = data.split(":", 3)
-        back_data = context.user_data.get("tz_back_data") if isinstance(context.user_data, dict) else None
-        await _show_timezone_picker(update, context, mode, int(page), back_data=back_data)
+        _, _, page = data.split(":", 2)
+        await _show_timezone_picker(update, context, int(page))
         return
-    if data.startswith("tz:pick:"):
-        tz_value = data.split(":", 2)[2]
+    if data == "tz:back":
+        if context.user_data.get("onboarding") == "tz":
+            page = int(context.user_data.get("tz_page") or 0)
+            await _show_timezone_picker(
+                update,
+                context,
+                page,
+                message_text="Нужно выбрать часовой пояс, чтобы продолжить.",
+            )
+            return
+        back_data = context.user_data.get("tz_back_data")
+        if back_data == "menu:settings":
+            await show(
+                update,
+                context,
+                "⚙️ <b>Настройки</b>",
+                settings_menu(),
+                route="menu:settings",
+            )
+        else:
+            await home(update, context)
+        return
+    if data.startswith("tz:set:"):
+        tz_tag = data.split(":", 2)[2]
+        tz_value = tz.tz_name_from_tag(tz_tag)
         s = context.application.bot_data["settings"]
         tg_uid = update.effective_user.id
         conn = await db.connect(s.DB_PATH)
@@ -1313,15 +1328,16 @@ async def on_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         finally:
             await conn.close()
         context.user_data.pop("tz_back_data", None)
-        local_now = tz.now_local_hhmm(tz_value)
+        context.user_data.pop("onboarding", None)
+        tzinfo = db.parse_utc_tz(tz_value)
+        local_now = datetime.now(tzinfo).strftime("%H:%M")
         label = tz.format_confirmation_label(tz_value)
         await show(
             update,
             context,
-            "✅ Часовой пояс установлен: "
+            "✅ Часовой пояс сохранён: "
             f"{label}\n"
-            f"Сейчас у тебя будет: {local_now}\n\n"
-            f"{_home_text()}",
+            f"Текущее время у тебя: {local_now}",
             main_menu(),
             route="menu:home",
         )
@@ -1705,14 +1721,11 @@ async def _render_route(
         )
         return
     if route.startswith("tz:page:"):
-        _, _, mode, page = route.split(":", 3)
-        back_data = context.user_data.get("tz_back_data") if isinstance(context.user_data, dict) else None
+        _, _, page = route.split(":", 2)
         await _show_timezone_picker(
             update,
             context,
-            mode,
             int(page),
-            back_data=back_data,
             target_chat_id=target_chat_id,
             target_message_id=target_message_id,
         )
@@ -1769,6 +1782,12 @@ async def _render_route(
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.message.text:
         return
+    if context.user_data.get("onboarding") == "tz":
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+        return
     txt = update.message.text.strip()
     waiting = context.user_data.get(WAITING_KEY)
     if waiting and waiting.startswith(("set_time:", "set_dose:")):
@@ -1824,9 +1843,10 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
         tz_name = await db.get_user_tz(conn, tg_uid)
-        if not tz_name:
+        if _is_tz_unset(tz_name):
             context.user_data.pop("tz_back_data", None)
-            await _show_timezone_picker(update, context, "ru", 0)
+            context.user_data["onboarding"] = "tz"
+            await _show_timezone_picker(update, context, 0)
             return
 
         if waiting == "add_query":
@@ -1934,9 +1954,10 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
         tz_name = await db.get_user_tz(conn, tg_uid)
-        if not tz_name:
+        if _is_tz_unset(tz_name):
             context.user_data.pop("tz_back_data", None)
-            await _show_timezone_picker(update, context, "ru", 0)
+            context.user_data["onboarding"] = "tz"
+            await _show_timezone_picker(update, context, 0)
             return
 
         if not s.OPENAI_API_KEY:
@@ -2547,7 +2568,7 @@ async def show_my_supp_hub(
         settings = await db.get_user_supp_settings(conn, internal_user_id, supplement_id)
         tz_name = await db.get_user_tz(conn, user_id) or "UTC"
         try:
-            today = datetime.now(db.parse_offset_tz(tz_name)).date().isoformat()
+            today = datetime.now(db.parse_utc_tz(tz_name)).date().isoformat()
         except Exception:
             today = datetime.utcnow().date().isoformat()
 

@@ -6,7 +6,7 @@ import tz
 def main_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("➕ Добавить добавку", callback_data="menu:add")],
-        [InlineKeyboardButton("📚 Каталог", callback_data="menu:catalog")],
+        [InlineKeyboardButton("📚 Каталог БАДов", callback_data="menu:catalog")],
         [InlineKeyboardButton("🧠 Готовые стеки", callback_data="menu:curated")],
         [InlineKeyboardButton("📦 Мои БАДы", callback_data="menu:my")],
         [InlineKeyboardButton("🧩 Совместимость", callback_data="menu:compat")],
@@ -14,6 +14,44 @@ def main_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🤖 AI-подбор", callback_data="menu:ai")],
         [InlineKeyboardButton("⚙️ Настройки", callback_data="menu:settings")],
     ])
+
+def catalog_home() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔎 Поиск", callback_data="cat:mode:search")],
+        [InlineKeyboardButton("🧠 По доказательности", callback_data="cat:mode:evidence")],
+        [InlineKeyboardButton("🎯 По цели/классу", callback_data="cat:mode:class")],
+        [InlineKeyboardButton("⭐ Мои БАДы", callback_data="menu:my")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")],
+    ])
+
+def catalog_list(rows, has_prev: bool, has_next: bool) -> InlineKeyboardMarkup:
+    btns = []
+    for r in rows:
+        title = r["name_ru"] or r["name_en"] or r["name"]
+        btns.append([InlineKeyboardButton(f"💊 {title}", callback_data=f"cat:open:{r['id']}")])
+    nav: list[InlineKeyboardButton] = []
+    if has_prev:
+        nav.append(InlineKeyboardButton("◀️", callback_data="cat:page:prev"))
+    if has_next:
+        nav.append(InlineKeyboardButton("▶️", callback_data="cat:page:next"))
+    if nav:
+        btns.append(nav)
+    btns.append([InlineKeyboardButton("⬅️ Назад", callback_data="cat:home")])
+    return InlineKeyboardMarkup(btns)
+
+def catalog_class_picker(classes: list[dict], *, page: int, has_prev: bool, has_next: bool) -> InlineKeyboardMarkup:
+    btns: list[list[InlineKeyboardButton]] = []
+    for item in classes:
+        btns.append([InlineKeyboardButton(item["title_ru"], callback_data=f"cat:class:pick:{item['key']}")])
+    nav: list[InlineKeyboardButton] = []
+    if has_prev:
+        nav.append(InlineKeyboardButton("◀️", callback_data=f"cat:class:page:{page - 1}"))
+    if has_next:
+        nav.append(InlineKeyboardButton("▶️", callback_data=f"cat:class:page:{page + 1}"))
+    if nav:
+        btns.append(nav)
+    btns.append([InlineKeyboardButton("⬅️ Назад", callback_data="cat:home")])
+    return InlineKeyboardMarkup(btns)
 
 def back() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")]])

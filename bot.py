@@ -16,6 +16,7 @@ from settings import get_settings
 import db
 import engine
 import seed_import
+import rules
 from ux import show
 from keyboards import (
     main_menu,
@@ -24,7 +25,9 @@ from keyboards import (
     my_hub_back,
     pick_search_results,
     my_supplements_list,
-    catalog_page,
+    catalog_home,
+    catalog_list,
+    catalog_class_picker,
     curated_stacks_list,
     curated_stack_card,
     supplement_page,
@@ -49,6 +52,7 @@ log = logging.getLogger("supply-bot")
 WAITING_KEY = "waiting"
 MY_SEARCH_KEY = "my_search_q"
 CATALOG_PAGE_SIZE = 8
+CATALOG_CLASS_PAGE_SIZE = 8
 MY_PAGE_SIZE = 10
 CURATED_PAGE_SIZE = 10
 
@@ -756,7 +760,7 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
 
         if data == "menu:catalog":
-            await _show_catalog_page(update, context, conn, 0)
+            await _show_catalog_home(update, context, conn)
             return
 
         if data == "menu:curated":
@@ -800,9 +804,75 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 await show(update, context, "Не нашёл в каталоге.", back(), route="menu:add")
             return
 
-        if data.startswith("cat:page:"):
+        if data == "cat:home":
+            await _show_catalog_home(update, context, conn)
+            return
+
+        if data == "cat:mode:search":
+            context.user_data[WAITING_KEY] = "catalog_search"
+            await show(
+                update,
+                context,
+                "Напиши название (можно RU/EN), например: Омега-3 или Omega 3",
+                InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="cat:home")]]),
+                route="cat:mode:search",
+                payload={"mode": "home"},
+            )
+            return
+
+        if data == "cat:mode:evidence":
+            await _show_catalog_list(update, context, conn, tg_uid, {
+                "mode": "list",
+                "list_mode": "evidence",
+                "page": 0,
+                "query": "",
+                "class_key": "",
+            })
+            return
+
+        if data == "cat:mode:class":
+            await _show_catalog_class_picker(update, context, conn, 0)
+            return
+
+        if data.startswith("cat:class:page:"):
             page = int(data.split(":")[-1])
-            await _show_catalog_page(update, context, conn, page)
+            await _show_catalog_class_picker(update, context, conn, page)
+            return
+
+        if data.startswith("cat:class:pick:"):
+            class_key = data.split(":", 3)[-1]
+            await _show_catalog_list(update, context, conn, tg_uid, {
+                "mode": "list",
+                "list_mode": "class",
+                "page": 0,
+                "query": "",
+                "class_key": class_key,
+            })
+            return
+
+        if data == "cat:page:prev":
+            payload = await _load_catalog_payload(conn, tg_uid)
+            payload["page"] = max(0, int(payload.get("page") or 0) - 1)
+            await _show_catalog_list(update, context, conn, tg_uid, payload)
+            return
+
+        if data == "cat:page:next":
+            payload = await _load_catalog_payload(conn, tg_uid)
+            payload["page"] = int(payload.get("page") or 0) + 1
+            await _show_catalog_list(update, context, conn, tg_uid, payload)
+            return
+
+        if data == "cat:back":
+            payload = await _load_catalog_payload(conn, tg_uid)
+            if payload.get("mode") == "list":
+                await _show_catalog_list(update, context, conn, tg_uid, payload)
+            else:
+                await _show_catalog_home(update, context, conn)
+            return
+
+        if data.startswith("cat:open:"):
+            supplement_id = int(data.split(":")[-1])
+            await _show_catalog_card(update, context, conn, tg_uid, supplement_id)
             return
 
         if data.startswith("curated:page:"):
@@ -873,6 +943,43 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             supplement_id = int(data.split(":")[-1])
             back_route = context.user_data.get("last_route")
             await _show_supplement_page(update, context, conn, tg_uid, supplement_id, back_route=back_route)
+            return
+
+        if data.startswith("card:add:"):
+            supplement_id = int(data.split(":")[-1])
+            await db.add_user_supplement(conn, tg_uid, supplement_id)
+            await _show_catalog_card(update, context, conn, tg_uid, supplement_id)
+            return
+
+        if data.startswith("card:remove:"):
+            supplement_id = int(data.split(":")[-1])
+            await db.remove_user_supplement(conn, tg_uid, supplement_id)
+            await _show_catalog_card(update, context, conn, tg_uid, supplement_id)
+            return
+
+        if data.startswith("card:compat:"):
+            parts = data.split(":")
+            supplement_id = int(parts[2])
+            kind = "synergy"
+            page = 0
+            if len(parts) >= 5:
+                kind = parts[3]
+                page = int(parts[4])
+            await _show_supplement_compat(
+                update,
+                context,
+                conn,
+                supplement_id,
+                kind,
+                page,
+                back_data=f"cat:open:{supplement_id}",
+                route_prefix=f"card:compat:{supplement_id}",
+            )
+            return
+
+        if data.startswith("card:evidence:"):
+            supplement_id = int(data.split(":")[-1])
+            await _show_catalog_evidence(update, context, conn, tg_uid, supplement_id)
             return
 
         if data.startswith("supp:view:"):
@@ -1301,8 +1408,11 @@ async def render_view(
     conn = await db.connect(s.DB_PATH)
     try:
         if view == "catalog":
-            page = int(payload_data.get("page") or 0)
-            await _show_catalog_page(update, context, conn, page)
+            mode = payload_data.get("mode") or "home"
+            if mode == "list":
+                await _show_catalog_list(update, context, conn, tg_user_id, payload_data)
+            else:
+                await _show_catalog_home(update, context, conn)
             return
         if view == "mine_list":
             page = int(payload_data.get("page") or 0)
@@ -1386,6 +1496,15 @@ async def _render_route(
             target_message_id=target_message_id,
         )
         return
+    if route == "menu:catalog":
+        await _show_catalog_home(
+            update,
+            context,
+            conn,
+            target_chat_id=target_chat_id,
+            target_message_id=target_message_id,
+        )
+        return
     if route == "menu:todayplan":
         await _show_today_plan(update, context, conn, tg_uid)
         return
@@ -1402,8 +1521,41 @@ async def _render_route(
         )
         return
     if route.startswith("cat:page:"):
+        payload = {"mode": "list", "list_mode": "evidence", "page": int(route.split(":")[-1])}
+        await _show_catalog_list(
+            update,
+            context,
+            conn,
+            tg_uid,
+            payload,
+            target_chat_id=target_chat_id,
+            target_message_id=target_message_id,
+        )
+        return
+    if route == "cat:home":
+        await _show_catalog_home(
+            update,
+            context,
+            conn,
+            target_chat_id=target_chat_id,
+            target_message_id=target_message_id,
+        )
+        return
+    if route.startswith("cat:list"):
+        payload = await _load_catalog_payload(conn, tg_uid)
+        await _show_catalog_list(
+            update,
+            context,
+            conn,
+            tg_uid,
+            payload,
+            target_chat_id=target_chat_id,
+            target_message_id=target_message_id,
+        )
+        return
+    if route.startswith("cat:class:page:"):
         page = int(route.split(":")[-1])
-        await _show_catalog_page(
+        await _show_catalog_class_picker(
             update,
             context,
             conn,
@@ -1713,6 +1865,16 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             else:
                 context.user_data.pop(MY_SEARCH_KEY, None)
                 await _show_my_list(update, context, conn, tg_uid, 0)
+        elif waiting == "catalog_search":
+            context.user_data.pop(WAITING_KEY, None)
+            payload = {
+                "mode": "list",
+                "list_mode": "search",
+                "page": 0,
+                "query": txt,
+                "class_key": "",
+            }
+            await _show_catalog_list(update, context, conn, tg_uid, payload)
         elif waiting == "ai_goal":
             context.user_data.pop(WAITING_KEY, None)
             if not s.OPENAI_API_KEY:
@@ -1909,7 +2071,7 @@ async def _bootstrap() -> Application:
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(
         on_menu,
-        pattern=r"^(menu:|settings:|add_pick:|compat_pick:|cat:page:|curated:|supp:|my:|mine:)",
+        pattern=r"^(menu:|settings:|add_pick:|compat_pick:|cat:|curated:|supp:|card:|my:|mine:)",
     ))
     app.add_handler(CallbackQueryHandler(on_ai_add, pattern=r"^aiadd:"))
     app.add_handler(CallbackQueryHandler(on_checkin_action, pattern=r"^chk(apply|deny):"))
@@ -1924,7 +2086,49 @@ async def _bootstrap() -> Application:
 def build_app() -> Application:
     return asyncio.run(_bootstrap())
 
-async def _show_catalog_page(
+async def _show_catalog_home(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    conn,
+    *,
+    target_chat_id: int | None = None,
+    target_message_id: int | None = None,
+) -> None:
+    await show(
+        update,
+        context,
+        "📚 <b>Каталог БАДов</b>\nВыбери, как искать:",
+        catalog_home(),
+        route="cat:home",
+        payload={"mode": "home"},
+        target_chat_id=target_chat_id,
+        target_message_id=target_message_id,
+    )
+
+async def _load_catalog_payload(conn, tg_uid: int) -> dict:
+    view, payload = await db.get_user_last_view(conn, tg_uid)
+    if view != "catalog":
+        return {
+            "mode": "list",
+            "list_mode": "evidence",
+            "page": 0,
+            "query": "",
+            "class_key": "",
+        }
+    try:
+        payload_data = json.loads(payload) if payload else {}
+    except json.JSONDecodeError:
+        payload_data = {}
+    if not isinstance(payload_data, dict):
+        payload_data = {}
+    payload_data.setdefault("mode", "list")
+    payload_data.setdefault("list_mode", "evidence")
+    payload_data.setdefault("page", 0)
+    payload_data.setdefault("query", "")
+    payload_data.setdefault("class_key", "")
+    return payload_data
+
+async def _show_catalog_class_picker(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
     conn,
@@ -1934,20 +2138,215 @@ async def _show_catalog_page(
     target_message_id: int | None = None,
 ) -> None:
     page = max(page, 0)
+    classes = rules.CATALOG_CLASSES
+    start = page * CATALOG_CLASS_PAGE_SIZE
+    end = start + CATALOG_CLASS_PAGE_SIZE
+    sliced = classes[start:end]
+    await show(
+        update,
+        context,
+        "🎯 <b>Цели/классы</b>\nВыбери категорию:",
+        catalog_class_picker(
+            sliced,
+            page=page,
+            has_prev=page > 0,
+            has_next=end < len(classes),
+        ),
+        route=f"cat:class:page:{page}",
+        payload={"mode": "home"},
+        target_chat_id=target_chat_id,
+        target_message_id=target_message_id,
+    )
+
+async def _show_catalog_list(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    conn,
+    tg_uid: int,
+    payload: dict,
+    *,
+    target_chat_id: int | None = None,
+    target_message_id: int | None = None,
+) -> None:
+    list_mode = payload.get("list_mode") or "evidence"
+    page = max(int(payload.get("page") or 0), 0)
     offset = page * CATALOG_PAGE_SIZE
-    rows = await db.list_supplements_page(conn, offset=offset, limit=CATALOG_PAGE_SIZE + 1)
-    has_next = len(rows) > CATALOG_PAGE_SIZE
-    display_rows = rows[:CATALOG_PAGE_SIZE]
-    if not display_rows:
-        await show(update, context, "Каталог пуст. Похоже, сиды ещё не импортированы…", back(), route="menu:catalog")
+    query = str(payload.get("query") or "").strip()
+    class_key = str(payload.get("class_key") or "").strip()
+
+    if list_mode == "search":
+        total = await db.count_search_supplements(conn, query)
+        rows = await db.search_supplements(conn, query, limit=CATALOG_PAGE_SIZE, offset=offset)
+    elif list_mode == "class":
+        total = await db.count_supplements_by_class(conn, class_key)
+        rows = await db.list_supplements_by_class(conn, class_key, limit=CATALOG_PAGE_SIZE, offset=offset)
+    else:
+        total = await db.count_supplements(conn)
+        rows = await db.list_supplements_sorted(conn, "evidence", limit=CATALOG_PAGE_SIZE, offset=offset)
+        list_mode = "evidence"
+
+    if not rows:
+        if total == 0 and list_mode == "evidence":
+            await show(
+                update,
+                context,
+                "Каталог пуст. Похоже, сиды ещё не импортированы…",
+                catalog_home(),
+                route="cat:home",
+                payload={"mode": "home"},
+                target_chat_id=target_chat_id,
+                target_message_id=target_message_id,
+            )
+            return
+        await show(
+            update,
+            context,
+            "Ничего не найдено.",
+            catalog_home(),
+            route="cat:home",
+            payload={"mode": "home"},
+            target_chat_id=target_chat_id,
+            target_message_id=target_message_id,
+        )
         return
-    text = f"📚 <b>Каталог</b> (стр. {page + 1})"
+
+    total_pages = max(1, (total + CATALOG_PAGE_SIZE - 1) // CATALOG_PAGE_SIZE)
+    lines = ["📚 <b>Каталог</b>"]
+    if list_mode == "search":
+        lines.append(f"Поиск: «{query}»")
+    elif list_mode == "class":
+        lines.append(f"Класс: {rules.get_catalog_class_title(class_key)}")
+    else:
+        lines.append("Сортировка: по доказательности")
+    lines.append(f"Стр. {page + 1} из {total_pages}")
+
+    await show(
+        update,
+        context,
+        "\n".join(lines),
+        catalog_list(
+            rows,
+            has_prev=page > 0,
+            has_next=(offset + len(rows)) < total,
+        ),
+        route="cat:list",
+        payload={
+            "mode": "list",
+            "list_mode": list_mode,
+            "page": page,
+            "query": query,
+            "class_key": class_key,
+        },
+        target_chat_id=target_chat_id,
+        target_message_id=target_message_id,
+    )
+
+async def _show_catalog_card(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    conn,
+    tg_uid: int,
+    supplement_id: int,
+    *,
+    target_chat_id: int | None = None,
+    target_message_id: int | None = None,
+) -> None:
+    row = await db.get_supplement_by_id(conn, supplement_id)
+    if not row:
+        await show(update, context, "Не нашёл в каталоге.", back(), route="menu:catalog")
+        return
+    name_ru = str(row["name_ru"] or "").strip()
+    name_en = str(row["name_en"] or "").strip()
+    title = name_ru or name_en or row["name"]
+    if name_ru and name_en:
+        title = f"{name_ru} ({name_en})"
+    summary = (
+        row["summary_verified"]
+        or row["summary_ru"]
+        or row["summary_theoretical"]
+        or row["molecular_mechanisms"]
+        or row["mechanisms"]
+        or ""
+    )
+    summary = summary.strip() or "описание будет добавлено"
+
+    confidence = str(row["confidence"] or "").strip() or "неизвестно"
+    human_trials = str(row["human_trials_count_est"] or "").strip() or "неизвестно"
+    participants = str(row["participants_total_est"] or "").strip() or "неизвестно"
+    avg_effect = str(row["avg_effect_percent_est"] or "").strip() or "неизвестно"
+
+    text = (
+        f"💊 <b>{title}</b>\n\n"
+        f"Кратко: {summary}\n\n"
+        f"Доказательность: {confidence}\n"
+        f"Исследования на людях: {human_trials}\n"
+        f"Участников суммарно: {participants}\n"
+        f"Средний эффект: {avg_effect}"
+    )
+
+    in_my = await db.user_has_supplement(conn, tg_uid, int(row["id"]))
+    btns: list[list[InlineKeyboardButton]] = []
+    if in_my:
+        btns.append([InlineKeyboardButton("➖ Убрать из моих", callback_data=f"card:remove:{row['id']}")])
+    else:
+        btns.append([InlineKeyboardButton("➕ Добавить в мои", callback_data=f"card:add:{row['id']}")])
+    btns.append([InlineKeyboardButton("🧩 Совместимость", callback_data=f"card:compat:{row['id']}")])
+    btns.append([InlineKeyboardButton("📊 Доказательность", callback_data=f"card:evidence:{row['id']}")])
+    if in_my:
+        btns.append([InlineKeyboardButton("⚙️ Управление", callback_data=f"mine:open:{row['id']}")])
+    btns.append([InlineKeyboardButton("⬅️ Назад", callback_data="cat:back")])
+
+    payload = await _load_catalog_payload(conn, tg_uid)
     await show(
         update,
         context,
         text,
-        catalog_page(display_rows, page, has_prev=page > 0, has_next=has_next),
-        route=f"cat:page:{page}",
+        InlineKeyboardMarkup(btns),
+        route="cat:card",
+        payload=payload,
+        target_chat_id=target_chat_id,
+        target_message_id=target_message_id,
+    )
+
+async def _show_catalog_evidence(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    conn,
+    tg_uid: int,
+    supplement_id: int,
+    *,
+    target_chat_id: int | None = None,
+    target_message_id: int | None = None,
+) -> None:
+    row = await db.get_supplement_by_id(conn, supplement_id)
+    if not row:
+        await show(update, context, "Не нашёл в каталоге.", back(), route="menu:catalog")
+        return
+    title = row["name_ru"] or row["name_en"] or row["name"]
+    if row["name_ru"] and row["name_en"]:
+        title = f"{row['name_ru']} ({row['name_en']})"
+    confidence = str(row["confidence"] or "").strip() or "неизвестно"
+    human_trials = str(row["human_trials_count_est"] or "").strip() or "неизвестно"
+    participants = str(row["participants_total_est"] or "").strip() or "неизвестно"
+    avg_effect = str(row["avg_effect_percent_est"] or "").strip() or "неизвестно"
+
+    text = (
+        f"📊 <b>Доказательность</b>\n"
+        f"{title}\n\n"
+        f"Уверенность: {confidence}\n"
+        f"Исследования на людях: {human_trials}\n"
+        f"Участников суммарно: {participants}\n"
+        f"Средний эффект: {avg_effect}"
+    )
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"cat:open:{row['id']}")]])
+    payload = await _load_catalog_payload(conn, tg_uid)
+    await show(
+        update,
+        context,
+        text,
+        kb,
+        route="cat:evidence",
+        payload=payload,
         target_chat_id=target_chat_id,
         target_message_id=target_message_id,
     )

@@ -21,26 +21,44 @@ def _build_aliases(item: dict) -> list[str]:
         aliases.extend(item.get(key) or [])
     return aliases
 
+def _extract_evidence_fields(item: dict) -> dict[str, str]:
+    evidence = item.get("evidence") or {}
+    if not isinstance(evidence, dict):
+        evidence = {}
+    def _string(value: object) -> str:
+        return str(value).strip() if value is not None else ""
+    return {
+        "human_trials_count_est": _string(evidence.get("human_trials_count_est")),
+        "participants_total_est": _string(evidence.get("participants_total_est")),
+        "avg_effect_percent_est": _string(evidence.get("avg_effect_percent_est")),
+        "confidence": _string(evidence.get("confidence")),
+    }
+
 async def _import_rich(conn, supp_path: str, slug_to_id: dict[str, int]) -> None:
     pending_interactions: list[tuple[str, dict]] = []
     for item in _read_jsonl(supp_path):
         name_ru = item.get("name_ru")
         name_en = item.get("name_en")
         interaction_classes = item.get("interaction_classes") or []
+        aliases = _build_aliases(item)
+        evidence_fields = _extract_evidence_fields(item)
         payload = {
             "slug": item["slug"],
             "name": item.get("name") or name_ru or name_en or item["slug"],
             "name_ru": name_ru,
             "name_en": name_en,
+            "aliases": aliases,
             "summary_verified": item.get("summary_ru_verified") or "",
             "summary_theoretical": item.get("summary_ru_theoretical") or "",
             "molecular_mechanisms": item.get("molecular_mechanisms_ru") or "",
             "evidence_json": json.dumps(item.get("evidence") or {}, ensure_ascii=False),
+            **evidence_fields,
             "dose_ru": item.get("dose_ru") or "",
             "timing_ru": item.get("timing_ru") or "",
             "safety_ru": item.get("safety_ru") or "",
             "purchase_url": item.get("purchase_url") or "",
             "tags_json": json.dumps(item.get("tags") or [], ensure_ascii=False),
+            "tags": item.get("tags") or [],
             "interaction_classes": json.dumps(interaction_classes, ensure_ascii=False),
             "interaction_classes_json": json.dumps(interaction_classes, ensure_ascii=False),
             "payload_json": json.dumps(item, ensure_ascii=False),
@@ -48,7 +66,6 @@ async def _import_rich(conn, supp_path: str, slug_to_id: dict[str, int]) -> None
         sid = await db.upsert_supplement(conn, payload)
         slug_to_id[item["slug"]] = sid
 
-        aliases = _build_aliases(item)
         for extra in (name_ru, name_en, item.get("slug")):
             if extra:
                 aliases.append(extra)
@@ -133,14 +150,17 @@ async def _import(
             for item in _read_jsonl(supp_path):
                 name_ru = item.get("name_ru")
                 name_en = item.get("name_en")
+                aliases = _build_aliases(item)
                 payload = {
                     "slug": item["slug"],
                     "name": item.get("name") or name_ru or name_en or item["slug"],
                     "name_ru": name_ru,
                     "name_en": name_en,
+                    "aliases": aliases,
                     "summary_ru": item.get("summary_ru") or "",
                     "purchase_url": item.get("purchase_url") or "",
                     "tags_json": json.dumps(item.get("tags") or [], ensure_ascii=False),
+                    "tags": item.get("tags") or [],
                     "mechanisms": item.get("mechanisms_ru") or item.get("mechanisms") or "",
                     "evidence_grade": item.get("evidence_grade") or item.get("evidence") or "",
                     "safety_notes": item.get("safety_ru") or item.get("safety_notes") or "",
@@ -148,7 +168,7 @@ async def _import(
                 }
                 sid = await db.upsert_supplement(conn, payload)
                 slug_to_id[item["slug"]] = sid
-                await db.upsert_aliases(conn, sid, _build_aliases(item))
+                await db.upsert_aliases(conn, sid, aliases)
 
         if inter_path:
             for item in _read_jsonl(inter_path):

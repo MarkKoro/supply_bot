@@ -13,9 +13,11 @@ def normalize(text: str | None) -> str:
     if not text:
         return ""
     value = text.strip().lower().replace("ё", "е")
-    for ch in ("-", "_", ".", " ", "(", ")"):
-        value = value.replace(ch, "")
-    return value
+    value = re.sub(r"[-_.]", " ", value)
+    value = re.sub(r"([a-zа-я])(\d)", r"\1 \2", value, flags=re.IGNORECASE)
+    value = re.sub(r"(\d)([a-zа-я])", r"\1 \2", value, flags=re.IGNORECASE)
+    value = re.sub(r"\s+", " ", value)
+    return value.strip()
 
 # --- Compat helpers: work on all `aiosqlite` versions ---
 async def fetchone(conn: aiosqlite.Connection, sql: str, params: tuple = ()):
@@ -46,6 +48,15 @@ CREATE TABLE IF NOT EXISTS supplements (
   name          TEXT NOT NULL,
   name_ru       TEXT,
   name_en       TEXT,
+  aliases       TEXT DEFAULT '',
+  alias_norm    TEXT DEFAULT '',
+  human_trials_count_est TEXT DEFAULT '',
+  participants_total_est TEXT DEFAULT '',
+  avg_effect_percent_est TEXT DEFAULT '',
+  confidence    TEXT DEFAULT '',
+  tags          TEXT DEFAULT '',
+  goals         TEXT DEFAULT '',
+  rules_tags    TEXT DEFAULT '',
   summary_ru    TEXT,
   summary_verified TEXT,
   summary_theoretical TEXT,
@@ -67,6 +78,7 @@ CREATE TABLE IF NOT EXISTS supplements (
 
 CREATE INDEX IF NOT EXISTS idx_supplements_name ON supplements(name);
 CREATE INDEX IF NOT EXISTS idx_supplements_slug ON supplements(slug);
+CREATE INDEX IF NOT EXISTS idx_supplements_alias_norm ON supplements(alias_norm);
 
 CREATE TABLE IF NOT EXISTS supplement_aliases (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -222,6 +234,15 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     await _ensure_column(conn, "users", "last_message_id", "INTEGER NOT NULL DEFAULT 0")
     await _ensure_column(conn, "supplements", "name_ru", "TEXT")
     await _ensure_column(conn, "supplements", "name_en", "TEXT")
+    await _ensure_column(conn, "supplements", "aliases", "TEXT DEFAULT ''")
+    await _ensure_column(conn, "supplements", "alias_norm", "TEXT DEFAULT ''")
+    await _ensure_column(conn, "supplements", "human_trials_count_est", "TEXT DEFAULT ''")
+    await _ensure_column(conn, "supplements", "participants_total_est", "TEXT DEFAULT ''")
+    await _ensure_column(conn, "supplements", "avg_effect_percent_est", "TEXT DEFAULT ''")
+    await _ensure_column(conn, "supplements", "confidence", "TEXT DEFAULT ''")
+    await _ensure_column(conn, "supplements", "tags", "TEXT DEFAULT ''")
+    await _ensure_column(conn, "supplements", "goals", "TEXT DEFAULT ''")
+    await _ensure_column(conn, "supplements", "rules_tags", "TEXT DEFAULT ''")
     await _ensure_column(conn, "supplements", "summary_ru", "TEXT")
     await _ensure_column(conn, "supplements", "summary_verified", "TEXT")
     await _ensure_column(conn, "supplements", "summary_theoretical", "TEXT")
@@ -251,6 +272,21 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
         "UPDATE supplements SET interaction_classes_json='[]' WHERE interaction_classes_json IS NULL OR interaction_classes_json=''"
     )
     await conn.execute(
+        "UPDATE supplements SET aliases='' WHERE aliases IS NULL"
+    )
+    await conn.execute(
+        "UPDATE supplements SET alias_norm='' WHERE alias_norm IS NULL"
+    )
+    await conn.execute(
+        "UPDATE supplements SET tags='' WHERE tags IS NULL"
+    )
+    await conn.execute(
+        "UPDATE supplements SET goals='' WHERE goals IS NULL"
+    )
+    await conn.execute(
+        "UPDATE supplements SET rules_tags='' WHERE rules_tags IS NULL"
+    )
+    await conn.execute(
         "UPDATE users SET last_view='menu' WHERE last_view IS NULL OR last_view=''"
     )
     await conn.execute(
@@ -263,6 +299,8 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
         "UPDATE users SET last_message_id=0 WHERE last_message_id IS NULL"
     )
     await _backfill_alias_norm(conn)
+    await _backfill_supplement_alias_norm(conn)
+    await _backfill_supplement_evidence(conn)
 
 async def _ensure_aliases_table(conn: aiosqlite.Connection) -> None:
     table = await fetchone(
@@ -563,6 +601,45 @@ async def _backfill_alias_norm(conn: aiosqlite.Connection) -> None:
         alias_norm = normalize(row["alias_value"])
         await conn.execute("UPDATE supplement_aliases SET alias_norm=? WHERE id=?", (alias_norm, int(row["id"])))
 
+async def _backfill_supplement_alias_norm(conn: aiosqlite.Connection) -> None:
+    rows = await fetchall(conn, "SELECT id, slug, name_ru, name_en, aliases FROM supplements")
+    for row in rows:
+        alias_norm = await _build_supplement_alias_norm(conn, row)
+        await conn.execute(
+            "UPDATE supplements SET alias_norm=? WHERE id=?",
+            (alias_norm, int(row["id"])),
+        )
+
+async def _backfill_supplement_evidence(conn: aiosqlite.Connection) -> None:
+    rows = await fetchall(
+        conn,
+        """SELECT id, evidence_json, payload_json, human_trials_count_est,
+                  participants_total_est, avg_effect_percent_est, confidence
+           FROM supplements""",
+    )
+    for row in rows:
+        if (
+            str(row["human_trials_count_est"] or "").strip()
+            or str(row["participants_total_est"] or "").strip()
+            or str(row["avg_effect_percent_est"] or "").strip()
+            or str(row["confidence"] or "").strip()
+        ):
+            continue
+        evidence = _extract_evidence_fields(row["evidence_json"], row["payload_json"])
+        await conn.execute(
+            """UPDATE supplements
+               SET human_trials_count_est=?, participants_total_est=?,
+                   avg_effect_percent_est=?, confidence=?
+               WHERE id=?""",
+            (
+                evidence["human_trials_count_est"],
+                evidence["participants_total_est"],
+                evidence["avg_effect_percent_est"],
+                evidence["confidence"],
+                int(row["id"]),
+            ),
+        )
+
 # users
 async def get_or_create_user(conn: aiosqlite.Connection, tg_user_id: int, tz_name: str | None = "") -> int:
     row = await fetchone(conn, "SELECT id FROM users WHERE tg_user_id=?", (tg_user_id,))
@@ -668,6 +745,56 @@ async def get_user_local_day(conn: aiosqlite.Connection, user_id: int) -> str:
     return local_date(tz_name or None)
 
 # catalog
+def _extract_evidence_fields(evidence_json: str | None, payload_json: str | None) -> dict[str, str]:
+    data: dict = {}
+    if evidence_json:
+        try:
+            parsed = json.loads(evidence_json)
+        except json.JSONDecodeError:
+            parsed = {}
+        if isinstance(parsed, dict):
+            data.update(parsed)
+    if payload_json:
+        try:
+            payload = json.loads(payload_json)
+        except json.JSONDecodeError:
+            payload = {}
+        if isinstance(payload, dict):
+            evidence = payload.get("evidence")
+            if isinstance(evidence, dict):
+                data.update(evidence)
+    def _string(value: object) -> str:
+        return str(value).strip() if value is not None else ""
+    return {
+        "human_trials_count_est": _string(data.get("human_trials_count_est")),
+        "participants_total_est": _string(data.get("participants_total_est")),
+        "avg_effect_percent_est": _string(data.get("avg_effect_percent_est")),
+        "confidence": _string(data.get("confidence")),
+    }
+
+async def _build_supplement_alias_norm(conn: aiosqlite.Connection, row) -> str:
+    parts: list[str] = []
+    for field in ("name_ru", "name_en", "slug"):
+        value = str(row[field] or "").strip() if field in row.keys() else ""
+        if value:
+            parts.append(value)
+    aliases_raw = str(row["aliases"] or "").strip() if "aliases" in row.keys() else ""
+    if aliases_raw:
+        try:
+            aliases = json.loads(aliases_raw)
+        except json.JSONDecodeError:
+            aliases = [item.strip() for item in aliases_raw.split(",")]
+        if isinstance(aliases, (list, tuple)):
+            parts.extend([str(item) for item in aliases if item])
+    alias_rows = await fetchall(
+        conn,
+        "SELECT alias_raw FROM supplement_aliases WHERE supplement_id=?",
+        (int(row["id"]),),
+    )
+    parts.extend([str(item["alias_raw"] or "") for item in alias_rows])
+    normalized = [normalize(part) for part in parts if part]
+    return " ".join([part for part in normalized if part]).strip()
+
 async def upsert_supplement(conn: aiosqlite.Connection, s: dict) -> int:
     name_ru = s.get("name_ru")
     name_en = s.get("name_en")
@@ -678,17 +805,35 @@ async def upsert_supplement(conn: aiosqlite.Connection, s: dict) -> int:
         display_name = name_ru
     elif name_en:
         display_name = name_en
+    aliases_raw = s.get("aliases") or s.get("aliases_json") or ""
+    if isinstance(aliases_raw, (list, tuple)):
+        aliases_raw = json.dumps(list(aliases_raw), ensure_ascii=False)
+    tags_raw = s.get("tags") or ""
+    if isinstance(tags_raw, (list, tuple)):
+        tags_raw = " ".join([str(item) for item in tags_raw if item])
+    evidence_fields = _extract_evidence_fields(s.get("evidence_json"), s.get("payload_json"))
     await conn.execute(
         """INSERT INTO supplements(
-          slug,name,name_ru,name_en,summary_ru,summary_verified,summary_theoretical,molecular_mechanisms,
-          evidence_json,dose_ru,timing_ru,safety_ru,purchase_url,tags_json,mechanisms,evidence_grade,
-          safety_notes,interaction_classes,interaction_classes_json,payload_json,is_active
+          slug,name,name_ru,name_en,aliases,alias_norm,human_trials_count_est,participants_total_est,
+          avg_effect_percent_est,confidence,tags,goals,rules_tags,summary_ru,summary_verified,
+          summary_theoretical,molecular_mechanisms,evidence_json,dose_ru,timing_ru,safety_ru,purchase_url,
+          tags_json,mechanisms,evidence_grade,safety_notes,interaction_classes,interaction_classes_json,
+          payload_json,is_active
         )
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(slug) DO UPDATE SET
           name=excluded.name,
           name_ru=excluded.name_ru,
           name_en=excluded.name_en,
+          aliases=excluded.aliases,
+          alias_norm=excluded.alias_norm,
+          human_trials_count_est=excluded.human_trials_count_est,
+          participants_total_est=excluded.participants_total_est,
+          avg_effect_percent_est=excluded.avg_effect_percent_est,
+          confidence=excluded.confidence,
+          tags=excluded.tags,
+          goals=excluded.goals,
+          rules_tags=excluded.rules_tags,
           summary_ru=excluded.summary_ru,
           summary_verified=excluded.summary_verified,
           summary_theoretical=excluded.summary_theoretical,
@@ -712,6 +857,15 @@ async def upsert_supplement(conn: aiosqlite.Connection, s: dict) -> int:
             display_name,
             name_ru,
             name_en,
+            aliases_raw,
+            s.get("alias_norm") or "",
+            s.get("human_trials_count_est") or evidence_fields["human_trials_count_est"],
+            s.get("participants_total_est") or evidence_fields["participants_total_est"],
+            s.get("avg_effect_percent_est") or evidence_fields["avg_effect_percent_est"],
+            s.get("confidence") or evidence_fields["confidence"],
+            tags_raw,
+            s.get("goals") or "",
+            s.get("rules_tags") or "",
             s.get("summary_ru"),
             s.get("summary_verified"),
             s.get("summary_theoretical"),
@@ -732,7 +886,12 @@ async def upsert_supplement(conn: aiosqlite.Connection, s: dict) -> int:
         ),
     )
     await conn.commit()
-    row = await fetchone(conn, "SELECT id FROM supplements WHERE slug=?", (s["slug"],))
+    row = await fetchone(conn, "SELECT * FROM supplements WHERE slug=?", (s["slug"],))
+    alias_norm = s.get("alias_norm")
+    if not alias_norm:
+        alias_norm = await _build_supplement_alias_norm(conn, row)
+        await conn.execute("UPDATE supplements SET alias_norm=? WHERE id=?", (alias_norm, int(row["id"])))
+        await conn.commit()
     return int(row["id"])
 
 async def get_supplement_by_slug(conn: aiosqlite.Connection, slug: str):
@@ -860,30 +1019,94 @@ async def get_interactions_for_supplement(conn: aiosqlite.Connection, sid: int) 
 
     return interactions
 
-async def search_supplements(conn: aiosqlite.Connection, q: str, limit: int = 10):
+async def search_supplements(
+    conn: aiosqlite.Connection,
+    q: str,
+    limit: int = 10,
+    offset: int = 0,
+):
     if not q or not q.strip():
         return []
     q_norm = normalize(q)
-    q_like = f"%{q.strip()}%"
+    q_like = f"%{q_norm}%"
     return await fetchall(
         conn,
-        """WITH ranked AS (
-            SELECT s.id AS sid, 0 AS rank
-            FROM supplements s
-            JOIN supplement_aliases a ON a.supplement_id=s.id
-            WHERE a.alias_norm=?
-            UNION ALL
-            SELECT s.id AS sid, 1 AS rank
-            FROM supplements s
-            WHERE s.name LIKE ? OR s.slug LIKE ? OR s.name_ru LIKE ? OR s.name_en LIKE ?
-        )
-        SELECT s.* FROM ranked r
-        JOIN supplements s ON s.id=r.sid
-        GROUP BY s.id
-        ORDER BY MIN(r.rank), s.name
-        LIMIT ?""",
-        (q_norm, q_like, q_like, q_like, q_like, limit),
+        """SELECT *
+           FROM supplements
+           WHERE is_active=1 AND alias_norm LIKE ?
+           ORDER BY human_trials_count_est DESC, participants_total_est DESC, name_ru COLLATE NOCASE
+           LIMIT ? OFFSET ?""",
+        (q_like, limit, offset),
     )
+
+async def count_search_supplements(conn: aiosqlite.Connection, q: str) -> int:
+    if not q or not q.strip():
+        return 0
+    q_norm = normalize(q)
+    q_like = f"%{q_norm}%"
+    row = await fetchone(
+        conn,
+        "SELECT COUNT(*) AS total FROM supplements WHERE is_active=1 AND alias_norm LIKE ?",
+        (q_like,),
+    )
+    return int(row["total"] or 0)
+
+async def list_supplements_sorted(
+    conn: aiosqlite.Connection,
+    sort_key: str,
+    limit: int,
+    offset: int = 0,
+):
+    if sort_key == "alpha":
+        order = "name_ru COLLATE NOCASE"
+    elif sort_key == "effect":
+        order = "avg_effect_percent_est DESC, name_ru COLLATE NOCASE"
+    else:
+        order = "human_trials_count_est DESC, participants_total_est DESC"
+    return await fetchall(
+        conn,
+        f"SELECT * FROM supplements WHERE is_active=1 ORDER BY {order} LIMIT ? OFFSET ?",
+        (limit, offset),
+    )
+
+async def list_supplements_by_class(
+    conn: aiosqlite.Connection,
+    class_key: str,
+    limit: int,
+    offset: int = 0,
+):
+    token = class_key.strip().lower()
+    if not token:
+        return []
+    like_json = f'%"{token}"%'
+    like_plain = f"%{token}%"
+    return await fetchall(
+        conn,
+        """SELECT * FROM supplements
+           WHERE is_active=1 AND (tags_json LIKE ? OR tags LIKE ? OR goals LIKE ? OR rules_tags LIKE ?)
+           ORDER BY name_ru COLLATE NOCASE
+           LIMIT ? OFFSET ?""",
+        (like_json, like_plain, like_plain, like_plain, limit, offset),
+    )
+
+async def count_supplements(conn: aiosqlite.Connection) -> int:
+    row = await fetchone(conn, "SELECT COUNT(*) AS total FROM supplements WHERE is_active=1")
+    return int(row["total"] or 0)
+
+async def count_supplements_by_class(conn: aiosqlite.Connection, class_key: str) -> int:
+    token = class_key.strip().lower()
+    if not token:
+        return 0
+    like_json = f'%"{token}"%'
+    like_plain = f"%{token}%"
+    row = await fetchone(
+        conn,
+        """SELECT COUNT(*) AS total
+           FROM supplements
+           WHERE is_active=1 AND (tags_json LIKE ? OR tags LIKE ? OR goals LIKE ? OR rules_tags LIKE ?)""",
+        (like_json, like_plain, like_plain, like_plain),
+    )
+    return int(row["total"] or 0)
 
 async def upsert_aliases(conn: aiosqlite.Connection, supplement_id: int, aliases: list[str]) -> None:
     if not aliases:
@@ -922,7 +1145,16 @@ async def upsert_aliases(conn: aiosqlite.Connection, supplement_id: int, aliases
                    VALUES(?,?,?)""",
                 (supplement_id, alias_raw, alias_norm),
             )
+    await conn.execute(
+        "UPDATE supplements SET aliases=? WHERE id=?",
+        (json.dumps(list({str(a).strip() for a in aliases if str(a).strip()}), ensure_ascii=False), supplement_id),
+    )
     await conn.commit()
+    row = await fetchone(conn, "SELECT * FROM supplements WHERE id=?", (supplement_id,))
+    if row:
+        alias_norm = await _build_supplement_alias_norm(conn, row)
+        await conn.execute("UPDATE supplements SET alias_norm=? WHERE id=?", (alias_norm, supplement_id))
+        await conn.commit()
 
 async def list_supplements_page(conn: aiosqlite.Connection, offset: int, limit: int = 10):
     return await fetchall(
@@ -1100,11 +1332,22 @@ async def add_user_supplement(conn: aiosqlite.Connection, tg_user_id: int, suppl
              is_active=1""",
         (user_id, supplement_id, utc_now_iso()),
     )
+    await conn.execute(
+        """INSERT OR IGNORE INTO user_supp_settings(
+             user_id, supplement_id, dose_text, reminder_time, reminder_enabled,
+             taken_date, skip_date, updated_at
+           ) VALUES(?,?,?,?,?,?,?,?)""",
+        (user_id, supplement_id, "", "", 0, "", "", utc_now_iso()),
+    )
     await conn.commit()
 
 async def remove_user_supplement(conn: aiosqlite.Connection, tg_user_id: int, supplement_id: int) -> None:
     user_id = await get_or_create_user(conn, tg_user_id)
     await conn.execute("DELETE FROM user_supplements WHERE user_id=? AND supplement_id=?", (user_id, supplement_id))
+    await conn.execute(
+        "DELETE FROM user_supp_settings WHERE user_id=? AND supplement_id=?",
+        (user_id, supplement_id),
+    )
     await conn.commit()
 
 async def get_user_supplement(conn: aiosqlite.Connection, tg_user_id: int, supplement_id: int):

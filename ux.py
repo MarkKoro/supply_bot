@@ -13,8 +13,14 @@ def _payload_from_route(route: str) -> dict | None:
         return {}
     if route == "menu:settings":
         return {}
+    if route == "cat:home":
+        return {"mode": "home"}
+    if route.startswith("cat:list"):
+        return {"mode": "list", "page": 0}
+    if route.startswith("cat:class:page:"):
+        return {"mode": "home"}
     if route.startswith("cat:page:"):
-        return {"page": int(route.split(":")[-1])}
+        return {"mode": "list", "page": int(route.split(":")[-1])}
     if route.startswith("my:list:"):
         return {"page": int(route.split(":")[-1])}
     if route.startswith("my:open:"):
@@ -69,7 +75,7 @@ def _set_last_menu(
 
 def _view_payload_from_route(route: str, payload: dict | None) -> tuple[str, dict] | None:
     if payload is not None and isinstance(payload, dict):
-        if route.startswith("cat:page:"):
+        if route.startswith("cat:"):
             return ("catalog", payload)
         if route.startswith("mine:list:"):
             return ("mine_list", payload)
@@ -79,8 +85,8 @@ def _view_payload_from_route(route: str, payload: dict | None) -> tuple[str, dic
             return ("menu", payload)
     if route == "menu:home" or route.startswith("menu:"):
         return ("menu", {})
-    if route.startswith("cat:page:"):
-        return ("catalog", {"page": int(route.split(":")[-1])})
+    if route.startswith("cat:"):
+        return ("catalog", _payload_from_route(route) or {})
     if route.startswith("mine:list:"):
         return ("mine_list", {"page": int(route.split(":")[-1])})
     if route.startswith("mine:hub:") or route.startswith("mine:open:"):

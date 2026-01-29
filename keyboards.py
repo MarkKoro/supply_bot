@@ -6,7 +6,7 @@ import tz
 def main_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("➕ Добавить добавку", callback_data="menu:add")],
-        [InlineKeyboardButton("📚 Каталог БАДов", callback_data="menu:catalog")],
+        [InlineKeyboardButton("📚 Каталог БАДов", callback_data="catalog")],
         [InlineKeyboardButton("🧠 Готовые стеки", callback_data="menu:curated")],
         [InlineKeyboardButton("💊 Мои БАДы", callback_data="menu:my")],
         [InlineKeyboardButton("🧩 Совместимость", callback_data="menu:compat")],
@@ -14,6 +14,22 @@ def main_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🤖 AI-подбор", callback_data="menu:ai")],
         [InlineKeyboardButton("⚙️ Настройки", callback_data="menu:settings")],
     ])
+
+def catalog_kb(items: list[dict], page: int, pages: int) -> InlineKeyboardMarkup:
+    btns: list[list[InlineKeyboardButton]] = []
+    for item in items:
+        title = item.get("name_ru") or item.get("name_en") or "Без названия"
+        btns.append([InlineKeyboardButton(f"• {title}", callback_data=f"cat:open:{item['id']}:{page}")])
+    nav: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️", callback_data=f"cat:page:{page - 1}"))
+    nav.append(InlineKeyboardButton(f"Стр. {page + 1}/{pages}", callback_data="noop"))
+    if page < pages - 1:
+        nav.append(InlineKeyboardButton("➡️", callback_data=f"cat:page:{page + 1}"))
+    if nav:
+        btns.append(nav)
+    btns.append([InlineKeyboardButton("⬅️ Назад", callback_data="main")])
+    return InlineKeyboardMarkup(btns)
 
 def catalog_home() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([

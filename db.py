@@ -1118,8 +1118,37 @@ async def upsert_supplement(conn: aiosqlite.Connection, s: dict) -> int:
 async def get_supplement_by_slug(conn: aiosqlite.Connection, slug: str):
     return await fetchone(conn, "SELECT * FROM supplements WHERE slug=?", (slug,))
 
-async def get_supplement_by_id(conn: aiosqlite.Connection, sid: int):
-    return await fetchone(conn, "SELECT * FROM supplements WHERE id=?", (sid,))
+async def get_supplement_by_id(conn: aiosqlite.Connection, supplement_id: int) -> dict | None:
+    row = await fetchone(conn, "SELECT * FROM supplements WHERE id=?", (supplement_id,))
+    if not row:
+        return None
+    return dict(row)
+
+async def list_supplements(
+    conn: aiosqlite.Connection,
+    page: int,
+    page_size: int = 10,
+) -> tuple[list[dict], int]:
+    page = max(int(page), 0)
+    page_size = max(int(page_size), 1)
+    offset = page * page_size
+    total_row = await fetchone(
+        conn,
+        "SELECT COUNT(*) AS total FROM supplements WHERE is_active=1",
+    )
+    total_count = int(total_row["total"]) if total_row else 0
+    rows = await fetchall(
+        conn,
+        """SELECT id, name_ru, name_en, slug,
+                  human_trials_count_est, participants_total_est, avg_effect_percent_est,
+                  confidence, evidence_grade
+           FROM supplements
+           WHERE is_active=1
+           ORDER BY COALESCE(NULLIF(name_ru, ''), NULLIF(name_en, ''), name) COLLATE NOCASE, id
+           LIMIT ? OFFSET ?""",
+        (page_size, offset),
+    )
+    return ([dict(row) for row in rows], total_count)
 
 async def list_supplements_by_ids(conn: aiosqlite.Connection, ids: list[int]) -> list[aiosqlite.Row]:
     if not ids:

@@ -28,17 +28,45 @@ def catalog_kb(items: list[dict], page: int, pages: int) -> InlineKeyboardMarkup
         nav.append(InlineKeyboardButton("➡️", callback_data=f"cat:page:{page + 1}"))
     if nav:
         btns.append(nav)
+    btns.append([InlineKeyboardButton("🔎 Поиск", callback_data="cat:search")])
     btns.append([InlineKeyboardButton("⬅️ Назад", callback_data="main")])
     return InlineKeyboardMarkup(btns)
 
 def catalog_home() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔎 Поиск", callback_data="cat:mode:search")],
+        [InlineKeyboardButton("🔎 Поиск", callback_data="cat:search")],
         [InlineKeyboardButton("🧠 По доказательности", callback_data="cat:mode:evidence")],
         [InlineKeyboardButton("🎯 По цели/классу", callback_data="cat:mode:class")],
         [InlineKeyboardButton("💊 Мои БАДы", callback_data="menu:my")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")],
     ])
+
+def catalog_search_results(
+    rows: list[dict],
+    *,
+    page: int,
+    has_prev: bool,
+    has_next: bool,
+    return_page: int,
+) -> InlineKeyboardMarkup:
+    btns: list[list[InlineKeyboardButton]] = []
+    for item in rows:
+        title = item.get("name_ru") or item.get("name_en") or item.get("name") or "Без названия"
+        btns.append([InlineKeyboardButton(f"• {title}", callback_data=f"cat:sopen:{item['id']}:{page}")])
+    nav: list[InlineKeyboardButton] = []
+    if has_prev:
+        nav.append(InlineKeyboardButton("⬅️", callback_data=f"cat:sres:{page - 1}"))
+    if has_next:
+        nav.append(InlineKeyboardButton("➡️", callback_data=f"cat:sres:{page + 1}"))
+    if nav:
+        btns.append(nav)
+    btns.append(
+        [
+            InlineKeyboardButton("🔎 Новый поиск", callback_data="cat:search"),
+            InlineKeyboardButton("⬅️ В каталог", callback_data=f"cat:page:{return_page}"),
+        ]
+    )
+    return InlineKeyboardMarkup(btns)
 
 def catalog_list(rows, has_prev: bool, has_next: bool) -> InlineKeyboardMarkup:
     btns = []

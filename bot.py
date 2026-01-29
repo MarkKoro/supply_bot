@@ -27,6 +27,7 @@ from keyboards import (
     catalog_kb,
     catalog_home,
     catalog_list,
+    catalog_search_results,
     catalog_class_picker,
     curated_stacks_list,
     curated_stack_card,
@@ -159,7 +160,7 @@ async def _render_ai_suggestions(
             name = str(cand.get("name") or "").strip()
             if not name:
                 continue
-            rows = await db.search_supplements(conn, name, limit=1)
+            rows, _ = await db.search_supplements(conn, name, page=0, page_size=1)
             if rows:
                 found.append({"row": rows[0], "cand": cand})
             else:
@@ -321,7 +322,7 @@ async def _render_checkin_plan(
         name = str(change.get("supplement_name") or "").strip()
         if not name:
             continue
-        rows = await db.search_supplements(conn, name, limit=1)
+        rows, _ = await db.search_supplements(conn, name, page=0, page_size=1)
         if rows:
             found_map[idx] = int(rows[0]["id"])
         else:
@@ -815,15 +816,22 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await _show_catalog_home(update, context, conn)
             return
 
-        if data == "cat:mode:search":
-            context.user_data[WAITING_KEY] = "catalog_search"
-            await show(
+        if data in {"cat:search", "cat:mode:search"}:
+            _, _, ui_payload = await db.get_ui_state(conn, tg_uid)
+            try:
+                payload_data = json.loads(ui_payload) if ui_payload else {}
+            except json.JSONDecodeError:
+                payload_data = {}
+            if not isinstance(payload_data, dict):
+                payload_data = {}
+            return_page = payload_data.get("return_page")
+            if return_page is None:
+                return_page = payload_data.get("page", 0)
+            await _show_catalog_search_prompt(
                 update,
                 context,
-                "Напиши название (можно RU/EN), например: Омега-3 или Omega 3",
-                InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="cat:home")]]),
-                route="cat:mode:search",
-                payload={"mode": "home"},
+                conn,
+                return_page=int(return_page or 0),
             )
             return
 
@@ -867,6 +875,60 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             payload = await _load_catalog_payload(conn, tg_uid)
             payload["page"] = int(payload.get("page") or 0) + 1
             await _show_catalog_list(update, context, conn, tg_uid, payload)
+            return
+
+        if data.startswith("cat:sres:"):
+            page = max(int(data.split(":")[-1]), 0)
+            _, _, ui_payload = await db.get_ui_state(conn, tg_uid)
+            try:
+                payload_data = json.loads(ui_payload) if ui_payload else {}
+            except json.JSONDecodeError:
+                payload_data = {}
+            if not isinstance(payload_data, dict):
+                payload_data = {}
+            query = str(payload_data.get("query") or "").strip()
+            return_page = int(payload_data.get("return_page") or 0)
+            if not query:
+                await _show_catalog_search_prompt(
+                    update,
+                    context,
+                    conn,
+                    return_page=return_page,
+                )
+                return
+            await render_search_results(
+                update,
+                context,
+                conn,
+                tg_uid=tg_uid,
+                query=query,
+                page=page,
+                return_page=return_page,
+            )
+            return
+
+        if data.startswith("cat:sopen:"):
+            parts = data.split(":")
+            if len(parts) >= 4:
+                supplement_id = int(parts[2])
+                page = max(int(parts[3]), 0)
+                _, _, ui_payload = await db.get_ui_state(conn, tg_uid)
+                try:
+                    payload_data = json.loads(ui_payload) if ui_payload else {}
+                except json.JSONDecodeError:
+                    payload_data = {}
+                if not isinstance(payload_data, dict):
+                    payload_data = {}
+                query = str(payload_data.get("query") or "").strip()
+                await render_supplement_card(
+                    update,
+                    context,
+                    conn,
+                    supplement_id,
+                    page,
+                    return_mode="search",
+                    search_query=query or None,
+                )
             return
 
         if data == "cat:back":
@@ -1023,6 +1085,36 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         conn,
                         supplement_id,
                         return_page,
+                        show_added=True,
+                    )
+                    return
+
+        if data.startswith("mysupp:add:") and ":retsearch:" in data:
+            parts = data.split(":")
+            if len(parts) >= 5:
+                try:
+                    supplement_id = int(parts[2])
+                    return_page = int(parts[4])
+                except ValueError:
+                    supplement_id = None
+                if supplement_id is not None:
+                    _, _, ui_payload = await db.get_ui_state(conn, tg_uid)
+                    try:
+                        payload_data = json.loads(ui_payload) if ui_payload else {}
+                    except json.JSONDecodeError:
+                        payload_data = {}
+                    if not isinstance(payload_data, dict):
+                        payload_data = {}
+                    query = str(payload_data.get("query") or "").strip()
+                    await db.add_user_supplement(conn, tg_uid, supplement_id)
+                    await render_supplement_card(
+                        update,
+                        context,
+                        conn,
+                        supplement_id,
+                        return_page,
+                        return_mode="search",
+                        search_query=query or None,
                         show_added=True,
                     )
                     return
@@ -1460,12 +1552,22 @@ async def render_view(
             page = int(payload_data.get("page") or 0)
             await render_catalog(update, context, conn, page)
             return
-        if view == "supp_card":
-            supplement_id = payload_data.get("id")
-            return_page = int(payload_data.get("return_page") or 0)
-            if supplement_id is not None:
-                await render_supplement_card(update, context, conn, int(supplement_id), return_page)
-                return
+    if view == "supp_card":
+        supplement_id = payload_data.get("id")
+        return_page = int(payload_data.get("return_page") or 0)
+        return_mode = payload_data.get("return_mode") or "catalog"
+        search_query = payload_data.get("query")
+        if supplement_id is not None:
+            await render_supplement_card(
+                update,
+                context,
+                conn,
+                int(supplement_id),
+                return_page,
+                return_mode=return_mode,
+                search_query=search_query,
+            )
+            return
         if view == "mine_list":
             page = int(payload_data.get("page") or 0)
             await _show_my_list(update, context, conn, tg_user_id, page)
@@ -1517,6 +1619,8 @@ async def _render_route(
         if isinstance(payload, dict):
             supplement_id = payload.get("id")
             return_page = int(payload.get("return_page") or 0)
+            return_mode = payload.get("return_mode") or "catalog"
+            search_query = payload.get("query")
             if supplement_id is not None:
                 await render_supplement_card(
                     update,
@@ -1524,10 +1628,50 @@ async def _render_route(
                     conn,
                     int(supplement_id),
                     return_page,
+                    return_mode=return_mode,
+                    search_query=search_query,
                     target_chat_id=target_chat_id,
                     target_message_id=target_message_id,
                 )
                 return
+    if route == "cat_search_wait":
+        return_page = int(payload.get("return_page") or 0) if isinstance(payload, dict) else 0
+        await _show_catalog_search_prompt(
+            update,
+            context,
+            conn,
+            return_page=return_page,
+            target_chat_id=target_chat_id,
+            target_message_id=target_message_id,
+        )
+        return
+    if route == "cat_search_results":
+        if isinstance(payload, dict):
+            query = str(payload.get("query") or "").strip()
+            page = int(payload.get("page") or 0)
+            return_page = int(payload.get("return_page") or 0)
+            if not query:
+                await _show_catalog_search_prompt(
+                    update,
+                    context,
+                    conn,
+                    return_page=return_page,
+                    target_chat_id=target_chat_id,
+                    target_message_id=target_message_id,
+                )
+                return
+            await render_search_results(
+                update,
+                context,
+                conn,
+                tg_uid=tg_uid,
+                query=query,
+                page=page,
+                return_page=return_page,
+                target_chat_id=target_chat_id,
+                target_message_id=target_message_id,
+            )
+            return
     if route == "menu:settings":
         await show(
             update,
@@ -1857,6 +2001,36 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             pass
         return
     txt = update.message.text.strip()
+    s = context.application.bot_data["settings"]
+    tg_uid = update.effective_user.id
+    conn = await db.connect(s.DB_PATH)
+    try:
+        ui_message_id, ui_screen, ui_payload = await db.get_ui_state(conn, tg_uid)
+        if ui_screen == "cat_search_wait":
+            try:
+                payload_data = json.loads(ui_payload) if ui_payload else {}
+            except json.JSONDecodeError:
+                payload_data = {}
+            if not isinstance(payload_data, dict):
+                payload_data = {}
+            return_page = int(payload_data.get("return_page") or 0)
+            await render_search_results(
+                update,
+                context,
+                conn,
+                tg_uid=tg_uid,
+                query=txt,
+                page=0,
+                return_page=return_page,
+                target_message_id=ui_message_id,
+            )
+            try:
+                await update.message.delete()
+            except Exception:
+                pass
+            return
+    finally:
+        await conn.close()
     waiting = context.user_data.get(WAITING_KEY)
     if waiting and waiting.startswith(("mysupp:set_dose:", "mysupp:rem_add:")):
         _, _, supplement_id_text = waiting.split(":", 2)
@@ -1917,7 +2091,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
 
         if waiting == "add_query":
-            rows = await db.search_supplements(conn, txt, limit=10)
+            rows, _ = await db.search_supplements(conn, txt, page=0, page_size=10)
             if not rows:
                 await show(update, context, "Не нашёл в каталоге.", back(), route="menu:add")
             else:
@@ -1931,7 +2105,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             context.user_data.pop(WAITING_KEY, None)
 
         elif waiting == "compat_query":
-            rows = await db.search_supplements(conn, txt, limit=10)
+            rows, _ = await db.search_supplements(conn, txt, page=0, page_size=10)
             if not rows:
                 await show(update, context, "Не нашёл в каталоге.", back(), route="menu:compat")
             else:
@@ -1945,7 +2119,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             context.user_data.pop(WAITING_KEY, None)
 
         elif waiting == "mysupp_add_query":
-            rows = await db.search_supplements(conn, txt, limit=10)
+            rows, _ = await db.search_supplements(conn, txt, page=0, page_size=10)
             if not rows:
                 await show(update, context, "Не нашёл в каталоге.", my_list_back(), route="mysupp:add")
             else:
@@ -1957,16 +2131,6 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     route="mysupp:add",
                 )
             context.user_data.pop(WAITING_KEY, None)
-        elif waiting == "catalog_search":
-            context.user_data.pop(WAITING_KEY, None)
-            payload = {
-                "mode": "list",
-                "list_mode": "search",
-                "page": 0,
-                "query": txt,
-                "class_key": "",
-            }
-            await _show_catalog_list(update, context, conn, tg_uid, payload)
         elif waiting == "ai_goal":
             context.user_data.pop(WAITING_KEY, None)
             if not s.OPENAI_API_KEY:
@@ -2269,8 +2433,7 @@ async def _show_catalog_list(
     class_key = str(payload.get("class_key") or "").strip()
 
     if list_mode == "search":
-        total = await db.count_search_supplements(conn, query)
-        rows = await db.search_supplements(conn, query, limit=CATALOG_PAGE_SIZE, offset=offset)
+        rows, total = await db.search_supplements(conn, query, page=page, page_size=CATALOG_PAGE_SIZE)
     elif list_mode == "class":
         total = await db.count_supplements_by_class(conn, class_key)
         rows = await db.list_supplements_by_class(conn, class_key, limit=CATALOG_PAGE_SIZE, offset=offset)
@@ -2445,6 +2608,88 @@ async def _show_catalog_evidence(
         target_message_id=target_message_id,
     )
 
+async def _show_catalog_search_prompt(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    conn,
+    *,
+    return_page: int,
+    target_chat_id: int | None = None,
+    target_message_id: int | None = None,
+) -> None:
+    context.user_data.pop(WAITING_KEY, None)
+    text = (
+        "🔎 Поиск БАДов\n\n"
+        "Напиши название (RU/EN), например: магний, omega3"
+    )
+    msg = await show(
+        update,
+        context,
+        text,
+        InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬅️ Назад", callback_data=f"cat:page:{return_page}")]]
+        ),
+        route=None,
+        target_chat_id=target_chat_id,
+        target_message_id=target_message_id,
+    )
+    await db.save_ui_state(
+        conn,
+        update.effective_user.id,
+        msg.message_id,
+        "cat_search_wait",
+        json.dumps({"return_page": return_page}, ensure_ascii=False),
+    )
+
+async def render_search_results(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    conn,
+    *,
+    tg_uid: int,
+    query: str,
+    page: int,
+    return_page: int,
+    target_chat_id: int | None = None,
+    target_message_id: int | None = None,
+) -> None:
+    page_size = 10
+    page = max(int(page), 0)
+    items, total = await db.search_supplements(conn, query, page=page, page_size=page_size)
+    has_prev = page > 0
+    has_next = (page + 1) * page_size < total
+    text = (
+        "🔎 Результаты поиска: "
+        f"{query}\n"
+        f"Найдено: {total}\n\n"
+        "Выбери БАД:"
+    )
+    msg = await show(
+        update,
+        context,
+        text,
+        catalog_search_results(
+            items,
+            page=page,
+            has_prev=has_prev,
+            has_next=has_next,
+            return_page=return_page,
+        ),
+        route=None,
+        target_chat_id=target_chat_id,
+        target_message_id=target_message_id,
+    )
+    await db.save_ui_state(
+        conn,
+        tg_uid,
+        msg.message_id,
+        "cat_search_results",
+        json.dumps(
+            {"query": query, "page": page, "return_page": return_page},
+            ensure_ascii=False,
+        ),
+    )
+
 async def render_catalog(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -2508,19 +2753,24 @@ async def render_supplement_card(
     supplement_id: int,
     return_page: int,
     *,
+    return_mode: str = "catalog",
+    search_query: str | None = None,
     show_added: bool = False,
     target_chat_id: int | None = None,
     target_message_id: int | None = None,
 ) -> None:
     row = await db.get_supplement_by_id(conn, supplement_id)
     if not row:
+        back_data = (
+            f"cat:sres:{return_page}" if return_mode == "search" else f"cat:page:{return_page}"
+        )
         msg = await show(
             update,
             context,
             "Не найдено.",
             InlineKeyboardMarkup(
                 [
-                    [InlineKeyboardButton("⬅️ Назад в каталог", callback_data=f"cat:page:{return_page}")],
+                    [InlineKeyboardButton("⬅️ Назад", callback_data=back_data)],
                     [InlineKeyboardButton("🏠 В меню", callback_data="main")],
                 ]
             ),
@@ -2565,10 +2815,18 @@ async def render_supplement_card(
             "(Скоро: совместимость, оптимальное время, дозировки, молекулярное объяснение)",
         ]
     )
+    add_callback = (
+        f"mysupp:add:{supplement_id}:retsearch:{return_page}"
+        if return_mode == "search"
+        else f"mysupp:add:{supplement_id}:retcat:{return_page}"
+    )
+    back_callback = (
+        f"cat:sres:{return_page}" if return_mode == "search" else f"cat:page:{return_page}"
+    )
     kb = InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("➕ Добавить в мои", callback_data=f"mysupp:add:{supplement_id}:retcat:{return_page}")],
-            [InlineKeyboardButton("⬅️ Назад в каталог", callback_data=f"cat:page:{return_page}")],
+            [InlineKeyboardButton("➕ Добавить в мои", callback_data=add_callback)],
+            [InlineKeyboardButton("⬅️ Назад", callback_data=back_callback)],
             [InlineKeyboardButton("🏠 В меню", callback_data="main")],
         ]
     )
@@ -2581,12 +2839,19 @@ async def render_supplement_card(
         target_chat_id=target_chat_id,
         target_message_id=target_message_id,
     )
+    payload = {
+        "id": supplement_id,
+        "return_page": return_page,
+        "return_mode": return_mode,
+    }
+    if return_mode == "search" and search_query:
+        payload["query"] = search_query
     await db.save_ui_state(
         conn,
         update.effective_user.id,
         msg.message_id,
         "supp_card",
-        json.dumps({"id": supplement_id, "return_page": return_page}, ensure_ascii=False),
+        json.dumps(payload, ensure_ascii=False),
     )
 
 async def _show_curated_page(

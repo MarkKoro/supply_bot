@@ -29,6 +29,12 @@ def _payload_from_route(route: str) -> dict | None:
         return {"page": int(route.split(":")[-1])}
     if route.startswith("my:open:"):
         return {"supplement_id": int(route.split(":")[-1])}
+    if route.startswith("mysupp:list:"):
+        return {"page": int(route.split(":")[-1])}
+    if route.startswith("mysupp:open:") or route.startswith("mysupp:hub:"):
+        return {"supplement_id": int(route.split(":")[-1])}
+    if route.startswith("mysupp:rem:"):
+        return {"supplement_id": int(route.split(":")[-1])}
     if route.startswith("supp:view:"):
         _, _, slug, page = route.split(":", 3)
         return {"slug": slug, "page": int(page)}
@@ -85,6 +91,10 @@ def _view_payload_from_route(route: str, payload: dict | None) -> tuple[str, dic
             return ("mine_list", payload)
         if route.startswith("mine:hub:") or route.startswith("mine:open:"):
             return ("mine_hub", payload)
+        if route.startswith("mysupp:list:"):
+            return ("mysupp_list", payload)
+        if route.startswith("mysupp:hub:") or route.startswith("mysupp:open:"):
+            return ("mysupp_hub", payload)
         if route.startswith("menu:"):
             return ("menu", payload)
     if route == "menu:home" or route.startswith("menu:"):
@@ -95,6 +105,10 @@ def _view_payload_from_route(route: str, payload: dict | None) -> tuple[str, dic
         return ("mine_list", {"page": int(route.split(":")[-1])})
     if route.startswith("mine:hub:") or route.startswith("mine:open:"):
         return ("mine_hub", {"supp_id": int(route.split(":")[-1])})
+    if route.startswith("mysupp:list:"):
+        return ("mysupp_list", {"page": int(route.split(":")[-1])})
+    if route.startswith("mysupp:hub:") or route.startswith("mysupp:open:"):
+        return ("mysupp_hub", {"supp_id": int(route.split(":")[-1])})
     return None
 
 async def _persist_last_state(
@@ -120,6 +134,10 @@ async def _persist_last_state(
             payload_json = json.dumps(payload_data, ensure_ascii=False)
             await db.set_user_last_view(conn, tg_user.id, view, payload_json)
         await db.set_user_last_msg(conn, tg_user.id, chat_id, message_id)
+        if route:
+            payload_data = payload if payload is not None else _payload_from_route(route) or {}
+            payload_json = json.dumps(payload_data, ensure_ascii=False)
+            await db.save_ui_state(conn, tg_user.id, message_id, route, payload_json)
     finally:
         await conn.close()
 

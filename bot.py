@@ -4,7 +4,7 @@ import json
 import logging
 import os
 import re
-from datetime import datetime, timedelta, time as dt_time
+from datetime import datetime, timedelta
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -32,6 +32,7 @@ from keyboards import (
     supplement_page,
     supplement_compat_list,
     my_supplement_hub,
+    my_supplement_reminders,
     timezone_picker,
     reminder_actions,
     settings_menu,
@@ -49,7 +50,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 log = logging.getLogger("supply-bot")
 
 WAITING_KEY = "waiting"
-MY_SEARCH_KEY = "my_search_q"
 CATALOG_PAGE_SIZE = 8
 CATALOG_CLASS_PAGE_SIZE = 8
 MY_PAGE_SIZE = 10
@@ -57,9 +57,6 @@ CURATED_PAGE_SIZE = 10
 
 def _is_tz_unset(tz_name: str | None) -> bool:
     return not tz_name or str(tz_name).strip().upper() == "UTC"
-
-def _job_name(tg_user_id: int, supplement_id: int) -> str:
-    return f"rem:{tg_user_id}:{supplement_id}"
 
 async def _download_voice_bytes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> tuple[bytes, str]:
     voice = update.message.voice
@@ -572,70 +569,25 @@ async def _show_timezone_picker(
 def _is_debug_user(settings, tg_uid: int) -> bool:
     return bool(settings.DEBUG or (tg_uid in settings.ADMIN_IDS))
 
-async def reschedule_reminders_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    job_queue = context.application.job_queue
+async def reminders_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
     s = context.application.bot_data["settings"]
     conn = await db.connect(s.DB_PATH)
     try:
-        rows = await db.list_enabled_reminders(conn)
+        due = await db.list_due_reminders(conn)
+        for item in due:
+            tg_user_id = int(item["user_id"])
+            supplement_id = int(item["supplement_id"])
+            time_local = str(item["time_local"])
+            day = str(item["day"])
+            today_status = await db.get_today_status(conn, tg_user_id, supplement_id)
+            if today_status in {"taken", "skipped"}:
+                continue
+            inserted = await db.insert_reminder_fire(conn, tg_user_id, supplement_id, day, time_local)
+            if not inserted:
+                continue
+            await reminder_fire(context, tg_user_id, supplement_id)
     finally:
         await conn.close()
-
-    desired: dict[str, dict] = {}
-    for row in rows:
-        tz_name = str(row["tz_name"] or "").strip()
-        if _is_tz_unset(tz_name):
-            continue
-        reminder_time = str(row["reminder_time"] or "").strip()
-        if not reminder_time:
-            continue
-        if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", reminder_time):
-            continue
-        tzinfo = _tzinfo_from_name(tz_name)
-        if not tzinfo:
-            continue
-        tg_user_id = int(row["tg_user_id"])
-        supplement_id = int(row["supplement_id"])
-        job_name = _job_name(tg_user_id, supplement_id)
-        desired[job_name] = {
-            "tg_user_id": tg_user_id,
-            "supplement_id": supplement_id,
-            "reminder_time": reminder_time,
-            "tz_name": tz_name,
-            "tzinfo": tzinfo,
-        }
-
-    for job in job_queue.jobs("^rem:"):
-        if job.name not in desired:
-            job.schedule_removal()
-
-    for job_name, data in desired.items():
-        existing = job_queue.get_jobs_by_name(job_name)
-        if existing:
-            job = existing[0]
-            existing_data = job.data or {}
-            if (
-                existing_data.get("reminder_time") == data["reminder_time"]
-                and existing_data.get("tz_name") == data["tz_name"]
-            ):
-                continue
-            for old_job in existing:
-                old_job.schedule_removal()
-
-        hour, minute = map(int, str(data["reminder_time"]).split(":"))
-        job_queue.run_daily(
-            reminder_fire,
-            time=dt_time(hour=hour, minute=minute),
-            days=tuple(range(7)),
-            name=job_name,
-            data={
-                "tg_user_id": data["tg_user_id"],
-                "supplement_id": data["supplement_id"],
-                "reminder_time": data["reminder_time"],
-                "tz_name": data["tz_name"],
-            },
-            timezone=data["tzinfo"],
-        )
 
 async def daily_rollover_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     s = context.application.bot_data["settings"]
@@ -661,17 +613,25 @@ async def daily_rollover_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     finally:
         await conn.close()
 
-async def reminder_fire(context: ContextTypes.DEFAULT_TYPE) -> None:
+async def reminder_fire_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     data = context.job.data or {}
     tg_user_id = int(data.get("tg_user_id"))
     supplement_id = int(data.get("supplement_id"))
+    await reminder_fire(context, tg_user_id, supplement_id, is_snooze=True)
+
+async def reminder_fire(
+    context: ContextTypes.DEFAULT_TYPE,
+    tg_user_id: int,
+    supplement_id: int,
+    *,
+    is_snooze: bool = False,
+) -> None:
     s = context.application.bot_data["settings"]
     conn = await db.connect(s.DB_PATH)
     try:
         user_row = await db.fetchone(
             conn,
-            """SELECT id, tg_user_id, tz_name, last_chat_id, last_message_id,
-                      last_view, last_view_payload
+            """SELECT tg_user_id, tz_name, last_chat_id
                FROM users WHERE tg_user_id=?""",
             (tg_user_id,),
         )
@@ -680,43 +640,33 @@ async def reminder_fire(context: ContextTypes.DEFAULT_TYPE) -> None:
         tz_name = str(user_row["tz_name"] or "").strip()
         if _is_tz_unset(tz_name):
             return
-        tzinfo = _tzinfo_from_name(tz_name)
-        if not tzinfo:
-            return
-        user_id = int(user_row["id"])
-        settings = await db.get_user_supp_settings(conn, user_id, supplement_id)
-        if int(settings.get("reminder_enabled") or 0) != 1:
-            return
-        if not str(settings.get("reminder_time") or "").strip():
-            return
-        today_status = await db.get_today_status(conn, tg_user_id, supplement_id)
-        if today_status in {"taken", "skipped"}:
-            return
         supplement = await db.get_supplement_by_id(conn, supplement_id)
         if not supplement:
             return
-
-        last_chat_id = int(user_row["last_chat_id"] or 0)
-        last_message_id = int(user_row["last_message_id"] or 0)
-        if last_chat_id and last_message_id:
+        ui_message_id, ui_screen, ui_payload = await db.get_ui_state(conn, tg_user_id)
+        if ui_message_id:
+            last_chat_id = int(user_row["last_chat_id"] or 0) or tg_user_id
             try:
-                await context.bot.delete_message(chat_id=last_chat_id, message_id=last_message_id)
+                await context.bot.delete_message(chat_id=last_chat_id, message_id=ui_message_id)
             except Exception:
                 pass
 
         name_ru = (supplement["name_ru"] or supplement["name"] or "").strip()
         name_en = (supplement["name_en"] or "").strip()
-        name_line = f"💊 <b>{name_ru}</b>"
+        name_line = name_ru
         if name_en and name_en != name_ru:
             name_line = f"{name_line} ({name_en})"
-        dose_text = (settings.get("dose_text") or "").strip() or "не задана"
+        dose_text = "—"
+        user_supp = await db.get_user_supplement(conn, tg_user_id, supplement_id)
+        if user_supp and str(user_supp["dose_text"] or "").strip():
+            dose_text = str(user_supp["dose_text"]).strip()
+
         text = (
-            "⏰ <b>Пора принять добавку</b>\n\n"
-            f"{name_line}\n"
-            f"Доза: {dose_text}\n\n"
-            "Выбери действие:"
+            "⏰ <b>Напоминание</b>\n"
+            f"Пора принять: <b>{name_line}</b>\n"
+            f"Доза: {dose_text}"
         )
-        target_chat_id = last_chat_id or tg_user_id
+        target_chat_id = int(user_row["last_chat_id"] or 0) or tg_user_id
         msg = await context.bot.send_message(
             chat_id=target_chat_id,
             text=text,
@@ -724,7 +674,18 @@ async def reminder_fire(context: ContextTypes.DEFAULT_TYPE) -> None:
             parse_mode="HTML",
             disable_web_page_preview=True,
         )
-        await db.set_user_last_msg(conn, tg_user_id, msg.chat_id, msg.message_id)
+        try:
+            payload_data = json.loads(ui_payload) if ui_payload else {}
+        except json.JSONDecodeError:
+            payload_data = {}
+        if not isinstance(payload_data, dict):
+            payload_data = {}
+        payload_data["reminder_msg_id"] = msg.message_id
+        payload_json = json.dumps(payload_data, ensure_ascii=False)
+        if ui_screen:
+            await db.update_ui_state_payload(conn, tg_user_id, payload_json)
+        else:
+            await db.save_ui_state(conn, tg_user_id, ui_message_id, "", payload_json)
     finally:
         await conn.close()
 
@@ -785,7 +746,6 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
 
         if data == "menu:my":
-            context.user_data.pop(MY_SEARCH_KEY, None)
             await _show_my_list(update, context, conn, tg_uid, 0)
             return
 
@@ -1012,133 +972,96 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await _show_supplement_compat(update, context, conn, int(sid), kind, int(page))
             return
 
-        if data.startswith("mine:list:"):
+        if data.startswith("mysupp:list:"):
             page = int(data.split(":")[-1])
             await _show_my_list(update, context, conn, tg_uid, page)
             return
 
-        if data == "mine:search":
-            context.user_data[WAITING_KEY] = "my_search_query"
+        if data == "mysupp:add":
+            context.user_data[WAITING_KEY] = "mysupp_add_query"
             await show(
                 update,
                 context,
-                "Введи название БАДА для поиска в твоём списке.",
+                "Введи название БАДА для добавления.",
                 my_list_back(),
-                route="mine:search",
+                route="mysupp:add",
             )
             return
 
-        if data == "mine:clear":
-            context.user_data.pop(MY_SEARCH_KEY, None)
-            await _show_my_list(update, context, conn, tg_uid, 0)
+        if data.startswith("mysupp:add_pick:"):
+            slug = data.split(":", 2)[-1]
+            row = await db.get_supplement_by_slug(conn, slug)
+            if row:
+                await db.add_user_supp(conn, tg_uid, int(row["id"]))
+                await show_my_supp_hub(update, context, tg_uid, int(row["id"]), conn=conn)
+            else:
+                await show(update, context, "Не нашёл в каталоге.", my_list_back(), route="mysupp:add")
             return
 
-        if data.startswith("mine:open:") or data.startswith("mine:hub:"):
+        if data.startswith("mysupp:add_direct:"):
+            supplement_id = int(data.split(":")[-1])
+            await db.add_user_supp(conn, tg_uid, supplement_id)
+            await show_my_supp_hub(update, context, tg_uid, supplement_id, conn=conn)
+            return
+
+        if data.startswith("mysupp:open:") or data.startswith("mysupp:hub:"):
             supplement_id = int(data.split(":")[-1])
             await show_my_supp_hub(update, context, tg_uid, supplement_id, conn=conn)
             return
 
-        if data.startswith("my:add:"):
+        if data.startswith("mysupp:set_dose:"):
             supplement_id = int(data.split(":")[-1])
-            await db.add_user_supplement(conn, tg_uid, supplement_id)
-            await show_my_supp_hub(update, context, tg_uid, supplement_id, conn=conn)
-            return
-
-        if data == "mine:back":
-            await _show_my_list(update, context, conn, tg_uid, 0)
-            return
-
-        if data.startswith("mine:hub:toggle:"):
-            supplement_id = int(data.split(":")[-1])
-            internal_user_id = await db.get_or_create_user(conn, tg_uid)
-            settings = await db.get_user_supp_settings(conn, internal_user_id, supplement_id)
-            await db.set_user_supp_reminder_enabled(
-                conn,
-                internal_user_id,
-                supplement_id,
-                not bool(settings.get("reminder_enabled")),
-            )
-            await show_my_supp_hub(update, context, tg_uid, supplement_id, conn=conn)
-            return
-
-        if data.startswith("mine:hub:set_time:"):
-            supplement_id = int(data.split(":")[-1])
-            context.user_data[WAITING_KEY] = f"set_time:{supplement_id}"
-            await show(
-                update,
-                context,
-                "Напиши время в формате ЧЧ:ММ, например 09:30",
-                my_hub_back(supplement_id),
-                route=f"mine:hub:set_time:{supplement_id}",
-            )
-            return
-
-        if data.startswith("mine:hub:set_dose:"):
-            supplement_id = int(data.split(":")[-1])
-            context.user_data[WAITING_KEY] = f"set_dose:{supplement_id}"
+            context.user_data[WAITING_KEY] = f"mysupp:set_dose:{supplement_id}"
             await show(
                 update,
                 context,
                 "Напиши дозу (до 80 символов).",
                 my_hub_back(supplement_id),
-                route=f"mine:hub:set_dose:{supplement_id}",
+                route=f"mysupp:set_dose:{supplement_id}",
             )
             return
 
-        if data.startswith("mine:hub:taken:"):
+        if data.startswith("mysupp:mark:taken:"):
             supplement_id = int(data.split(":")[-1])
-            internal_user_id = await db.get_or_create_user(conn, tg_uid)
-            tz_name = await db.get_user_tz(conn, tg_uid) or "UTC"
-            try:
-                today = datetime.now(db.parse_utc_tz(tz_name)).date().isoformat()
-            except Exception:
-                today = datetime.utcnow().date().isoformat()
             await db.set_today_status(conn, tg_uid, supplement_id, "taken")
-            await db.set_user_supp_taken_date(conn, internal_user_id, supplement_id, today)
-            await db.set_user_supp_skip_date(conn, internal_user_id, supplement_id, "")
             await show_my_supp_hub(update, context, tg_uid, supplement_id, conn=conn)
             return
 
-        if data.startswith("mine:hub:skip:"):
+        if data.startswith("mysupp:mark:skip:"):
             supplement_id = int(data.split(":")[-1])
-            internal_user_id = await db.get_or_create_user(conn, tg_uid)
-            tz_name = await db.get_user_tz(conn, tg_uid) or "UTC"
-            try:
-                today = datetime.now(db.parse_utc_tz(tz_name)).date().isoformat()
-            except Exception:
-                today = datetime.utcnow().date().isoformat()
             await db.set_today_status(conn, tg_uid, supplement_id, "skipped")
-            await db.set_user_supp_skip_date(conn, internal_user_id, supplement_id, today)
-            await db.set_user_supp_taken_date(conn, internal_user_id, supplement_id, "")
             await show_my_supp_hub(update, context, tg_uid, supplement_id, conn=conn)
             return
 
-        if data.startswith("mine:hub:remove:"):
+        if data.startswith("mysupp:remove:"):
             supplement_id = int(data.split(":")[-1])
-            internal_user_id = await db.get_or_create_user(conn, tg_uid)
-            await db.remove_user_supplement(conn, tg_uid, supplement_id)
-            await db.delete_user_supp_settings(conn, internal_user_id, supplement_id)
+            await db.remove_user_supp(conn, tg_uid, supplement_id)
+            await db.delete_reminders_for_supplement(conn, tg_uid, supplement_id)
             await _show_my_list(update, context, conn, tg_uid, 0)
             return
 
-        if data.startswith("mine:hub:compat:"):
-            parts = data.split(":")
-            supplement_id = int(parts[3])
-            kind = "synergy"
-            page = 0
-            if len(parts) >= 6:
-                kind = parts[4]
-                page = int(parts[5])
-            await _show_supplement_compat(
+        if data.startswith("mysupp:rem:del:"):
+            _, _, _, supplement_id, time_key = data.split(":", 4)
+            time_local = time_key.replace("-", ":")
+            await db.delete_reminder(conn, tg_uid, int(supplement_id), time_local)
+            await _show_my_supp_reminders(update, context, conn, tg_uid, int(supplement_id))
+            return
+
+        if data.startswith("mysupp:rem:add:"):
+            supplement_id = int(data.split(":")[-1])
+            context.user_data[WAITING_KEY] = f"mysupp:rem_add:{supplement_id}"
+            await show(
                 update,
                 context,
-                conn,
-                supplement_id,
-                kind,
-                page,
-                back_data=f"mine:hub:{supplement_id}",
-                route_prefix=f"mine:hub:compat:{supplement_id}",
+                "Напиши время в формате ЧЧ:ММ, например 09:30",
+                my_hub_back(supplement_id),
+                route=f"mysupp:rem:add:{supplement_id}",
             )
+            return
+
+        if data.startswith("mysupp:rem:"):
+            supplement_id = int(data.split(":")[-1])
+            await _show_my_supp_reminders(update, context, conn, tg_uid, supplement_id)
             return
 
         if data == "menu:checkin":
@@ -1375,64 +1298,89 @@ async def on_reminder_action(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await q.answer()
     data = q.data or ""
     parts = data.split(":")
-    if len(parts) < 2:
+    if len(parts) < 3:
         return
     action = parts[1]
     supplement_id: int | None = None
-    snooze_minutes: int | None = None
-    if action in ("done", "taken", "skip"):
-        if len(parts) < 3:
-            return
+    snooze_minutes = 15
+    if action in ("done", "skip"):
         supplement_id = int(parts[2])
     elif action == "snooze":
+        supplement_id = int(parts[2])
         if len(parts) >= 4:
-            snooze_minutes = int(parts[2])
-            supplement_id = int(parts[3])
-        elif len(parts) >= 3:
-            snooze_minutes = 15
-            supplement_id = int(parts[2])
-        else:
-            return
-    elif action == "back":
-        supplement_id = None
+            snooze_minutes = int(parts[3])
     else:
         return
 
     s = context.application.bot_data["settings"]
     tg_uid = update.effective_user.id
+    ui_screen = ""
+    payload_data: dict = {}
+    ui_message_id: int | None = None
     conn = await db.connect(s.DB_PATH)
     try:
-        tz_name = await db.get_user_tz(conn, tg_uid)
-        tzinfo = _tzinfo_from_name(tz_name)
-        today = datetime.now(tzinfo).date().isoformat() if tzinfo else datetime.utcnow().date().isoformat()
-        internal_user_id = await db.get_or_create_user(conn, tg_uid)
-        if action in ("done", "taken") and supplement_id is not None:
+        if supplement_id is None:
+            return
+        if action == "done":
             await db.set_today_status(conn, tg_uid, supplement_id, "taken")
-            await db.set_user_supp_taken_date(conn, internal_user_id, supplement_id, today)
-            await db.set_user_supp_skip_date(conn, internal_user_id, supplement_id, "")
-        elif action == "skip" and supplement_id is not None:
+        elif action == "skip":
             await db.set_today_status(conn, tg_uid, supplement_id, "skipped")
-            await db.set_user_supp_skip_date(conn, internal_user_id, supplement_id, today)
-            await db.set_user_supp_taken_date(conn, internal_user_id, supplement_id, "")
-        elif action == "snooze" and supplement_id is not None:
+        elif action == "snooze":
             minutes = snooze_minutes or 15
-            snooze_name = f"snooze:{tg_uid}:{supplement_id}"
-            for job in context.application.job_queue.get_jobs_by_name(snooze_name):
-                job.schedule_removal()
-            context.application.job_queue.run_once(
-                reminder_fire,
-                when=timedelta(minutes=minutes),
-                name=snooze_name,
-                data={
-                    "tg_user_id": tg_uid,
-                    "supplement_id": supplement_id,
-                },
-            )
-        view, payload = await db.get_user_last_view(conn, tg_uid)
+            guard = context.application.bot_data.setdefault("snooze_guard", {})
+            key = f"{tg_uid}:{supplement_id}"
+            now = datetime.utcnow()
+            next_allowed = guard.get(key)
+            if next_allowed and now < next_allowed:
+                pass
+            else:
+                guard[key] = now + timedelta(minutes=minutes)
+                snooze_name = f"snooze:{tg_uid}:{supplement_id}"
+                for job in context.application.job_queue.get_jobs_by_name(snooze_name):
+                    job.schedule_removal()
+                context.application.job_queue.run_once(
+                    reminder_fire_job,
+                    when=timedelta(minutes=minutes),
+                    name=snooze_name,
+                    data={
+                        "tg_user_id": tg_uid,
+                        "supplement_id": supplement_id,
+                    },
+                )
+
+        ui_message_id, ui_screen, ui_payload = await db.get_ui_state(conn, tg_uid)
+        try:
+            payload_data = json.loads(ui_payload) if ui_payload else {}
+        except json.JSONDecodeError:
+            payload_data = {}
+        if isinstance(payload_data, dict) and "reminder_msg_id" in payload_data:
+            payload_data.pop("reminder_msg_id", None)
+            await db.update_ui_state_payload(conn, tg_uid, json.dumps(payload_data, ensure_ascii=False))
     finally:
         await conn.close()
 
-    await render_view(update, context, tg_uid, view, payload)
+    if q.message:
+        try:
+            await q.message.delete()
+        except Exception:
+            pass
+
+    route = ui_screen or "menu:home"
+    payload = payload_data if isinstance(payload_data, dict) else {}
+    conn = await db.connect(s.DB_PATH)
+    try:
+        await _render_route(
+            update,
+            context,
+            conn,
+            tg_uid,
+            route,
+            None,
+            ui_message_id,
+            payload=payload,
+        )
+    finally:
+        await conn.close()
 
 async def render_view(
     update: Update,
@@ -1463,6 +1411,15 @@ async def render_view(
             await _show_my_list(update, context, conn, tg_user_id, page)
             return
         if view == "mine_hub":
+            supplement_id = payload_data.get("supp_id")
+            if supplement_id is not None:
+                await show_my_supp_hub(update, context, tg_user_id, int(supplement_id), conn=conn)
+                return
+        if view == "mysupp_list":
+            page = int(payload_data.get("page") or 0)
+            await _show_my_list(update, context, conn, tg_user_id, page)
+            return
+        if view == "mysupp_hub":
             supplement_id = payload_data.get("supp_id")
             if supplement_id is not None:
                 await show_my_supp_hub(update, context, tg_user_id, int(supplement_id), conn=conn)
@@ -1552,12 +1509,12 @@ async def _render_route(
     if route == "menu:todayplan":
         await _show_today_plan(update, context, conn, tg_uid)
         return
-    if route == "mine:search":
-        context.user_data[WAITING_KEY] = "my_search_query"
+    if route == "mysupp:add":
+        context.user_data[WAITING_KEY] = "mysupp_add_query"
         await show(
             update,
             context,
-            "Введи название БАДА для поиска в твоём списке.",
+            "Введи название БАДА для добавления.",
             my_list_back(),
             route=route,
             target_chat_id=target_chat_id,
@@ -1641,7 +1598,7 @@ async def _render_route(
             target_message_id=target_message_id,
         )
         return
-    if route.startswith("mine:list:"):
+    if route.startswith("mysupp:list:"):
         page = int(route.split(":")[-1])
         await _show_my_list(
             update,
@@ -1653,7 +1610,7 @@ async def _render_route(
             target_message_id=target_message_id,
         )
         return
-    if route.startswith("mine:open:") or route.startswith("mine:hub:"):
+    if route.startswith("mysupp:open:") or route.startswith("mysupp:hub:"):
         supplement_id = int(route.split(":")[-1])
         await show_my_supp_hub(
             update,
@@ -1707,9 +1664,9 @@ async def _render_route(
             target_message_id=target_message_id,
         )
         return
-    if route.startswith("mine:hub:set_dose:"):
+    if route.startswith("mysupp:set_dose:"):
         supplement_id = int(route.split(":")[-1])
-        context.user_data[WAITING_KEY] = f"set_dose:{supplement_id}"
+        context.user_data[WAITING_KEY] = f"mysupp:set_dose:{supplement_id}"
         await show(
             update,
             context,
@@ -1720,9 +1677,9 @@ async def _render_route(
             target_message_id=target_message_id,
         )
         return
-    if route.startswith("mine:hub:set_time:"):
+    if route.startswith("mysupp:rem:add:"):
         supplement_id = int(route.split(":")[-1])
-        context.user_data[WAITING_KEY] = f"set_time:{supplement_id}"
+        context.user_data[WAITING_KEY] = f"mysupp:rem_add:{supplement_id}"
         await show(
             update,
             context,
@@ -1733,17 +1690,14 @@ async def _render_route(
             target_message_id=target_message_id,
         )
         return
-    if route.startswith("mine:hub:compat:"):
-        _, _, _, supplement_id, kind, page = route.split(":", 5)
-        await _show_supplement_compat(
+    if route.startswith("mysupp:rem:"):
+        supplement_id = int(route.split(":")[-1])
+        await _show_my_supp_reminders(
             update,
             context,
             conn,
-            int(supplement_id),
-            kind,
-            int(page),
-            back_data=f"mine:hub:{supplement_id}",
-            route_prefix=f"mine:hub:compat:{supplement_id}",
+            tg_uid,
+            supplement_id,
             target_chat_id=target_chat_id,
             target_message_id=target_message_id,
         )
@@ -1818,28 +1772,14 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     txt = update.message.text.strip()
     waiting = context.user_data.get(WAITING_KEY)
-    if waiting and waiting.startswith(("set_time:", "set_dose:")):
-        _, supplement_id_text = waiting.split(":", 1)
+    if waiting and waiting.startswith(("mysupp:set_dose:", "mysupp:rem_add:")):
+        _, _, supplement_id_text = waiting.split(":", 2)
         supplement_id = int(supplement_id_text)
         s = context.application.bot_data["settings"]
         tg_uid = update.effective_user.id
         conn = await db.connect(s.DB_PATH)
         try:
-            internal_user_id = await db.get_or_create_user(conn, tg_uid)
-            if waiting.startswith("set_time:"):
-                if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", txt):
-                    await show(
-                        update,
-                        context,
-                        "Напиши время в формате ЧЧ:ММ, например 09:30",
-                        my_hub_back(supplement_id),
-                        route=f"mine:hub:set_time:{supplement_id}",
-                    )
-                else:
-                    await db.set_user_supp_reminder_time(conn, internal_user_id, supplement_id, txt)
-                    context.user_data.pop(WAITING_KEY, None)
-                    await show_my_supp_hub(update, context, tg_uid, supplement_id, conn=conn)
-            else:
+            if waiting.startswith("mysupp:set_dose:"):
                 trimmed = txt.strip()
                 if not trimmed or len(trimmed) > 80:
                     await show(
@@ -1847,12 +1787,25 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         context,
                         "Напиши дозу (до 80 символов).",
                         my_hub_back(supplement_id),
-                        route=f"mine:hub:set_dose:{supplement_id}",
+                        route=f"mysupp:set_dose:{supplement_id}",
                     )
                 else:
-                    await db.set_user_supp_dose(conn, internal_user_id, supplement_id, trimmed)
+                    await db.set_user_supp_dose(conn, tg_uid, supplement_id, trimmed)
                     context.user_data.pop(WAITING_KEY, None)
                     await show_my_supp_hub(update, context, tg_uid, supplement_id, conn=conn)
+            else:
+                if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", txt):
+                    await show(
+                        update,
+                        context,
+                        "Напиши время в формате ЧЧ:ММ, например 09:30",
+                        my_hub_back(supplement_id),
+                        route=f"mysupp:rem:add:{supplement_id}",
+                    )
+                else:
+                    await db.upsert_reminder(conn, tg_uid, supplement_id, txt, enabled=1)
+                    context.user_data.pop(WAITING_KEY, None)
+                    await _show_my_supp_reminders(update, context, conn, tg_uid, supplement_id)
         finally:
             await conn.close()
 
@@ -1905,14 +1858,19 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 )
             context.user_data.pop(WAITING_KEY, None)
 
-        elif waiting == "my_search_query":
-            context.user_data.pop(WAITING_KEY, None)
-            if txt:
-                context.user_data[MY_SEARCH_KEY] = txt
-                await _show_my_list(update, context, conn, tg_uid, 0, q=txt)
+        elif waiting == "mysupp_add_query":
+            rows = await db.search_supplements(conn, txt, limit=10)
+            if not rows:
+                await show(update, context, "Не нашёл в каталоге.", my_list_back(), route="mysupp:add")
             else:
-                context.user_data.pop(MY_SEARCH_KEY, None)
-                await _show_my_list(update, context, conn, tg_uid, 0)
+                await show(
+                    update,
+                    context,
+                    "Выбери добавку для добавления:",
+                    pick_search_results(rows, "mysupp:add_pick"),
+                    route="mysupp:add",
+                )
+            context.user_data.pop(WAITING_KEY, None)
         elif waiting == "catalog_search":
             context.user_data.pop(WAITING_KEY, None)
             payload = {
@@ -2120,7 +2078,7 @@ async def _bootstrap() -> Application:
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(
         on_menu,
-        pattern=r"^(menu:|settings:|add_pick:|compat_pick:|cat:|curated:|supp:|card:|my:|mine:)",
+        pattern=r"^(menu:|settings:|add_pick:|compat_pick:|cat:|curated:|supp:|card:|mysupp:)",
     ))
     app.add_handler(CallbackQueryHandler(on_ai_add, pattern=r"^aiadd:"))
     app.add_handler(CallbackQueryHandler(on_checkin_action, pattern=r"^chk(apply|deny):"))
@@ -2129,7 +2087,7 @@ async def _bootstrap() -> Application:
     app.add_handler(MessageHandler(filters.VOICE, on_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_error_handler(on_error)
-    app.job_queue.run_repeating(reschedule_reminders_job, interval=60, first=5, name="resched")
+    app.job_queue.run_repeating(reminders_tick, interval=60, first=5, name="reminders_tick")
     app.job_queue.run_repeating(daily_rollover_job, interval=600, first=30, name="daily_rollover")
     return app
 
@@ -2343,7 +2301,7 @@ async def _show_catalog_card(
     btns.append([InlineKeyboardButton("🧩 Совместимость", callback_data=f"card:compat:{row['id']}")])
     btns.append([InlineKeyboardButton("📊 Доказательность", callback_data=f"card:evidence:{row['id']}")])
     if in_my:
-        btns.append([InlineKeyboardButton("⚙️ Управление", callback_data=f"mine:open:{row['id']}")])
+        btns.append([InlineKeyboardButton("⚙️ Управление", callback_data=f"mysupp:open:{row['id']}")])
     btns.append([InlineKeyboardButton("⬅️ Назад", callback_data="cat:back")])
 
     payload = await _load_catalog_payload(conn, tg_uid)
@@ -2509,57 +2467,41 @@ async def _show_my_list(
     conn,
     tg_uid: int,
     page: int,
-    q: str | None = None,
     *,
     target_chat_id: int | None = None,
     target_message_id: int | None = None,
 ) -> None:
-    if q is None:
-        q = context.user_data.get(MY_SEARCH_KEY)
     await db.get_or_create_user(conn, tg_uid)
     local_date = await db.ensure_daily_rollover(conn, tg_uid)
     rows, total = await db.list_user_supplements_page(
         conn,
         tg_uid,
-        q=q,
+        q=None,
         page=page,
         page_size=MY_PAGE_SIZE,
         local_date=local_date,
     )
     has_next = (page + 1) * MY_PAGE_SIZE < total
     if not rows:
-        if q:
-            await show(
-                update,
-                context,
-                f"Ничего не найдено по запросу: <b>{q}</b>",
-                my_supplements_list([], 0, False, False, show_clear=True),
-                route="mine:list:0",
-                target_chat_id=target_chat_id,
-                target_message_id=target_message_id,
-            )
-        else:
-            await show(
-                update,
-                context,
-                "Пока список пуст. Добавь БАД из каталога.",
-                my_supplements_list([], 0, False, False, show_clear=False),
-                route="mine:list:0",
-                target_chat_id=target_chat_id,
-                target_message_id=target_message_id,
-            )
+        await show(
+            update,
+            context,
+            "💊 <b>Мои БАДы</b>\nПока список пуст.",
+            my_supplements_list([], 0, False, False, show_clear=False),
+            route="mysupp:list:0",
+            target_chat_id=target_chat_id,
+            target_message_id=target_message_id,
+        )
         return
 
     suffix = f" (стр. {page + 1})" if total > MY_PAGE_SIZE else ""
-    title = "📦 <b>Мои БАДы</b>\nНажми на добавку, чтобы открыть управление."
-    if q:
-        title = f"📦 <b>Мои БАДы</b>\nПоиск: <b>{q}</b>\nНажми на добавку, чтобы открыть управление."
+    title = "💊 <b>Мои БАДы</b>\nНажми на добавку, чтобы открыть управление."
     await show(
         update,
         context,
         f"{title}{suffix}",
-        my_supplements_list(rows, page, has_prev=page > 0, has_next=has_next, show_clear=bool(q)),
-        route=f"mine:list:{page}",
+        my_supplements_list(rows, page, has_prev=page > 0, has_next=has_next, show_clear=False),
+        route=f"mysupp:list:{page}",
         target_chat_id=target_chat_id,
         target_message_id=target_message_id,
     )
@@ -2588,47 +2530,80 @@ async def show_my_supp_hub(
                 context,
                 "БАД не найден в твоём списке.",
                 my_supplements_list([], 0, False, False, show_clear=False),
-                route="mine:list:0",
+                route="mysupp:list:0",
                 target_chat_id=target_chat_id,
                 target_message_id=target_message_id,
             )
             return
-        settings = await db.get_user_supp_settings(conn, internal_user_id, supplement_id)
         await db.ensure_daily_rollover(conn, user_id)
         today_status = await db.get_today_status(conn, user_id, supplement_id)
+        reminders = await db.list_reminders_for_user(conn, user_id)
+        reminder_times = [r["time_local"] for r in reminders if int(r["supplement_id"]) == supplement_id]
+        reminder_list = ", ".join(reminder_times) if reminder_times else "нет"
 
-        name_ru = (row.get("name_ru") or row.get("name") or "").strip()
-        name_en = (row.get("name_en") or "").strip()
+        name_ru = (row["name_ru"] or row["name"] or "").strip()
+        name_en = (row["name_en"] or "").strip()
         name_line = f"💊 <b>{name_ru}</b>"
         if name_en and name_en != name_ru:
             name_line = f"{name_line} ({name_en})"
-        dose_text = (settings.get("dose_text") or "").strip() or "не задана"
-        reminder_enabled = bool(settings.get("reminder_enabled"))
-        reminder_time = (settings.get("reminder_time") or "").strip() or "не задано"
-        taken_today = today_status == "taken"
-        skip_today = today_status == "skipped"
+        dose_text = (row["dose_text"] or "").strip() or "—"
+        status_text = "не отмечено"
+        if today_status == "taken":
+            status_text = "выпил"
+        elif today_status == "skipped":
+            status_text = "не выпил"
 
         text = (
             "⚙️ <b>Управление добавкой</b>\n\n"
             f"{name_line}\n\n"
             f"Доза: {dose_text}\n"
-            f"Напоминание: {'включено' if reminder_enabled else 'выключено'}\n"
-            f"Время: {reminder_time}\n\n"
-            f"✅ Выпил сегодня: {'да' if taken_today else 'нет'}\n"
-            f"🚫 Не пью сегодня: {'да' if skip_today else 'нет'}\n"
+            f"Статус на сегодня: {status_text}\n"
+            f"Напоминания: {reminder_list}\n"
         )
         await show(
             update,
             context,
             text,
-            my_supplement_hub(supplement_id, reminder_enabled),
-            route=f"mine:hub:{supplement_id}",
+            my_supplement_hub(supplement_id),
+            route=f"mysupp:hub:{supplement_id}",
             target_chat_id=target_chat_id,
             target_message_id=target_message_id,
         )
     finally:
         if close_conn:
             await conn.close()
+
+async def _show_my_supp_reminders(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    conn,
+    tg_uid: int,
+    supplement_id: int,
+    *,
+    target_chat_id: int | None = None,
+    target_message_id: int | None = None,
+) -> None:
+    supplement = await db.get_supplement_by_id(conn, supplement_id)
+    if not supplement:
+        await show(update, context, "БАД не найден.", my_list_back(), route="mysupp:list:0")
+        return
+    reminders = await db.list_reminders_for_user(conn, tg_uid)
+    reminder_times = [str(r["time_local"]) for r in reminders if int(r["supplement_id"]) == supplement_id]
+    name = (supplement["name_ru"] or supplement["name"] or "").strip()
+    title = f"⏰ <b>Напоминания</b>\n{name}"
+    if reminder_times:
+        lines = [title, "", "Время:", *[f"• {t}" for t in reminder_times]]
+    else:
+        lines = [title, "", "Время: нет"]
+    await show(
+        update,
+        context,
+        "\n".join(lines),
+        my_supplement_reminders(supplement_id, reminder_times),
+        route=f"mysupp:rem:{supplement_id}",
+        target_chat_id=target_chat_id,
+        target_message_id=target_message_id,
+    )
 
 async def _show_supplement_page(
     update: Update,

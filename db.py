@@ -112,12 +112,43 @@ CREATE TABLE IF NOT EXISTS user_supplements (
   user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   supplement_id INTEGER NOT NULL REFERENCES supplements(id) ON DELETE CASCADE,
   is_active     INTEGER NOT NULL DEFAULT 1,
+  enabled       INTEGER NOT NULL DEFAULT 1,
   dose_text     TEXT,
   note_text     TEXT,
+  notes         TEXT,
   created_at    TEXT NOT NULL,
   UNIQUE (user_id, supplement_id)
 );
 CREATE INDEX IF NOT EXISTS idx_user_supp_user ON user_supplements(user_id);
+
+CREATE TABLE IF NOT EXISTS reminders (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL,
+  supplement_id INTEGER NOT NULL,
+  time_local TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  snooze_min INTEGER NOT NULL DEFAULT 15,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(user_id, supplement_id, time_local)
+);
+CREATE INDEX IF NOT EXISTS idx_rem_user_time ON reminders(user_id, time_local);
+
+CREATE TABLE IF NOT EXISTS ui_state (
+  user_id INTEGER PRIMARY KEY,
+  last_message_id INTEGER NULL,
+  last_screen TEXT NOT NULL DEFAULT '',
+  last_payload TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS reminder_fires (
+  user_id INTEGER NOT NULL,
+  supplement_id INTEGER NOT NULL,
+  day TEXT NOT NULL,
+  time_local TEXT NOT NULL,
+  fired_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (user_id, supplement_id, day, time_local)
+);
 
 CREATE TABLE IF NOT EXISTS intake_log (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -277,6 +308,9 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     await _ensure_user_intake_log(conn)
     await _ensure_user_supp_settings(conn)
     await _ensure_supplement_day_state(conn)
+    await _ensure_reminders(conn)
+    await _ensure_ui_state(conn)
+    await _ensure_reminder_fires(conn)
     await _ensure_daily_checkins(conn)
     await _ensure_daily_plan_overrides(conn)
     await _ensure_curated_stacks(conn)
@@ -359,10 +393,86 @@ async def _ensure_aliases_table(conn: aiosqlite.Connection) -> None:
 
 async def _ensure_user_supplements(conn: aiosqlite.Connection) -> None:
     await _ensure_column(conn, "user_supplements", "is_active", "INTEGER NOT NULL DEFAULT 1")
+    await _ensure_column(conn, "user_supplements", "enabled", "INTEGER NOT NULL DEFAULT 1")
     await _ensure_column(conn, "user_supplements", "dose_text", "TEXT")
     await _ensure_column(conn, "user_supplements", "note_text", "TEXT")
+    await _ensure_column(conn, "user_supplements", "notes", "TEXT")
     await _ensure_column(conn, "user_supplements", "created_at", "TEXT NOT NULL DEFAULT ''")
     await _backfill_user_supplements(conn)
+
+async def _ensure_reminders(conn: aiosqlite.Connection) -> None:
+    table = await fetchone(
+        conn,
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='reminders'",
+    )
+    if not table:
+        await conn.execute(
+            """CREATE TABLE IF NOT EXISTS reminders (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              user_id INTEGER NOT NULL,
+              supplement_id INTEGER NOT NULL,
+              time_local TEXT NOT NULL,
+              enabled INTEGER NOT NULL DEFAULT 1,
+              snooze_min INTEGER NOT NULL DEFAULT 15,
+              created_at TEXT NOT NULL DEFAULT (datetime('now')),
+              UNIQUE(user_id, supplement_id, time_local)
+            )"""
+        )
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_rem_user_time ON reminders(user_id, time_local)")
+        return
+
+    await _ensure_column(conn, "reminders", "user_id", "INTEGER NOT NULL")
+    await _ensure_column(conn, "reminders", "supplement_id", "INTEGER NOT NULL")
+    await _ensure_column(conn, "reminders", "time_local", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "reminders", "enabled", "INTEGER NOT NULL DEFAULT 1")
+    await _ensure_column(conn, "reminders", "snooze_min", "INTEGER NOT NULL DEFAULT 15")
+    await _ensure_column(conn, "reminders", "created_at", "TEXT NOT NULL DEFAULT ''")
+    await conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_rem_unique ON reminders(user_id, supplement_id, time_local)")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_rem_user_time ON reminders(user_id, time_local)")
+
+async def _ensure_ui_state(conn: aiosqlite.Connection) -> None:
+    table = await fetchone(
+        conn,
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='ui_state'",
+    )
+    if not table:
+        await conn.execute(
+            """CREATE TABLE IF NOT EXISTS ui_state (
+              user_id INTEGER PRIMARY KEY,
+              last_message_id INTEGER NULL,
+              last_screen TEXT NOT NULL DEFAULT '',
+              last_payload TEXT NOT NULL DEFAULT '',
+              updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )"""
+        )
+        return
+    await _ensure_column(conn, "ui_state", "last_message_id", "INTEGER")
+    await _ensure_column(conn, "ui_state", "last_screen", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "ui_state", "last_payload", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "ui_state", "updated_at", "TEXT NOT NULL DEFAULT ''")
+
+async def _ensure_reminder_fires(conn: aiosqlite.Connection) -> None:
+    table = await fetchone(
+        conn,
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='reminder_fires'",
+    )
+    if not table:
+        await conn.execute(
+            """CREATE TABLE IF NOT EXISTS reminder_fires (
+              user_id INTEGER NOT NULL,
+              supplement_id INTEGER NOT NULL,
+              day TEXT NOT NULL,
+              time_local TEXT NOT NULL,
+              fired_at TEXT NOT NULL DEFAULT (datetime('now')),
+              PRIMARY KEY (user_id, supplement_id, day, time_local)
+            )"""
+        )
+        return
+    await _ensure_column(conn, "reminder_fires", "user_id", "INTEGER NOT NULL")
+    await _ensure_column(conn, "reminder_fires", "supplement_id", "INTEGER NOT NULL")
+    await _ensure_column(conn, "reminder_fires", "day", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "reminder_fires", "time_local", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "reminder_fires", "fired_at", "TEXT NOT NULL DEFAULT ''")
 
 async def _ensure_user_schedules(conn: aiosqlite.Connection) -> None:
     table = await fetchone(
@@ -621,6 +731,18 @@ async def _backfill_user_supplements(conn: aiosqlite.Connection) -> None:
             """UPDATE user_supplements
                SET is_active=active
                WHERE (is_active IS NULL OR is_active='') AND active IS NOT NULL"""
+        )
+    if "enabled" in col_names:
+        await conn.execute(
+            """UPDATE user_supplements
+               SET enabled=is_active
+               WHERE (enabled IS NULL OR enabled='') AND is_active IS NOT NULL"""
+        )
+    if "notes" in col_names:
+        await conn.execute(
+            """UPDATE user_supplements
+               SET notes=note_text
+               WHERE (notes IS NULL OR notes='') AND note_text IS NOT NULL AND note_text!=''"""
         )
     await conn.execute(
         "UPDATE user_supplements SET created_at=? WHERE created_at IS NULL OR created_at=''",
@@ -1342,10 +1464,11 @@ async def add_stack_items_to_user(conn: aiosqlite.Connection, user_id: int, item
             added += 1
 
         await conn.execute(
-            """INSERT INTO user_supplements(user_id, supplement_id, is_active, created_at)
-               VALUES(?,?,1,?)
+            """INSERT INTO user_supplements(user_id, supplement_id, is_active, enabled, created_at)
+               VALUES(?,?,1,1,?)
                ON CONFLICT(user_id, supplement_id) DO UPDATE SET
-                 is_active=1""",
+                 is_active=1,
+                 enabled=1""",
             (user_id, supplement_id, utc_now_iso()),
         )
 
@@ -1425,10 +1548,11 @@ async def get_interaction_between(conn: aiosqlite.Connection, a_id: int, b_id: i
 async def add_user_supplement(conn: aiosqlite.Connection, tg_user_id: int, supplement_id: int) -> None:
     user_id = await get_or_create_user(conn, tg_user_id)
     await conn.execute(
-        """INSERT INTO user_supplements(user_id, supplement_id, is_active, created_at)
-           VALUES(?,?,1,?)
+        """INSERT INTO user_supplements(user_id, supplement_id, is_active, enabled, created_at)
+           VALUES(?,?,1,1,?)
            ON CONFLICT(user_id, supplement_id) DO UPDATE SET
-             is_active=1""",
+             is_active=1,
+             enabled=1""",
         (user_id, supplement_id, utc_now_iso()),
     )
     await conn.execute(
@@ -1440,6 +1564,9 @@ async def add_user_supplement(conn: aiosqlite.Connection, tg_user_id: int, suppl
     )
     await conn.commit()
 
+async def add_user_supp(conn: aiosqlite.Connection, user_id: int, supplement_id: int) -> None:
+    await add_user_supplement(conn, user_id, supplement_id)
+
 async def remove_user_supplement(conn: aiosqlite.Connection, tg_user_id: int, supplement_id: int) -> None:
     user_id = await get_or_create_user(conn, tg_user_id)
     await conn.execute("DELETE FROM user_supplements WHERE user_id=? AND supplement_id=?", (user_id, supplement_id))
@@ -1447,7 +1574,14 @@ async def remove_user_supplement(conn: aiosqlite.Connection, tg_user_id: int, su
         "DELETE FROM user_supp_settings WHERE user_id=? AND supplement_id=?",
         (user_id, supplement_id),
     )
+    await conn.execute(
+        "DELETE FROM reminders WHERE user_id=? AND supplement_id=?",
+        (tg_user_id, supplement_id),
+    )
     await conn.commit()
+
+async def remove_user_supp(conn: aiosqlite.Connection, user_id: int, supplement_id: int) -> None:
+    await remove_user_supplement(conn, user_id, supplement_id)
 
 async def get_user_supplement(conn: aiosqlite.Connection, tg_user_id: int, supplement_id: int):
     user_id = await get_or_create_user(conn, tg_user_id)
@@ -1557,6 +1691,14 @@ async def set_user_supplement_dose(
     )
     await conn.commit()
 
+async def set_user_supp_dose(
+    conn: aiosqlite.Connection,
+    user_id: int,
+    supplement_id: int,
+    dose_text: str | None,
+) -> None:
+    await set_user_supplement_dose(conn, user_id, supplement_id, dose_text)
+
 async def set_user_supplement_note(
     conn: aiosqlite.Connection,
     tg_user_id: int,
@@ -1590,6 +1732,9 @@ async def list_user_supplements(conn: aiosqlite.Connection, tg_user_id: int, lim
            ORDER BY s.name LIMIT ?""",
         (user_id, limit),
     )
+
+async def list_user_supps(conn: aiosqlite.Connection, user_id: int):
+    return await list_user_supplements(conn, user_id, limit=1000)
 
 async def list_user_stack_details(conn: aiosqlite.Connection, tg_user_id: int, local_date: str | None = None):
     user_id = await get_or_create_user(conn, tg_user_id)
@@ -1661,6 +1806,140 @@ async def list_enabled_reminders(conn: aiosqlite.Connection):
            JOIN users u ON u.id=uss.user_id
            WHERE uss.reminder_enabled=1 AND uss.reminder_time IS NOT NULL AND uss.reminder_time!=''
              AND u.tz_name IS NOT NULL AND u.tz_name!=''""",
+    )
+
+# new reminders system
+async def upsert_reminder(
+    conn: aiosqlite.Connection,
+    user_id: int,
+    supplement_id: int,
+    time_local: str,
+    enabled: int = 1,
+) -> None:
+    await conn.execute(
+        """INSERT INTO reminders(user_id, supplement_id, time_local, enabled)
+           VALUES(?,?,?,?)
+           ON CONFLICT(user_id, supplement_id, time_local) DO UPDATE SET
+             enabled=excluded.enabled""",
+        (user_id, supplement_id, time_local, int(enabled)),
+    )
+    await conn.commit()
+
+async def delete_reminder(
+    conn: aiosqlite.Connection,
+    user_id: int,
+    supplement_id: int,
+    time_local: str,
+) -> None:
+    await conn.execute(
+        "DELETE FROM reminders WHERE user_id=? AND supplement_id=? AND time_local=?",
+        (user_id, supplement_id, time_local),
+    )
+    await conn.commit()
+
+async def delete_reminders_for_supplement(
+    conn: aiosqlite.Connection,
+    user_id: int,
+    supplement_id: int,
+) -> None:
+    await conn.execute(
+        "DELETE FROM reminders WHERE user_id=? AND supplement_id=?",
+        (user_id, supplement_id),
+    )
+    await conn.commit()
+
+async def list_reminders_for_user(conn: aiosqlite.Connection, user_id: int):
+    return await fetchall(
+        conn,
+        """SELECT * FROM reminders
+           WHERE user_id=?
+           ORDER BY time_local""",
+        (user_id,),
+    )
+
+async def list_due_reminders(conn: aiosqlite.Connection):
+    rows = await fetchall(
+        conn,
+        """SELECT r.*, u.tz_name
+           FROM reminders r
+           JOIN users u ON u.tg_user_id=r.user_id
+           WHERE r.enabled=1""",
+    )
+    due = []
+    for row in rows:
+        tz_name = str(row["tz_name"] or "").strip()
+        local_now = datetime.now(parse_utc_tz(tz_name))
+        if local_now.strftime("%H:%M") != str(row["time_local"] or ""):
+            continue
+        due.append(
+            {
+                "user_id": int(row["user_id"]),
+                "supplement_id": int(row["supplement_id"]),
+                "time_local": str(row["time_local"]),
+                "day": local_now.date().isoformat(),
+                "tz_name": tz_name,
+            }
+        )
+    return due
+
+async def insert_reminder_fire(
+    conn: aiosqlite.Connection,
+    user_id: int,
+    supplement_id: int,
+    day: str,
+    time_local: str,
+) -> bool:
+    before = conn.total_changes
+    await conn.execute(
+        """INSERT OR IGNORE INTO reminder_fires(user_id, supplement_id, day, time_local, fired_at)
+           VALUES(?,?,?,?,datetime('now'))""",
+        (user_id, supplement_id, day, time_local),
+    )
+    await conn.commit()
+    return conn.total_changes > before
+
+async def save_ui_state(
+    conn: aiosqlite.Connection,
+    user_id: int,
+    message_id: int | None,
+    screen: str,
+    payload_json: str,
+) -> None:
+    await conn.execute(
+        """INSERT INTO ui_state(user_id, last_message_id, last_screen, last_payload, updated_at)
+           VALUES(?,?,?,?,datetime('now'))
+           ON CONFLICT(user_id) DO UPDATE SET
+             last_message_id=excluded.last_message_id,
+             last_screen=excluded.last_screen,
+             last_payload=excluded.last_payload,
+             updated_at=excluded.updated_at""",
+        (user_id, message_id, screen, payload_json),
+    )
+    await conn.commit()
+
+async def update_ui_state_payload(
+    conn: aiosqlite.Connection,
+    user_id: int,
+    payload_json: str,
+) -> None:
+    await conn.execute(
+        "UPDATE ui_state SET last_payload=?, updated_at=datetime('now') WHERE user_id=?",
+        (payload_json, user_id),
+    )
+    await conn.commit()
+
+async def get_ui_state(conn: aiosqlite.Connection, user_id: int) -> tuple[int | None, str, str]:
+    row = await fetchone(
+        conn,
+        "SELECT last_message_id, last_screen, last_payload FROM ui_state WHERE user_id=?",
+        (user_id,),
+    )
+    if not row:
+        return (None, "", "")
+    return (
+        int(row["last_message_id"]) if row["last_message_id"] is not None else None,
+        str(row["last_screen"] or ""),
+        str(row["last_payload"] or ""),
     )
 
 async def set_user_schedule_time(

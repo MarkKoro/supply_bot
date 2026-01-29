@@ -8,7 +8,7 @@ def main_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("➕ Добавить добавку", callback_data="menu:add")],
         [InlineKeyboardButton("📚 Каталог БАДов", callback_data="menu:catalog")],
         [InlineKeyboardButton("🧠 Готовые стеки", callback_data="menu:curated")],
-        [InlineKeyboardButton("📦 Мои БАДы", callback_data="menu:my")],
+        [InlineKeyboardButton("💊 Мои БАДы", callback_data="menu:my")],
         [InlineKeyboardButton("🧩 Совместимость", callback_data="menu:compat")],
         [InlineKeyboardButton("📝 Опрос дня", callback_data="menu:checkin")],
         [InlineKeyboardButton("🤖 AI-подбор", callback_data="menu:ai")],
@@ -20,7 +20,7 @@ def catalog_home() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🔎 Поиск", callback_data="cat:mode:search")],
         [InlineKeyboardButton("🧠 По доказательности", callback_data="cat:mode:evidence")],
         [InlineKeyboardButton("🎯 По цели/классу", callback_data="cat:mode:class")],
-        [InlineKeyboardButton("⭐ Мои БАДы", callback_data="menu:my")],
+        [InlineKeyboardButton("💊 Мои БАДы", callback_data="menu:my")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")],
     ])
 
@@ -57,10 +57,10 @@ def back() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")]])
 
 def my_list_back() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="mine:list:0")]])
+    return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="mysupp:list:0")]])
 
 def my_hub_back(supplement_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"mine:hub:{supplement_id}")]])
+    return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"mysupp:open:{supplement_id}")]])
 
 def pick_search_results(rows, prefix: str) -> InlineKeyboardMarkup:
     btns = []
@@ -80,17 +80,14 @@ def my_supplements_list(rows, page: int, has_prev: bool, has_next: bool, *, show
         else:
             marker = "…"
         label = f"{r['name']} {marker}"
-        btns.append([InlineKeyboardButton(label, callback_data=f"mine:open:{r['supplement_id']}")])
-    search_row = [InlineKeyboardButton("🔎 Поиск", callback_data="mine:search")]
-    if show_clear:
-        search_row.append(InlineKeyboardButton("❌ Сбросить поиск", callback_data="mine:clear"))
-    btns.append(search_row)
+        btns.append([InlineKeyboardButton(label, callback_data=f"mysupp:open:{r['supplement_id']}")])
+    btns.append([InlineKeyboardButton("➕ Добавить", callback_data="mysupp:add")])
     nav = []
     if has_prev:
-        nav.append(InlineKeyboardButton("⬅️ Назад", callback_data=f"mine:list:{page - 1}"))
+        nav.append(InlineKeyboardButton("⬅️ Назад", callback_data=f"mysupp:list:{page - 1}"))
     nav.append(InlineKeyboardButton("⬅️ Назад", callback_data="menu:home"))
     if has_next:
-        nav.append(InlineKeyboardButton("➡️ Далее", callback_data=f"mine:list:{page + 1}"))
+        nav.append(InlineKeyboardButton("➡️ Далее", callback_data=f"mysupp:list:{page + 1}"))
     btns.append(nav)
     return InlineKeyboardMarkup(btns)
 
@@ -138,9 +135,9 @@ def supplement_page(
 ) -> InlineKeyboardMarkup:
     btns = []
     if in_stack:
-        btns.append([InlineKeyboardButton("✅ Уже в моих — Управлять", callback_data=f"mine:open:{supplement_id}")])
+        btns.append([InlineKeyboardButton("✅ Уже в моих — Управлять", callback_data=f"mysupp:open:{supplement_id}")])
     else:
-        btns.append([InlineKeyboardButton("➕ Добавить в Мои БАДы", callback_data=f"my:add:{supplement_id}")])
+        btns.append([InlineKeyboardButton("➕ Добавить в Мои БАДы", callback_data=f"mysupp:add_direct:{supplement_id}")])
     btns.append([
         InlineKeyboardButton("✅ Совместимо", callback_data=f"supp:compat:{supplement_id}:synergy:0"),
         InlineKeyboardButton("⛔ Несовместимо", callback_data=f"supp:compat:{supplement_id}:antagonism:0"),
@@ -182,19 +179,27 @@ def supplement_compat_list(
 
 def my_supplement_hub(
     supplement_id: int,
-    reminder_enabled: bool,
 ) -> InlineKeyboardMarkup:
-    toggle_label = "⏰ Напоминание: ВКЛ" if reminder_enabled else "⏰ Напоминание: ВЫКЛ"
     btns = [
-        [InlineKeyboardButton(toggle_label, callback_data=f"mine:hub:toggle:{supplement_id}")],
-        [InlineKeyboardButton("🕒 Время", callback_data=f"mine:hub:set_time:{supplement_id}")],
-        [InlineKeyboardButton("💊 Доза", callback_data=f"mine:hub:set_dose:{supplement_id}")],
-        [InlineKeyboardButton("✅ Выпил сегодня", callback_data=f"mine:hub:taken:{supplement_id}")],
-        [InlineKeyboardButton("🚫 Не пью сегодня", callback_data=f"mine:hub:skip:{supplement_id}")],
-        [InlineKeyboardButton("🧩 Совместимость", callback_data=f"mine:hub:compat:{supplement_id}")],
-        [InlineKeyboardButton("🗑 Удалить из моих", callback_data=f"mine:hub:remove:{supplement_id}")],
-        [InlineKeyboardButton("⬅️ Назад", callback_data="mine:back")],
+        [InlineKeyboardButton("✅ Отметить: выпил сегодня", callback_data=f"mysupp:mark:taken:{supplement_id}")],
+        [InlineKeyboardButton("✖️ Отметить: не буду сегодня", callback_data=f"mysupp:mark:skip:{supplement_id}")],
+        [InlineKeyboardButton("⏰ Напоминания", callback_data=f"mysupp:rem:{supplement_id}")],
+        [InlineKeyboardButton("🧾 Доза", callback_data=f"mysupp:set_dose:{supplement_id}")],
+        [InlineKeyboardButton("🗑 Удалить из моих", callback_data=f"mysupp:remove:{supplement_id}")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="mysupp:list:0")],
     ]
+    return InlineKeyboardMarkup(btns)
+
+def my_supplement_reminders(
+    supplement_id: int,
+    reminders: list[str],
+) -> InlineKeyboardMarkup:
+    btns: list[list[InlineKeyboardButton]] = []
+    for time_local in reminders:
+        key = time_local.replace(":", "-")
+        btns.append([InlineKeyboardButton(f"🗑 {time_local}", callback_data=f"mysupp:rem:del:{supplement_id}:{key}")])
+    btns.append([InlineKeyboardButton("➕ Добавить время", callback_data=f"mysupp:rem:add:{supplement_id}")])
+    btns.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"mysupp:open:{supplement_id}")])
     return InlineKeyboardMarkup(btns)
 
 def timezone_picker(
@@ -231,9 +236,8 @@ def timezone_picker(
 def reminder_actions(supplement_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("✅ Выпил", callback_data=f"rem:done:{supplement_id}")],
-        [InlineKeyboardButton("⏱ Через 15 минут", callback_data=f"rem:snooze:15:{supplement_id}")],
-        [InlineKeyboardButton("🚫 Сегодня не пью", callback_data=f"rem:skip:{supplement_id}")],
-        [InlineKeyboardButton("↩️ Вернуться", callback_data="rem:back")],
+        [InlineKeyboardButton("⏱ Через 15 минут", callback_data=f"rem:snooze:{supplement_id}:15")],
+        [InlineKeyboardButton("✖️ Сегодня не буду", callback_data=f"rem:skip:{supplement_id}")],
     ])
 
 def settings_menu() -> InlineKeyboardMarkup:

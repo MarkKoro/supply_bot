@@ -2,6 +2,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 import sys
 from pathlib import Path
 from settings import get_settings
@@ -19,6 +20,14 @@ def _build_aliases(item: dict) -> list[str]:
     aliases = []
     for key in ("aliases_ru", "aliases_en", "aliases_misc", "aliases"):
         aliases.extend(item.get(key) or [])
+    return aliases
+
+def _ensure_omega_aliases(name_en: str | None, aliases: list[str]) -> list[str]:
+    if not name_en:
+        return aliases
+    lower = str(name_en).lower()
+    if re.search(r"omega\\s*-?\\s*3", lower):
+        aliases.extend(["omega3", "omega-3", "omega 3"])
     return aliases
 
 def _extract_evidence_fields(item: dict) -> dict[str, str]:
@@ -40,7 +49,8 @@ async def _import_rich(conn, supp_path: str, slug_to_id: dict[str, int]) -> None
         name_ru = item.get("name_ru")
         name_en = item.get("name_en")
         interaction_classes = item.get("interaction_classes") or []
-        aliases = _build_aliases(item)
+        aliases = _ensure_omega_aliases(name_en, _build_aliases(item))
+        search_blob = db.build_search_blob(name_ru, name_en, aliases)
         evidence_fields = _extract_evidence_fields(item)
         payload = {
             "slug": item["slug"],
@@ -48,6 +58,8 @@ async def _import_rich(conn, supp_path: str, slug_to_id: dict[str, int]) -> None
             "name_ru": name_ru,
             "name_en": name_en,
             "aliases": aliases,
+            "aliases_json": aliases,
+            "search_blob": search_blob,
             "summary_verified": item.get("summary_ru_verified") or "",
             "summary_theoretical": item.get("summary_ru_theoretical") or "",
             "molecular_mechanisms": item.get("molecular_mechanisms_ru") or "",
@@ -150,13 +162,16 @@ async def _import(
             for item in _read_jsonl(supp_path):
                 name_ru = item.get("name_ru")
                 name_en = item.get("name_en")
-                aliases = _build_aliases(item)
+                aliases = _ensure_omega_aliases(name_en, _build_aliases(item))
+                search_blob = db.build_search_blob(name_ru, name_en, aliases)
                 payload = {
                     "slug": item["slug"],
                     "name": item.get("name") or name_ru or name_en or item["slug"],
                     "name_ru": name_ru,
                     "name_en": name_en,
                     "aliases": aliases,
+                    "aliases_json": aliases,
+                    "search_blob": search_blob,
                     "summary_ru": item.get("summary_ru") or "",
                     "purchase_url": item.get("purchase_url") or "",
                     "tags_json": json.dumps(item.get("tags") or [], ensure_ascii=False),

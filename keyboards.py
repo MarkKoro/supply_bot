@@ -10,7 +10,7 @@ def main_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🧠 Готовые стеки", callback_data="menu:curated")],
         [InlineKeyboardButton("💊 Мои БАДы", callback_data="menu:my")],
         [InlineKeyboardButton("🧩 Совместимость", callback_data="menu:compat")],
-        [InlineKeyboardButton("📝 Опрос дня", callback_data="menu:checkin")],
+        [InlineKeyboardButton("📝 Опрос дня (AI)", callback_data="menu:checkin_ai")],
         [InlineKeyboardButton("🤖 AI-подбор", callback_data="menu:ai")],
         [InlineKeyboardButton("⚙️ Настройки", callback_data="menu:settings")],
     ])

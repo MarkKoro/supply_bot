@@ -2414,28 +2414,28 @@ async def render_view(
             page = int(payload_data.get("page") or 0)
             await render_catalog(update, context, conn, page)
             return
-    if view == "supp_card":
-        supplement_id = payload_data.get("id")
-        return_page = int(payload_data.get("return_page") or 0)
-        return_mode = payload_data.get("return_mode") or "catalog"
-        search_query = payload_data.get("query")
-        tab = payload_data.get("tab") or "brief"
-        page = int(payload_data.get("page") or 0)
-        prev_payload = payload_data.get("prev_payload")
-        if supplement_id is not None:
-            await render_supplement_card(
-                update,
-                context,
-                conn,
-                int(supplement_id),
-                return_page,
-                tab=tab,
-                page=page,
-                return_mode=return_mode,
-                search_query=search_query,
-                prev_payload=prev_payload,
-            )
-            return
+        if view == "supp_card":
+            supplement_id = payload_data.get("id")
+            return_page = int(payload_data.get("return_page") or 0)
+            return_mode = payload_data.get("return_mode") or "catalog"
+            search_query = payload_data.get("query")
+            tab = payload_data.get("tab") or "brief"
+            page = int(payload_data.get("page") or 0)
+            prev_payload = payload_data.get("prev_payload")
+            if supplement_id is not None:
+                await render_supplement_card(
+                    update,
+                    context,
+                    conn,
+                    int(supplement_id),
+                    return_page,
+                    tab=tab,
+                    page=page,
+                    return_mode=return_mode,
+                    search_query=search_query,
+                    prev_payload=prev_payload,
+                )
+                return
         if view == "mine_list":
             page = int(payload_data.get("page") or 0)
             await _show_my_list(update, context, conn, tg_user_id, page)

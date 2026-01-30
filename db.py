@@ -1679,6 +1679,45 @@ async def get_interaction_between(conn: aiosqlite.Connection, a_id: int, b_id: i
     a, b = canon_pair(a_id, b_id)
     return await fetchone(conn, "SELECT * FROM interactions WHERE a_id=? AND b_id=?", (a, b))
 
+async def get_supplement_links(conn: aiosqlite.Connection, supplement_id: int) -> dict:
+    synergy_ids: set[int] = set()
+    antagonist_ids: set[int] = set()
+    rows = await fetchall(
+        conn,
+        """SELECT a_id, b_id, relation
+           FROM interactions
+           WHERE a_id=? OR b_id=?""",
+        (supplement_id, supplement_id),
+    )
+    for row in rows:
+        a_id = int(row["a_id"])
+        b_id = int(row["b_id"])
+        other_id = b_id if a_id == supplement_id else a_id
+        relation = str(row["relation"] or "").strip().lower()
+        if relation in {"synergy"}:
+            synergy_ids.add(other_id)
+        elif relation in {"antagonist", "antagonism", "avoid"}:
+            antagonist_ids.add(other_id)
+    return {
+        "synergy": sorted(synergy_ids),
+        "antagonists": sorted(antagonist_ids),
+    }
+
+async def list_linked_supplements(conn: aiosqlite.Connection, ids: list[int]) -> list[dict]:
+    if not ids:
+        return []
+    cleaned = [int(item) for item in ids]
+    placeholders = ",".join("?" for _ in cleaned)
+    rows = await fetchall(
+        conn,
+        f"""SELECT id, name_ru, name_en
+            FROM supplements
+            WHERE id IN ({placeholders})""",
+        tuple(cleaned),
+    )
+    by_id = {int(row["id"]): dict(row) for row in rows}
+    return [by_id[item] for item in cleaned if item in by_id]
+
 # user library
 async def add_user_supplement(conn: aiosqlite.Connection, tg_user_id: int, supplement_id: int) -> None:
     user_id = await get_or_create_user(conn, tg_user_id)

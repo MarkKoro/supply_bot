@@ -33,6 +33,7 @@ from keyboards import (
     curated_stack_card,
     supplement_page,
     supplement_compat_list,
+    supp_tabs_kb,
     my_supplement_hub,
     my_supplement_reminders,
     timezone_picker,
@@ -809,7 +810,15 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 except ValueError:
                     supplement_id = None
                 if supplement_id is not None:
-                    await render_supplement_card(update, context, conn, supplement_id, return_page)
+                    await render_supplement_card(
+                        update,
+                        context,
+                        conn,
+                        supplement_id,
+                        return_page,
+                        tab="brief",
+                        page=0,
+                    )
                     return
 
         if data == "cat:home":
@@ -926,9 +935,95 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     conn,
                     supplement_id,
                     page,
+                    tab="brief",
+                    page=0,
                     return_mode="search",
                     search_query=query or None,
                 )
+            return
+
+        if data.startswith("supp:tab:"):
+            _, _, sid, tab = data.split(":", 3)
+            _, last_screen, ui_payload = await db.get_ui_state(conn, tg_uid)
+            try:
+                payload_data = json.loads(ui_payload) if ui_payload else {}
+            except json.JSONDecodeError:
+                payload_data = {}
+            if not isinstance(payload_data, dict):
+                payload_data = {}
+            if last_screen != "supp_card":
+                payload_data = {}
+            return_page = int(payload_data.get("return_page") or 0)
+            return_mode = payload_data.get("return_mode") or "catalog"
+            search_query = payload_data.get("query")
+            prev_payload = payload_data.get("prev_payload") if return_mode == "supp_back" else None
+            await render_supplement_card(
+                update,
+                context,
+                conn,
+                int(sid),
+                return_page,
+                tab=tab,
+                page=0,
+                return_mode=return_mode,
+                search_query=search_query,
+                prev_payload=prev_payload,
+            )
+            return
+
+        if data.startswith("supp:page:"):
+            _, _, sid, tab, page_text = data.split(":", 4)
+            _, last_screen, ui_payload = await db.get_ui_state(conn, tg_uid)
+            try:
+                payload_data = json.loads(ui_payload) if ui_payload else {}
+            except json.JSONDecodeError:
+                payload_data = {}
+            if not isinstance(payload_data, dict):
+                payload_data = {}
+            if last_screen != "supp_card":
+                payload_data = {}
+            return_page = int(payload_data.get("return_page") or 0)
+            return_mode = payload_data.get("return_mode") or "catalog"
+            search_query = payload_data.get("query")
+            prev_payload = payload_data.get("prev_payload") if return_mode == "supp_back" else None
+            await render_supplement_card(
+                update,
+                context,
+                conn,
+                int(sid),
+                return_page,
+                tab=tab,
+                page=int(page_text),
+                return_mode=return_mode,
+                search_query=search_query,
+                prev_payload=prev_payload,
+            )
+            return
+
+        if data == "supp:back":
+            _, last_screen, ui_payload = await db.get_ui_state(conn, tg_uid)
+            try:
+                payload_data = json.loads(ui_payload) if ui_payload else {}
+            except json.JSONDecodeError:
+                payload_data = {}
+            if not isinstance(payload_data, dict) or last_screen != "supp_card":
+                payload_data = {}
+            prev_payload = payload_data.get("prev_payload")
+            if isinstance(prev_payload, dict):
+                await render_supplement_card(
+                    update,
+                    context,
+                    conn,
+                    int(prev_payload.get("id")),
+                    int(prev_payload.get("return_page") or 0),
+                    tab=prev_payload.get("tab") or "brief",
+                    page=int(prev_payload.get("page") or 0),
+                    return_mode=prev_payload.get("return_mode") or "catalog",
+                    search_query=prev_payload.get("query"),
+                    prev_payload=prev_payload.get("prev_payload"),
+                )
+                return
+            await render_catalog(update, context, conn, 0)
             return
 
         if data == "cat:back":
@@ -1010,8 +1105,29 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         if data.startswith("supp:open:"):
             supplement_id = int(data.split(":")[-1])
-            back_route = context.user_data.get("last_route")
-            await _show_supplement_page(update, context, conn, tg_uid, supplement_id, back_route=back_route)
+            _, last_screen, ui_payload = await db.get_ui_state(conn, tg_uid)
+            try:
+                payload_data = json.loads(ui_payload) if ui_payload else {}
+            except json.JSONDecodeError:
+                payload_data = {}
+            if not isinstance(payload_data, dict):
+                payload_data = {}
+            if last_screen == "supp_card":
+                return_page = int(payload_data.get("return_page") or 0)
+                await render_supplement_card(
+                    update,
+                    context,
+                    conn,
+                    supplement_id,
+                    return_page,
+                    tab="brief",
+                    page=0,
+                    return_mode="supp_back",
+                    prev_payload=payload_data,
+                )
+            else:
+                back_route = context.user_data.get("last_route")
+                await _show_supplement_page(update, context, conn, tg_uid, supplement_id, back_route=back_route)
             return
 
         if data.startswith("card:add:"):
@@ -1078,6 +1194,16 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 except ValueError:
                     supplement_id = None
                 if supplement_id is not None:
+                    _, _, ui_payload = await db.get_ui_state(conn, tg_uid)
+                    try:
+                        payload_data = json.loads(ui_payload) if ui_payload else {}
+                    except json.JSONDecodeError:
+                        payload_data = {}
+                    if not isinstance(payload_data, dict):
+                        payload_data = {}
+                    tab = payload_data.get("tab") or "brief"
+                    page = int(payload_data.get("page") or 0)
+                    prev_payload = payload_data.get("prev_payload") if payload_data.get("return_mode") == "supp_back" else None
                     await db.add_user_supplement(conn, tg_uid, supplement_id)
                     await render_supplement_card(
                         update,
@@ -1085,7 +1211,12 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         conn,
                         supplement_id,
                         return_page,
+                        tab=tab,
+                        page=page,
                         show_added=True,
+                        return_mode=payload_data.get("return_mode") or "catalog",
+                        search_query=payload_data.get("query"),
+                        prev_payload=prev_payload,
                     )
                     return
 
@@ -1106,6 +1237,9 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     if not isinstance(payload_data, dict):
                         payload_data = {}
                     query = str(payload_data.get("query") or "").strip()
+                    tab = payload_data.get("tab") or "brief"
+                    page = int(payload_data.get("page") or 0)
+                    prev_payload = payload_data.get("prev_payload") if payload_data.get("return_mode") == "supp_back" else None
                     await db.add_user_supplement(conn, tg_uid, supplement_id)
                     await render_supplement_card(
                         update,
@@ -1113,8 +1247,45 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         conn,
                         supplement_id,
                         return_page,
+                        tab=tab,
+                        page=page,
                         return_mode="search",
                         search_query=query or None,
+                        show_added=True,
+                        prev_payload=prev_payload,
+                    )
+                    return
+
+        if data.startswith("mysupp:add:") and ":retback" in data:
+            parts = data.split(":")
+            if len(parts) >= 4:
+                try:
+                    supplement_id = int(parts[2])
+                except ValueError:
+                    supplement_id = None
+                if supplement_id is not None:
+                    _, _, ui_payload = await db.get_ui_state(conn, tg_uid)
+                    try:
+                        payload_data = json.loads(ui_payload) if ui_payload else {}
+                    except json.JSONDecodeError:
+                        payload_data = {}
+                    if not isinstance(payload_data, dict):
+                        payload_data = {}
+                    tab = payload_data.get("tab") or "brief"
+                    page = int(payload_data.get("page") or 0)
+                    return_page = int(payload_data.get("return_page") or 0)
+                    prev_payload = payload_data.get("prev_payload")
+                    await db.add_user_supplement(conn, tg_uid, supplement_id)
+                    await render_supplement_card(
+                        update,
+                        context,
+                        conn,
+                        supplement_id,
+                        return_page,
+                        tab=tab,
+                        page=page,
+                        return_mode="supp_back",
+                        prev_payload=prev_payload,
                         show_added=True,
                     )
                     return
@@ -1557,6 +1728,9 @@ async def render_view(
         return_page = int(payload_data.get("return_page") or 0)
         return_mode = payload_data.get("return_mode") or "catalog"
         search_query = payload_data.get("query")
+        tab = payload_data.get("tab") or "brief"
+        page = int(payload_data.get("page") or 0)
+        prev_payload = payload_data.get("prev_payload")
         if supplement_id is not None:
             await render_supplement_card(
                 update,
@@ -1564,8 +1738,11 @@ async def render_view(
                 conn,
                 int(supplement_id),
                 return_page,
+                tab=tab,
+                page=page,
                 return_mode=return_mode,
                 search_query=search_query,
+                prev_payload=prev_payload,
             )
             return
         if view == "mine_list":
@@ -1621,6 +1798,9 @@ async def _render_route(
             return_page = int(payload.get("return_page") or 0)
             return_mode = payload.get("return_mode") or "catalog"
             search_query = payload.get("query")
+            tab = payload.get("tab") or "brief"
+            page = int(payload.get("page") or 0)
+            prev_payload = payload.get("prev_payload")
             if supplement_id is not None:
                 await render_supplement_card(
                     update,
@@ -1628,8 +1808,11 @@ async def _render_route(
                     conn,
                     int(supplement_id),
                     return_page,
+                    tab=tab,
+                    page=page,
                     return_mode=return_mode,
                     search_query=search_query,
+                    prev_payload=prev_payload,
                     target_chat_id=target_chat_id,
                     target_message_id=target_message_id,
                 )
@@ -2753,8 +2936,11 @@ async def render_supplement_card(
     supplement_id: int,
     return_page: int,
     *,
+    tab: str = "brief",
+    page: int = 0,
     return_mode: str = "catalog",
     search_query: str | None = None,
+    prev_payload: dict | None = None,
     show_added: bool = False,
     target_chat_id: int | None = None,
     target_message_id: int | None = None,
@@ -2786,6 +2972,10 @@ async def render_supplement_card(
             json.dumps({"page": return_page}, ensure_ascii=False),
         )
         return
+    tab = (tab or "brief").strip().lower()
+    if tab not in {"brief", "time", "dose", "synergy", "antag"}:
+        tab = "brief"
+
     name_ru = str(row.get("name_ru") or "").strip()
     name_en = str(row.get("name_en") or "").strip()
     title = name_ru or name_en or str(row.get("name") or "").strip() or "Без названия"
@@ -2797,38 +2987,131 @@ async def render_supplement_card(
     human_trials = str(row.get("human_trials_count_est") or "").strip() or "—"
     participants = str(row.get("participants_total_est") or "").strip() or "—"
     avg_effect = str(row.get("avg_effect_percent_est") or "").strip() or "—"
+    short_desc = (
+        str(row.get("summary_ru") or "").strip()
+        or str(row.get("summary_ru_verified") or "").strip()
+        or str(row.get("summary_ru_theoretical") or "").strip()
+        or "—"
+    )
 
-    lines = [
-        f"<b>{title}</b>",
-        f"Англ: {name_en or '—'}",
-    ]
-    if show_added:
-        lines.append("✅ Добавлено в «Мои БАДы»")
-    lines.extend(
-        [
-            "",
-            f"Доказательность: {evidence}",
-            f"Исследования на людях: {human_trials}",
-            f"Участников всего: {participants}",
-            f"Средний эффект: {avg_effect}",
-            "",
-            "(Скоро: совместимость, оптимальное время, дозировки, молекулярное объяснение)",
+    dose_raw = row.get("dose_ru")
+    dose_typical = ""
+    dose_range = ""
+    course_ru = ""
+    dose_notes = ""
+    timing_hint = ""
+    if isinstance(dose_raw, str) and dose_raw:
+        try:
+            parsed = json.loads(dose_raw)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            dose_typical = str(parsed.get("typical_range") or parsed.get("typical") or "").strip()
+            dose_range = str(parsed.get("range") or parsed.get("dose_range") or "").strip()
+            course_ru = str(parsed.get("course") or "").strip()
+            dose_notes = str(parsed.get("notes") or "").strip()
+            timing_hint = str(parsed.get("timing") or "").strip()
+        else:
+            dose_typical = dose_raw.strip()
+    elif dose_raw:
+        dose_typical = str(dose_raw).strip()
+
+    timing_ru = str(row.get("timing_ru") or "").strip() or timing_hint
+    with_food_ru = "—"
+    timing_notes_ru = dose_notes or "—"
+    if not timing_ru:
+        timing_ru = "—"
+
+    safety_ru = str(row.get("safety_ru") or "").strip() or "—"
+    dose_typical = dose_typical or "—"
+    dose_range = dose_range or "—"
+    course_ru = course_ru or "—"
+
+    lines: list[str] = []
+    if tab == "brief":
+        lines = [
+            f"<b>{title}</b>",
+            f"Англ: {name_en or '—'}",
         ]
-    )
-    add_callback = (
-        f"mysupp:add:{supplement_id}:retsearch:{return_page}"
-        if return_mode == "search"
-        else f"mysupp:add:{supplement_id}:retcat:{return_page}"
-    )
-    back_callback = (
-        f"cat:sres:{return_page}" if return_mode == "search" else f"cat:page:{return_page}"
-    )
-    kb = InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("➕ Добавить в мои", callback_data=add_callback)],
-            [InlineKeyboardButton("⬅️ Назад", callback_data=back_callback)],
-            [InlineKeyboardButton("🏠 В меню", callback_data="main")],
+        if show_added:
+            lines.append("✅ Добавлено в «Мои БАДы»")
+        lines.extend(
+            [
+                "",
+                f"Доказательность: {evidence}",
+                f"Исследования на людях: {human_trials}",
+                f"Участников всего: {participants}",
+                f"Средний эффект: {avg_effect}",
+                "",
+                "Коротко:",
+                short_desc,
+            ]
+        )
+    elif tab == "time":
+        lines = [
+            f"<b>{title}</b> — 🕒 Когда принимать",
+            f"Рекомендация: {timing_ru}",
+            f"С едой/натощак: {with_food_ru}",
+            f"Комментарии: {timing_notes_ru}",
         ]
+    elif tab == "dose":
+        lines = [
+            f"<b>{title}</b> — 💊 Дозировка",
+            f"Типичная доза: {dose_typical}",
+            f"Диапазон: {dose_range}",
+            f"Курс: {course_ru}",
+            f"Предупреждения: {safety_ru}",
+        ]
+    else:
+        links = await db.get_supplement_links(conn, supplement_id)
+        link_ids = links["synergy"] if tab == "synergy" else links["antagonists"]
+        page_size = 10
+        page = max(int(page), 0)
+        pages = max(1, (len(link_ids) + page_size - 1) // page_size) if link_ids else 1
+        if page >= pages:
+            page = max(pages - 1, 0)
+        start = page * page_size
+        end = start + page_size
+        slice_ids = link_ids[start:end]
+        linked_items = await db.list_linked_supplements(conn, slice_ids)
+        has_links = bool(link_ids)
+        list_lines = []
+        for item in linked_items:
+            label = item.get("name_ru") or item.get("name_en") or "Без названия"
+            list_lines.append(f"• {label}")
+        if tab == "synergy":
+            lines = [
+                f"<b>{title}</b> — 🤝 Совместимость",
+                "С чем чаще всего сочетают:",
+            ]
+            if list_lines:
+                lines.extend(list_lines)
+            else:
+                lines.append("Пока нет данных. Добавим по мере наполнения базы.")
+        else:
+            lines = [
+                f"<b>{title}</b> — ⚠️ Антагонисты",
+                "С чем лучше НЕ сочетать:",
+            ]
+            if list_lines:
+                lines.extend(list_lines)
+            else:
+                lines.append("Пока нет данных…")
+
+    if tab not in {"synergy", "antag"}:
+        pages = 1
+        has_links = False
+        linked_items = None
+
+    kb = supp_tabs_kb(
+        supplement_id,
+        tab,
+        return_mode,
+        return_page,
+        page=page,
+        pages=pages,
+        has_links=has_links,
+        linked_items=linked_items,
     )
     msg = await show(
         update,
@@ -2841,11 +3124,15 @@ async def render_supplement_card(
     )
     payload = {
         "id": supplement_id,
+        "tab": tab,
+        "page": page,
         "return_page": return_page,
         "return_mode": return_mode,
     }
     if return_mode == "search" and search_query:
         payload["query"] = search_query
+    if prev_payload:
+        payload["prev_payload"] = prev_payload
     await db.save_ui_state(
         conn,
         update.effective_user.id,

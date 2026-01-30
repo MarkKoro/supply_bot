@@ -221,6 +221,61 @@ def supplement_compat_list(
         btns.append([InlineKeyboardButton("⬅️ К карточке", callback_data=f"supp:open:{supplement_id}")])
     return InlineKeyboardMarkup(btns)
 
+def supp_tabs_kb(
+    supplement_id: int,
+    tab: str,
+    return_mode: str,
+    return_page: int,
+    *,
+    page: int = 0,
+    pages: int = 1,
+    has_links: bool = False,
+    linked_items: list[dict] | None = None,
+) -> InlineKeyboardMarkup:
+    btns: list[list[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton("📌", callback_data=f"supp:tab:{supplement_id}:brief"),
+            InlineKeyboardButton("🕒", callback_data=f"supp:tab:{supplement_id}:time"),
+            InlineKeyboardButton("💊", callback_data=f"supp:tab:{supplement_id}:dose"),
+        ],
+        [
+            InlineKeyboardButton("🤝", callback_data=f"supp:tab:{supplement_id}:synergy"),
+            InlineKeyboardButton("⚠️", callback_data=f"supp:tab:{supplement_id}:antag"),
+        ],
+    ]
+
+    if tab in {"synergy", "antag"}:
+        for item in linked_items or []:
+            title = item.get("name_ru") or item.get("name_en") or "Без названия"
+            btns.append([InlineKeyboardButton(f"• {title}", callback_data=f"supp:open:{item['id']}")])
+        if has_links or pages > 1:
+            nav: list[InlineKeyboardButton] = []
+            if page > 0:
+                nav.append(InlineKeyboardButton("⬅️", callback_data=f"supp:page:{supplement_id}:{tab}:{page - 1}"))
+            nav.append(InlineKeyboardButton(f"Стр {page + 1}/{max(pages, 1)}", callback_data="noop"))
+            if page < pages - 1:
+                nav.append(InlineKeyboardButton("➡️", callback_data=f"supp:page:{supplement_id}:{tab}:{page + 1}"))
+            btns.append(nav)
+
+    if return_mode == "search":
+        add_cb = f"mysupp:add:{supplement_id}:retsearch:{return_page}"
+        back_cb = f"cat:sres:{return_page}"
+    elif return_mode == "supp_back":
+        add_cb = f"mysupp:add:{supplement_id}:retback"
+        back_cb = "supp:back"
+    else:
+        add_cb = f"mysupp:add:{supplement_id}:retcat:{return_page}"
+        back_cb = f"cat:page:{return_page}"
+
+    btns.append(
+        [
+            InlineKeyboardButton("➕ В мои", callback_data=add_cb),
+            InlineKeyboardButton("⬅️ Назад", callback_data=back_cb),
+            InlineKeyboardButton("🏠 Меню", callback_data="main"),
+        ]
+    )
+    return InlineKeyboardMarkup(btns)
+
 def my_supplement_hub(
     supplement_id: int,
 ) -> InlineKeyboardMarkup:

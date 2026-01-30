@@ -1,6 +1,8 @@
 from __future__ import annotations
 import asyncio
+import json
 import logging
+import os
 from dataclasses import dataclass
 from typing import Optional
 
@@ -44,6 +46,7 @@ def _sync_transcribe_call(
     *,
     audio_bytes: bytes,
     filename: str,
+    language: str | None = None,
     timeout_s: float | None = None,
 ) -> str:
     from openai import OpenAI
@@ -51,10 +54,13 @@ def _sync_transcribe_call(
         client = OpenAI(api_key=cfg.api_key, timeout=timeout_s)
     else:
         client = OpenAI(api_key=cfg.api_key)
-    resp = client.audio.transcriptions.create(
-        model=cfg.model,
-        file=(filename, audio_bytes, "audio/ogg"),
-    )
+    params = {
+        "model": cfg.model,
+        "file": (filename, audio_bytes, "audio/ogg"),
+    }
+    if language:
+        params["language"] = language
+    resp = client.audio.transcriptions.create(**params)
     return (getattr(resp, "text", "") or "").strip()
 
 def _sync_call_messages(
@@ -182,11 +188,110 @@ async def transcribe_voice_v1(
             cfg,
             audio_bytes=audio_bytes,
             filename=filename,
+            language="ru",
             timeout_s=20,
         )
     except Exception:
         log.exception("OpenAI transcription failed")
         raise
+
+async def _read_file_bytes(path: str) -> bytes:
+    def _read() -> bytes:
+        with open(path, "rb") as handle:
+            return handle.read()
+    return await asyncio.to_thread(_read)
+
+async def transcribe_audio(
+    cfg: Optional[OpenAITranscribeConfig],
+    path: str,
+) -> str:
+    if not cfg:
+        return ""
+    audio_bytes = await _read_file_bytes(path)
+    filename = os.path.basename(path)
+    try:
+        return await asyncio.to_thread(
+            _sync_transcribe_call,
+            cfg,
+            audio_bytes=audio_bytes,
+            filename=filename,
+            language="ru",
+            timeout_s=20,
+        )
+    except Exception:
+        log.exception("OpenAI transcription failed")
+        raise
+
+def _parse_json_dict(raw: str) -> dict | None:
+    if not raw:
+        return None
+    content = raw.strip()
+    if content.startswith("```"):
+        content = content.strip("`")
+        content = content.replace("json", "", 1).strip()
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
+
+async def extract_checkin_from_text(
+    text_ru: str,
+    cfg: Optional[OpenAIConfig] = None,
+) -> dict:
+    if not cfg:
+        api_key = os.getenv("OPENAI_API_KEY", "").strip()
+        model = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
+        if not api_key:
+            return {}
+        cfg = OpenAIConfig(api_key=api_key, model=model)
+
+    instructions = (
+        "Ты извлекаешь структурированные поля чек-ина из русского текста. "
+        "Верни только JSON без Markdown. "
+        "Используй только сведения из текста, иначе null/unknown."
+    )
+    schema = (
+        "{\n"
+        '  "sleep_range": "4–5"|"5–6"|"6–7"|"7–8"|"8+"|"unknown",\n'
+        '  "energy": 1|2|3|4|null,\n'
+        '  "stress": 1|2|3|null,\n'
+        '  "training_today": true|false|null,\n'
+        '  "goals": ["focus","energy","sleep","gut","mood","recovery","calm","workout"],\n'
+        '  "note_text": "краткое резюме по-русски до 250 символов"\n'
+        "}\n"
+    )
+    mapping = (
+        "КАРТА ЦЕЛЕЙ:\n"
+        "- концентрация/фокус/учёба/работа -> focus\n"
+        "- энергия/бодрость -> energy\n"
+        "- сон/заснуть/выспаться -> sleep\n"
+        "- жкт/живот/пищеварение -> gut\n"
+        "- настроение/тревога/депресс -> mood или calm\n"
+        "- восстановление -> recovery\n"
+        "- тренировка/спорт -> workout\n"
+    )
+    prompt = "\n".join(
+        [
+            "ТЕКСТ:",
+            text_ru.strip(),
+            "",
+            mapping,
+            "",
+            "СХЕМА (строго JSON):",
+            schema,
+        ]
+    )
+    raw = await asyncio.to_thread(
+        _sync_call,
+        cfg,
+        instructions=instructions,
+        input_text=prompt,
+        max_output_tokens=400,
+        timeout_s=20,
+    )
+    parsed = _parse_json_dict(raw)
+    return parsed or {}
 
 async def checkin_plan_v1(
     cfg: Optional[OpenAIConfig],

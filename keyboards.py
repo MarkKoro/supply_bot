@@ -15,6 +15,23 @@ def main_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("⚙️ Настройки", callback_data="menu:settings")],
     ])
 
+def ai_checkin_entry_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🟦 Быстрый опрос (кнопки)", callback_data="aicheck:quick")],
+            [InlineKeyboardButton("🎙 Опрос голосом", callback_data="aicheck:voice")],
+            [InlineKeyboardButton("🏠 Меню", callback_data="menu:home")],
+        ]
+    )
+
+def ai_checkin_voice_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("⬅️ Назад", callback_data="aicheck:entry")],
+            [InlineKeyboardButton("❌ Отмена", callback_data="menu:home")],
+        ]
+    )
+
 def catalog_kb(items: list[dict], page: int, pages: int) -> InlineKeyboardMarkup:
     btns: list[list[InlineKeyboardButton]] = []
     for item in items:

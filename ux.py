@@ -17,6 +17,8 @@ def _payload_from_route(route: str) -> dict | None:
         return {}
     if route == "menu:settings":
         return {}
+    if route == "menu:checkin_ai":
+        return {}
     if route == "cat:home":
         return {"mode": "home"}
     if route.startswith("cat:list"):

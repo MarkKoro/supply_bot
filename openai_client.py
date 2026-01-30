@@ -57,6 +57,27 @@ def _sync_transcribe_call(
     )
     return (getattr(resp, "text", "") or "").strip()
 
+def _sync_call_messages(
+    cfg: OpenAIConfig,
+    *,
+    messages: list[dict],
+    max_output_tokens: int | None = None,
+    timeout_s: float | None = None,
+) -> str:
+    from openai import OpenAI
+    if timeout_s is not None:
+        client = OpenAI(api_key=cfg.api_key, timeout=timeout_s)
+    else:
+        client = OpenAI(api_key=cfg.api_key)
+    params = {
+        "model": cfg.model,
+        "input": messages,
+    }
+    if max_output_tokens is not None:
+        params["max_output_tokens"] = max_output_tokens
+    resp = client.responses.create(**params)
+    return (resp.output_text or "").strip()
+
 async def daily_advice(
     cfg: Optional[OpenAIConfig],
     *,
@@ -219,4 +240,21 @@ async def checkin_plan_v1(
         input_text=prompt,
         max_output_tokens=900,
         timeout_s=20,
+    )
+
+async def ai_checkin_json(
+    cfg: Optional[OpenAIConfig],
+    messages: list[dict],
+    *,
+    max_output_tokens: int = 900,
+    timeout_s: float = 30,
+) -> str:
+    if not cfg:
+        return "AI отключен: добавь OPENAI_API_KEY в .env."
+    return await asyncio.to_thread(
+        _sync_call_messages,
+        cfg,
+        messages=messages,
+        max_output_tokens=max_output_tokens,
+        timeout_s=timeout_s,
     )

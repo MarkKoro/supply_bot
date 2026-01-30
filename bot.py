@@ -4,7 +4,9 @@ import json
 import logging
 import os
 import re
+import time
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -39,6 +41,8 @@ from keyboards import (
     timezone_picker,
     reminder_actions,
     settings_menu,
+    ai_checkin_entry_kb,
+    ai_checkin_voice_kb,
 )
 import tz
 from openai_client import (
@@ -46,7 +50,9 @@ from openai_client import (
     OpenAITranscribeConfig,
     suggest_stack_v1,
     transcribe_voice_v1,
+    transcribe_audio,
     ai_checkin_json,
+    extract_checkin_from_text,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -61,6 +67,7 @@ CURATED_PAGE_SIZE = 10
 AI_CHECKIN_ROUTE = "menu:checkin_ai"
 AI_CHECKIN_STATE = "ai_checkin_state"
 AI_CHECKIN_NOTE_WAIT = "ai_checkin_note"
+AI_CHECKIN_VOICE_ROUTE = "checkin_voice"
 
 GOAL_OPTIONS = [
     ("focus", "🧠 Концентрация"),
@@ -86,6 +93,9 @@ STRESS_OPTIONS = [
     (3, "🔥 Высокий"),
 ]
 
+CHECKIN_VOICE_MAX_SECONDS = 90
+CHECKIN_VOICE_MAX_BYTES = 10 * 1024 * 1024
+
 def _is_tz_unset(tz_name: str | None) -> bool:
     return not tz_name or str(tz_name).strip().upper() == "UTC"
 
@@ -95,6 +105,17 @@ async def _download_voice_bytes(update: Update, context: ContextTypes.DEFAULT_TY
     data = await file.download_as_bytearray()
     filename = f"voice_{update.message.message_id}.ogg"
     return bytes(data), filename
+
+async def download_telegram_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Path:
+    voice = update.message.voice
+    tg_uid = update.effective_user.id if update.effective_user else update.message.message_id
+    timestamp = int(time.time() * 1000)
+    tmp_dir = Path("data/tmp")
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    path = tmp_dir / f"voice_{tg_uid}_{timestamp}.ogg"
+    file = await context.bot.get_file(voice.file_id)
+    await file.download_to_drive(custom_path=str(path))
+    return path
 
 def _format_day_ru(day: str) -> str:
     try:
@@ -164,6 +185,58 @@ def _ai_checkin_actions_payload(state: dict) -> dict:
     except json.JSONDecodeError:
         return {}
     return payload if isinstance(payload, dict) else {}
+
+def _ai_checkin_entry_payload() -> dict:
+    return {"screen": "entry"}
+
+def _ai_checkin_voice_payload() -> dict:
+    return {"note_pending": True, "return_screen": "main", "date_local": ""}
+
+async def _render_ai_checkin_entry(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    target_chat_id: int | None = None,
+    target_message_id: int | None = None,
+) -> None:
+    text = "📝 <b>Опрос дня (AI)</b>\n\nКак хочешь пройти опрос?"
+    await show(
+        update,
+        context,
+        text,
+        ai_checkin_entry_kb(),
+        route=AI_CHECKIN_ROUTE,
+        payload=_ai_checkin_entry_payload(),
+        target_chat_id=target_chat_id,
+        target_message_id=target_message_id,
+    )
+
+async def _render_ai_checkin_voice_prompt(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    target_chat_id: int | None = None,
+    target_message_id: int | None = None,
+) -> None:
+    text = (
+        "🎙 Запиши голосом одним сообщением:\n"
+        "— как спал(а)\n"
+        "— энергия/стресс\n"
+        "— будет ли тренировка\n"
+        "— цель на сегодня (концентрация/энергия/сон/жкт/настроение/восстановление)\n"
+        "Можно говорить свободно. Я сам(а) разберу.\n"
+        "Важно: это не медсовет."
+    )
+    await show(
+        update,
+        context,
+        text,
+        ai_checkin_voice_kb(),
+        route=AI_CHECKIN_VOICE_ROUTE,
+        payload=_ai_checkin_voice_payload(),
+        target_chat_id=target_chat_id,
+        target_message_id=target_message_id,
+    )
 
 async def _render_ai_checkin_wizard(
     update: Update,
@@ -324,12 +397,21 @@ def build_ai_checkin_prompt(user: dict, stack: list[dict], checkin: dict, candid
         "Если уверенность низкая — явно скажи. "
         "Верни строго JSON без Markdown."
     )
+    def _val_or_unknown(value: object, label: str = "не указано") -> str:
+        return label if value is None or value == "" else str(value)
+
+    training_value = checkin.get("training")
+    if training_value is None:
+        training_text = "не указано"
+    else:
+        training_text = "да" if training_value else "нет"
+
     checkin_lines = [
         f"Дата: {checkin.get('date_local')}",
-        f"Сон: {checkin.get('sleep_range')}",
-        f"Энергия (1-4): {checkin.get('energy')}",
-        f"Стресс (1-3): {checkin.get('stress')}",
-        f"Тренировка: {'да' if checkin.get('training') else 'нет'}",
+        f"Сон: {_val_or_unknown(checkin.get('sleep_range'), 'unknown')}",
+        f"Энергия (1-4): {_val_or_unknown(checkin.get('energy'))}",
+        f"Стресс (1-3): {_val_or_unknown(checkin.get('stress'))}",
+        f"Тренировка: {training_text}",
         f"Цели: {', '.join(checkin.get('goals_ru') or []) or 'не указаны'}",
     ]
     note_text = str(checkin.get("note") or "").strip()
@@ -423,6 +505,8 @@ async def _render_ai_checkin_results(
     date_local: str,
     payload: dict,
     missing_count: int = 0,
+    target_chat_id: int | None = None,
+    target_message_id: int | None = None,
 ) -> None:
     summary = str(payload.get("summary_ru") or "").strip() or "Короткое резюме недоступно."
     disclaimer = str(payload.get("disclaimer_ru") or "").strip()
@@ -483,6 +567,8 @@ async def _render_ai_checkin_results(
         kb,
         route=AI_CHECKIN_ROUTE,
         payload={"ai_checkin": _get_ai_checkin_state(context)},
+        target_chat_id=target_chat_id,
+        target_message_id=target_message_id,
     )
 
 async def _render_ai_checkin_selection(
@@ -492,6 +578,8 @@ async def _render_ai_checkin_selection(
     payload: dict,
     selected_ids: set[str],
     date_local: str,
+    target_chat_id: int | None = None,
+    target_message_id: int | None = None,
 ) -> None:
     actions = payload.get("actions") or []
     lines = [f"🎯 Выбор действий ({date_local})", ""]
@@ -524,6 +612,8 @@ async def _render_ai_checkin_selection(
         InlineKeyboardMarkup(rows),
         route=AI_CHECKIN_ROUTE,
         payload={"ai_checkin": _get_ai_checkin_state(context)},
+        target_chat_id=target_chat_id,
+        target_message_id=target_message_id,
     )
 
 async def _render_ai_suggestions(
@@ -665,6 +755,58 @@ def _truncate_text(value: str | None, limit: int = 180) -> str:
         return text
     return f"{text[:limit - 3]}..."
 
+def _normalize_ai_checkin_extract(raw: dict, transcription: str) -> dict:
+    sleep_range = raw.get("sleep_range")
+    if sleep_range not in SLEEP_OPTIONS and sleep_range != "unknown":
+        sleep_range = "unknown"
+
+    energy = raw.get("energy")
+    if not isinstance(energy, int) or energy not in {1, 2, 3, 4}:
+        energy = None
+
+    stress = raw.get("stress")
+    if not isinstance(stress, int) or stress not in {1, 2, 3}:
+        stress = None
+
+    training_today = raw.get("training_today")
+    if not isinstance(training_today, bool):
+        training_today = None
+
+    raw_goals = raw.get("goals") if isinstance(raw.get("goals"), list) else []
+    goal_map = {
+        "focus": "focus",
+        "energy": "energy",
+        "sleep": "sleep",
+        "gut": "gut",
+        "mood": "mood",
+        "recovery": "recovery",
+        "calm": "calm",
+        "workout": "training",
+        "training": "training",
+    }
+    allowed_goals = {code for code, _ in GOAL_OPTIONS}
+    goals: list[str] = []
+    for item in raw_goals:
+        if not isinstance(item, str):
+            continue
+        mapped = goal_map.get(item.strip().lower())
+        if mapped and mapped in allowed_goals and mapped not in goals:
+            goals.append(mapped)
+
+    note_text = str(raw.get("note_text") or "").strip()
+    if not note_text:
+        note_text = transcription.strip()
+    note_text = _truncate_text(note_text, 250)
+
+    return {
+        "sleep_range": sleep_range,
+        "energy": energy,
+        "stress": stress,
+        "training": training_today,
+        "goals": goals,
+        "note": note_text,
+    }
+
 async def _finalize_ai_checkin(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -674,6 +816,8 @@ async def _finalize_ai_checkin(
     user_id: int,
     tz_name: str,
     state: dict,
+    target_chat_id: int | None = None,
+    target_message_id: int | None = None,
 ) -> None:
     day = await db.ensure_daily_rollover(conn, tg_uid)
     answers = state.get("answers", {}) if isinstance(state.get("answers"), dict) else {}
@@ -712,6 +856,8 @@ async def _finalize_ai_checkin(
             "AI отключен: добавь OPENAI_API_KEY в .env.",
             back(),
             route=AI_CHECKIN_ROUTE,
+            target_chat_id=target_chat_id,
+            target_message_id=target_message_id,
         )
         return
 
@@ -724,18 +870,42 @@ async def _finalize_ai_checkin(
         candidates,
     )
     cfg = OpenAIConfig(api_key=s.OPENAI_API_KEY, model=s.OPENAI_MODEL)
-    await show(update, context, "🤖 Думаю… (AI)", back(), route=AI_CHECKIN_ROUTE)
+    await show(
+        update,
+        context,
+        "🤖 Думаю… (AI)",
+        back(),
+        route=AI_CHECKIN_ROUTE,
+        target_chat_id=target_chat_id,
+        target_message_id=target_message_id,
+    )
     raw = None
     try:
         raw = await ai_checkin_json(cfg, messages, max_output_tokens=900, timeout_s=30)
     except Exception:
         log.exception("OpenAI checkin request failed")
-        await show(update, context, "AI временно недоступен.", back(), route=AI_CHECKIN_ROUTE)
+        await show(
+            update,
+            context,
+            "AI временно недоступен.",
+            back(),
+            route=AI_CHECKIN_ROUTE,
+            target_chat_id=target_chat_id,
+            target_message_id=target_message_id,
+        )
         return
 
     data = _parse_ai_json(raw or "")
     if not isinstance(data, dict):
-        await show(update, context, "AI вернул неожиданный формат. Попробуй ещё раз.", back(), route=AI_CHECKIN_ROUTE)
+        await show(
+            update,
+            context,
+            "AI вернул неожиданный формат. Попробуй ещё раз.",
+            back(),
+            route=AI_CHECKIN_ROUTE,
+            target_chat_id=target_chat_id,
+            target_message_id=target_message_id,
+        )
         return
 
     allowed_slugs = {item.get("slug") for item in candidates} | {item.get("slug") for item in stack}
@@ -794,6 +964,8 @@ async def _finalize_ai_checkin(
         date_local=day,
         payload=payload,
         missing_count=missing_count,
+        target_chat_id=target_chat_id,
+        target_message_id=target_message_id,
     )
 
 async def _show_today_plan(
@@ -1737,22 +1909,7 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         if data == "menu:checkin_ai":
             context.user_data.pop(WAITING_KEY, None)
-            state = {
-                "step": 1,
-                "answers": {
-                    "sleep_range": "",
-                    "energy": None,
-                    "stress": None,
-                    "training": None,
-                    "goals": [],
-                    "note": "",
-                },
-                "note_pending": False,
-                "last_ai_actions_json": "",
-                "selected_action_ids": [],
-            }
-            _set_ai_checkin_state(context, state)
-            await _render_ai_checkin_wizard(update, context, state=state)
+            await _render_ai_checkin_entry(update, context)
             return
 
         if data == "menu:todayplan":
@@ -1835,6 +1992,36 @@ async def on_ai_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     state = _get_ai_checkin_state(context)
     step = int(state.get("step") or 1)
     answers = state.get("answers", {}) if isinstance(state.get("answers"), dict) else {}
+
+    if data == "aicheck:entry":
+        context.user_data.pop(WAITING_KEY, None)
+        await _render_ai_checkin_entry(update, context)
+        return
+
+    if data == "aicheck:voice":
+        context.user_data.pop(WAITING_KEY, None)
+        await _render_ai_checkin_voice_prompt(update, context)
+        return
+
+    if data == "aicheck:quick":
+        context.user_data.pop(WAITING_KEY, None)
+        state = {
+            "step": 1,
+            "answers": {
+                "sleep_range": "",
+                "energy": None,
+                "stress": None,
+                "training": None,
+                "goals": [],
+                "note": "",
+            },
+            "note_pending": False,
+            "last_ai_actions_json": "",
+            "selected_action_ids": [],
+        }
+        _set_ai_checkin_state(context, state)
+        await _render_ai_checkin_wizard(update, context, state=state)
+        return
 
     if data == "aicheck:note":
         state["note_pending"] = True
@@ -2393,10 +2580,26 @@ async def _render_route(
         )
         return
     if route == AI_CHECKIN_ROUTE:
-        state = _get_ai_checkin_state(context)
-        state["step"] = int(state.get("step") or 1)
-        _set_ai_checkin_state(context, state)
-        await _render_ai_checkin_wizard(update, context, state=state)
+        if isinstance(payload, dict) and payload.get("ai_checkin"):
+            state = _get_ai_checkin_state(context)
+            state["step"] = int(state.get("step") or 1)
+            _set_ai_checkin_state(context, state)
+            await _render_ai_checkin_wizard(update, context, state=state)
+        else:
+            await _render_ai_checkin_entry(
+                update,
+                context,
+                target_chat_id=target_chat_id,
+                target_message_id=target_message_id,
+            )
+        return
+    if route == AI_CHECKIN_VOICE_ROUTE:
+        await _render_ai_checkin_voice_prompt(
+            update,
+            context,
+            target_chat_id=target_chat_id,
+            target_message_id=target_message_id,
+        )
         return
     if route == "menu:curated":
         await _show_curated_page(
@@ -2710,6 +2913,27 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 pass
             return
+        if ui_screen == AI_CHECKIN_VOICE_ROUTE:
+            try:
+                payload_data = json.loads(ui_payload) if ui_payload else {}
+            except json.JSONDecodeError:
+                payload_data = {}
+            if not isinstance(payload_data, dict):
+                payload_data = {}
+            await show(
+                update,
+                context,
+                "Пришли именно голосовое сообщение.",
+                ai_checkin_voice_kb(),
+                route=AI_CHECKIN_VOICE_ROUTE,
+                payload=payload_data or _ai_checkin_voice_payload(),
+                target_message_id=ui_message_id,
+            )
+            try:
+                await update.message.delete()
+            except Exception:
+                pass
+            return
     finally:
         await conn.close()
     waiting = context.user_data.get(WAITING_KEY)
@@ -2850,12 +3074,189 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.message.voice:
         return
+    s = context.application.bot_data["settings"]
+    tg_uid = update.effective_user.id
+
+    conn = await db.connect(s.DB_PATH)
+    try:
+        ui_message_id, ui_screen, ui_payload = await db.get_ui_state(conn, tg_uid)
+    finally:
+        await conn.close()
+
+    if ui_screen == AI_CHECKIN_VOICE_ROUTE:
+        try:
+            payload_data = json.loads(ui_payload) if ui_payload else {}
+        except json.JSONDecodeError:
+            payload_data = {}
+        if not isinstance(payload_data, dict):
+            payload_data = {}
+        voice = update.message.voice
+        if (
+            (voice.duration and voice.duration > CHECKIN_VOICE_MAX_SECONDS)
+            or (voice.file_size and voice.file_size > CHECKIN_VOICE_MAX_BYTES)
+        ):
+            await show(
+                update,
+                context,
+                "Слишком длинно. Запиши до 60 секунд, пожалуйста.",
+                ai_checkin_voice_kb(),
+                route=AI_CHECKIN_VOICE_ROUTE,
+                payload=payload_data or _ai_checkin_voice_payload(),
+                target_message_id=ui_message_id,
+            )
+            try:
+                await update.message.delete()
+            except Exception:
+                pass
+            return
+
+        await show(
+            update,
+            context,
+            "Распознаю голос…",
+            ai_checkin_voice_kb(),
+            route=AI_CHECKIN_VOICE_ROUTE,
+            payload=payload_data or _ai_checkin_voice_payload(),
+            target_message_id=ui_message_id,
+        )
+
+        if not s.OPENAI_API_KEY:
+            await show(
+                update,
+                context,
+                "AI отключен: добавь OPENAI_API_KEY в .env.",
+                ai_checkin_voice_kb(),
+                route=AI_CHECKIN_VOICE_ROUTE,
+                payload=payload_data or _ai_checkin_voice_payload(),
+                target_message_id=ui_message_id,
+            )
+            try:
+                await update.message.delete()
+            except Exception:
+                pass
+            return
+
+        voice_path: Path | None = None
+        try:
+            try:
+                voice_path = await download_telegram_voice(update, context)
+            except Exception:
+                await show(
+                    update,
+                    context,
+                    "Не смог скачать голосовое. Попробуй ещё раз.",
+                    ai_checkin_voice_kb(),
+                    route=AI_CHECKIN_VOICE_ROUTE,
+                    payload=payload_data or _ai_checkin_voice_payload(),
+                    target_message_id=ui_message_id,
+                )
+                return
+
+            transcribe_cfg = OpenAITranscribeConfig(
+                api_key=s.OPENAI_API_KEY,
+                model=s.OPENAI_STT_MODEL,
+            )
+            transcription = ""
+            try:
+                transcription = await transcribe_audio(transcribe_cfg, str(voice_path))
+            except Exception:
+                await show(
+                    update,
+                    context,
+                    "Не получилось распознать голос. Попробуй ещё раз короче и ближе к микрофону.",
+                    ai_checkin_voice_kb(),
+                    route=AI_CHECKIN_VOICE_ROUTE,
+                    payload=payload_data or _ai_checkin_voice_payload(),
+                    target_message_id=ui_message_id,
+                )
+                return
+
+            transcription = transcription.strip()
+            if not transcription:
+                await show(
+                    update,
+                    context,
+                    "Не получилось распознать голос. Попробуй ещё раз короче и ближе к микрофону.",
+                    ai_checkin_voice_kb(),
+                    route=AI_CHECKIN_VOICE_ROUTE,
+                    payload=payload_data or _ai_checkin_voice_payload(),
+                    target_message_id=ui_message_id,
+                )
+                return
+
+            await show(
+                update,
+                context,
+                "Готовлю рекомендации…",
+                ai_checkin_voice_kb(),
+                route=AI_CHECKIN_VOICE_ROUTE,
+                payload=payload_data or _ai_checkin_voice_payload(),
+                target_message_id=ui_message_id,
+            )
+
+            extracted: dict = {}
+            try:
+                cfg = OpenAIConfig(api_key=s.OPENAI_API_KEY, model=s.OPENAI_MODEL)
+                extracted = await extract_checkin_from_text(transcription, cfg=cfg)
+            except Exception:
+                log.exception("Checkin extraction failed")
+                extracted = {}
+
+            answers = _normalize_ai_checkin_extract(
+                extracted if isinstance(extracted, dict) else {},
+                transcription,
+            )
+            state = {
+                "step": 5,
+                "answers": answers,
+                "note_pending": False,
+                "last_ai_actions_json": "",
+                "selected_action_ids": [],
+            }
+            _set_ai_checkin_state(context, state)
+
+            conn = await db.connect(s.DB_PATH)
+            try:
+                user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
+                tz_name = await db.get_user_tz(conn, tg_uid)
+                if _is_tz_unset(tz_name):
+                    context.user_data.pop("tz_back_data", None)
+                    context.user_data["onboarding"] = "tz"
+                    await _show_timezone_picker(
+                        update,
+                        context,
+                        0,
+                        target_message_id=ui_message_id,
+                    )
+                    return
+                await _finalize_ai_checkin(
+                    update,
+                    context,
+                    conn,
+                    tg_uid=tg_uid,
+                    user_id=user_id,
+                    tz_name=tz_name or "UTC",
+                    state=state,
+                    target_message_id=ui_message_id,
+                )
+            finally:
+                await conn.close()
+        finally:
+            if voice_path:
+                try:
+                    voice_path.unlink()
+                except Exception:
+                    pass
+            try:
+                await update.message.delete()
+            except Exception:
+                pass
+        return
+
     waiting = context.user_data.get(WAITING_KEY)
     if waiting != "ai_goal":
         return
 
-    s = context.application.bot_data["settings"]
-    tg_uid = update.effective_user.id
     conn = await db.connect(s.DB_PATH)
     try:
         user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
@@ -2886,7 +3287,7 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         transcribe_cfg = OpenAITranscribeConfig(
             api_key=s.OPENAI_API_KEY,
-            model=s.OPENAI_TRANSCRIBE_MODEL,
+            model=s.OPENAI_STT_MODEL,
         )
         transcription = ""
         try:

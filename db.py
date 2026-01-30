@@ -88,17 +88,13 @@ CREATE TABLE IF NOT EXISTS supplements (
 
 CREATE INDEX IF NOT EXISTS idx_supplements_name ON supplements(name);
 CREATE INDEX IF NOT EXISTS idx_supplements_slug ON supplements(slug);
-CREATE INDEX IF NOT EXISTS idx_supplements_alias_norm ON supplements(alias_norm);
-
 CREATE TABLE IF NOT EXISTS supplement_aliases (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   supplement_id INTEGER NOT NULL REFERENCES supplements(id) ON DELETE CASCADE,
   alias_raw     TEXT NOT NULL,
   alias_norm    TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_alias_norm ON supplement_aliases(alias_norm);
 CREATE INDEX IF NOT EXISTS idx_alias_supp ON supplement_aliases(supplement_id);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_alias_unique_norm ON supplement_aliases(supplement_id, alias_norm);
 
 CREATE TABLE IF NOT EXISTS interactions (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -291,6 +287,7 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     await _ensure_column(conn, "supplements", "aliases", "TEXT DEFAULT ''")
     await _ensure_column(conn, "supplements", "aliases_json", "TEXT NOT NULL DEFAULT '[]'")
     await _ensure_column(conn, "supplements", "alias_norm", "TEXT DEFAULT ''")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_supplements_alias_norm ON supplements(alias_norm)")
     await _ensure_column(conn, "supplements", "search_blob", "TEXT NOT NULL DEFAULT ''")
     await _ensure_column(conn, "supplements", "human_trials_count_est", "TEXT DEFAULT ''")
     await _ensure_column(conn, "supplements", "participants_total_est", "TEXT DEFAULT ''")

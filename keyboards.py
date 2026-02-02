@@ -251,13 +251,13 @@ def supp_tabs_kb(
 ) -> InlineKeyboardMarkup:
     btns: list[list[InlineKeyboardButton]] = [
         [
-            InlineKeyboardButton("📌", callback_data=f"supp:tab:{supplement_id}:brief"),
-            InlineKeyboardButton("🕒", callback_data=f"supp:tab:{supplement_id}:time"),
-            InlineKeyboardButton("💊", callback_data=f"supp:tab:{supplement_id}:dose"),
+            InlineKeyboardButton("📌 Коротко", callback_data=f"supp:tab:{supplement_id}:brief"),
+            InlineKeyboardButton("🕒 Когда", callback_data=f"supp:tab:{supplement_id}:time"),
+            InlineKeyboardButton("💊 Дозы", callback_data=f"supp:tab:{supplement_id}:dose"),
         ],
         [
-            InlineKeyboardButton("🤝", callback_data=f"supp:tab:{supplement_id}:synergy"),
-            InlineKeyboardButton("⚠️", callback_data=f"supp:tab:{supplement_id}:antag"),
+            InlineKeyboardButton("🤝 Совместимо", callback_data=f"supp:tab:{supplement_id}:synergy"),
+            InlineKeyboardButton("⚠️ Несовместимо", callback_data=f"supp:tab:{supplement_id}:antag"),
         ],
     ]
 

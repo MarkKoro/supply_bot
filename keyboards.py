@@ -133,7 +133,7 @@ def pick_search_results(rows, prefix: str) -> InlineKeyboardMarkup:
 def my_supplements_list(rows, page: int, has_prev: bool, has_next: bool, *, show_clear: bool) -> InlineKeyboardMarkup:
     btns = []
     for r in rows:
-        status = r.get("today_status")
+        status = r["today_status"] if "today_status" in r.keys() else None
         if status == "taken":
             marker = "✅"
         elif status == "skipped":

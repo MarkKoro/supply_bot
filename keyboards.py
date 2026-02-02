@@ -9,9 +9,7 @@ def main_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📚 Каталог БАДов", callback_data="menu:catalog")],
         [InlineKeyboardButton("🧠 Готовые стеки", callback_data="menu:curated")],
         [InlineKeyboardButton("💊 Мои БАДы", callback_data="menu:my")],
-        [InlineKeyboardButton("🧩 Совместимость", callback_data="menu:compat")],
         [InlineKeyboardButton("📝 Опрос дня (AI)", callback_data="menu:checkin_ai")],
-        [InlineKeyboardButton("🤖 AI-подбор", callback_data="menu:ai")],
         [InlineKeyboardButton("⚙️ Настройки", callback_data="menu:settings")],
     ])
 
@@ -46,7 +44,7 @@ def catalog_kb(items: list[dict], page: int, pages: int) -> InlineKeyboardMarkup
     if nav:
         btns.append(nav)
     btns.append([InlineKeyboardButton("🔎 Поиск", callback_data="cat:search")])
-    btns.append([InlineKeyboardButton("⬅️ Назад", callback_data="main")])
+    btns.append([InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")])
     return InlineKeyboardMarkup(btns)
 
 def catalog_home() -> InlineKeyboardMarkup:
@@ -288,7 +286,7 @@ def supp_tabs_kb(
         [
             InlineKeyboardButton("➕ В мои", callback_data=add_cb),
             InlineKeyboardButton("⬅️ Назад", callback_data=back_cb),
-            InlineKeyboardButton("🏠 Меню", callback_data="main"),
+            InlineKeyboardButton("🏠 Меню", callback_data="menu:home"),
         ]
     )
     return InlineKeyboardMarkup(btns)
@@ -359,5 +357,6 @@ def reminder_actions(supplement_id: int) -> InlineKeyboardMarkup:
 def settings_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🕒 Часовой пояс", callback_data="settings:tz")],
+        [InlineKeyboardButton("✨ Начальный подбор", callback_data="settings:initial_pick")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")],
     ])

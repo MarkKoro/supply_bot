@@ -47,7 +47,8 @@ CREATE TABLE IF NOT EXISTS users (
   last_view     TEXT NOT NULL DEFAULT 'menu',
   last_view_payload TEXT NOT NULL DEFAULT '',
   last_chat_id  INTEGER NOT NULL DEFAULT 0,
-  last_message_id INTEGER NOT NULL DEFAULT 0
+  last_message_id INTEGER NOT NULL DEFAULT 0,
+  initial_stack_json TEXT NOT NULL DEFAULT '[]'
 );
 
 CREATE TABLE IF NOT EXISTS supplements (
@@ -282,6 +283,7 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     await _ensure_column(conn, "users", "last_view_payload", "TEXT NOT NULL DEFAULT ''")
     await _ensure_column(conn, "users", "last_chat_id", "INTEGER NOT NULL DEFAULT 0")
     await _ensure_column(conn, "users", "last_message_id", "INTEGER NOT NULL DEFAULT 0")
+    await _ensure_column(conn, "users", "initial_stack_json", "TEXT NOT NULL DEFAULT '[]'")
     await _ensure_column(conn, "supplements", "name_ru", "TEXT")
     await _ensure_column(conn, "supplements", "name_en", "TEXT")
     await _ensure_column(conn, "supplements", "aliases", "TEXT DEFAULT ''")
@@ -1005,6 +1007,53 @@ async def get_user_last_msg(conn: aiosqlite.Connection, tg_user_id: int) -> tupl
     if not row:
         return (0, 0)
     return (int(row["last_chat_id"] or 0), int(row["last_message_id"] or 0))
+
+def _clean_initial_stack_ids(items: list[int]) -> list[int]:
+    cleaned: list[int] = []
+    for item in items:
+        try:
+            value = int(item)
+        except (TypeError, ValueError):
+            continue
+        if value not in cleaned:
+            cleaned.append(value)
+    return cleaned
+
+async def get_user_initial_stack_ids(conn: aiosqlite.Connection, tg_user_id: int) -> list[int]:
+    user_id = await get_or_create_user(conn, tg_user_id)
+    row = await fetchone(conn, "SELECT initial_stack_json FROM users WHERE id=?", (user_id,))
+    raw = row["initial_stack_json"] if row else "[]"
+    try:
+        data = json.loads(raw or "[]")
+    except json.JSONDecodeError:
+        data = []
+    if not isinstance(data, list):
+        data = []
+    return _clean_initial_stack_ids(data)
+
+async def set_user_initial_stack_ids(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    supplement_ids: list[int],
+) -> None:
+    user_id = await get_or_create_user(conn, tg_user_id)
+    cleaned = _clean_initial_stack_ids(supplement_ids)
+    payload = json.dumps(cleaned, ensure_ascii=False)
+    await conn.execute(
+        "UPDATE users SET initial_stack_json=? WHERE id=?",
+        (payload, user_id),
+    )
+    await conn.commit()
+
+async def add_user_initial_stack_id(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    supplement_id: int,
+) -> None:
+    items = await get_user_initial_stack_ids(conn, tg_user_id)
+    if supplement_id not in items:
+        items.append(int(supplement_id))
+        await set_user_initial_stack_ids(conn, tg_user_id, items)
 
 def parse_utc_tz(tz_name: str | None):
     if not tz_name:
@@ -1792,6 +1841,32 @@ async def remove_user_supplement(conn: aiosqlite.Connection, tg_user_id: int, su
 
 async def remove_user_supp(conn: aiosqlite.Connection, user_id: int, supplement_id: int) -> None:
     await remove_user_supplement(conn, user_id, supplement_id)
+
+async def remove_user_supplements_bulk(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    supplement_ids: list[int],
+) -> None:
+    if not supplement_ids:
+        return
+    cleaned = [int(item) for item in supplement_ids if str(item).isdigit()]
+    if not cleaned:
+        return
+    user_id = await get_or_create_user(conn, tg_user_id)
+    placeholders = ",".join("?" for _ in cleaned)
+    await conn.execute(
+        f"DELETE FROM user_supplements WHERE user_id=? AND supplement_id IN ({placeholders})",
+        (user_id, *cleaned),
+    )
+    await conn.execute(
+        f"DELETE FROM user_supp_settings WHERE user_id=? AND supplement_id IN ({placeholders})",
+        (user_id, *cleaned),
+    )
+    await conn.execute(
+        f"DELETE FROM reminders WHERE user_id=? AND supplement_id IN ({placeholders})",
+        (tg_user_id, *cleaned),
+    )
+    await conn.commit()
 
 async def get_user_supplement(conn: aiosqlite.Connection, tg_user_id: int, supplement_id: int):
     user_id = await get_or_create_user(conn, tg_user_id)

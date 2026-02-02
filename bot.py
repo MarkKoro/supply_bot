@@ -643,13 +643,13 @@ async def _render_ai_suggestions(
             await show(
                 update,
                 context,
-                "AI вернул неожиданный формат. Попробуй ещё раз.",
+                "Начальный подбор вернул неожиданный формат. Попробуй ещё раз.",
                 back(),
                 route="menu:ai",
             )
             format_error_shown = True
     else:
-        await show(update, context, "AI не вернул ответ. Попробуй ещё раз.", back(), route="menu:ai")
+        await show(update, context, "Начальный подбор не вернул ответ. Попробуй ещё раз.", back(), route="menu:ai")
 
     if isinstance(data, dict):
         candidates = data.get("candidates") or []
@@ -674,7 +674,7 @@ async def _render_ai_suggestions(
                 missing.append(name)
 
         lines = [
-            "🤖 <b>Подбор стека (AI)</b>",
+            "✨ <b>Начальный подбор</b>",
             "",
         ]
         if prefix_line:
@@ -752,7 +752,7 @@ async def _render_ai_suggestions(
         await show(
             update,
             context,
-            "AI вернул неожиданный формат. Попробуй ещё раз.",
+            "Начальный подбор вернул неожиданный формат. Попробуй ещё раз.",
             back(),
             route="menu:ai",
         )
@@ -1060,8 +1060,42 @@ def _home_text() -> str:
         "💊 <b>Supply Bot</b>\n\n"
         "Я справочник + дневник добавок.\n"
         "— Совместимость из базы\n"
-        "— AI-подбор (опционально)\n\n"
+        "— Начальный подбор (опционально)\n\n"
         "<i>Не медицинский совет.</i>"
+    )
+
+def _initial_pick_prompt_text(prefix: str | None = None) -> str:
+    base = (
+        "✨ <b>Начальный подбор</b>\n\n"
+        "Опиши, что хочешь получить или изменить. Можно рассказать о целях, самочувствии, режиме дня, "
+        "ограничениях или о том, что уже пробовал — не ограничивай фантазию.\n"
+        "Пример: «Хочу больше энергии утром и спокойнее засыпать, но без стимуляторов».\n\n"
+        "Чем подробнее опишешь запрос, тем точнее будет подбор: я предложу список добавок с примерными "
+        "дозировками и временем приёма для стартового стека.\n\n"
+        "Можно написать текстом или отправить голосовое сообщение.\n\n"
+        "<i>Не медицинский совет.</i>"
+    )
+    if prefix:
+        return f"{prefix}\n\n{base}"
+    return base
+
+async def _start_initial_pick(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    prefix: str | None = None,
+    target_chat_id: int | None = None,
+    target_message_id: int | None = None,
+) -> None:
+    context.user_data[WAITING_KEY] = "initial_pick_goal"
+    await show(
+        update,
+        context,
+        _initial_pick_prompt_text(prefix),
+        back(),
+        route="menu:ai",
+        target_chat_id=target_chat_id,
+        target_message_id=target_message_id,
     )
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1264,6 +1298,55 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "⚙️ <b>Настройки</b>",
                 settings_menu(),
                 route="menu:settings",
+            )
+            return
+        if data == "settings:initial_pick":
+            if not s.OPENAI_API_KEY:
+                await show(
+                    update,
+                    context,
+                    "Начальный подбор недоступен: добавь OPENAI_API_KEY в .env.",
+                    settings_menu(),
+                    route="menu:settings",
+                )
+                return
+            existing_ids = await db.get_user_initial_stack_ids(conn, tg_uid)
+            if existing_ids:
+                kb = InlineKeyboardMarkup(
+                    [
+                        [InlineKeyboardButton("✅ Да, начать заново", callback_data="settings:initial_pick:confirm")],
+                        [InlineKeyboardButton("⬅️ Назад", callback_data="menu:settings")],
+                    ]
+                )
+                await show(
+                    update,
+                    context,
+                    "Уверены, что хотите начать заново? "
+                    "Предыдущий начальный подбор будет удалён.",
+                    kb,
+                    route="menu:settings",
+                )
+                return
+            await _start_initial_pick(update, context)
+            return
+        if data == "settings:initial_pick:confirm":
+            if not s.OPENAI_API_KEY:
+                await show(
+                    update,
+                    context,
+                    "Начальный подбор недоступен: добавь OPENAI_API_KEY в .env.",
+                    settings_menu(),
+                    route="menu:settings",
+                )
+                return
+            existing_ids = await db.get_user_initial_stack_ids(conn, tg_uid)
+            if existing_ids:
+                await db.remove_user_supplements_bulk(conn, tg_uid, existing_ids)
+            await db.set_user_initial_stack_ids(conn, tg_uid, [])
+            await _start_initial_pick(
+                update,
+                context,
+                prefix="🔄 Начинаем новый подбор. Предыдущий список очищен.",
             )
             return
         if data == "settings:tz":
@@ -1927,21 +2010,32 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         if data == "menu:ai":
             if not s.OPENAI_API_KEY:
-                await show(update, context, "AI отключен: добавь OPENAI_API_KEY в .env.", back(), route="menu:ai")
+                await show(
+                    update,
+                    context,
+                    "Начальный подбор недоступен: добавь OPENAI_API_KEY в .env.",
+                    back(),
+                    route="menu:ai",
+                )
                 return
-
-            context.user_data[WAITING_KEY] = "ai_goal"
-            await show(
-                update,
-                context,
-                "🤖 <b>Подбор стека (AI)</b>\n\n"
-                "Опиши цель одной фразой.\n"
-                "Пример: «Больше энергии утром, но без тревожности».\n\n"
-                "Можно написать текстом или отправить голосовое сообщение.\n\n"
-                "<i>Не медицинский совет.</i>",
-                back(),
-                route="menu:ai",
-            )
+            existing_ids = await db.get_user_initial_stack_ids(conn, tg_uid)
+            if existing_ids:
+                kb = InlineKeyboardMarkup(
+                    [
+                        [InlineKeyboardButton("✅ Да, начать заново", callback_data="settings:initial_pick:confirm")],
+                        [InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")],
+                    ]
+                )
+                await show(
+                    update,
+                    context,
+                    "Уверены, что хотите начать заново? "
+                    "Предыдущий начальный подбор будет удалён.",
+                    kb,
+                    route="menu:ai",
+                )
+                return
+            await _start_initial_pick(update, context)
             return
 
     finally:
@@ -1970,6 +2064,7 @@ async def on_ai_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     conn = await db.connect(s.DB_PATH)
     try:
         await db.add_user_supplement(conn, tg_uid, supplement_id)
+        await db.add_user_initial_stack_id(conn, tg_uid, supplement_id)
         name = await db.get_supplement_name(conn, supplement_id)
         name = name or "добавка"
         await show(
@@ -2287,22 +2382,53 @@ async def on_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         try:
             await db.get_or_create_user(conn, tg_uid, tz_name="")
             await db.set_user_tz(conn, tg_uid, tz_value)
+            context.user_data.pop("tz_back_data", None)
+            onboarding_step = context.user_data.pop("onboarding", None)
+            tzinfo = db.parse_utc_tz(tz_value)
+            local_now = datetime.now(tzinfo).strftime("%H:%M")
+            label = tz.format_confirmation_label(tz_value)
+            if onboarding_step == "tz":
+                existing_ids = await db.get_user_initial_stack_ids(conn, tg_uid)
+                prefix = (
+                    "✅ Часовой пояс сохранён: "
+                    f"{label}\n"
+                    f"Текущее время у тебя: {local_now}\n"
+                    "Теперь сделаем начальный подбор."
+                )
+                if existing_ids:
+                    kb = InlineKeyboardMarkup(
+                        [
+                            [InlineKeyboardButton("✅ Да, начать заново", callback_data="settings:initial_pick:confirm")],
+                            [InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")],
+                        ]
+                    )
+                    await show(
+                        update,
+                        context,
+                        f"{prefix}\n\n"
+                        "У вас уже есть начальный подбор. "
+                        "При повторном запуске он будет удалён.",
+                        kb,
+                        route="menu:ai",
+                    )
+                else:
+                    await _start_initial_pick(
+                        update,
+                        context,
+                        prefix=prefix,
+                    )
+            else:
+                await show(
+                    update,
+                    context,
+                    "✅ Часовой пояс сохранён: "
+                    f"{label}\n"
+                    f"Текущее время у тебя: {local_now}",
+                    main_menu(),
+                    route="menu:home",
+                )
         finally:
             await conn.close()
-        context.user_data.pop("tz_back_data", None)
-        context.user_data.pop("onboarding", None)
-        tzinfo = db.parse_utc_tz(tz_value)
-        local_now = datetime.now(tzinfo).strftime("%H:%M")
-        label = tz.format_confirmation_label(tz_value)
-        await show(
-            update,
-            context,
-            "✅ Часовой пояс сохранён: "
-            f"{label}\n"
-            f"Текущее время у тебя: {local_now}",
-            main_menu(),
-            route="menu:home",
-        )
 
 async def on_reminder_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
@@ -3045,21 +3171,27 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     route="mysupp:add",
                 )
             context.user_data.pop(WAITING_KEY, None)
-        elif waiting == "ai_goal":
+        elif waiting == "initial_pick_goal":
             context.user_data.pop(WAITING_KEY, None)
             if not s.OPENAI_API_KEY:
-                await show(update, context, "AI отключен: добавь OPENAI_API_KEY в .env.", back(), route="menu:ai")
+                await show(
+                    update,
+                    context,
+                    "Начальный подбор недоступен: добавь OPENAI_API_KEY в .env.",
+                    back(),
+                    route="menu:ai",
+                )
             else:
                 sups = await db.list_user_supplements(conn, tg_uid, limit=100)
                 user_supp_text = ", ".join([r["name"] for r in sups]) or "нет"
                 cfg = OpenAIConfig(api_key=s.OPENAI_API_KEY, model=s.OPENAI_MODEL)
-                await show(update, context, "🤖 Думаю… (AI)", back(), route="menu:ai")
+                await show(update, context, "🤖 Думаю…", back(), route="menu:ai")
                 raw = None
                 try:
                     raw = await suggest_stack_v1(cfg, txt, user_supp_text)
                 except Exception:
                     log.exception("OpenAI request failed")
-                    await show(update, context, "AI временно недоступен.", back(), route="menu:ai")
+                    await show(update, context, "Начальный подбор временно недоступен.", back(), route="menu:ai")
 
                 await _render_ai_suggestions(update, context, conn, txt, raw)
         elif waiting == AI_CHECKIN_NOTE_WAIT:
@@ -3263,7 +3395,7 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     waiting = context.user_data.get(WAITING_KEY)
-    if waiting != "ai_goal":
+    if waiting != "initial_pick_goal":
         return
 
     conn = await db.connect(s.DB_PATH)
@@ -3277,7 +3409,13 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
 
         if not s.OPENAI_API_KEY:
-            await show(update, context, "AI отключен: добавь OPENAI_API_KEY в .env.", back(), route="menu:ai")
+            await show(
+                update,
+                context,
+                "Начальный подбор недоступен: добавь OPENAI_API_KEY в .env.",
+                back(),
+                route="menu:ai",
+            )
             return
 
         route = "menu:ai"
@@ -3305,7 +3443,7 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await show(
                 update,
                 context,
-                "AI сейчас недоступен для расшифровки. Попробуй позже.",
+                "Сейчас недоступна расшифровка. Попробуй позже.",
                 back(),
                 route=route,
             )
@@ -3324,13 +3462,13 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         sups = await db.list_user_supplements(conn, tg_uid, limit=100)
         user_supp_text = ", ".join([r["name"] for r in sups]) or "нет"
         cfg = OpenAIConfig(api_key=s.OPENAI_API_KEY, model=s.OPENAI_MODEL)
-        await show(update, context, "🤖 Думаю… (AI)", back(), route="menu:ai")
+        await show(update, context, "🤖 Думаю…", back(), route="menu:ai")
         raw = None
         try:
             raw = await suggest_stack_v1(cfg, transcription, user_supp_text)
         except Exception:
             log.exception("OpenAI request failed")
-            await show(update, context, "AI временно недоступен.", back(), route="menu:ai")
+            await show(update, context, "Начальный подбор временно недоступен.", back(), route="menu:ai")
             return
 
         rendered = await _render_ai_suggestions(
@@ -3395,7 +3533,7 @@ async def _bootstrap() -> Application:
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(
         on_menu,
-        pattern=r"^(menu:|settings:|add_pick:|compat_pick:|cat:|curated:|supp:|card:|mysupp:)",
+        pattern=r"^(main$|menu:|settings:|add_pick:|compat_pick:|cat:|curated:|supp:|card:|mysupp:)",
     ))
     app.add_handler(CallbackQueryHandler(on_ai_add, pattern=r"^aiadd:"))
     app.add_handler(CallbackQueryHandler(on_ai_checkin, pattern=r"^aicheck:"))
@@ -3776,7 +3914,7 @@ async def render_catalog(
             update,
             context,
             "Каталог пуст. Загрузите сиды.",
-            InlineKeyboardMarkup([[InlineKeyboardButton("🏠 В меню", callback_data="main")]]),
+            InlineKeyboardMarkup([[InlineKeyboardButton("🏠 В меню", callback_data="menu:home")]]),
             route=None,
             target_chat_id=target_chat_id,
             target_message_id=target_message_id,
@@ -3842,7 +3980,7 @@ async def render_supplement_card(
             InlineKeyboardMarkup(
                 [
                     [InlineKeyboardButton("⬅️ Назад", callback_data=back_data)],
-                    [InlineKeyboardButton("🏠 В меню", callback_data="main")],
+                    [InlineKeyboardButton("🏠 В меню", callback_data="menu:home")],
                 ]
             ),
             route=None,

@@ -123,6 +123,15 @@ def _format_day_ru(day: str) -> str:
     except ValueError:
         return day
 
+def _format_link_names(items: list[dict]) -> str:
+    if not items:
+        return "Пока нет данных."
+    labels = []
+    for item in items:
+        label = item.get("name_ru") or item.get("name_en") or "Без названия"
+        labels.append(f"• {label}")
+    return "\n".join(labels)
+
 async def ensure_timezone_or_redirect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     s = context.application.bot_data.get("settings")
     if not s:
@@ -3865,8 +3874,8 @@ async def render_supplement_card(
     avg_effect = str(row.get("avg_effect_percent_est") or "").strip() or "—"
     short_desc = (
         str(row.get("summary_ru") or "").strip()
-        or str(row.get("summary_ru_verified") or "").strip()
-        or str(row.get("summary_ru_theoretical") or "").strip()
+        or str(row.get("summary_verified") or "").strip()
+        or str(row.get("summary_theoretical") or "").strip()
         or "—"
     )
 
@@ -3904,7 +3913,13 @@ async def render_supplement_card(
     course_ru = course_ru or "—"
 
     lines: list[str] = []
+    top_synergy = []
+    top_antag = []
     if tab == "brief":
+        links = await db.get_supplement_links(conn, supplement_id)
+        top_limit = 5
+        top_synergy = await db.list_linked_supplements(conn, links["synergy"][:top_limit])
+        top_antag = await db.list_linked_supplements(conn, links["antagonists"][:top_limit])
         lines = [
             f"<b>{title}</b>",
             f"Англ: {name_en or '—'}",
@@ -3921,6 +3936,14 @@ async def render_supplement_card(
                 "",
                 "Коротко:",
                 short_desc,
+                "",
+                "Топ совместимости (с чем лучше всего сочетают):",
+                _format_link_names(top_synergy),
+                "",
+                "Топ несовместимости (с чем лучше НЕ сочетать):",
+                _format_link_names(top_antag),
+                "",
+                "Больше деталей — во вкладках 🤝 и ⚠️.",
             ]
         )
     elif tab == "time":

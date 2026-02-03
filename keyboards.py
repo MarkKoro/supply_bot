@@ -5,11 +5,10 @@ import tz
 
 def main_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ Добавить добавку", callback_data="menu:add")],
+        [InlineKeyboardButton("💊 Мои БАДы", callback_data="menu:my")],
         [InlineKeyboardButton("📚 Каталог БАДов", callback_data="menu:catalog")],
         [InlineKeyboardButton("🧠 Готовые стеки", callback_data="menu:curated")],
-        [InlineKeyboardButton("💊 Мои БАДы", callback_data="menu:my")],
-        [InlineKeyboardButton("📝 Опрос дня (AI)", callback_data="menu:checkin_ai")],
+        [InlineKeyboardButton("📝 Фраза дня", callback_data="menu:checkin_ai")],
         [InlineKeyboardButton("⚙️ Настройки", callback_data="menu:settings")],
     ])
 
@@ -139,7 +138,13 @@ def my_supplements_list(rows, page: int, has_prev: bool, has_next: bool, *, show
         else:
             marker = "…"
         label = f"{r['name']} {marker}"
-        btns.append([InlineKeyboardButton(label, callback_data=f"mysupp:open:{r['supplement_id']}")])
+        btns.append(
+            [
+                InlineKeyboardButton(label, callback_data=f"mysupp:open:{r['supplement_id']}"),
+                InlineKeyboardButton("✅", callback_data=f"mysupp:quick:taken:{r['supplement_id']}:{page}"),
+                InlineKeyboardButton("❌", callback_data=f"mysupp:quick:skip:{r['supplement_id']}:{page}"),
+            ]
+        )
     btns.append([InlineKeyboardButton("➕ Добавить", callback_data="mysupp:add")])
     nav = []
     if has_prev:
@@ -307,12 +312,42 @@ def my_supplement_hub(
 def my_supplement_reminders(
     supplement_id: int,
     reminders: list[str],
+    suggested_times: list[str],
+    page: int,
+    *,
+    per_page: int = 8,
 ) -> InlineKeyboardMarkup:
     btns: list[list[InlineKeyboardButton]] = []
+    page = max(page, 0)
+    if suggested_times:
+        start = page * per_page
+        end = start + per_page
+        sliced = suggested_times[start:end]
+        row: list[InlineKeyboardButton] = []
+        for time_local in sliced:
+            row.append(
+                InlineKeyboardButton(
+                    f"⏰ {time_local}",
+                    callback_data=f"mysupp:rem:suggest:{supplement_id}:{time_local.replace(':', '-')}"
+                    f":{page}",
+                )
+            )
+            if len(row) == 2:
+                btns.append(row)
+                row = []
+        if row:
+            btns.append(row)
+        nav = []
+        if start > 0:
+            nav.append(InlineKeyboardButton("⬅️", callback_data=f"mysupp:rem:page:{supplement_id}:{page - 1}"))
+        if end < len(suggested_times):
+            nav.append(InlineKeyboardButton("➡️", callback_data=f"mysupp:rem:page:{supplement_id}:{page + 1}"))
+        if nav:
+            btns.append(nav)
+    btns.append([InlineKeyboardButton("➕ Добавить своё время", callback_data=f"mysupp:rem:add:{supplement_id}")])
     for time_local in reminders:
         key = time_local.replace(":", "-")
         btns.append([InlineKeyboardButton(f"🗑 {time_local}", callback_data=f"mysupp:rem:del:{supplement_id}:{key}")])
-    btns.append([InlineKeyboardButton("➕ Добавить время", callback_data=f"mysupp:rem:add:{supplement_id}")])
     btns.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"mysupp:open:{supplement_id}")])
     return InlineKeyboardMarkup(btns)
 
@@ -349,9 +384,15 @@ def timezone_picker(
 
 def reminder_actions(supplement_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Выпил", callback_data=f"rem:done:{supplement_id}")],
-        [InlineKeyboardButton("⏱ Через 15 минут", callback_data=f"rem:snooze:{supplement_id}:15")],
-        [InlineKeyboardButton("✖️ Сегодня не буду", callback_data=f"rem:skip:{supplement_id}")],
+        [
+            InlineKeyboardButton("✅ Выпил", callback_data=f"rem:done:{supplement_id}"),
+            InlineKeyboardButton("❌ Не выпил", callback_data=f"rem:skip:{supplement_id}"),
+        ],
+        [
+            InlineKeyboardButton("⏱ 15 мин", callback_data=f"rem:snooze:{supplement_id}:15"),
+            InlineKeyboardButton("⏱ 30 мин", callback_data=f"rem:snooze:{supplement_id}:30"),
+            InlineKeyboardButton("⏱ 60 мин", callback_data=f"rem:snooze:{supplement_id}:60"),
+        ],
     ])
 
 def settings_menu() -> InlineKeyboardMarkup:

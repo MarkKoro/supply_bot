@@ -41,7 +41,7 @@ PRAGMA foreign_keys=ON;
 CREATE TABLE IF NOT EXISTS users (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   tg_user_id    INTEGER UNIQUE NOT NULL,
-  tz_name       TEXT NOT NULL DEFAULT 'UTC',
+  tz_name       TEXT NOT NULL DEFAULT 'GMT',
   created_at    TEXT NOT NULL,
   last_local_date TEXT NOT NULL DEFAULT '',
   last_view     TEXT NOT NULL DEFAULT 'menu',
@@ -277,7 +277,7 @@ async def init_db(db_path: str) -> None:
 
 async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     await _ensure_users_tz_name(conn)
-    await conn.execute("UPDATE users SET tz_name='UTC' WHERE tz_name IS NULL OR tz_name=''")
+    await conn.execute("UPDATE users SET tz_name='GMT' WHERE tz_name IS NULL OR tz_name=''")
     await _ensure_column(conn, "users", "last_local_date", "TEXT NOT NULL DEFAULT ''")
     await _ensure_column(conn, "users", "last_view", "TEXT NOT NULL DEFAULT 'menu'")
     await _ensure_column(conn, "users", "last_view_payload", "TEXT NOT NULL DEFAULT ''")
@@ -654,7 +654,7 @@ async def _ensure_daily_checkins(conn: aiosqlite.Connection) -> None:
         "UPDATE daily_checkins SET answers_json='{}' WHERE answers_json IS NULL OR answers_json=''",
     )
     await conn.execute(
-        "UPDATE daily_checkins SET tz_name='UTC' WHERE tz_name IS NULL OR tz_name=''"
+        "UPDATE daily_checkins SET tz_name='GMT' WHERE tz_name IS NULL OR tz_name=''"
     )
     await conn.execute(
         """DELETE FROM daily_checkins
@@ -816,7 +816,7 @@ async def _ensure_users_tz_name(conn: aiosqlite.Connection) -> None:
     cols = await fetchall(conn, "PRAGMA table_info(users)")
     if any(c["name"] == "tz_name" for c in cols):
         return
-    await conn.execute("ALTER TABLE users ADD COLUMN tz_name TEXT NOT NULL DEFAULT 'UTC'")
+    await conn.execute("ALTER TABLE users ADD COLUMN tz_name TEXT NOT NULL DEFAULT 'GMT'")
 
 async def _backfill_alias_raw(conn: aiosqlite.Connection) -> None:
     cols = await fetchall(conn, "PRAGMA table_info(supplement_aliases)")
@@ -945,7 +945,7 @@ async def get_or_create_user(conn: aiosqlite.Connection, tg_user_id: int, tz_nam
     row = await fetchone(conn, "SELECT id FROM users WHERE tg_user_id=?", (tg_user_id,))
     if row:
         return int(row["id"])
-    tz_value = tz_name.strip() if isinstance(tz_name, str) and tz_name.strip() else "UTC"
+    tz_value = tz_name.strip() if isinstance(tz_name, str) and tz_name.strip() else "GMT"
     await conn.execute(
         "INSERT INTO users(tg_user_id, tz_name, created_at) VALUES(?,?,?)",
         (tg_user_id, tz_value, utc_now_iso()),
@@ -1059,9 +1059,9 @@ def parse_utc_tz(tz_name: str | None):
     if not tz_name:
         return timezone.utc
     value = str(tz_name).strip()
-    if value.upper() == "UTC":
+    if value.upper() in {"UTC", "GMT"}:
         return timezone.utc
-    match = re.fullmatch(r"(?:UTC)?([+-](?:0\\d|1\\d|2[0-3])):([0-5]\\d)", value)
+    match = re.fullmatch(r"(?:UTC|GMT)?([+-](?:0\\d|1\\d|2[0-3])):([0-5]\\d)", value)
     if match:
         sign_hours, minutes_str = match.groups()
         sign = 1 if sign_hours[0] == "+" else -1

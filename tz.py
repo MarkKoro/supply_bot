@@ -2,18 +2,34 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-RU_TZ_CITY = {
-    2: "Калининград",
+TZ_CITY = {
+    -12: "Бейкер-Айленд",
+    -11: "Паго-Паго",
+    -10: "Гонолулу",
+    -9: "Анкоридж",
+    -8: "Лос-Анджелес",
+    -7: "Денвер",
+    -6: "Мехико",
+    -5: "Нью-Йорк",
+    -4: "Сантьяго",
+    -3: "Буэнос-Айрес",
+    -2: "Фернанду-ди-Норонья",
+    -1: "Понта-Делгада",
+    0: "Лондон",
+    1: "Берлин",
+    2: "Каир",
     3: "Москва",
-    4: "Самара",
-    5: "Екатеринбург",
-    6: "Омск",
-    7: "Красноярск",
-    8: "Иркутск",
-    9: "Якутск",
-    10: "Владивосток",
-    11: "Магадан",
-    12: "Камчатка",
+    4: "Дубай",
+    5: "Карачи",
+    6: "Дакка",
+    7: "Бангкок",
+    8: "Пекин",
+    9: "Токио",
+    10: "Сидней",
+    11: "Нумеа",
+    12: "Окленд",
+    13: "Апиа",
+    14: "Киритимати",
 }
 
 
@@ -30,8 +46,8 @@ def format_offset_tag(hours: int) -> str:
 
 def format_offset_label(hours: int) -> str:
     tag = format_offset_tag(hours)
-    label = f"UTC{tag}"
-    city = RU_TZ_CITY.get(hours)
+    label = f"GMT{tag}"
+    city = TZ_CITY.get(hours)
     if city:
         return f"{label} ({city})"
     return label
@@ -42,8 +58,8 @@ def format_confirmation_label(tz_name: str) -> str:
     if hours is None:
         return tz_name
     tag = format_offset_tag(hours)
-    label = f"UTC{tag}:00"
-    city = RU_TZ_CITY.get(hours)
+    label = f"GMT{tag}:00"
+    city = TZ_CITY.get(hours)
     if city:
         return f"{label} ({city})"
     return label
@@ -53,9 +69,9 @@ def parse_tz_hours(tz_name: str) -> int | None:
     if not tz_name:
         return None
     value = tz_name.strip().upper()
-    if value == "UTC":
+    if value in {"UTC", "GMT"}:
         return 0
-    if value.startswith("UTC"):
+    if value.startswith(("UTC", "GMT")):
         value = value[3:]
     if value.startswith(("+", "-")):
         try:
@@ -67,4 +83,4 @@ def parse_tz_hours(tz_name: str) -> int | None:
 
 def tz_name_from_tag(tag: str) -> str:
     hours = int(tag)
-    return f"UTC{format_offset_tag(hours)}:00"
+    return f"GMT{format_offset_tag(hours)}:00"

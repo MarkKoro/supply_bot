@@ -3666,7 +3666,12 @@ async def _show_catalog_home(
     await show(
         update,
         context,
-        "📚 <b>Каталог БАДов</b>\nВыбери, как искать:",
+        (
+            "📚 <b>Каталог БАДов</b>\n"
+            "Здесь есть карточки с краткими выводами, механизмами, дозировками, "
+            "временем приёма и совместимостью.\n"
+            "Выбери, как искать:"
+        ),
         catalog_home(),
         route="cat:home",
         payload={"mode": "home"},
@@ -3857,7 +3862,7 @@ async def _show_catalog_card(
     if in_my:
         btns.append([InlineKeyboardButton("➖ Убрать из моих", callback_data=f"card:remove:{row['id']}")])
     else:
-        btns.append([InlineKeyboardButton("➕ Добавить в мои", callback_data=f"card:add:{row['id']}")])
+        btns.append([InlineKeyboardButton("🟢➕ Добавить в мои", callback_data=f"card:add:{row['id']}")])
     btns.append([InlineKeyboardButton("🧩 Совместимость", callback_data=f"card:compat:{row['id']}")])
     btns.append([InlineKeyboardButton("📊 Доказательность", callback_data=f"card:evidence:{row['id']}")])
     if in_my:
@@ -4110,17 +4115,13 @@ async def render_supplement_card(
     evidence = (
         str(row.get("evidence_grade") or "").strip()
         or str(row.get("confidence") or "").strip()
-        or "—"
     )
-    human_trials = str(row.get("human_trials_count_est") or "").strip() or "—"
-    participants = str(row.get("participants_total_est") or "").strip() or "—"
-    avg_effect = str(row.get("avg_effect_percent_est") or "").strip() or "—"
-    short_desc = (
-        str(row.get("summary_ru") or "").strip()
-        or str(row.get("summary_verified") or "").strip()
-        or str(row.get("summary_theoretical") or "").strip()
-        or "—"
-    )
+    if not evidence:
+        evidence = "неизвестно"
+    human_trials = str(row.get("human_trials_count_est") or "").strip()
+    participants = str(row.get("participants_total_est") or "").strip()
+    avg_effect = str(row.get("avg_effect_percent_est") or "").strip()
+    short_desc = str(row.get("summary_ru") or "").strip()
 
     dose_raw = row.get("dose_ru")
     dose_typical = ""
@@ -4128,6 +4129,15 @@ async def render_supplement_card(
     course_ru = ""
     dose_notes = ""
     timing_hint = ""
+    timing_comment = ""
+    with_food = ""
+    payload_json = row.get("payload_json")
+    payload_data = {}
+    if payload_json:
+        try:
+            payload_data = json.loads(payload_json)
+        except json.JSONDecodeError:
+            payload_data = {}
     if isinstance(dose_raw, str) and dose_raw:
         try:
             parsed = json.loads(dose_raw)
@@ -4139,21 +4149,44 @@ async def render_supplement_card(
             course_ru = str(parsed.get("course") or "").strip()
             dose_notes = str(parsed.get("notes") or "").strip()
             timing_hint = str(parsed.get("timing") or "").strip()
+            timing_comment = str(
+                parsed.get("timing_comment")
+                or parsed.get("timing_notes")
+                or parsed.get("comment")
+                or ""
+            ).strip()
+            with_food = str(
+                parsed.get("with_food")
+                or parsed.get("with_food_ru")
+                or parsed.get("food")
+                or ""
+            ).strip()
         else:
             dose_typical = dose_raw.strip()
     elif dose_raw:
         dose_typical = str(dose_raw).strip()
 
     timing_ru = str(row.get("timing_ru") or "").strip() or timing_hint
-    with_food_ru = "—"
-    timing_notes_ru = dose_notes or "—"
-    if not timing_ru:
-        timing_ru = "—"
+    if not with_food:
+        with_food = str(payload_data.get("with_food_ru") or payload_data.get("with_food") or "").strip()
+    if not timing_comment:
+        timing_comment = str(
+            payload_data.get("timing_comment_ru")
+            or payload_data.get("timing_notes_ru")
+            or payload_data.get("timing_notes")
+            or payload_data.get("comment_ru")
+            or ""
+        ).strip()
 
-    safety_ru = str(row.get("safety_ru") or "").strip() or "—"
-    dose_typical = dose_typical or "—"
-    dose_range = dose_range or "—"
-    course_ru = course_ru or "—"
+    safety_ru = str(row.get("safety_ru") or "").strip()
+    tags_raw = row.get("tags_json")
+    tags = []
+    if tags_raw:
+        try:
+            tags = json.loads(tags_raw)
+        except json.JSONDecodeError:
+            tags = []
+    tags_text = ", ".join([str(tag).strip() for tag in tags if str(tag).strip()])
 
     lines: list[str] = []
     top_synergy = []
@@ -4165,20 +4198,34 @@ async def render_supplement_card(
         top_antag = await db.list_linked_supplements(conn, links["antagonists"][:top_limit])
         lines = [
             f"<b>{title}</b>",
-            f"Англ: {name_en or '—'}",
         ]
+        if name_en:
+            lines.append(f"Англ: {name_en}")
         if show_added:
             lines.append("✅ Добавлено в «Мои БАДы»")
+        lines.append("")
+        lines.append(f"Доказательность: {evidence}")
+        if human_trials:
+            lines.append(f"Исследования на людях: {human_trials}")
+        if participants:
+            lines.append(f"Участников всего: {participants}")
+        if avg_effect:
+            lines.append(f"Средний эффект: {avg_effect}")
+        if tags_text:
+            lines.append(f"Категории: {tags_text}")
+        if short_desc:
+            lines.extend(["", "Коротко:", short_desc])
+        summary_verified = str(row.get("summary_verified") or "").strip()
+        summary_theoretical = str(row.get("summary_theoretical") or "").strip()
+        molecular_mechanisms = str(row.get("molecular_mechanisms") or "").strip()
+        if summary_verified:
+            lines.extend(["", "Проверено:", summary_verified])
+        if summary_theoretical:
+            lines.extend(["", "Теоретически:", summary_theoretical])
+        if molecular_mechanisms:
+            lines.extend(["", "Механизмы:", molecular_mechanisms])
         lines.extend(
             [
-                "",
-                f"Доказательность: {evidence}",
-                f"Исследования на людях: {human_trials}",
-                f"Участников всего: {participants}",
-                f"Средний эффект: {avg_effect}",
-                "",
-                "Коротко:",
-                short_desc,
                 "",
                 "Топ совместимости (с чем лучше всего сочетают):",
                 _format_link_names(top_synergy),
@@ -4190,20 +4237,29 @@ async def render_supplement_card(
             ]
         )
     elif tab == "time":
-        lines = [
-            f"<b>{title}</b> — 🕒 Когда принимать",
-            f"Рекомендация: {timing_ru}",
-            f"С едой/натощак: {with_food_ru}",
-            f"Комментарии: {timing_notes_ru}",
-        ]
+        lines = [f"<b>{title}</b> — 🕒 Время приёма"]
+        if timing_ru:
+            lines.append(f"Рекомендация по времени: {timing_ru}")
+        if with_food:
+            lines.append(f"С едой/натощак: {with_food}")
+        if timing_comment:
+            lines.append(f"Комментарий: {timing_comment}")
+        if len(lines) == 1:
+            lines.append("Пока нет данных. Добавим по мере наполнения базы.")
     elif tab == "dose":
-        lines = [
-            f"<b>{title}</b> — 💊 Дозировка",
-            f"Типичная доза: {dose_typical}",
-            f"Диапазон: {dose_range}",
-            f"Курс: {course_ru}",
-            f"Предупреждения: {safety_ru}",
-        ]
+        lines = [f"<b>{title}</b> — 💊 Дозировка"]
+        if dose_typical:
+            lines.append(f"Рекомендуемая доза: {dose_typical}")
+        if dose_range:
+            lines.append(f"Диапазон: {dose_range}")
+        if course_ru:
+            lines.append(f"Курс: {course_ru}")
+        if dose_notes:
+            lines.append(f"Примечания: {dose_notes}")
+        if safety_ru:
+            lines.append(f"Безопасность: {safety_ru}")
+        if len(lines) == 1:
+            lines.append("Пока нет данных. Добавим по мере наполнения базы.")
     else:
         links = await db.get_supplement_links(conn, supplement_id)
         link_ids = links["synergy"] if tab == "synergy" else links["antagonists"]

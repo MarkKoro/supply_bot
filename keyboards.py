@@ -8,7 +8,7 @@ def main_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("💊 Мои БАДы", callback_data="menu:my")],
         [InlineKeyboardButton("📚 Каталог БАДов", callback_data="menu:catalog")],
         [InlineKeyboardButton("🧠 Готовые стеки", callback_data="menu:curated")],
-        [InlineKeyboardButton("📝 Фраза дня", callback_data="menu:checkin_ai")],
+        [InlineKeyboardButton("📝 Ежедневный опрос", callback_data="menu:checkin_ai")],
         [InlineKeyboardButton("⚙️ Настройки", callback_data="menu:settings")],
     ])
 
@@ -16,6 +16,7 @@ def ai_checkin_entry_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("🟦 Быстрый опрос (кнопки)", callback_data="aicheck:quick")],
+            [InlineKeyboardButton("✍️ Свободный текст", callback_data="aicheck:text")],
             [InlineKeyboardButton("🎙 Опрос голосом", callback_data="aicheck:voice")],
             [InlineKeyboardButton("🏠 Меню", callback_data="menu:home")],
         ]

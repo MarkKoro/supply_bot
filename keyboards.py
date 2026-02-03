@@ -201,7 +201,7 @@ def supplement_page(
     if in_stack:
         btns.append([InlineKeyboardButton("✅ Уже в моих — Управлять", callback_data=f"mysupp:open:{supplement_id}")])
     else:
-        btns.append([InlineKeyboardButton("➕ Добавить в Мои БАДы", callback_data=f"mysupp:add_direct:{supplement_id}")])
+        btns.append([InlineKeyboardButton("🟢➕ Добавить в Мои БАДы", callback_data=f"mysupp:add_direct:{supplement_id}")])
     btns.append([
         InlineKeyboardButton("✅ Совместимо", callback_data=f"supp:compat:{supplement_id}:synergy:0"),
         InlineKeyboardButton("⛔ Несовместимо", callback_data=f"supp:compat:{supplement_id}:antagonism:0"),
@@ -255,8 +255,8 @@ def supp_tabs_kb(
     btns: list[list[InlineKeyboardButton]] = [
         [
             InlineKeyboardButton("📌 Коротко", callback_data=f"supp:tab:{supplement_id}:brief"),
-            InlineKeyboardButton("🕒 Когда", callback_data=f"supp:tab:{supplement_id}:time"),
-            InlineKeyboardButton("💊 Дозы", callback_data=f"supp:tab:{supplement_id}:dose"),
+            InlineKeyboardButton("🕒 Время приёма", callback_data=f"supp:tab:{supplement_id}:time"),
+            InlineKeyboardButton("💊 Дозировка", callback_data=f"supp:tab:{supplement_id}:dose"),
         ],
         [
             InlineKeyboardButton("🤝 Совместимо", callback_data=f"supp:tab:{supplement_id}:synergy"),
@@ -289,7 +289,7 @@ def supp_tabs_kb(
 
     btns.append(
         [
-            InlineKeyboardButton("➕ В мои", callback_data=add_cb),
+            InlineKeyboardButton("🟢➕ В мои", callback_data=add_cb),
             InlineKeyboardButton("⬅️ Назад", callback_data=back_cb),
             InlineKeyboardButton("🏠 Меню", callback_data="menu:home"),
         ]

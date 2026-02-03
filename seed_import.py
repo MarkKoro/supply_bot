@@ -87,13 +87,19 @@ async def _import_rich(conn, supp_path: str, slug_to_id: dict[str, int]) -> None
             other_slug = interaction.get("other_slug")
             if not other_slug:
                 continue
-            if other_slug not in slug_to_id:
+            other_id = slug_to_id.get(other_slug)
+            if other_id is None:
+                other_row = await db.get_supplement_by_slug(conn, other_slug)
+                if other_row:
+                    other_id = int(other_row["id"])
+                    slug_to_id[other_slug] = other_id
+            if other_id is None:
                 pending_interactions.append((item["slug"], interaction))
                 continue
             await db.upsert_interaction(
                 conn,
                 slug_to_id[item["slug"]],
-                slug_to_id[other_slug],
+                other_id,
                 {
                     "relation": interaction.get("relation", "neutral"),
                     "severity": int(interaction.get("severity", 0)),
@@ -107,13 +113,22 @@ async def _import_rich(conn, supp_path: str, slug_to_id: dict[str, int]) -> None
         remaining: list[tuple[str, dict]] = []
         for slug, interaction in pending_interactions:
             other_slug = interaction.get("other_slug")
-            if not other_slug or other_slug not in slug_to_id or slug not in slug_to_id:
+            if not other_slug or slug not in slug_to_id:
+                remaining.append((slug, interaction))
+                continue
+            other_id = slug_to_id.get(other_slug)
+            if other_id is None:
+                other_row = await db.get_supplement_by_slug(conn, other_slug)
+                if other_row:
+                    other_id = int(other_row["id"])
+                    slug_to_id[other_slug] = other_id
+            if other_id is None:
                 remaining.append((slug, interaction))
                 continue
             await db.upsert_interaction(
                 conn,
                 slug_to_id[slug],
-                slug_to_id[other_slug],
+                other_id,
                 {
                     "relation": interaction.get("relation", "neutral"),
                     "severity": int(interaction.get("severity", 0)),

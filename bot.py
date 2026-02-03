@@ -66,6 +66,7 @@ CURATED_PAGE_SIZE = 10
 AI_CHECKIN_ROUTE = "menu:checkin_ai"
 AI_CHECKIN_STATE = "ai_checkin_state"
 AI_CHECKIN_NOTE_WAIT = "ai_checkin_note"
+AI_CHECKIN_TEXT_WAIT = "ai_checkin_text"
 AI_CHECKIN_VOICE_ROUTE = "checkin_voice"
 
 GOAL_OPTIONS = [
@@ -182,7 +183,7 @@ def _goal_label(code: str) -> str:
     return code
 
 def _ai_checkin_step_title(step: int) -> str:
-    return f"📝 <b>Фраза дня</b>\n\nШаг {step}/5"
+    return f"📝 <b>Ежедневный опрос</b>\n\nШаг {step}/5"
 
 def _ai_checkin_actions_payload(state: dict) -> dict:
     raw = state.get("last_ai_actions_json")
@@ -207,7 +208,17 @@ async def _render_ai_checkin_entry(
     target_chat_id: int | None = None,
     target_message_id: int | None = None,
 ) -> None:
-    text = "📝 <b>Фраза дня</b>\n\nКак хочешь пройти опрос?"
+    text = (
+        "📝 <b>Ежедневный опрос</b>\n\n"
+        "Расскажи, как прошло утро и вчерашний день — это поможет подобрать изменения "
+        "в сегодняшнем стеке: усилить эффект, убрать лишнее или предложить эксперимент.\n\n"
+        "Мы уже учитываем, что ты вчера выпил(а) и что пропустил(а), а также все изменения, "
+        "которые ты делал(а) в стеке.\n\n"
+        "Выбери формат:\n"
+        "• Быстрый опрос (кнопки)\n"
+        "• Свободный текст — просто напиши одним сообщением\n"
+        "• Опрос голосом — отправь голосовое"
+    )
     await show(
         update,
         context,
@@ -245,6 +256,60 @@ async def _render_ai_checkin_voice_prompt(
         target_chat_id=target_chat_id,
         target_message_id=target_message_id,
     )
+
+async def _render_ai_checkin_text_prompt(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    target_chat_id: int | None = None,
+    target_message_id: int | None = None,
+) -> None:
+    text = (
+        "✍️ Напиши одним сообщением, как прошло утро и вчерашний день: самочувствие, "
+        "энергия, стресс, тренировка, любые симптомы или планы. Я разберу текст и подготовлю рекомендации."
+    )
+    await show(
+        update,
+        context,
+        text,
+        InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="aicheck:entry")]]),
+        route=AI_CHECKIN_ROUTE,
+        payload=_ai_checkin_entry_payload(),
+        target_chat_id=target_chat_id,
+        target_message_id=target_message_id,
+    )
+
+def _build_adherence_lines(
+    stack: list[dict],
+    status_rows: list[dict],
+    days: list[str],
+) -> list[str]:
+    status_map: dict[int, dict[str, str]] = {}
+    for row in status_rows:
+        supplement_id = int(row["supplement_id"])
+        status_map.setdefault(supplement_id, {})[str(row["day"])] = str(row["status"] or "")
+    lines: list[str] = []
+    for item in stack:
+        supplement_id = int(item.get("supplement_id") or 0)
+        base = f"- {item.get('slug')} / {item.get('ru_name')}"
+        day_statuses = status_map.get(supplement_id, {})
+        entries = []
+        for day in days:
+            status = day_statuses.get(day)
+            if status == "taken":
+                label = "выпил"
+            elif status == "skipped":
+                label = "не выпил"
+            else:
+                label = "нет данных"
+            entries.append(f"{day}: {label}")
+        if any(entry.endswith(("выпил", "не выпил")) for entry in entries):
+            lines.append(f"{base} — {'; '.join(entries)}")
+        else:
+            lines.append(f"{base} — нет данных за последние дни")
+    if not lines:
+        lines = ["— нет"]
+    return lines
 
 async def _render_ai_checkin_wizard(
     update: Update,
@@ -394,7 +459,13 @@ async def _render_ai_checkin_wizard(
         payload={"ai_checkin": state},
     )
 
-def build_ai_checkin_prompt(user: dict, stack: list[dict], checkin: dict, candidates: list[dict]) -> list[dict]:
+def build_ai_checkin_prompt(
+    user: dict,
+    stack: list[dict],
+    checkin: dict,
+    candidates: list[dict],
+    adherence_lines: list[str],
+) -> list[dict]:
     system_msg = (
         "Ты — осторожный помощник по добавкам. "
         "Никаких диагнозов и назначений. "
@@ -480,6 +551,9 @@ def build_ai_checkin_prompt(user: dict, stack: list[dict], checkin: dict, candid
             "",
             "ТЕКУЩИЙ СТЕК:",
             *stack_lines,
+            "",
+            "СТАТУС ПРИЕМА (последние дни):",
+            *adherence_lines,
             "",
             "КАНДИДАТЫ ИЗ КАТАЛОГА:",
             *cand_lines,
@@ -870,12 +944,30 @@ async def _finalize_ai_checkin(
         return
 
     stack = await db.get_user_base_stack(conn, user_id)
+    supplement_ids = [int(item.get("supplement_id") or 0) for item in stack if item.get("supplement_id")]
+    days_range = []
+    try:
+        day_value = datetime.strptime(day, "%Y-%m-%d").date()
+        days_range = [(day_value - timedelta(days=delta)).isoformat() for delta in range(6, -1, -1)]
+    except ValueError:
+        days_range = [day]
+    status_rows = []
+    if supplement_ids:
+        status_rows = await db.list_supplement_day_states(
+            conn,
+            tg_uid,
+            supplement_ids,
+            days_range[0],
+            days_range[-1],
+        )
+    adherence_lines = _build_adherence_lines(stack, status_rows, days_range)
     candidates = await db.get_catalog_candidates(conn, goals, limit=60)
     messages = build_ai_checkin_prompt(
         {"tz_name": tz_name},
         stack,
         checkin_payload,
         candidates,
+        adherence_lines,
     )
     cfg = OpenAIConfig(api_key=s.OPENAI_API_KEY, model=s.OPENAI_MODEL)
     await show(
@@ -2183,6 +2275,11 @@ async def on_ai_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await _render_ai_checkin_voice_prompt(update, context)
         return
 
+    if data == "aicheck:text":
+        context.user_data[WAITING_KEY] = AI_CHECKIN_TEXT_WAIT
+        await _render_ai_checkin_text_prompt(update, context)
+        return
+
     if data == "aicheck:quick":
         context.user_data.pop(WAITING_KEY, None)
         state = {
@@ -3299,6 +3396,53 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     await show(update, context, "Начальный подбор временно недоступен.", back(), route="menu:ai")
 
                 await _render_ai_suggestions(update, context, conn, txt, raw)
+        elif waiting == AI_CHECKIN_TEXT_WAIT:
+            context.user_data.pop(WAITING_KEY, None)
+            if not s.OPENAI_API_KEY:
+                await show(
+                    update,
+                    context,
+                    "AI отключен: добавь OPENAI_API_KEY в .env.",
+                    back(),
+                    route=AI_CHECKIN_ROUTE,
+                )
+            else:
+                await show(update, context, "Готовлю рекомендации…", back(), route=AI_CHECKIN_ROUTE)
+                extracted: dict = {}
+                try:
+                    cfg = OpenAIConfig(api_key=s.OPENAI_API_KEY, model=s.OPENAI_MODEL)
+                    extracted = await extract_checkin_from_text(txt, cfg=cfg)
+                except Exception:
+                    log.exception("Checkin extraction failed")
+                    extracted = {}
+                answers = _normalize_ai_checkin_extract(
+                    extracted if isinstance(extracted, dict) else {},
+                    txt,
+                )
+                state = {
+                    "step": 5,
+                    "answers": answers,
+                    "note_pending": False,
+                    "last_ai_actions_json": "",
+                    "selected_action_ids": [],
+                }
+                _set_ai_checkin_state(context, state)
+                user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
+                tz_name = await db.get_user_tz(conn, tg_uid)
+                if _is_tz_unset(tz_name):
+                    context.user_data.pop("tz_back_data", None)
+                    context.user_data["onboarding"] = "tz"
+                    await _show_timezone_picker(update, context, 0)
+                else:
+                    await _finalize_ai_checkin(
+                        update,
+                        context,
+                        conn,
+                        tg_uid=tg_uid,
+                        user_id=user_id,
+                        tz_name=tz_name or "GMT",
+                        state=state,
+                    )
         elif waiting == AI_CHECKIN_NOTE_WAIT:
             state = _get_ai_checkin_state(context)
             answers = state.get("answers", {}) if isinstance(state.get("answers"), dict) else {}
@@ -4596,7 +4740,7 @@ async def _show_my_supp_reminders(
     name = (supplement["name_ru"] or supplement["name"] or "").strip()
     timing_text = str(supplement["timing_ru"] or "").strip()
     timing_label = timing_text or "—"
-    suggested_hours = _parse_timing_hours(timing_text)
+    suggested_hours = _parse_timing_hours(timing_text) if not reminder_times else []
     suggested_times = [f"{hour:02d}:00" for hour in suggested_hours]
     title = f"⏰ <b>Напоминания</b>\n{name}"
     if reminder_times:
@@ -4605,7 +4749,7 @@ async def _show_my_supp_reminders(
             "",
             "Здесь ты можешь поставить напоминание для этого БАДа.",
             f"Рекомендуемое время: {timing_label}",
-            "Выбери время ниже или добавь своё.",
+            "Добавь новое время или удали существующие напоминания.",
             "",
             "Текущие напоминания:",
             *[f"• {t}" for t in reminder_times],

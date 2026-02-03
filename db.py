@@ -2314,6 +2314,24 @@ async def get_today_status(
     )
     return str(row["status"]) if row else None
 
+async def list_supplement_day_states(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    supplement_ids: list[int],
+    start_day: str,
+    end_day: str,
+) -> list[dict]:
+    if not supplement_ids:
+        return []
+    placeholders = ",".join(["?"] * len(supplement_ids))
+    query = (
+        "SELECT supplement_id, day, status FROM supplement_day_state "
+        f"WHERE user_id=? AND supplement_id IN ({placeholders}) AND day>=? AND day<=? "
+        "ORDER BY day"
+    )
+    params = [tg_user_id, *supplement_ids, start_day, end_day]
+    return await fetchall(conn, query, tuple(params))
+
 async def clear_today_status(
     conn: aiosqlite.Connection,
     tg_user_id: int,

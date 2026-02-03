@@ -1366,7 +1366,7 @@ async def _resolve_supplement_id(conn: aiosqlite.Connection, slug: str | None, n
 
 async def get_interactions_for_supplement(conn: aiosqlite.Connection, sid: int) -> list[dict]:
     interactions: list[dict] = []
-    seen: set[tuple[int, str, str]] = set()
+    seen: set[tuple[object, str, str, str]] = set()
     rows = await fetchall(
         conn,
         """SELECT * FROM interactions
@@ -1383,7 +1383,7 @@ async def get_interactions_for_supplement(conn: aiosqlite.Connection, sid: int) 
             continue
         reason = (row["note"] or "").strip()
         strength = _severity_to_strength(row["severity"])
-        key = (other_id, kind, reason)
+        key = (other_id, kind, reason, "")
         if key in seen:
             continue
         seen.add(key)
@@ -1416,22 +1416,34 @@ async def get_interactions_for_supplement(conn: aiosqlite.Connection, sid: int) 
                     item.get("other_name") or item.get("other_title"),
                     item.get("other_id"),
                 )
-                if not other_id:
-                    continue
+                other_name_ru = (item.get("other_name_ru") or "").strip()
+                other_slug = (item.get("other_slug") or "").strip()
+                other_label = other_name_ru or other_slug
                 reason = (item.get("note_ru") or item.get("note") or "").strip()
                 strength = _severity_to_strength(item.get("severity"))
-                key = (other_id, kind, reason)
+                key = (other_id, kind, reason, other_label)
                 if key in seen:
                     continue
                 seen.add(key)
-                interactions.append(
-                    {
-                        "other_supplement_id": int(other_id),
-                        "kind": kind,
-                        "reason_ru": reason,
-                        "strength": strength,
-                    }
-                )
+                if other_id:
+                    interactions.append(
+                        {
+                            "other_supplement_id": int(other_id),
+                            "kind": kind,
+                            "reason_ru": reason,
+                            "strength": strength,
+                        }
+                    )
+                elif other_label:
+                    interactions.append(
+                        {
+                            "other_supplement_id": None,
+                            "other_label_ru": other_label,
+                            "kind": kind,
+                            "reason_ru": reason,
+                            "strength": strength,
+                        }
+                    )
 
     return interactions
 

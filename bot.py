@@ -4830,25 +4830,34 @@ async def _show_supplement_compat(
     title = engine._supp_title(row)
     compat = await engine.build_compatibility(conn, supplement_id)
     items = compat.get(kind) or []
+    resolved_items = [item for item in items if item.get("other_id") is not None]
+    unresolved_items = [item for item in items if item.get("other_id") is None]
     page = max(page, 0)
     page_size = 8
     start = page * page_size
     end = start + page_size
-    page_items = items[start:end]
+    page_items = resolved_items[start:end]
     has_prev = page > 0
-    has_next = end < len(items)
+    has_next = end < len(resolved_items)
     icon = {"synergy": "✅", "antagonism": "⛔", "caution": "⚠️"}.get(kind, "✅")
     header = f"{icon} {('Совместимо' if kind == 'synergy' else 'Несовместимо' if kind == 'antagonism' else 'Осторожно')} с {title}"
     lines = [f"<b>{header}</b>"]
-    if not page_items:
+    if not page_items and not unresolved_items:
         lines.append("")
-        lines.append("Пока нет данных. Мы добавим позже.")
+        lines.append("Нет надёжных данных о взаимодействиях с другими БАДами из базы.")
     else:
         lines.append("")
         for item in page_items:
             reason = (item.get("reason_ru") or "").strip()
             reason_text = f" — {reason}" if reason else ""
             lines.append(f"• {item['title']}{reason_text}")
+        if unresolved_items:
+            if page_items:
+                lines.append("")
+            for item in unresolved_items:
+                reason = (item.get("reason_ru") or "").strip()
+                reason_text = f" — {reason}" if reason else ""
+                lines.append(f"• {item.get('title') or 'Неизвестно'}{reason_text}")
     source_map = {"db": "DB", "rules": "Правила", "mixed": "Смешано"}
     lines.append("")
     lines.append(f"Источник: {source_map.get(compat.get('source'), 'DB')}")

@@ -113,25 +113,36 @@ def _supp_title(row) -> str:
 async def build_compatibility(conn: aiosqlite.Connection, sid: int) -> dict:
     db_items = await db.get_interactions_for_supplement(conn, sid)
     grouped: dict[str, list[dict]] = {"synergy": [], "antagonism": [], "caution": []}
-    seen: set[tuple[int, str, str]] = set()
+    seen: set[tuple[object, str, str, str]] = set()
     for item in db_items:
         kind = item.get("kind")
         if kind not in grouped:
             continue
-        other_id = int(item["other_supplement_id"])
+        other_id = item.get("other_supplement_id")
+        other_label = (item.get("other_label_ru") or "").strip()
         reason = (item.get("reason_ru") or "").strip()
         strength = item.get("strength")
-        key = (other_id, kind, reason)
+        key = (other_id, kind, reason, other_label)
         if key in seen:
             continue
         seen.add(key)
-        grouped[kind].append(
-            {
-                "other_id": other_id,
-                "reason_ru": reason,
-                "strength": strength,
-            }
-        )
+        if other_id is not None:
+            grouped[kind].append(
+                {
+                    "other_id": int(other_id),
+                    "reason_ru": reason,
+                    "strength": strength,
+                }
+            )
+        elif other_label:
+            grouped[kind].append(
+                {
+                    "other_id": None,
+                    "title": other_label,
+                    "reason_ru": reason,
+                    "strength": strength,
+                }
+            )
 
     db_total = sum(len(items) for items in grouped.values())
     source = "db"
@@ -144,7 +155,7 @@ async def build_compatibility(conn: aiosqlite.Connection, sid: int) -> dict:
             source = "mixed"
             for kind, items in rules_grouped.items():
                 for item in items:
-                    key = (item["other_id"], kind, item.get("reason_ru") or "")
+                    key = (item["other_id"], kind, item.get("reason_ru") or "", "")
                     if key in seen:
                         continue
                     seen.add(key)
@@ -203,18 +214,24 @@ async def _build_rule_compatibility(conn: aiosqlite.Connection, sid: int) -> dic
 def _compat_sort_key(item: dict) -> tuple:
     strength = item.get("strength")
     strength_value = strength if isinstance(strength, int) else 0
-    return (-strength_value, str(item.get("title") or ""), int(item.get("other_id") or 0))
+    other_id = item.get("other_id")
+    other_id_value = int(other_id) if isinstance(other_id, int) else 0
+    return (-strength_value, str(item.get("title") or ""), other_id_value)
 
 async def _attach_titles(conn: aiosqlite.Connection, grouped: dict[str, list[dict]]) -> dict[str, list[dict]]:
     ids: list[int] = []
     for items in grouped.values():
         for item in items:
-            ids.append(int(item["other_id"]))
+            other_id = item.get("other_id")
+            if isinstance(other_id, int):
+                ids.append(other_id)
     rows = await db.list_supplements_by_ids(conn, ids)
     titles = {int(r["id"]): _supp_title(r) for r in rows}
     for kind, items in grouped.items():
         for item in items:
-            item["title"] = titles.get(int(item["other_id"]), "Неизвестно")
+            other_id = item.get("other_id")
+            if isinstance(other_id, int):
+                item["title"] = titles.get(other_id, "Неизвестно")
     return grouped
 
 def format_interactions(title_supp: str, groups: dict[str, dict[str, list[dict]]]) -> str:
@@ -227,7 +244,7 @@ def format_interactions(title_supp: str, groups: dict[str, dict[str, list[dict]]
     rule_count = _append_interaction_section(lines, "По классам", rule_groups)
 
     if explicit_count + rule_count == 0:
-        lines.append("\nПока нет данных по связям. (Мы добавим доказательную базу.)")
+        lines.append("\nНет надёжных данных о взаимодействиях с другими БАДами из базы.")
     return "\n".join(lines)
 
 async def stack_compatibility(conn: aiosqlite.Connection, supp_rows, *, limit: int = 30) -> list[dict]:

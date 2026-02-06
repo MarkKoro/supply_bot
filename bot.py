@@ -99,6 +99,15 @@ CHECKIN_VOICE_MAX_BYTES = 10 * 1024 * 1024
 def _is_tz_unset(tz_name: str | None) -> bool:
     return not tz_name or str(tz_name).strip().upper() in {"UTC", "GMT"}
 
+async def _safe_answer_callback(update: Update) -> None:
+    q = update.callback_query
+    if not q:
+        return
+    try:
+        await q.answer()
+    except Exception as exc:
+        log.warning("Failed to answer callback query: %s", exc)
+
 async def _download_voice_bytes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> tuple[bytes, str]:
     voice = update.message.voice
     file = await context.bot.get_file(voice.file_id)
@@ -727,24 +736,37 @@ async def _render_ai_suggestions(
     if isinstance(data, dict):
         candidates = data.get("candidates") or []
         warnings = data.get("warnings_ru") or []
-        questions = data.get("questions_ru") or []
         if not isinstance(warnings, list):
             warnings = []
-        if not isinstance(questions, list):
-            questions = []
         found = []
         missing = []
+        seen_ids: set[int] = set()
         for cand in candidates:
             if not isinstance(cand, dict):
                 continue
+            query_variants = []
             name = str(cand.get("name") or "").strip()
-            if not name:
+            name_ru = str(cand.get("name_ru") or "").strip()
+            if name:
+                query_variants.append(name)
+            if name_ru and name_ru not in query_variants:
+                query_variants.append(name_ru)
+            if not query_variants:
                 continue
-            rows, _ = await db.search_supplements(conn, name, page=0, page_size=1)
-            if rows:
-                found.append({"row": rows[0], "cand": cand})
+            matched_row = None
+            for query in query_variants:
+                rows, _ = await db.search_supplements(conn, query, page=0, page_size=1)
+                if rows:
+                    matched_row = rows[0]
+                    break
+            if matched_row:
+                supp_id = int(matched_row["id"])
+                if supp_id in seen_ids:
+                    continue
+                seen_ids.add(supp_id)
+                found.append({"row": matched_row, "cand": cand})
             else:
-                missing.append(name)
+                missing.append(name_ru or name)
 
         lines = [
             "✨ <b>Начальный подбор</b>",
@@ -797,28 +819,28 @@ async def _render_ai_suggestions(
             for w in warnings:
                 lines.append(f"• {w}")
 
-        if questions:
-            lines.append("")
-            lines.append("Вопросы:")
-            for q in questions:
-                lines.append(f"• {q}")
-
         lines.append("")
-        lines.append("Выбери, что добавить в «Мои БАДы».")
+        lines.append("Открой карточку БАДА, чтобы посмотреть детали, и добавляй то, что подходит.")
 
         buttons = []
         for item in found:
             row = item["row"]
             buttons.append(
-                [InlineKeyboardButton(f"➕ Добавить: {row['name']}", callback_data=f"aiadd:{row['id']}")]
+                [InlineKeyboardButton(f"🔎 {row['name']}", callback_data=f"supp:openai:{row['id']}")]
             )
-        buttons.append([InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")])
+        buttons.append([InlineKeyboardButton("🏠 В меню", callback_data="menu:ai:exit")])
         await show(
             update,
             context,
             "\n".join(lines),
             InlineKeyboardMarkup(buttons),
             route="menu:ai",
+            payload={
+                "ai_suggest_active": True,
+                "goal_text": goal_text,
+                "raw": raw or "",
+                "prefix_line": prefix_line or "",
+            },
         )
         return True
     if raw and not format_error_shown:
@@ -1399,7 +1421,7 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     if not q:
         return
-    await q.answer()
+    await _safe_answer_callback(update)
 
     data = q.data or ""
     s = context.application.bot_data["settings"]
@@ -1419,6 +1441,9 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await home(update, context)
             return
         if data == "menu:home":
+            await home(update, context)
+            return
+        if data == "menu:ai:exit":
             await home(update, context)
             return
         if data == "menu:settings":
@@ -1855,6 +1880,20 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             return
 
+        if data.startswith("supp:openai:"):
+            supplement_id = int(data.split(":")[-1])
+            await render_supplement_card(
+                update,
+                context,
+                conn,
+                supplement_id,
+                0,
+                tab="brief",
+                page=0,
+                return_mode="ai_back",
+            )
+            return
+
         if data.startswith("supp:open:"):
             supplement_id = int(data.split(":")[-1])
             _, last_screen, ui_payload = await db.get_ui_state(conn, tg_uid)
@@ -2005,6 +2044,37 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         search_query=query or None,
                         show_added=True,
                         prev_payload=prev_payload,
+                    )
+                    return
+
+        if data.startswith("mysupp:add:") and ":retai" in data:
+            parts = data.split(":")
+            if len(parts) >= 4:
+                try:
+                    supplement_id = int(parts[2])
+                except ValueError:
+                    supplement_id = None
+                if supplement_id is not None:
+                    _, _, ui_payload = await db.get_ui_state(conn, tg_uid)
+                    try:
+                        payload_data = json.loads(ui_payload) if ui_payload else {}
+                    except json.JSONDecodeError:
+                        payload_data = {}
+                    if not isinstance(payload_data, dict):
+                        payload_data = {}
+                    tab = payload_data.get("tab") or "brief"
+                    page = int(payload_data.get("page") or 0)
+                    await db.add_user_supplement(conn, tg_uid, supplement_id)
+                    await render_supplement_card(
+                        update,
+                        context,
+                        conn,
+                        supplement_id,
+                        0,
+                        tab=tab,
+                        page=page,
+                        return_mode="ai_back",
+                        show_added=True,
                     )
                     return
 
@@ -2186,6 +2256,21 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     route="menu:ai",
                 )
                 return
+            _, ui_screen, ui_payload = await db.get_ui_state(conn, tg_uid)
+            try:
+                payload_data = json.loads(ui_payload) if ui_payload else {}
+            except json.JSONDecodeError:
+                payload_data = {}
+            if isinstance(payload_data, dict) and ui_screen == "menu:ai" and payload_data.get("ai_suggest_active"):
+                await _render_ai_suggestions(
+                    update,
+                    context,
+                    conn,
+                    str(payload_data.get("goal_text") or "текущая цель"),
+                    str(payload_data.get("raw") or ""),
+                    prefix_line=str(payload_data.get("prefix_line") or "") or None,
+                )
+                return
             existing_ids = await db.get_user_initial_stack_ids(conn, tg_uid)
             if existing_ids:
                 kb = InlineKeyboardMarkup(
@@ -2215,7 +2300,7 @@ async def on_ai_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     if not q:
         return
-    await q.answer()
+    await _safe_answer_callback(update)
     data = q.data or ""
     if not data.startswith("aiadd:"):
         return
@@ -2250,13 +2335,13 @@ async def on_ai_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def on_noop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     if q:
-        await q.answer()
+        await _safe_answer_callback(update)
 
 async def on_ai_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     if not q:
         return
-    await q.answer()
+    await _safe_answer_callback(update)
     data = q.data or ""
     if not data.startswith("aicheck:"):
         return
@@ -2380,6 +2465,8 @@ async def on_ai_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if data.startswith("aicheck:sleep:"):
         answers["sleep_range"] = data.split(":", 2)[2]
         state["answers"] = answers
+        if int(state.get("step") or 1) == 1:
+            state["step"] = 2
         _set_ai_checkin_state(context, state)
         await _render_ai_checkin_wizard(update, context, state=state)
         return
@@ -2390,6 +2477,8 @@ async def on_ai_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         except ValueError:
             return
         state["answers"] = answers
+        if int(state.get("step") or 1) == 2:
+            state["step"] = 3
         _set_ai_checkin_state(context, state)
         await _render_ai_checkin_wizard(update, context, state=state)
         return
@@ -2400,6 +2489,8 @@ async def on_ai_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         except ValueError:
             return
         state["answers"] = answers
+        if int(state.get("step") or 1) == 3:
+            state["step"] = 4
         _set_ai_checkin_state(context, state)
         await _render_ai_checkin_wizard(update, context, state=state)
         return
@@ -2410,6 +2501,8 @@ async def on_ai_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         except ValueError:
             return
         state["answers"] = answers
+        if int(state.get("step") or 1) == 4:
+            state["step"] = 5
         _set_ai_checkin_state(context, state)
         await _render_ai_checkin_wizard(update, context, state=state)
         return
@@ -2518,7 +2611,7 @@ async def on_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     q = update.callback_query
     if not q:
         return
-    await q.answer()
+    await _safe_answer_callback(update)
     data = q.data or ""
     if data.startswith("tz:page:"):
         _, _, page = data.split(":", 2)
@@ -2607,7 +2700,7 @@ async def on_reminder_action(update: Update, context: ContextTypes.DEFAULT_TYPE)
     q = update.callback_query
     if not q:
         return
-    await q.answer()
+    await _safe_answer_callback(update)
     data = q.data or ""
     parts = data.split(":")
     if len(parts) < 2:
@@ -3207,6 +3300,16 @@ async def _render_route(
         )
         return
     if route == "menu:ai":
+        if isinstance(payload, dict) and payload.get("ai_suggest_active"):
+            await _render_ai_suggestions(
+                update,
+                context,
+                conn,
+                str(payload.get("goal_text") or "текущая цель"),
+                str(payload.get("raw") or ""),
+                prefix_line=str(payload.get("prefix_line") or "") or None,
+            )
+            return
         await home(update, context, target_chat_id=target_chat_id, target_message_id=target_message_id)
         return
 
@@ -4355,8 +4458,6 @@ async def render_supplement_card(
             lines.append(f"Участников всего: {participants}")
         if avg_effect:
             lines.append(f"Средний эффект: {avg_effect}")
-        if tags_text:
-            lines.append(f"Категории: {tags_text}")
         if short_desc:
             lines.extend(["", "Коротко:", short_desc])
         summary_verified = str(row.get("summary_verified") or "").strip()

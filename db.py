@@ -606,6 +606,47 @@ async def _ensure_supplement_day_state(conn: aiosqlite.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_sds_user_sup_day ON supplement_day_state(user_id, supplement_id, day)"
     )
 
+async def _rebuild_daily_checkins_table(conn: aiosqlite.Connection) -> None:
+    cols = await fetchall(conn, "PRAGMA table_info(daily_checkins)")
+    col_names = {c["name"] for c in cols}
+
+    def _pick_expr(primary: str, fallbacks: list[str], default_sql: str) -> str:
+        options = []
+        for key in [primary, *fallbacks]:
+            if key in col_names:
+                options.append(f"NULLIF({key}, '')")
+        options.append(default_sql)
+        return f"COALESCE({', '.join(options)})"
+
+    date_expr = _pick_expr("date_local", ["day", "date"], "'1970-01-01'")
+    tz_expr = _pick_expr("tz_name", [], "'GMT'")
+    answers_expr = _pick_expr("answers_json", ["payload_json"], "'{}'")
+    created_expr = _pick_expr("created_at_utc", ["created_at"], "datetime('now')")
+
+    await conn.execute("DROP TABLE IF EXISTS daily_checkins__new")
+    await conn.execute(
+        """CREATE TABLE daily_checkins__new (
+          id            INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          date_local    TEXT NOT NULL,
+          tz_name       TEXT NOT NULL,
+          answers_json  TEXT NOT NULL,
+          created_at_utc TEXT NOT NULL,
+          UNIQUE(user_id, date_local)
+        )"""
+    )
+    await conn.execute(
+        f"""INSERT INTO daily_checkins__new(user_id, date_local, tz_name, answers_json, created_at_utc)
+           SELECT user_id,
+                  {date_expr} AS date_local,
+                  {tz_expr} AS tz_name,
+                  {answers_expr} AS answers_json,
+                  {created_expr} AS created_at_utc
+           FROM daily_checkins"""
+    )
+    await conn.execute("DROP TABLE daily_checkins")
+    await conn.execute("ALTER TABLE daily_checkins__new RENAME TO daily_checkins")
+
 async def _ensure_daily_checkins(conn: aiosqlite.Connection) -> None:
     table = await fetchone(
         conn,
@@ -630,6 +671,15 @@ async def _ensure_daily_checkins(conn: aiosqlite.Connection) -> None:
     await _ensure_column(conn, "daily_checkins", "created_at_utc", "TEXT NOT NULL DEFAULT ''")
     cols = await fetchall(conn, "PRAGMA table_info(daily_checkins)")
     col_names = {c["name"] for c in cols}
+    needs_rebuild = False
+    for legacy_col in ("date", "day", "payload_json", "created_at"):
+        if legacy_col in col_names:
+            needs_rebuild = True
+            break
+    if needs_rebuild:
+        await _rebuild_daily_checkins_table(conn)
+        cols = await fetchall(conn, "PRAGMA table_info(daily_checkins)")
+        col_names = {c["name"] for c in cols}
     if "day" in col_names:
         await conn.execute(
             "UPDATE daily_checkins SET date_local=day WHERE date_local IS NULL OR date_local=''"
@@ -1884,11 +1934,15 @@ async def get_user_supplement(conn: aiosqlite.Connection, tg_user_id: int, suppl
     user_id = await get_or_create_user(conn, tg_user_id)
     return await fetchone(
         conn,
-        """SELECT us.*, s.slug, s.name, s.name_ru, s.name_en,
+        """SELECT us.id, us.user_id, us.supplement_id, us.is_active, us.enabled,
+                  COALESCE(NULLIF(uss.dose_text, ''), us.dose_text) AS dose_text,
+                  us.note_text, us.notes, us.created_at,
+                  s.slug, s.name, s.name_ru, s.name_en,
                   s.summary_ru, s.summary_verified, s.summary_theoretical,
                   s.molecular_mechanisms, s.mechanisms
            FROM user_supplements us
            JOIN supplements s ON s.id=us.supplement_id
+           LEFT JOIN user_supp_settings uss ON uss.user_id=us.user_id AND uss.supplement_id=us.supplement_id
            WHERE us.user_id=? AND us.supplement_id=?""",
         (user_id, supplement_id),
     )
@@ -1988,7 +2042,7 @@ async def set_user_supplement_dose(
     )
     await conn.commit()
 
-async def set_user_supp_dose(
+async def set_user_supp_dose_legacy(
     conn: aiosqlite.Connection,
     user_id: int,
     supplement_id: int,
@@ -2043,12 +2097,15 @@ async def list_user_stack_details(conn: aiosqlite.Connection, tg_user_id: int, l
     )
     return await fetchall(
         conn,
-        f"""SELECT us.supplement_id, us.dose_text, us.note_text, us.is_active,
+        f"""SELECT us.supplement_id,
+                   COALESCE(NULLIF(uss.dose_text, ''), us.dose_text) AS dose_text,
+                   us.note_text, us.is_active,
                    s.name, s.slug,
                    sch.time_hhmm,
                    sds.status AS today_status
             FROM user_supplements us
             JOIN supplements s ON s.id=us.supplement_id
+            LEFT JOIN user_supp_settings uss ON uss.user_id=us.user_id AND uss.supplement_id=us.supplement_id
             LEFT JOIN user_schedules sch ON sch.user_id=us.user_id AND sch.supplement_id=us.supplement_id
             {status_join}
             WHERE us.user_id=? AND us.is_active=1

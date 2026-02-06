@@ -7,7 +7,6 @@ def main_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("💊 Мои БАДы", callback_data="menu:my")],
         [InlineKeyboardButton("📚 Каталог БАДов", callback_data="menu:catalog")],
-        [InlineKeyboardButton("🧠 Готовые стеки", callback_data="menu:curated")],
         [InlineKeyboardButton("📝 Ежедневный опрос", callback_data="menu:checkin_ai")],
         [InlineKeyboardButton("⚙️ Настройки", callback_data="menu:settings")],
     ])
@@ -43,7 +42,7 @@ def catalog_kb(items: list[dict], page: int, pages: int) -> InlineKeyboardMarkup
         nav.append(InlineKeyboardButton("➡️", callback_data=f"cat:page:{page + 1}"))
     if nav:
         btns.append(nav)
-    btns.append([InlineKeyboardButton("🔎 Поиск", callback_data="cat:search")])
+    btns.append([InlineKeyboardButton("🧠 Готовые стеки", callback_data="menu:curated")])
     btns.append([InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")])
     return InlineKeyboardMarkup(btns)
 
@@ -51,8 +50,8 @@ def catalog_home() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔎 Поиск", callback_data="cat:search")],
         [InlineKeyboardButton("🧠 По доказательности", callback_data="cat:mode:evidence")],
-        [InlineKeyboardButton("🎯 По цели/классу", callback_data="cat:mode:class")],
         [InlineKeyboardButton("💊 Мои БАДы", callback_data="menu:my")],
+        [InlineKeyboardButton("🧠 Готовые стеки", callback_data="menu:curated")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")],
     ])
 
@@ -284,6 +283,9 @@ def supp_tabs_kb(
     elif return_mode == "supp_back":
         add_cb = f"mysupp:add:{supplement_id}:retback"
         back_cb = "supp:back"
+    elif return_mode == "ai_back":
+        add_cb = f"mysupp:add:{supplement_id}:retai"
+        back_cb = "menu:ai"
     else:
         add_cb = f"mysupp:add:{supplement_id}:retcat:{return_page}"
         back_cb = f"cat:page:{return_page}"

@@ -26,6 +26,7 @@ from keyboards import (
     my_hub_back,
     pick_search_results,
     my_supplements_list,
+    my_supplements_overview_kb,
     catalog_kb,
     catalog_home,
     catalog_list,
@@ -288,37 +289,41 @@ async def _render_ai_checkin_text_prompt(
         target_message_id=target_message_id,
     )
 
-def _build_adherence_lines(
+def _build_adherence_payload(
     stack: list[dict],
     status_rows: list[dict],
     days: list[str],
-) -> list[str]:
+) -> list[dict]:
     status_map: dict[int, dict[str, str]] = {}
     for row in status_rows:
         supplement_id = int(row["supplement_id"])
         status_map.setdefault(supplement_id, {})[str(row["day"])] = str(row["status"] or "")
-    lines: list[str] = []
+
+    payload: list[dict] = []
     for item in stack:
         supplement_id = int(item.get("supplement_id") or 0)
-        base = f"- {item.get('slug')} / {item.get('ru_name')}"
         day_statuses = status_map.get(supplement_id, {})
-        entries = []
+        compact = ""
         for day in days:
             status = day_statuses.get(day)
             if status == "taken":
-                label = "выпил"
+                compact += "T"
             elif status == "skipped":
-                label = "не выпил"
+                compact += "S"
             else:
-                label = "нет данных"
-            entries.append(f"{day}: {label}")
-        if any(entry.endswith(("выпил", "не выпил")) for entry in entries):
-            lines.append(f"{base} — {'; '.join(entries)}")
-        else:
-            lines.append(f"{base} — нет данных за последние дни")
-    if not lines:
-        lines = ["— нет"]
-    return lines
+                compact += "-"
+        payload.append(
+            {
+                "supplement_id": supplement_id,
+                "slug": item.get("slug"),
+                "ru_name": item.get("ru_name"),
+                "dose_text": item.get("dose_text") or "",
+                "time_local": item.get("time_local") or "",
+                "days": days,
+                "status_compact": compact,
+            }
+        )
+    return payload
 
 async def _render_ai_checkin_wizard(
     update: Update,
@@ -473,99 +478,58 @@ def build_ai_checkin_prompt(
     stack: list[dict],
     checkin: dict,
     candidates: list[dict],
-    adherence_lines: list[str],
+    adherence_payload: list[dict],
+    recent_checkins_payload: list[dict],
+    ai_plan_history_payload: list[dict],
 ) -> list[dict]:
     system_msg = (
         "Ты — осторожный помощник по добавкам. "
         "Никаких диагнозов и назначений. "
         "Рекомендации только по предоставленным данным. "
+        "Тебе передан полный контекст: текущий чек-ин, история приема за 14 дней, "
+        "история AI-предложений и ответы в прошлых чек-инах. "
+        "Обязательно анализируй динамику в прогрессии, что помогало и что не соблюдалось, "
+        "и на этой основе давай адаптированные предложения только на сегодня. "
         "Нельзя предлагать добавки вне списка кандидатов и текущего стека. "
         "Не предлагай рецептурные препараты. "
         "Будь консервативным, максимум 6 действий. "
         "Если уверенность низкая — явно скажи. "
         "Верни строго JSON без Markdown."
     )
-    def _val_or_unknown(value: object, label: str = "не указано") -> str:
-        return label if value is None or value == "" else str(value)
 
-    training_value = checkin.get("training")
-    if training_value is None:
-        training_text = "не указано"
-    else:
-        training_text = "да" if training_value else "нет"
+    context_payload = {
+        "user": {"tz_name": user.get("tz_name")},
+        "today_checkin": checkin,
+        "base_stack": stack,
+        "adherence_14d": adherence_payload,
+        "ai_plan_14d": ai_plan_history_payload,
+        "recent_checkins_14d": recent_checkins_payload,
+        "catalog_candidates": candidates,
+    }
+    context_json = json.dumps(context_payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
-    checkin_lines = [
-        f"Дата: {checkin.get('date_local')}",
-        f"Сон: {_val_or_unknown(checkin.get('sleep_range'), 'unknown')}",
-        f"Энергия (1-4): {_val_or_unknown(checkin.get('energy'))}",
-        f"Стресс (1-3): {_val_or_unknown(checkin.get('stress'))}",
-        f"Тренировка: {training_text}",
-        f"Цели: {', '.join(checkin.get('goals_ru') or []) or 'не указаны'}",
-    ]
-    note_text = str(checkin.get("note") or "").strip()
-    if note_text:
-        checkin_lines.append(f"Заметка: {note_text}")
-    stack_lines = []
-    for item in stack:
-        base = f"- {item.get('slug')} / {item.get('ru_name')}"
-        dose = item.get("dose_text")
-        time_local = item.get("time_local")
-        bits = []
-        if dose:
-            bits.append(f"доза: {dose}")
-        if time_local:
-            bits.append(f"время: {time_local}")
-        if bits:
-            base = f"{base} ({', '.join(bits)})"
-        stack_lines.append(base)
-    if not stack_lines:
-        stack_lines = ["— нет"]
-
-    cand_lines = []
-    for cand in candidates:
-        hint = cand.get("hint")
-        line = f"- {cand.get('slug')} / {cand.get('ru_name')}"
-        if hint:
-            line = f"{line} — {hint}"
-        cand_lines.append(line)
-    if not cand_lines:
-        cand_lines = ["— нет"]
-
-    schema = (
-        "{\n"
-        '  "actions": [\n'
-        "    {\n"
-        '      "id": "a1",\n'
-        '      "type": "add" | "remove" | "adjust",\n'
-        '      "slug": "caffeine",\n'
-        '      "dose_text": "200 mg",\n'
-        '      "time_hint": "утро",\n'
-        '      "confidence": 0.0,\n'
-        '      "reason_short_ru": "коротко почему",\n'
-        '      "safety_ru": "короткая фраза о рисках"\n'
-        "    }\n"
-        "  ],\n"
-        '  "summary_ru": "резюме на 2-4 строки",\n'
-        '  "disclaimer_ru": "Не медсовет..."\n'
-        "}"
-    )
+    schema = """{
+  "actions": [
+    {
+      "id": "a1",
+      "type": "add" | "remove" | "adjust",
+      "slug": "caffeine",
+      "dose_text": "200 mg",
+      "time_hint": "утро",
+      "confidence": 0.0,
+      "reason_short_ru": "коротко почему",
+      "safety_ru": "короткая фраза о рисках"
+    }
+  ],
+  "summary_ru": "резюме на 2-4 строки",
+  "disclaimer_ru": "Не медсовет..."
+}"""
 
     user_msg = "\n".join(
         [
-            "ПОЛЬЗОВАТЕЛЬ:",
-            f"- tz: {user.get('tz_name')}",
-            "",
-            "ЧЕКИН:",
-            *checkin_lines,
-            "",
-            "ТЕКУЩИЙ СТЕК:",
-            *stack_lines,
-            "",
-            "СТАТУС ПРИЕМА (последние дни):",
-            *adherence_lines,
-            "",
-            "КАНДИДАТЫ ИЗ КАТАЛОГА:",
-            *cand_lines,
+            "Используй контекст JSON ниже. Учитывай как самочувствие, так и реальную приверженность (выпил/не выпил).",
+            "КОНТЕКСТ_JSON:",
+            context_json,
             "",
             "ФОРМАТ ОТВЕТА (строго JSON):",
             schema,
@@ -982,14 +946,45 @@ async def _finalize_ai_checkin(
             days_range[0],
             days_range[-1],
         )
-    adherence_lines = _build_adherence_lines(stack, status_rows, days_range)
+    adherence_payload = _build_adherence_payload(stack, status_rows, days_range)
+    start_14d = days_range[0]
+    end_14d = days_range[-1]
+    recent_checkins_rows = await db.list_recent_checkins_window(conn, user_id, start_14d, end_14d, limit=14)
+    ai_plan_history_rows = await db.list_day_plan_history(conn, user_id, start_14d, end_14d, limit=120)
+
+    recent_checkins_payload = []
+    for row in recent_checkins_rows:
+        raw_answers = str(row["answers_json"] or "{}").strip()
+        try:
+            answers = json.loads(raw_answers) if raw_answers else {}
+        except json.JSONDecodeError:
+            answers = {}
+        recent_checkins_payload.append({"date_local": str(row["date_local"]), "answers": answers if isinstance(answers, dict) else {}})
+
+    ai_plan_history_payload = []
+    for row in ai_plan_history_rows:
+        ai_plan_history_payload.append(
+            {
+                "date_local": str(row["date_local"]),
+                "supplement_id": int(row["supplement_id"]),
+                "slug": str(row["slug"] or ""),
+                "ru_name": str(row["name_ru"] or row["name_en"] or row["name"] or ""),
+                "action": str(row["action"] or ""),
+                "dose_text": str(row["dose_text"] or ""),
+                "time_hint": str(row["time_hint"] or ""),
+                "status": str(row["status"] or ""),
+            }
+        )
+
     candidates = await db.get_catalog_candidates(conn, goals, limit=60)
     messages = build_ai_checkin_prompt(
         {"tz_name": tz_name},
         stack,
         checkin_payload,
         candidates,
-        adherence_lines,
+        adherence_payload,
+        recent_checkins_payload,
+        ai_plan_history_payload,
     )
     cfg = OpenAIConfig(api_key=s.OPENAI_API_KEY, model=s.OPENAI_MODEL)
     await show(
@@ -2144,7 +2139,7 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await show_my_supp_hub(update, context, tg_uid, supplement_id, conn=conn)
             return
 
-        if data.startswith("mysupp:quick:"):
+        if data.startswith("mysupp:quick:") or data.startswith("mysupp:aiquick:"):
             parts = data.split(":")
             if len(parts) >= 5:
                 action = parts[2]
@@ -4718,18 +4713,38 @@ async def _show_my_list(
             target_message_id=target_message_id,
         )
         return
+    ai_rows = await db.list_day_plan_items_with_status(conn, tg_uid, local_date)
 
     suffix = f" (стр. {page + 1})" if total > MY_PAGE_SIZE else ""
-    title = (
-        "💊 <b>Мои БАДы</b>\n"
-        "Нажми на добавку, чтобы открыть управление.\n"
-        "✅ — выпил сегодня, ❌ — не выпил."
-    )
+    lines = [
+        f"💊 <b>Мои БАДы</b>{suffix}",
+        "",
+        "<b>Текущий стек</b>",
+    ]
+    for idx, row in enumerate(rows, start=1):
+        dose = str(row["dose_text"] or "").strip() or "—"
+        status = str(row["today_status"] or "")
+        status_label = "выпил" if status == "taken" else ("не выпил" if status == "skipped" else "не отмечено")
+        lines.append(f"{idx}) {row['name']} — доза: {dose} · сегодня: {status_label}")
+
+    lines.extend(["", "<b>Добавлено AI на сегодня</b>"])
+    if ai_rows:
+        for idx, item in enumerate(ai_rows, start=1):
+            name = str(item.get("name_ru") or item.get("name_en") or item.get("name") or "Добавка")
+            dose = str(item.get("dose_text") or "").strip() or "—"
+            action = str(item.get("action") or "")
+            status = str(item.get("today_status") or "")
+            status_label = "выпил" if status == "taken" else ("не выпил" if status == "skipped" else "не отмечено")
+            action_label = {"add": "добавить", "remove": "убрать", "adjust": "изменить"}.get(action, action or "изменить")
+            lines.append(f"{idx}) {name} — {action_label}, доза: {dose} · сегодня: {status_label}")
+    else:
+        lines.append("На сегодня AI ничего не добавил.")
+
     await show(
         update,
         context,
-        f"{title}{suffix}",
-        my_supplements_list(rows, page, has_prev=page > 0, has_next=has_next, show_clear=False),
+        "\n".join(lines),
+        my_supplements_overview_kb(rows, ai_rows, page, has_prev=page > 0, has_next=has_next),
         route=f"mysupp:list:{page}",
         target_chat_id=target_chat_id,
         target_message_id=target_message_id,

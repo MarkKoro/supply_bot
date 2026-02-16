@@ -155,6 +155,56 @@ def my_supplements_list(rows, page: int, has_prev: bool, has_next: bool, *, show
     btns.append(nav)
     return InlineKeyboardMarkup(btns)
 
+
+
+def my_supplements_overview_kb(base_rows, ai_rows, page: int, has_prev: bool, has_next: bool) -> InlineKeyboardMarkup:
+    btns = []
+    for r in base_rows:
+        status = r["today_status"] if "today_status" in r.keys() else None
+        if status == "taken":
+            marker = "✅"
+        elif status == "skipped":
+            marker = "❌"
+        else:
+            marker = "…"
+        label = f"{r['name']} {marker}"
+        btns.append(
+            [
+                InlineKeyboardButton(label, callback_data=f"mysupp:open:{r['supplement_id']}"),
+                InlineKeyboardButton("✅", callback_data=f"mysupp:quick:taken:{r['supplement_id']}:{page}"),
+                InlineKeyboardButton("❌", callback_data=f"mysupp:quick:skip:{r['supplement_id']}:{page}"),
+            ]
+        )
+
+    if ai_rows:
+        btns.append([InlineKeyboardButton("🤖 AI-добавления на сегодня", callback_data="noop")])
+        for item in ai_rows:
+            status = item.get("today_status")
+            if status == "taken":
+                marker = "✅"
+            elif status == "skipped":
+                marker = "❌"
+            else:
+                marker = "…"
+            name = (item.get("name_ru") or item.get("name_en") or item.get("name") or "Добавка").strip()
+            sid = int(item.get("supplement_id") or 0)
+            btns.append(
+                [
+                    InlineKeyboardButton(f"🤖 {name} {marker}", callback_data=f"supp:open:{sid}"),
+                    InlineKeyboardButton("✅", callback_data=f"mysupp:aiquick:taken:{sid}:{page}"),
+                    InlineKeyboardButton("❌", callback_data=f"mysupp:aiquick:skip:{sid}:{page}"),
+                ]
+            )
+
+    btns.append([InlineKeyboardButton("➕ Добавить", callback_data="mysupp:add")])
+    nav = []
+    if has_prev:
+        nav.append(InlineKeyboardButton("⬅️ Назад", callback_data=f"mysupp:list:{page - 1}"))
+    nav.append(InlineKeyboardButton("⬅️ Назад", callback_data="menu:home"))
+    if has_next:
+        nav.append(InlineKeyboardButton("➡️ Далее", callback_data=f"mysupp:list:{page + 1}"))
+    btns.append(nav)
+    return InlineKeyboardMarkup(btns)
 def catalog_page(rows, page: int, has_prev: bool, has_next: bool) -> InlineKeyboardMarkup:
     btns = []
     for r in rows:

@@ -2581,6 +2581,48 @@ async def list_recent_checkins(conn: aiosqlite.Connection, user_id: int, limit: 
         (user_id, limit),
     )
 
+
+
+async def list_recent_checkins_window(
+    conn: aiosqlite.Connection,
+    user_id: int,
+    start_day: str,
+    end_day: str,
+    limit: int = 14,
+):
+    return await fetchall(
+        conn,
+        """SELECT * FROM daily_checkins
+           WHERE user_id=? AND date_local>=? AND date_local<=?
+           ORDER BY date_local DESC
+           LIMIT ?""",
+        (user_id, start_day, end_day, limit),
+    )
+
+
+async def list_day_plan_history(
+    conn: aiosqlite.Connection,
+    user_id: int,
+    start_day: str,
+    end_day: str,
+    limit: int = 120,
+) -> list[dict]:
+    rows = await fetchall(
+        conn,
+        """SELECT dpi.date_local, dpi.supplement_id, dpi.action, dpi.dose_text, dpi.time_hint,
+                  s.slug, s.name_ru, s.name_en, s.name,
+                  sds.status
+           FROM day_plan_items dpi
+           JOIN supplements s ON s.id=dpi.supplement_id
+           JOIN users u ON u.id=dpi.user_id
+           LEFT JOIN supplement_day_state sds
+             ON sds.user_id=u.tg_user_id AND sds.supplement_id=dpi.supplement_id AND sds.day=dpi.date_local
+           WHERE dpi.user_id=? AND dpi.date_local>=? AND dpi.date_local<=?
+           ORDER BY dpi.date_local DESC, dpi.id DESC
+           LIMIT ?""",
+        (user_id, start_day, end_day, limit),
+    )
+    return [dict(row) for row in rows]
 async def get_user_base_stack(conn: aiosqlite.Connection, user_id: int) -> list[dict]:
     rows = await fetchall(
         conn,
@@ -2703,6 +2745,26 @@ async def list_day_plan_items(conn: aiosqlite.Connection, user_id: int, date_loc
            WHERE dpi.user_id=? AND dpi.date_local=?
            ORDER BY dpi.id""",
         (user_id, date_local),
+    )
+    return [dict(row) for row in rows]
+
+async def list_day_plan_items_with_status(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    date_local: str,
+) -> list[dict]:
+    user_id = await get_or_create_user(conn, tg_user_id)
+    rows = await fetchall(
+        conn,
+        """SELECT dpi.*, s.slug, s.name_ru, s.name_en, s.name,
+                  sds.status AS today_status
+           FROM day_plan_items dpi
+           JOIN supplements s ON s.id=dpi.supplement_id
+           LEFT JOIN supplement_day_state sds
+             ON sds.user_id=? AND sds.supplement_id=dpi.supplement_id AND sds.day=dpi.date_local
+           WHERE dpi.user_id=? AND dpi.date_local=?
+           ORDER BY dpi.id""",
+        (tg_user_id, user_id, date_local),
     )
     return [dict(row) for row in rows]
 

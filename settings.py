@@ -43,7 +43,7 @@ def get_settings() -> Settings:
 
     return Settings(
         TG_TOKEN=tg,
-        APP_TZ=os.getenv("APP_TZ", "GMT").strip(),
+        APP_TZ=os.getenv("APP_TZ", "UTC").strip(),
         DB_PATH=os.getenv("DB_PATH", "data/supply_bot.sqlite3").strip(),
         SEED_SUPPLEMENTS_PATH=os.getenv(
             "SEED_SUPPLEMENTS_PATH",

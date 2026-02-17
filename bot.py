@@ -100,6 +100,35 @@ CHECKIN_VOICE_MAX_BYTES = 10 * 1024 * 1024
 def _is_tz_unset(tz_name: str | None) -> bool:
     return not tz_name or str(tz_name).strip().upper() in {"UTC", "GMT"}
 
+
+def _parse_user_time_input(raw: str) -> str | None:
+    value = (raw or "").strip()
+    if not value:
+        return None
+    compact = re.sub(r"\s+", "", value)
+    for sep in (":", "."):
+        if sep in compact:
+            left, right = compact.split(sep, 1)
+            if left.isdigit() and right.isdigit() and len(right) <= 2:
+                hours = int(left)
+                minutes = int(right)
+                if 0 <= hours <= 23 and 0 <= minutes <= 59:
+                    return f"{hours:02d}:{minutes:02d}"
+            return None
+    spaced = re.findall(r"\d+", value)
+    if len(spaced) == 2:
+        hours = int(spaced[0])
+        minutes = int(spaced[1])
+        if 0 <= hours <= 23 and 0 <= minutes <= 59:
+            return f"{hours:02d}:{minutes:02d}"
+        return None
+    if compact.isdigit() and len(compact) in {3, 4}:
+        hours = int(compact[:-2])
+        minutes = int(compact[-2:])
+        if 0 <= hours <= 23 and 0 <= minutes <= 59:
+            return f"{hours:02d}:{minutes:02d}"
+    return None
+
 async def _safe_answer_callback(update: Update) -> None:
     q = update.callback_query
     if not q:
@@ -1221,7 +1250,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 0,
                 message_text=(
                     "Выбери свой часовой пояс, чтобы уведомления приходили вовремя.\n"
-                    "Пример: Москва — GMT+03."
+                    "Пример: Москва — UTC+03."
                 ),
             )
             return
@@ -2203,7 +2232,7 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await show(
                 update,
                 context,
-                "Напиши время в формате ЧЧ:ММ, например 09:30",
+                "Напиши время (например: 09:30, 9.30, 9 30 или 0930)",
                 my_hub_back(supplement_id),
                 route=f"mysupp:rem:add:{supplement_id}",
             )
@@ -2450,7 +2479,7 @@ async def on_ai_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 conn,
                 tg_uid=tg_uid,
                 user_id=user_id,
-                tz_name=tz_name or "GMT",
+                tz_name=tz_name or "UTC",
                 state=state,
             )
         finally:
@@ -3222,7 +3251,7 @@ async def _render_route(
         await show(
             update,
             context,
-            "Напиши время в формате ЧЧ:ММ, например 09:30",
+            "Напиши время (например: 09:30, 9.30, 9 30 или 0930)",
             my_hub_back(supplement_id),
             route=route,
             target_chat_id=target_chat_id,
@@ -3394,16 +3423,17 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     context.user_data.pop(WAITING_KEY, None)
                     await show_my_supp_hub(update, context, tg_uid, supplement_id, conn=conn)
             else:
-                if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", txt):
+                parsed_time = _parse_user_time_input(txt)
+                if not parsed_time:
                     await show(
                         update,
                         context,
-                        "Напиши время в формате ЧЧ:ММ, например 09:30",
+                        "Не понял время. Пример: 09:30, 9.30, 9 30 или 0930",
                         my_hub_back(supplement_id),
                         route=f"mysupp:rem:add:{supplement_id}",
                     )
                 else:
-                    await db.upsert_reminder(conn, tg_uid, supplement_id, txt, enabled=1)
+                    await db.upsert_reminder(conn, tg_uid, supplement_id, parsed_time, enabled=1)
                     context.user_data.pop(WAITING_KEY, None)
                     await _show_my_supp_reminders(update, context, conn, tg_uid, supplement_id)
         finally:
@@ -3538,7 +3568,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         conn,
                         tg_uid=tg_uid,
                         user_id=user_id,
-                        tz_name=tz_name or "GMT",
+                        tz_name=tz_name or "UTC",
                         state=state,
                     )
         elif waiting == AI_CHECKIN_NOTE_WAIT:
@@ -3723,7 +3753,7 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     conn,
                     tg_uid=tg_uid,
                     user_id=user_id,
-                    tz_name=tz_name or "GMT",
+                    tz_name=tz_name or "UTC",
                     state=state,
                     target_message_id=ui_message_id,
                 )
@@ -4817,25 +4847,6 @@ async def show_my_supp_hub(
         if close_conn:
             await conn.close()
 
-def _parse_timing_hours(timing_text: str) -> list[int]:
-    if not timing_text:
-        return []
-    ranges: list[tuple[int, int]] = []
-    for match in re.finditer(r"с\s*(\d{1,2})(?::\d{2})?\s*до\s*(\d{1,2})(?::\d{2})?", timing_text):
-        ranges.append((int(match.group(1)), int(match.group(2))))
-    for match in re.finditer(r"(\d{1,2})(?::\d{2})?\s*[–-]\s*(\d{1,2})(?::\d{2})?", timing_text):
-        ranges.append((int(match.group(1)), int(match.group(2))))
-    hours: list[int] = []
-    for start, end in ranges:
-        if start < 0 or start > 23 or end < 0 or end > 23:
-            continue
-        if end < start:
-            continue
-        for hour in range(start, end + 1):
-            if hour not in hours:
-                hours.append(hour)
-    return sorted(hours)
-
 async def _show_my_supp_reminders(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -4854,17 +4865,11 @@ async def _show_my_supp_reminders(
     reminders = await db.list_reminders_for_user(conn, tg_uid)
     reminder_times = [str(r["time_local"]) for r in reminders if int(r["supplement_id"]) == supplement_id]
     name = (supplement["name_ru"] or supplement["name"] or "").strip()
-    timing_text = str(supplement["timing_ru"] or "").strip()
-    timing_label = timing_text or "—"
-    suggested_hours = _parse_timing_hours(timing_text) if not reminder_times else []
-    suggested_times = [f"{hour:02d}:00" for hour in suggested_hours]
     title = f"⏰ <b>Напоминания</b>\n{name}"
     if reminder_times:
         lines = [
             title,
             "",
-            "Здесь ты можешь поставить напоминание для этого БАДа.",
-            f"Рекомендуемое время: {timing_label}",
             "Добавь новое время или удали существующие напоминания.",
             "",
             "Текущие напоминания:",
@@ -4874,9 +4879,7 @@ async def _show_my_supp_reminders(
         lines = [
             title,
             "",
-            "Здесь ты можешь поставить напоминание для этого БАДа.",
-            f"Рекомендуемое время: {timing_label}",
-            "Выбери время ниже или добавь своё.",
+            "Добавь удобное тебе время напоминания.",
             "",
             "Текущие напоминания: нет",
         ]
@@ -4887,7 +4890,7 @@ async def _show_my_supp_reminders(
         my_supplement_reminders(
             supplement_id,
             reminder_times,
-            suggested_times,
+            [],
             page,
         ),
         route=f"mysupp:rem:{supplement_id}",

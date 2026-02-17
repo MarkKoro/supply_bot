@@ -1545,7 +1545,7 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
 
         if data in {"menu:catalog", "catalog"}:
-            await render_catalog(update, context, conn, 0)
+            await _show_catalog_home(update, context, conn)
             return
 
         if data == "menu:curated":
@@ -3940,9 +3940,8 @@ async def _show_catalog_home(
         context,
         (
             "📚 <b>Каталог БАДов</b>\n"
-            "Здесь есть карточки с краткими выводами, механизмами, дозировками, "
-            "временем приёма и совместимостью.\n"
-            "Выбери, как искать:"
+            "Выбери, как искать: по названию, по доказательности, "
+            "по целям/влиянию или через готовые стеки."
         ),
         catalog_home(),
         route="cat:home",

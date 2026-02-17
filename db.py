@@ -79,7 +79,15 @@ CREATE TABLE IF NOT EXISTS supplements (
   purchase_url  TEXT,
   tags_json      TEXT,
   mechanisms     TEXT,
+  supplement_type TEXT DEFAULT '',
+  functional_groups TEXT DEFAULT '',
+  functional_groups_json TEXT NOT NULL DEFAULT '[]',
   evidence_grade TEXT,
+  body_effects_json TEXT NOT NULL DEFAULT '[]',
+  body_targets TEXT DEFAULT '',
+  body_targets_json TEXT NOT NULL DEFAULT '[]',
+  body_burdens TEXT DEFAULT '',
+  body_burdens_json TEXT NOT NULL DEFAULT '[]',
   safety_notes   TEXT,
   interaction_classes TEXT DEFAULT '[]',
   interaction_classes_json TEXT DEFAULT '[]',
@@ -307,6 +315,14 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     await _ensure_column(conn, "supplements", "timing_ru", "TEXT")
     await _ensure_column(conn, "supplements", "safety_ru", "TEXT")
     await _ensure_column(conn, "supplements", "purchase_url", "TEXT")
+    await _ensure_column(conn, "supplements", "supplement_type", "TEXT DEFAULT ''")
+    await _ensure_column(conn, "supplements", "functional_groups", "TEXT DEFAULT ''")
+    await _ensure_column(conn, "supplements", "functional_groups_json", "TEXT NOT NULL DEFAULT '[]'")
+    await _ensure_column(conn, "supplements", "body_effects_json", "TEXT NOT NULL DEFAULT '[]'")
+    await _ensure_column(conn, "supplements", "body_targets", "TEXT DEFAULT ''")
+    await _ensure_column(conn, "supplements", "body_targets_json", "TEXT NOT NULL DEFAULT '[]'")
+    await _ensure_column(conn, "supplements", "body_burdens", "TEXT DEFAULT ''")
+    await _ensure_column(conn, "supplements", "body_burdens_json", "TEXT NOT NULL DEFAULT '[]'")
     await _ensure_column(conn, "supplements", "interaction_classes", "TEXT DEFAULT '[]'")
     await _ensure_column(conn, "supplements", "interaction_classes_json", "TEXT DEFAULT '[]'")
     await _ensure_column(conn, "supplements", "payload_json", "TEXT")
@@ -331,6 +347,18 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
         "UPDATE supplements SET interaction_classes_json='[]' WHERE interaction_classes_json IS NULL OR interaction_classes_json=''"
     )
     await conn.execute(
+        "UPDATE supplements SET functional_groups_json='[]' WHERE functional_groups_json IS NULL OR functional_groups_json=''"
+    )
+    await conn.execute(
+        "UPDATE supplements SET body_effects_json='[]' WHERE body_effects_json IS NULL OR body_effects_json=''"
+    )
+    await conn.execute(
+        "UPDATE supplements SET body_targets_json='[]' WHERE body_targets_json IS NULL OR body_targets_json=''"
+    )
+    await conn.execute(
+        "UPDATE supplements SET body_burdens_json='[]' WHERE body_burdens_json IS NULL OR body_burdens_json=''"
+    )
+    await conn.execute(
         "UPDATE supplements SET aliases='' WHERE aliases IS NULL"
     )
     await conn.execute(
@@ -350,6 +378,18 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     )
     await conn.execute(
         "UPDATE supplements SET rules_tags='' WHERE rules_tags IS NULL"
+    )
+    await conn.execute(
+        "UPDATE supplements SET supplement_type='' WHERE supplement_type IS NULL"
+    )
+    await conn.execute(
+        "UPDATE supplements SET functional_groups='' WHERE functional_groups IS NULL"
+    )
+    await conn.execute(
+        "UPDATE supplements SET body_targets='' WHERE body_targets IS NULL"
+    )
+    await conn.execute(
+        "UPDATE supplements SET body_burdens='' WHERE body_burdens IS NULL"
     )
     await conn.execute(
         "UPDATE users SET last_view='menu' WHERE last_view IS NULL OR last_view=''"
@@ -1250,10 +1290,12 @@ async def upsert_supplement(conn: aiosqlite.Connection, s: dict) -> int:
           slug,name,name_ru,name_en,aliases,aliases_json,alias_norm,search_blob,
           human_trials_count_est,participants_total_est,avg_effect_percent_est,confidence,
           tags,goals,rules_tags,summary_ru,summary_verified,summary_theoretical,molecular_mechanisms,
-          evidence_json,dose_ru,timing_ru,safety_ru,purchase_url,tags_json,mechanisms,evidence_grade,
+          evidence_json,dose_ru,timing_ru,safety_ru,purchase_url,tags_json,mechanisms,supplement_type,
+          functional_groups,functional_groups_json,evidence_grade,body_effects_json,body_targets,
+          body_targets_json,body_burdens,body_burdens_json,
           safety_notes,interaction_classes,interaction_classes_json,payload_json,is_active
         )
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(slug) DO UPDATE SET
           name=excluded.name,
           name_ru=excluded.name_ru,
@@ -1280,7 +1322,15 @@ async def upsert_supplement(conn: aiosqlite.Connection, s: dict) -> int:
           purchase_url=excluded.purchase_url,
           tags_json=excluded.tags_json,
           mechanisms=excluded.mechanisms,
+          supplement_type=excluded.supplement_type,
+          functional_groups=excluded.functional_groups,
+          functional_groups_json=excluded.functional_groups_json,
           evidence_grade=excluded.evidence_grade,
+          body_effects_json=excluded.body_effects_json,
+          body_targets=excluded.body_targets,
+          body_targets_json=excluded.body_targets_json,
+          body_burdens=excluded.body_burdens,
+          body_burdens_json=excluded.body_burdens_json,
           safety_notes=excluded.safety_notes,
           interaction_classes=excluded.interaction_classes,
           interaction_classes_json=excluded.interaction_classes_json,
@@ -1314,7 +1364,15 @@ async def upsert_supplement(conn: aiosqlite.Connection, s: dict) -> int:
             s.get("purchase_url"),
             s.get("tags_json"),
             s.get("mechanisms"),
-            s.get("evidence_grade"),
+            s.get("supplement_type") or "",
+            s.get("functional_groups") or "",
+            s.get("functional_groups_json") or "[]",
+            s.get("evidence_grade") or "",
+            s.get("body_effects_json") or "[]",
+            s.get("body_targets") or "",
+            s.get("body_targets_json") or "[]",
+            s.get("body_burdens") or "",
+            s.get("body_burdens_json") or "[]",
             s.get("safety_notes"),
             s.get("interaction_classes", "[]"),
             s.get("interaction_classes_json", s.get("interaction_classes", "[]")),

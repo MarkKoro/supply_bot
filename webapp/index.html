@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>SupplyBot WebApp</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; padding: 18px; }
+    .box { padding: 12px; border: 1px solid #ddd; border-radius: 12px; margin: 12px 0; }
+    pre { white-space: pre-wrap; word-break: break-word; }
+    button { padding: 10px 14px; border-radius: 10px; border: 1px solid #ddd; background: #fff; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <h1>SupplyBot WebApp</h1>
+
+  <div class="box">
+    <div><b>Telegram WebApp initData:</b></div>
+    <pre id="initdata">loading...</pre>
+  </div>
+
+  <div class="box">
+    <div><b>Auth verify result:</b></div>
+    <pre id="verify">waiting...</pre>
+    <button id="btn">Verify initData</button>
+  </div>
+
+  <div class="box">
+    <div><b>Health:</b></div>
+    <pre id="health">loading...</pre>
+  </div>
+
+<script>
+  const elInit = document.getElementById('initdata');
+  const elVerify = document.getElementById('verify');
+  const elHealth = document.getElementById('health');
+  const btn = document.getElementById('btn');
+
+  function safe(obj) { return JSON.stringify(obj, null, 2); }
+
+  try {
+    const tg = window.Telegram?.WebApp;
+    if (!tg) {
+      elInit.textContent = "Telegram.WebApp not found (открылось не внутри Telegram?)";
+    } else {
+      tg.ready();
+      // Для удобства показываем и initData и user (если есть)
+      elInit.textContent = tg.initData ? tg.initData : "(empty initData)";
+      // можно: tg.expand();
+    }
+  } catch (e) {
+    elInit.textContent = String(e);
+  }
+
+  async function runHealth() {
+    try {
+      const r = await fetch("./health");
+      const j = await r.json();
+      elHealth.textContent = safe(j);
+    } catch (e) {
+      elHealth.textContent = String(e);
+    }
+  }
+
+  async function verify() {
+    try {
+      const tg = window.Telegram?.WebApp;
+      const initData = tg?.initData || "";
+      const r = await fetch("./api/telegram/verify", {
+        method: "POST",
+        headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({init_data: initData})
+      });
+      const j = await r.json();
+      elVerify.textContent = safe(j);
+    } catch (e) {
+      elVerify.textContent = String(e);
+    }
+  }
+
+  btn.addEventListener('click', verify);
+
+  runHealth();
+</script>
+</body>
+</html>

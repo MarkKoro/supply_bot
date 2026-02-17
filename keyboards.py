@@ -50,6 +50,7 @@ def catalog_home() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔎 Поиск", callback_data="cat:search")],
         [InlineKeyboardButton("🧠 По доказательности", callback_data="cat:mode:evidence")],
+        [InlineKeyboardButton("🎯 По целям/влиянию", callback_data="cat:mode:class")],
         [InlineKeyboardButton("💊 Мои БАДы", callback_data="menu:my")],
         [InlineKeyboardButton("🧠 Готовые стеки", callback_data="menu:curated")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")],

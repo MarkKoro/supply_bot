@@ -49,6 +49,41 @@ async def _import_rich(conn, supp_path: str, slug_to_id: dict[str, int]) -> None
         name_ru = item.get("name_ru")
         name_en = item.get("name_en")
         interaction_classes = item.get("interaction_classes") or []
+        functional_groups = item.get("functional_groups") or []
+        if not isinstance(functional_groups, list):
+            functional_groups = []
+        body_effects = item.get("body_effects") or []
+        if not isinstance(body_effects, list):
+            body_effects = []
+
+        targets: set[str] = set()
+        burdens: set[str] = set()
+        for effect in body_effects:
+            if not isinstance(effect, dict):
+                continue
+            system = str(effect.get("system") or "").strip()
+            if not system:
+                continue
+            direction = str(effect.get("direction") or "").strip().lower()
+            try:
+                strength = int(effect.get("strength", 0))
+            except (TypeError, ValueError):
+                strength = 0
+            if direction == "benefit" and strength > 0:
+                targets.add(system)
+            elif direction == "burden" and strength > 0:
+                burdens.add(system)
+
+        targets_list = sorted(targets)
+        burdens_list = sorted(burdens)
+        functional_groups_str = " ".join([str(v) for v in functional_groups if v])
+        functional_groups_json = json.dumps(functional_groups or [], ensure_ascii=False)
+        body_effects_json = json.dumps(body_effects or [], ensure_ascii=False)
+        body_targets_str = " ".join(targets_list)
+        body_targets_json = json.dumps(targets_list, ensure_ascii=False)
+        body_burdens_str = " ".join(burdens_list)
+        body_burdens_json = json.dumps(burdens_list, ensure_ascii=False)
+
         aliases = _ensure_omega_aliases(name_en, _build_aliases(item))
         search_blob = db.build_search_blob(name_ru, name_en, aliases)
         evidence_fields = _extract_evidence_fields(item)
@@ -71,6 +106,15 @@ async def _import_rich(conn, supp_path: str, slug_to_id: dict[str, int]) -> None
             "purchase_url": item.get("purchase_url") or "",
             "tags_json": json.dumps(item.get("tags") or [], ensure_ascii=False),
             "tags": item.get("tags") or [],
+            "supplement_type": item.get("supplement_type") or "",
+            "functional_groups": functional_groups_str,
+            "functional_groups_json": functional_groups_json,
+            "evidence_grade": item.get("evidence_grade") or "",
+            "body_effects_json": body_effects_json,
+            "body_targets": body_targets_str,
+            "body_targets_json": body_targets_json,
+            "body_burdens": body_burdens_str,
+            "body_burdens_json": body_burdens_json,
             "interaction_classes": json.dumps(interaction_classes, ensure_ascii=False),
             "interaction_classes_json": json.dumps(interaction_classes, ensure_ascii=False),
             "payload_json": json.dumps(item, ensure_ascii=False),

@@ -372,31 +372,6 @@ def my_supplement_reminders(
 ) -> InlineKeyboardMarkup:
     btns: list[list[InlineKeyboardButton]] = []
     page = max(page, 0)
-    if suggested_times:
-        start = page * per_page
-        end = start + per_page
-        sliced = suggested_times[start:end]
-        row: list[InlineKeyboardButton] = []
-        for time_local in sliced:
-            row.append(
-                InlineKeyboardButton(
-                    f"⏰ {time_local}",
-                    callback_data=f"mysupp:rem:suggest:{supplement_id}:{time_local.replace(':', '-')}"
-                    f":{page}",
-                )
-            )
-            if len(row) == 2:
-                btns.append(row)
-                row = []
-        if row:
-            btns.append(row)
-        nav = []
-        if start > 0:
-            nav.append(InlineKeyboardButton("⬅️", callback_data=f"mysupp:rem:page:{supplement_id}:{page - 1}"))
-        if end < len(suggested_times):
-            nav.append(InlineKeyboardButton("➡️", callback_data=f"mysupp:rem:page:{supplement_id}:{page + 1}"))
-        if nav:
-            btns.append(nav)
     btns.append([InlineKeyboardButton("➕ Добавить своё время", callback_data=f"mysupp:rem:add:{supplement_id}")])
     for time_local in reminders:
         key = time_local.replace(":", "-")

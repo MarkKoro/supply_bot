@@ -5,11 +5,75 @@ import tz
 
 def main_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📅 Сегодня", callback_data="menu:today")],
         [InlineKeyboardButton("💊 Мои БАДы", callback_data="menu:my")],
         [InlineKeyboardButton("📚 Каталог БАДов", callback_data="menu:catalog")],
         [InlineKeyboardButton("📝 Ежедневный опрос", callback_data="menu:checkin_ai")],
         [InlineKeyboardButton("⚙️ Настройки", callback_data="menu:settings")],
     ])
+
+
+def today_home_kb(slots: list[dict]) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Отметить приём", callback_data="today:slots")],
+        [InlineKeyboardButton("⏰ Напоминания", callback_data="rem:home")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")],
+    ])
+
+
+def today_slots_kb(slots: list[dict], date_local: str) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    pair: list[InlineKeyboardButton] = []
+    for slot in slots:
+        if not slot.get("is_enabled", True):
+            continue
+        title = str(slot.get("title_ru") or "Слот")
+        time_local = str(slot.get("time_local") or "--:--")
+        pair.append(InlineKeyboardButton(f"{title} · {time_local}", callback_data=f"today:slot:{slot.get('slot_id') or ''}"))
+        if len(pair) == 2:
+            rows.append(pair)
+            pair = []
+    if pair:
+        rows.append(pair)
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="today:home")])
+    return InlineKeyboardMarkup(rows)
+
+
+def slot_intake_kb(slot_id: str, taken_count: int, total_count: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Выпил всё", callback_data=f"intake:all:{slot_id}"),
+            InlineKeyboardButton("🧾 Выбрать", callback_data=f"intake:pick:{slot_id}"),
+        ],
+        [InlineKeyboardButton("🙅 Пропустить", callback_data=f"intake:skip:{slot_id}")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="today:slots")],
+    ])
+
+
+def intake_pick_kb(slot_id: str, items: list[dict], selected_set: set[str], page: int) -> InlineKeyboardMarkup:
+    page_size = 10
+    safe_page = max(0, page)
+    start = safe_page * page_size
+    end = start + page_size
+    page_items = items[start:end]
+    rows: list[list[InlineKeyboardButton]] = []
+    for item in page_items:
+        slug = str(item.get("slug") or "")
+        title = str(item.get("ru_name") or item.get("name_ru") or item.get("name") or slug)
+        mark = "☑️" if slug in selected_set else "⬜"
+        rows.append([InlineKeyboardButton(f"{mark} {title}", callback_data=f"intake:toggle:{slot_id}:{slug}:{safe_page}")])
+
+    nav: list[InlineKeyboardButton] = []
+    if safe_page > 0:
+        nav.append(InlineKeyboardButton("◀️", callback_data=f"intake:pick:{slot_id}:{safe_page - 1}"))
+    if end < len(items):
+        nav.append(InlineKeyboardButton("▶️", callback_data=f"intake:pick:{slot_id}:{safe_page + 1}"))
+    if nav:
+        rows.append(nav)
+
+    rows.append([InlineKeyboardButton("✅ Сохранить", callback_data=f"intake:save:{slot_id}:{safe_page}")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="today:slots")])
+    return InlineKeyboardMarkup(rows)
 
 def ai_checkin_entry_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(

@@ -52,6 +52,11 @@ from keyboards import (
     intake_pick_kb,
     admin_stats_kb,
     admin_stacks_kb,
+    admin_stacks_list_kb,
+    admin_stack_editor_kb,
+    admin_stack_items_kb,
+    admin_stack_item_editor_kb,
+    admin_stack_search_kb,
 )
 import tz
 from openai_client import (
@@ -111,6 +116,19 @@ def _is_admin(tg_user_id: int) -> bool:
     if _settings_cache is None:
         _settings_cache = get_settings()
     return tg_user_id in _settings_cache.ADMIN_IDS
+
+
+def _is_admin_ctx(context: ContextTypes.DEFAULT_TYPE, tg_user_id: int) -> bool:
+    settings = context.application.bot_data["settings"]
+    return tg_user_id in settings.ADMIN_IDS
+
+
+def _slugify_ascii(value: str) -> str:
+    src = (value or "").strip().lower()
+    src = re.sub(r"\s+", "_", src)
+    src = re.sub(r"[^a-z0-9_]", "", src)
+    src = re.sub(r"_+", "_", src)
+    return src.strip("_")
 
 CHECKIN_VOICE_MAX_SECONDS = 90
 CHECKIN_VOICE_MAX_BYTES = 10 * 1024 * 1024
@@ -1738,17 +1756,162 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
 
         if data == "admin:stats":
-            if not _is_admin(tg_uid):
-                await home(update, context)
-                return
             await _show_admin_stats(update, context, conn)
             return
 
+        if data.startswith("admin:") and not _is_admin_ctx(context, tg_uid):
+            await show(
+                update,
+                context,
+                "Нет доступа.",
+                InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")]]),
+                route="menu:home",
+            )
+            return
+
         if data == "admin:stacks":
-            if not _is_admin(tg_uid):
-                await _show_catalog_home(update, context, conn)
+            await _show_admin_stacks(update, context, conn, 0)
+            return
+
+        if data.startswith("admin:stacks:page:"):
+            page = int(data.split(":")[-1]) if data.split(":")[-1].isdigit() else 0
+            await _show_admin_stacks(update, context, conn, max(0, page))
+            return
+
+        if data == "admin:stack:new":
+            await show(
+                update,
+                context,
+                "Отправь название нового стека.\nПример: База для сна",
+                InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="admin:stacks")]]),
+                route="admin:stack:new_wait",
+                payload={"return": "admin:stacks"},
+            )
+            return
+
+        if data.startswith("admin:stack:open:"):
+            stack_id = int(data.split(":")[-1])
+            await _show_admin_stack_editor(update, context, conn, stack_id)
+            return
+
+        if data.startswith("admin:stack:toggle:"):
+            stack_id = int(data.split(":")[-1])
+            row = await db.admin_get_curated_stack_by_id(conn, stack_id)
+            if not row:
+                await show(update, context, "Стек не найден.", back(), route="admin:stacks")
                 return
-            await _show_admin_stacks(update, context)
+            await db.admin_set_curated_stack_active(conn, stack_id, 0 if int(row["is_active"] or 0) else 1)
+            await _show_admin_stack_editor(update, context, conn, stack_id)
+            return
+
+        if data.startswith("admin:stack:edit:"):
+            parts = data.split(":")
+            if len(parts) < 5:
+                return
+            stack_id = int(parts[3])
+            field = parts[4]
+            prompts = {
+                "title_ru": "Отправь новое название.",
+                "author_ru": "Отправь автора (можно пусто: '-').",
+                "description_ru": "Отправь описание (можно несколько строк).",
+                "source_url": "Отправь ссылку-источник (или '-' чтобы очистить).",
+                "tags": "Отправь теги через запятую.\nПример: сон, стресс, восстановление",
+            }
+            if field not in prompts:
+                return
+            await show(
+                update,
+                context,
+                prompts[field],
+                InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"admin:stack:open:{stack_id}")]]),
+                route="admin:stack:edit_wait",
+                payload={"stack_id": stack_id, "field": field},
+            )
+            return
+
+        if data.startswith("admin:stack:items:"):
+            stack_id = int(data.split(":")[-1])
+            await _show_admin_stack_items(update, context, conn, stack_id)
+            return
+
+        if data.startswith("admin:stack:item:open:"):
+            _, _, _, _, _, stack_id, item_id = data.split(":")
+            await _show_admin_stack_item(update, context, conn, int(stack_id), int(item_id))
+            return
+
+        if data.startswith("admin:stack:item:del:"):
+            _, _, _, _, _, stack_id, item_id = data.split(":")
+            await db.admin_delete_curated_stack_item(conn, int(item_id))
+            await q.answer("Удалено.", show_alert=False)
+            await _show_admin_stack_items(update, context, conn, int(stack_id))
+            return
+
+        if data.startswith("admin:stack:item:move:"):
+            _, _, _, _, _, stack_id, item_id, direction = data.split(":")
+            await db.admin_move_curated_stack_item(conn, int(stack_id), int(item_id), direction)
+            await _show_admin_stack_items(update, context, conn, int(stack_id))
+            return
+
+        if data.startswith("admin:stack:item:edit:"):
+            _, _, _, _, _, stack_id, item_id = data.split(":")
+            await show(
+                update,
+                context,
+                "Отправь одной строкой:\nДоза | Время | Заметка(опц.)\nПример: 500 мг | утром с едой | 8 недель",
+                InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"admin:stack:item:open:{stack_id}:{item_id}")]]),
+                route="admin:stack:item_edit_wait",
+                payload={"stack_id": int(stack_id), "item_id": int(item_id)},
+            )
+            return
+
+        if data.startswith("admin:stack:item:add:"):
+            stack_id = int(data.split(":")[-1])
+            await show(
+                update,
+                context,
+                "Напиши, что добавить (поиск по каталогу).\nПример: магний",
+                InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"admin:stack:items:{stack_id}")]]),
+                route="admin:stack:item_search_wait",
+                payload={"stack_id": stack_id, "query": "", "page": 0},
+            )
+            return
+
+        if data.startswith("admin:stack:item:search_page:"):
+            _, _, _, _, _, stack_id, page = data.split(":")
+            _, _, ui_payload = await db.get_ui_state(conn, tg_uid)
+            try:
+                payload_data = json.loads(ui_payload) if ui_payload else {}
+            except json.JSONDecodeError:
+                payload_data = {}
+            query = str(payload_data.get("query") or "").strip()
+            page_i = max(0, int(page))
+            rows, total = await db.search_supplements(conn, query, page_i, page_size=10)
+            has_next = (page_i + 1) * 10 < int(total)
+            await show(
+                update,
+                context,
+                "🔎 <b>Поиск по каталогу</b>\nВыбери добавку для стека.",
+                admin_stack_search_kb(int(stack_id), rows, page_i, has_prev=page_i > 0, has_next=has_next),
+                route="admin:stack:item_search",
+                payload={"stack_id": int(stack_id), "query": query, "page": page_i},
+            )
+            return
+
+        if data.startswith("admin:stack:item:pick:"):
+            _, _, _, _, _, stack_id, slug = data.split(":")
+            supplement = await db.get_supplement_by_slug(conn, slug)
+            if not supplement:
+                await show(update, context, "Добавка не найдена.", back(), route=f"admin:stack:items:{stack_id}")
+                return
+            name = str(supplement["name_ru"] or supplement["name_en"] or supplement["slug"])
+            await show(
+                update,
+                context,
+                f"Добавляем: <b>{name}</b>\nОтправь:\nДоза | Время | Заметка(опц.)",
+                InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"admin:stack:items:{stack_id}")]]),
+                route="admin:stack:item_details_wait",
+                payload={"stack_id": int(stack_id), "slug": slug, "name": name},
+            )
             return
 
         if data == "menu:today" or data == "today:home":
@@ -3532,7 +3695,10 @@ async def _render_route(
         await _show_admin_stats(update, context, conn)
         return
     if route == "admin:stacks":
-        await _show_admin_stacks(update, context)
+        page = 0
+        if isinstance(payload, dict):
+            page = int(payload.get("page") or 0)
+        await _show_admin_stacks(update, context, conn, page)
         return
     if route.startswith("cat:class:page:"):
         page = int(route.split(":")[-1])
@@ -3805,6 +3971,178 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 payload=payload_data or _ai_checkin_voice_payload(),
                 target_message_id=ui_message_id,
             )
+            try:
+                await update.message.delete()
+            except Exception:
+                pass
+            return
+        if ui_screen == "admin:stack:new_wait":
+            if not _is_admin_ctx(context, tg_uid):
+                await show(update, context, "Нет доступа.", back(), route="menu:home")
+                return
+            title = txt[:120].strip()
+            if not title:
+                await show(
+                    update,
+                    context,
+                    "Название пустое. Отправь название нового стека.",
+                    InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="admin:stacks")]]),
+                    route="admin:stack:new_wait",
+                    payload={"return": "admin:stacks"},
+                )
+                return
+            base = _slugify_ascii(title) or f"stack_{datetime.now().strftime('%Y%m%d%H%M')}"
+            slug = base
+            suffix = 2
+            while await db.admin_get_curated_stack_by_slug(conn, slug):
+                slug = f"{base}_{suffix}"
+                suffix += 1
+            await db.admin_upsert_curated_stack(
+                conn,
+                slug=slug,
+                title_ru=title,
+                author_ru="",
+                description_ru="",
+                source_url="",
+                tags=[],
+                is_active=0,
+            )
+            stack = await db.admin_get_curated_stack_by_slug(conn, slug)
+            await _show_admin_stack_editor(update, context, conn, int(stack["id"]))
+            try:
+                await update.message.delete()
+            except Exception:
+                pass
+            return
+        if ui_screen == "admin:stack:edit_wait":
+            if not _is_admin_ctx(context, tg_uid):
+                await show(update, context, "Нет доступа.", back(), route="menu:home")
+                return
+            try:
+                payload_data = json.loads(ui_payload) if ui_payload else {}
+            except json.JSONDecodeError:
+                payload_data = {}
+            stack_id = int(payload_data.get("stack_id") or 0)
+            field = str(payload_data.get("field") or "")
+            stack = await db.admin_get_curated_stack_by_id(conn, stack_id)
+            if not stack or field not in {"title_ru", "author_ru", "description_ru", "source_url", "tags"}:
+                await show(
+                    update,
+                    context,
+                    "Не удалось сохранить.",
+                    InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="admin:stacks")]]),
+                    route="admin:stacks",
+                )
+                return
+            title_ru = str(stack["title_ru"] or "")
+            author_ru = str(stack["author_ru"] or "")
+            description_ru = str(stack["description_ru"] or "")
+            source_url = str(stack["source_url"] or "")
+            tags = []
+            try:
+                tags = json.loads(stack["tags_json"] or "[]")
+            except Exception:
+                tags = []
+            value = "" if txt.strip() == "-" else txt.strip()
+            if field == "tags":
+                tags = [t.strip() for t in txt.split(",") if t.strip()][:20]
+            elif field == "title_ru":
+                title_ru = value[:120]
+            elif field == "author_ru":
+                author_ru = value[:120]
+            elif field == "description_ru":
+                description_ru = value
+            elif field == "source_url":
+                source_url = value
+            await db.admin_upsert_curated_stack(
+                conn,
+                slug=str(stack["slug"]),
+                title_ru=title_ru,
+                author_ru=author_ru,
+                description_ru=description_ru,
+                source_url=source_url,
+                tags=tags,
+                is_active=int(stack["is_active"] or 0),
+            )
+            await _show_admin_stack_editor(update, context, conn, stack_id)
+            try:
+                await update.message.delete()
+            except Exception:
+                pass
+            return
+        if ui_screen == "admin:stack:item_search_wait":
+            try:
+                payload_data = json.loads(ui_payload) if ui_payload else {}
+            except json.JSONDecodeError:
+                payload_data = {}
+            stack_id = int(payload_data.get("stack_id") or 0)
+            query = txt.strip()
+            if len(query) < 2:
+                await show(
+                    update,
+                    context,
+                    "Запрос слишком короткий. Напиши минимум 2 символа.",
+                    InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"admin:stack:items:{stack_id}")]]),
+                    route="admin:stack:item_search_wait",
+                    payload={"stack_id": stack_id, "query": "", "page": 0},
+                )
+                return
+            rows, total = await db.search_supplements(conn, query, 0, page_size=10)
+            await show(
+                update,
+                context,
+                "🔎 <b>Поиск по каталогу</b>\nВыбери добавку для стека.",
+                admin_stack_search_kb(stack_id, rows, 0, has_prev=False, has_next=10 < int(total)),
+                route="admin:stack:item_search",
+                payload={"stack_id": stack_id, "query": query, "page": 0},
+            )
+            try:
+                await update.message.delete()
+            except Exception:
+                pass
+            return
+        if ui_screen == "admin:stack:item_details_wait":
+            try:
+                payload_data = json.loads(ui_payload) if ui_payload else {}
+            except json.JSONDecodeError:
+                payload_data = {}
+            stack_id = int(payload_data.get("stack_id") or 0)
+            slug = str(payload_data.get("slug") or "")
+            name = str(payload_data.get("name") or slug)
+            parts = [p.strip() for p in txt.split("|")]
+            dose_ru = parts[0] if len(parts) > 0 else ""
+            timing_ru = parts[1] if len(parts) > 1 else ""
+            notes_ru = parts[2] if len(parts) > 2 else ""
+            if not dose_ru and not timing_ru:
+                await show(
+                    update,
+                    context,
+                    "Укажи хотя бы дозу или время.",
+                    InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"admin:stack:items:{stack_id}")]]),
+                    route="admin:stack:item_details_wait",
+                    payload=payload_data,
+                )
+                return
+            await db.admin_add_curated_stack_item(conn, stack_id, slug, name, dose_ru, timing_ru, notes_ru)
+            await _show_admin_stack_items(update, context, conn, stack_id)
+            try:
+                await update.message.delete()
+            except Exception:
+                pass
+            return
+        if ui_screen == "admin:stack:item_edit_wait":
+            try:
+                payload_data = json.loads(ui_payload) if ui_payload else {}
+            except json.JSONDecodeError:
+                payload_data = {}
+            stack_id = int(payload_data.get("stack_id") or 0)
+            item_id = int(payload_data.get("item_id") or 0)
+            parts = [p.strip() for p in txt.split("|")]
+            dose_ru = parts[0] if len(parts) > 0 else ""
+            timing_ru = parts[1] if len(parts) > 1 else ""
+            notes_ru = parts[2] if len(parts) > 2 else ""
+            await db.admin_update_curated_stack_item(conn, item_id, dose_ru, timing_ru, notes_ru)
+            await _show_admin_stack_item(update, context, conn, stack_id, item_id)
             try:
                 await update.message.delete()
             except Exception:
@@ -4404,13 +4742,99 @@ async def _show_admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     await show(update, context, text, admin_stats_kb(), route="admin:stats")
 
 
-async def _show_admin_stacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def _show_admin_stacks(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, page: int = 0) -> None:
+    page = max(0, int(page))
+    page_size = 10
+    offset = page * page_size
+    rows = await db.admin_list_curated_stacks(conn, limit=page_size + 1, offset=offset)
+    has_next = len(rows) > page_size
+    stacks = [dict(r) for r in rows[:page_size]]
     await show(
         update,
         context,
-        "🧩 <b>Стеки (админ)</b>\n\nЗдесь можно будет создавать и редактировать готовые стеки. (в разработке)",
-        admin_stacks_kb(),
+        "🧩 <b>Готовые стеки (админ)</b>\n"
+        "Создавай, редактируй, публикуй. Пользователи видят только опубликованные.\n"
+        "Нажми на стек, чтобы открыть.",
+        admin_stacks_list_kb(stacks, page, has_prev=page > 0, has_next=has_next),
         route="admin:stacks",
+        payload={"page": page},
+    )
+
+
+def _short_line(value: str, limit: int = 90) -> str:
+    clean = re.sub(r"\s+", " ", str(value or "")).strip()
+    if len(clean) <= limit:
+        return clean
+    return clean[: limit - 1].rstrip() + "…"
+
+
+async def _show_admin_stack_editor(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, stack_id: int) -> None:
+    stack = await db.admin_get_curated_stack_by_id(conn, stack_id)
+    if not stack:
+        await show(update, context, "Стек не найден.", admin_stacks_kb(), route="admin:stacks")
+        return
+    tags = []
+    try:
+        tags = json.loads(stack["tags_json"] or "[]")
+    except Exception:
+        tags = []
+    tags_text = ", ".join([str(t).strip() for t in tags if str(t).strip()]) if tags else "—"
+    status = "🟢" if int(stack["is_active"] or 0) else "⚪"
+    desc = _short_line(str(stack["description_ru"] or "—"), 120)
+    text = (
+        f"🧩 <b>{stack['title_ru'] or 'Без названия'}</b> {status}\n"
+        f"slug: <code>{stack['slug']}</code>\n"
+        f"Автор: {stack['author_ru'] or '—'}\n"
+        f"Теги: {tags_text}\n"
+        f"Источник: {stack['source_url'] or '—'}\n"
+        f"Описание: {desc}"
+    )
+    await show(
+        update,
+        context,
+        text,
+        admin_stack_editor_kb(int(stack["id"]), int(stack["is_active"] or 0)),
+        route=f"admin:stack:open:{int(stack['id'])}",
+    )
+
+
+async def _show_admin_stack_items(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, stack_id: int) -> None:
+    items = await db.list_curated_stack_items(conn, int(stack_id))
+    lines = ["📦 <b>Состав стека</b>"]
+    if not items:
+        lines.append("Пока пусто. Добавь элементы.")
+    else:
+        for idx, item in enumerate(items[:10], start=1):
+            name = item["supplement_name"] or item["supplement_slug"] or "Без названия"
+            dose = item["dose_ru"] or "—"
+            timing = item["timing_ru"] or "—"
+            lines.append(f"{idx}. {name} — {dose} — {timing}")
+    await show(
+        update,
+        context,
+        "\n".join(lines),
+        admin_stack_items_kb(int(stack_id), [dict(i) for i in items]),
+        route=f"admin:stack:items:{int(stack_id)}",
+    )
+
+
+async def _show_admin_stack_item(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, stack_id: int, item_id: int) -> None:
+    item = await db.admin_get_curated_stack_item(conn, int(item_id))
+    if not item:
+        await show(update, context, "Элемент не найден.", admin_stack_items_kb(stack_id, []), route=f"admin:stack:items:{stack_id}")
+        return
+    text = (
+        f"<b>{item['supplement_name'] or item['supplement_slug'] or 'Без названия'}</b>\n"
+        f"Доза: {item['dose_ru'] or '—'}\n"
+        f"Время: {item['timing_ru'] or '—'}\n"
+        f"Заметка: {item['notes_ru'] or '—'}"
+    )
+    await show(
+        update,
+        context,
+        text,
+        admin_stack_item_editor_kb(stack_id, int(item_id)),
+        route=f"admin:stack:item:open:{stack_id}:{int(item_id)}",
     )
 
 

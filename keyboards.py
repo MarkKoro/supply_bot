@@ -396,6 +396,81 @@ def admin_stats_kb() -> InlineKeyboardMarkup:
 def admin_stacks_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="cat:home")]])
 
+
+def admin_stacks_list_kb(stacks, page: int, has_prev: bool, has_next: bool) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = [[InlineKeyboardButton("➕ Новый стек", callback_data="admin:stack:new")]]
+    for stack in stacks:
+        title = str(stack.get("title_ru") or "Без названия")
+        dot = "🟢" if int(stack.get("is_active") or 0) == 1 else "⚪"
+        rows.append([InlineKeyboardButton(f"{dot} {title}", callback_data=f"admin:stack:open:{int(stack['id'])}")])
+    nav: list[InlineKeyboardButton] = []
+    if has_prev:
+        nav.append(InlineKeyboardButton("◀️", callback_data=f"admin:stacks:page:{max(0, page - 1)}"))
+    if has_next:
+        nav.append(InlineKeyboardButton("▶️", callback_data=f"admin:stacks:page:{page + 1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="cat:home")])
+    return InlineKeyboardMarkup(rows)
+
+
+def admin_stack_editor_kb(stack_id: int, is_active: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🟢 Опубликован" if int(is_active) else "⚪ Черновик", callback_data=f"admin:stack:toggle:{stack_id}")],
+            [
+                InlineKeyboardButton("✏️ Название", callback_data=f"admin:stack:edit:{stack_id}:title_ru"),
+                InlineKeyboardButton("👤 Автор", callback_data=f"admin:stack:edit:{stack_id}:author_ru"),
+            ],
+            [InlineKeyboardButton("📝 Описание", callback_data=f"admin:stack:edit:{stack_id}:description_ru")],
+            [
+                InlineKeyboardButton("🔗 Источник", callback_data=f"admin:stack:edit:{stack_id}:source_url"),
+                InlineKeyboardButton("🏷 Теги", callback_data=f"admin:stack:edit:{stack_id}:tags"),
+            ],
+            [InlineKeyboardButton("📦 Состав", callback_data=f"admin:stack:items:{stack_id}")],
+            [InlineKeyboardButton("⬅️ Назад", callback_data="admin:stacks")],
+        ]
+    )
+
+
+def admin_stack_items_kb(stack_id: int, items) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = [[InlineKeyboardButton("➕ Добавить", callback_data=f"admin:stack:item:add:{stack_id}")]]
+    for idx, item in enumerate(items[:10], start=1):
+        label = str(item.get("supplement_name") or item.get("supplement_slug") or "Без названия")
+        rows.append([InlineKeyboardButton(f"{idx}. {label}", callback_data=f"admin:stack:item:open:{stack_id}:{int(item['id'])}")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"admin:stack:open:{stack_id}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def admin_stack_item_editor_kb(stack_id: int, item_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("✍️ Правка дозы/времени", callback_data=f"admin:stack:item:edit:{stack_id}:{item_id}")],
+            [
+                InlineKeyboardButton("⬆️", callback_data=f"admin:stack:item:move:{stack_id}:{item_id}:up"),
+                InlineKeyboardButton("⬇️", callback_data=f"admin:stack:item:move:{stack_id}:{item_id}:down"),
+            ],
+            [InlineKeyboardButton("🗑 Удалить", callback_data=f"admin:stack:item:del:{stack_id}:{item_id}")],
+            [InlineKeyboardButton("⬅️ Назад", callback_data=f"admin:stack:items:{stack_id}")],
+        ]
+    )
+
+
+def admin_stack_search_kb(stack_id: int, rows_data, page: int, has_prev: bool, has_next: bool) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for row in rows_data:
+        title = row.get("name_ru") or row.get("name_en") or row.get("slug") or "Без названия"
+        rows.append([InlineKeyboardButton(str(title), callback_data=f"admin:stack:item:pick:{stack_id}:{row['slug']}")])
+    nav: list[InlineKeyboardButton] = []
+    if has_prev:
+        nav.append(InlineKeyboardButton("◀️", callback_data=f"admin:stack:item:search_page:{stack_id}:{max(0, page - 1)}"))
+    if has_next:
+        nav.append(InlineKeyboardButton("▶️", callback_data=f"admin:stack:item:search_page:{stack_id}:{page + 1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"admin:stack:items:{stack_id}")])
+    return InlineKeyboardMarkup(rows)
+
 def curated_stack_card(slug: str, *, source_url: str | None, back_page: int) -> InlineKeyboardMarkup:
     btns = []
     if source_url:

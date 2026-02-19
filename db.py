@@ -2103,6 +2103,133 @@ async def list_curated_stack_items(conn: aiosqlite.Connection, stack_id: int):
         (stack_id,),
     )
 
+
+async def admin_list_curated_stacks(conn: aiosqlite.Connection, limit: int, offset: int = 0):
+    return await fetchall(
+        conn,
+        """SELECT * FROM curated_stacks
+           ORDER BY updated_at DESC, created_at DESC
+           LIMIT ? OFFSET ?""",
+        (limit, offset),
+    )
+
+
+async def admin_get_curated_stack_by_id(conn: aiosqlite.Connection, stack_id: int):
+    return await fetchone(conn, "SELECT * FROM curated_stacks WHERE id=?", (stack_id,))
+
+
+async def admin_get_curated_stack_by_slug(conn: aiosqlite.Connection, slug: str):
+    return await fetchone(conn, "SELECT * FROM curated_stacks WHERE slug=?", (slug,))
+
+
+async def admin_upsert_curated_stack(
+    conn: aiosqlite.Connection,
+    *,
+    slug: str,
+    title_ru: str,
+    author_ru: str,
+    description_ru: str,
+    source_url: str,
+    tags: list[str],
+    is_active: int,
+):
+    tags_json = json.dumps(list(tags or []), ensure_ascii=False)
+    await conn.execute(
+        """INSERT INTO curated_stacks(
+               slug, title_ru, author_ru, description_ru, source_url, tags_json, is_active, created_at, updated_at
+           ) VALUES(?,?,?,?,?,?,?,datetime('now'),datetime('now'))
+           ON CONFLICT(slug) DO UPDATE SET
+             title_ru=excluded.title_ru,
+             author_ru=excluded.author_ru,
+             description_ru=excluded.description_ru,
+             source_url=excluded.source_url,
+             tags_json=excluded.tags_json,
+             is_active=excluded.is_active,
+             updated_at=datetime('now')""",
+        (slug, title_ru, author_ru, description_ru, source_url, tags_json, int(is_active)),
+    )
+    await conn.commit()
+
+
+async def admin_set_curated_stack_active(conn: aiosqlite.Connection, stack_id: int, is_active: int):
+    await conn.execute(
+        "UPDATE curated_stacks SET is_active=?, updated_at=datetime('now') WHERE id=?",
+        (int(is_active), int(stack_id)),
+    )
+    await conn.commit()
+
+
+async def admin_add_curated_stack_item(
+    conn: aiosqlite.Connection,
+    stack_id: int,
+    supplement_slug: str,
+    supplement_name: str,
+    dose_ru: str,
+    timing_ru: str,
+    notes_ru: str,
+):
+    row = await fetchone(
+        conn,
+        "SELECT COALESCE(MAX(sort_order), 0) AS max_sort FROM curated_stack_items WHERE stack_id=?",
+        (int(stack_id),),
+    )
+    sort_order = int(row["max_sort"] or 0) + 10 if row else 10
+    await conn.execute(
+        """INSERT INTO curated_stack_items(
+               stack_id, supplement_slug, supplement_name, dose_ru, timing_ru, notes_ru, sort_order
+           ) VALUES(?,?,?,?,?,?,?)""",
+        (
+            int(stack_id),
+            str(supplement_slug or "").strip(),
+            str(supplement_name or "").strip(),
+            str(dose_ru or "").strip(),
+            str(timing_ru or "").strip(),
+            str(notes_ru or "").strip(),
+            sort_order,
+        ),
+    )
+    await conn.commit()
+
+
+async def admin_get_curated_stack_item(conn: aiosqlite.Connection, item_id: int):
+    return await fetchone(conn, "SELECT * FROM curated_stack_items WHERE id=?", (int(item_id),))
+
+
+async def admin_update_curated_stack_item(conn: aiosqlite.Connection, item_id: int, dose_ru: str, timing_ru: str, notes_ru: str):
+    await conn.execute(
+        "UPDATE curated_stack_items SET dose_ru=?, timing_ru=?, notes_ru=? WHERE id=?",
+        (str(dose_ru or "").strip(), str(timing_ru or "").strip(), str(notes_ru or "").strip(), int(item_id)),
+    )
+    await conn.commit()
+
+
+async def admin_delete_curated_stack_item(conn: aiosqlite.Connection, item_id: int):
+    await conn.execute("DELETE FROM curated_stack_items WHERE id=?", (int(item_id),))
+    await conn.commit()
+
+
+async def admin_move_curated_stack_item(conn: aiosqlite.Connection, stack_id: int, item_id: int, direction: str):
+    rows = await fetchall(
+        conn,
+        "SELECT id, sort_order FROM curated_stack_items WHERE stack_id=? ORDER BY sort_order, id",
+        (int(stack_id),),
+    )
+    idx = -1
+    for i, row in enumerate(rows):
+        if int(row["id"]) == int(item_id):
+            idx = i
+            break
+    if idx < 0:
+        return
+    swap_idx = idx - 1 if direction == "up" else idx + 1
+    if swap_idx < 0 or swap_idx >= len(rows):
+        return
+    cur = rows[idx]
+    other = rows[swap_idx]
+    await conn.execute("UPDATE curated_stack_items SET sort_order=? WHERE id=?", (int(other["sort_order"]), int(cur["id"])))
+    await conn.execute("UPDATE curated_stack_items SET sort_order=? WHERE id=?", (int(cur["sort_order"]), int(other["id"])))
+    await conn.commit()
+
 async def find_supplement_by_slug_or_name(
     conn: aiosqlite.Connection,
     slug: str | None,

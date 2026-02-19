@@ -3,14 +3,17 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 import tz
 
-def main_menu() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
+def main_menu(*, is_admin: bool = False) -> InlineKeyboardMarkup:
+    rows = [
         [InlineKeyboardButton("📅 Сегодня", callback_data="menu:today")],
         [InlineKeyboardButton("💊 Мои БАДы", callback_data="menu:my")],
         [InlineKeyboardButton("📚 Каталог БАДов", callback_data="menu:catalog")],
         [InlineKeyboardButton("📝 Ежедневный опрос", callback_data="menu:checkin_ai")],
-        [InlineKeyboardButton("⚙️ Настройки", callback_data="menu:settings")],
-    ])
+    ]
+    if is_admin:
+        rows.append([InlineKeyboardButton("📊 Статистика", callback_data="admin:stats")])
+    rows.append([InlineKeyboardButton("⚙️ Настройки", callback_data="menu:settings")])
+    return InlineKeyboardMarkup(rows)
 
 
 def today_home_kb(slots: list[dict]) -> InlineKeyboardMarkup:
@@ -110,8 +113,8 @@ def catalog_kb(items: list[dict], page: int, pages: int) -> InlineKeyboardMarkup
     btns.append([InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")])
     return InlineKeyboardMarkup(btns)
 
-def catalog_home() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
+def catalog_home(*, is_admin: bool = False) -> InlineKeyboardMarkup:
+    rows = [
         [
             InlineKeyboardButton("🔎 Поиск", callback_data="cat:search"),
             InlineKeyboardButton("🧠 Доказательность", callback_data="cat:mode:evidence"),
@@ -124,11 +127,19 @@ def catalog_home() -> InlineKeyboardMarkup:
             InlineKeyboardButton("🫀 Куда влияет", callback_data="cat:mode:body:benefit"),
             InlineKeyboardButton("⚠️ Нагрузка", callback_data="cat:mode:body:burden"),
         ],
-        [InlineKeyboardButton("🧩 По группе", callback_data="cat:mode:group")],
-        [InlineKeyboardButton("💊 Мои БАДы", callback_data="menu:my")],
-        [InlineKeyboardButton("🧠 Готовые стеки", callback_data="menu:curated")],
-        [InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")],
-    ])
+        [
+            InlineKeyboardButton("🧩 По группе", callback_data="cat:mode:group"),
+            InlineKeyboardButton("📃 Список", callback_data="cat:mode:list"),
+        ],
+        [
+            InlineKeyboardButton("💊 Мои БАДы", callback_data="menu:my"),
+            InlineKeyboardButton("🧩 Готовые стеки", callback_data="menu:curated"),
+        ],
+    ]
+    if is_admin:
+        rows.append([InlineKeyboardButton("➕ Стеки (админ)", callback_data="admin:stacks")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")])
+    return InlineKeyboardMarkup(rows)
 
 def catalog_search_results(
     rows: list[dict],
@@ -361,7 +372,7 @@ def catalog_page(rows, page: int, has_prev: bool, has_next: bool) -> InlineKeybo
         btns.append(nav)
     return InlineKeyboardMarkup(btns)
 
-def curated_stacks_list(rows, page: int, has_prev: bool, has_next: bool) -> InlineKeyboardMarkup:
+def curated_stacks_list(rows, page: int, has_prev: bool, has_next: bool, *, is_admin: bool = False) -> InlineKeyboardMarkup:
     btns = []
     for r in rows:
         label = f"🧠 {r['title_ru']}"
@@ -373,7 +384,17 @@ def curated_stacks_list(rows, page: int, has_prev: bool, has_next: bool) -> Inli
     if has_next:
         nav.append(InlineKeyboardButton("▶️", callback_data=f"curated:page:{page + 1}"))
     btns.append(nav)
+    if is_admin:
+        btns.append([InlineKeyboardButton("➕ Стеки (админ)", callback_data="admin:stacks")])
     return InlineKeyboardMarkup(btns)
+
+
+def admin_stats_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")]])
+
+
+def admin_stacks_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="cat:home")]])
 
 def curated_stack_card(slug: str, *, source_url: str | None, back_page: int) -> InlineKeyboardMarkup:
     btns = []

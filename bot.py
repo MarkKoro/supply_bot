@@ -50,6 +50,8 @@ from keyboards import (
     today_slots_kb,
     slot_intake_kb,
     intake_pick_kb,
+    admin_stats_kb,
+    admin_stacks_kb,
 )
 import tz
 from openai_client import (
@@ -100,6 +102,15 @@ STRESS_OPTIONS = [
     (2, "😬 Средний"),
     (3, "🔥 Высокий"),
 ]
+
+_settings_cache = None
+
+
+def _is_admin(tg_user_id: int) -> bool:
+    global _settings_cache
+    if _settings_cache is None:
+        _settings_cache = get_settings()
+    return tg_user_id in _settings_cache.ADMIN_IDS
 
 CHECKIN_VOICE_MAX_SECONDS = 90
 CHECKIN_VOICE_MAX_BYTES = 10 * 1024 * 1024
@@ -1356,10 +1367,11 @@ async def home(
     target_chat_id: int | None = None,
     target_message_id: int | None = None,
 ) -> None:
+    user_id = update.effective_user.id if update.effective_user else 0
     await show(
         update, context,
         _home_text(),
-        main_menu(),
+        main_menu(is_admin=_is_admin(user_id)),
         route="menu:home",
         target_chat_id=target_chat_id,
         target_message_id=target_message_id,
@@ -1725,6 +1737,20 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await _show_curated_page(update, context, conn, 0)
             return
 
+        if data == "admin:stats":
+            if not _is_admin(tg_uid):
+                await home(update, context)
+                return
+            await _show_admin_stats(update, context, conn)
+            return
+
+        if data == "admin:stacks":
+            if not _is_admin(tg_uid):
+                await _show_catalog_home(update, context, conn)
+                return
+            await _show_admin_stacks(update, context)
+            return
+
         if data == "menu:today" or data == "today:home":
             await _show_today_home(update, context, conn, tg_uid)
             return
@@ -1939,6 +1965,18 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "query": "",
                 "class_key": "",
             })
+            return
+
+        if data == "cat:mode:list":
+            await _show_catalog_alpha_list(update, context, conn, page=0)
+            return
+
+        if data.startswith("cat:list:"):
+            try:
+                page = int(data.split(":")[-1])
+            except ValueError:
+                page = 0
+            await _show_catalog_alpha_list(update, context, conn, page=max(page, 0))
             return
 
         if data == "cat:mode:class":
@@ -3064,7 +3102,7 @@ async def on_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     "✅ Часовой пояс сохранён: "
                     f"{label}\n"
                     f"Текущее время у тебя: {local_now}",
-                    main_menu(),
+                    main_menu(is_admin=_is_admin(update.effective_user.id if update.effective_user else 0)),
                     route="menu:home",
                 )
         finally:
@@ -3212,6 +3250,8 @@ async def render_view(
                 mode = payload_data.get("mode") or "home"
                 if mode == "list":
                     await _show_catalog_list(update, context, conn, tg_user_id, payload_data)
+                elif mode == "alpha_list":
+                    await _show_catalog_alpha_list(update, context, conn, page=int(payload_data.get("page") or 0))
                 else:
                     await _show_catalog_home(update, context, conn)
                 return
@@ -3480,16 +3520,19 @@ async def _render_route(
         )
         return
     if route.startswith("cat:list"):
-        payload = await _load_catalog_payload(conn, tg_uid)
-        await _show_catalog_list(
-            update,
-            context,
-            conn,
-            tg_uid,
-            payload,
-            target_chat_id=target_chat_id,
-            target_message_id=target_message_id,
-        )
+        page = 0
+        parts = route.split(":")
+        if len(parts) == 3 and parts[2].isdigit():
+            page = int(parts[2])
+        elif isinstance(payload, dict):
+            page = int(payload.get("page") or 0)
+        await _show_catalog_alpha_list(update, context, conn, page=page)
+        return
+    if route == "admin:stats":
+        await _show_admin_stats(update, context, conn)
+        return
+    if route == "admin:stacks":
+        await _show_admin_stacks(update, context)
         return
     if route.startswith("cat:class:page:"):
         page = int(route.split(":")[-1])
@@ -4299,7 +4342,7 @@ async def _bootstrap() -> Application:
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(
         on_menu,
-        pattern=r"^(main$|menu:|settings:|add_pick:|compat_pick:|cat:|curated:|supp:|card:|mysupp:|today:|intake:|rem:(home|edit|set:|toggle:))",
+        pattern=r"^(main$|menu:|settings:|admin:|add_pick:|compat_pick:|cat:|curated:|supp:|card:|mysupp:|today:|intake:|rem:(home|edit|set:|toggle:))",
     ))
     app.add_handler(CallbackQueryHandler(on_ai_add, pattern=r"^aiadd:"))
     app.add_handler(CallbackQueryHandler(on_ai_checkin, pattern=r"^aicheck:"))
@@ -4324,6 +4367,7 @@ async def _show_catalog_home(
     target_chat_id: int | None = None,
     target_message_id: int | None = None,
 ) -> None:
+    tg_uid = update.effective_user.id if update.effective_user else 0
     await show(
         update,
         context,
@@ -4332,11 +4376,82 @@ async def _show_catalog_home(
             "Выбери, как искать: по названию, по доказательности, "
             "по целям/влиянию или через готовые стеки."
         ),
-        catalog_home(),
+        catalog_home(is_admin=_is_admin(tg_uid)),
         route="cat:home",
         payload={"mode": "home"},
         target_chat_id=target_chat_id,
         target_message_id=target_message_id,
+    )
+
+
+async def _show_admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE, conn) -> None:
+    stats = await db.admin_get_global_stats(conn)
+
+    def _fmt_avg(value: float | None) -> str:
+        if value is None:
+            return "—"
+        return f"{value:.2f}".rstrip("0").rstrip(".")
+
+    text = (
+        "📊 <b>Статистика</b>\n"
+        f"• Пользователей: {int(stats.get('users_total') or 0)}\n"
+        f"• Активные: 1д — {int(stats.get('active_1d') or 0)} | 7д — {int(stats.get('active_7d') or 0)} | 30д — {int(stats.get('active_30d') or 0)}\n"
+        f"• Среднее активных БАДов: {_fmt_avg(stats.get('avg_active_supplements_overall'))}\n"
+        f"• Среднее напоминаний: {_fmt_avg(stats.get('avg_enabled_reminders'))}\n"
+        f"• Чекины (30д): {int(stats.get('checkins_30d_total') or 0)}\n"
+        f"• Отметки приёма (30д): {int(stats.get('intake_30d_total') or 0)}"
+    )
+    await show(update, context, text, admin_stats_kb(), route="admin:stats")
+
+
+async def _show_admin_stacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await show(
+        update,
+        context,
+        "🧩 <b>Стеки (админ)</b>\n\nЗдесь можно будет создавать и редактировать готовые стеки. (в разработке)",
+        admin_stacks_kb(),
+        route="admin:stacks",
+    )
+
+
+async def _show_catalog_alpha_list(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, page: int = 0) -> None:
+    page = max(page, 0)
+    limit = 30
+    offset = page * limit
+    rows = await db.list_supplements_alpha(conn, limit=limit + 1, offset=offset)
+    has_next = len(rows) > limit
+    display_rows = rows[:limit]
+
+    if not display_rows and page > 0:
+        await _show_catalog_alpha_list(update, context, conn, page=page - 1)
+        return
+
+    lines = ["📃 <b>Список добавок</b>"]
+    if display_rows:
+        for idx, row in enumerate(display_rows, start=offset + 1):
+            name_ru = str(row["name_ru"] or row["slug"] or "Без названия")
+            grade = str(row["evidence_grade"] or "—").strip() or "—"
+            lines.append(f"{idx}. {name_ru} — {grade}")
+    else:
+        lines.append("Список пока пуст.")
+
+    nav_row: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("◀️", callback_data=f"cat:list:{page - 1}"))
+    if has_next:
+        nav_row.append(InlineKeyboardButton("▶️", callback_data=f"cat:list:{page + 1}"))
+    kb_rows: list[list[InlineKeyboardButton]] = []
+    if nav_row:
+        kb_rows.append(nav_row)
+    kb_rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="cat:home")])
+
+    await show(
+        update,
+        context,
+        "\n".join(lines),
+        InlineKeyboardMarkup(kb_rows),
+        route=f"cat:list:{page}",
+        payload={"mode": "alpha_list", "page": page},
     )
 
 async def _load_catalog_payload(conn, tg_uid: int) -> dict:
@@ -4492,7 +4607,7 @@ async def _show_catalog_list(
                 update,
                 context,
                 "Каталог пуст. Похоже, сиды ещё не импортированы…",
-                catalog_home(),
+                catalog_home(is_admin=_is_admin(tg_uid)),
                 route="cat:home",
                 payload={"mode": "home"},
                 target_chat_id=target_chat_id,
@@ -4503,7 +4618,7 @@ async def _show_catalog_list(
             update,
             context,
             "Ничего не найдено.",
-            catalog_home(),
+            catalog_home(is_admin=_is_admin(tg_uid)),
             route="cat:home",
             payload={"mode": "home"},
             target_chat_id=target_chat_id,
@@ -5088,6 +5203,7 @@ async def _show_curated_page(
     target_chat_id: int | None = None,
     target_message_id: int | None = None,
 ) -> None:
+    tg_uid = update.effective_user.id if update.effective_user else 0
     page = max(page, 0)
     offset = page * CURATED_PAGE_SIZE
     rows = await db.list_curated_stacks(conn, limit=CURATED_PAGE_SIZE + 1, offset=offset)
@@ -5110,7 +5226,7 @@ async def _show_curated_page(
         update,
         context,
         text,
-        curated_stacks_list(display_rows, page, has_prev=page > 0, has_next=has_next),
+        curated_stacks_list(display_rows, page, has_prev=page > 0, has_next=has_next, is_admin=_is_admin(tg_uid)),
         route=f"curated:page:{page}",
         target_chat_id=target_chat_id,
         target_message_id=target_message_id,

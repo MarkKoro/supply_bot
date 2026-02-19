@@ -1,5 +1,5 @@
 from __future__ import annotations
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 import json
@@ -31,9 +31,34 @@ async def fetchone(conn: aiosqlite.Connection, sql: str, params: tuple = ()):
     async with conn.execute(sql, params) as cur:
         return await cur.fetchone()
 
-async def fetchall(conn: aiosqlite.Connection, sql: str, params: tuple = ()):
+async def fetchall(conn: aiosqlite.Connection, sql: str, params: tuple = ()): 
     async with conn.execute(sql, params) as cur:
         return await cur.fetchall()
+
+
+async def _table_exists(conn: aiosqlite.Connection, name: str) -> bool:
+    row = await fetchone(
+        conn,
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (name,),
+    )
+    return row is not None
+
+
+async def _table_columns(conn: aiosqlite.Connection, table: str) -> set[str]:
+    try:
+        rows = await fetchall(conn, f"PRAGMA table_info({table})")
+    except Exception:
+        return set()
+    return {str(row["name"]).strip().lower() for row in rows if row and row["name"]}
+
+
+async def _get_date_col(conn: aiosqlite.Connection, table: str) -> str | None:
+    cols = await _table_columns(conn, table)
+    for candidate in ("date_local", "local_date", "date"):
+        if candidate in cols:
+            return candidate
+    return None
 
 SCHEMA_SQL = """PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
@@ -1911,6 +1936,145 @@ async def list_supplements_page(conn: aiosqlite.Connection, offset: int, limit: 
         "SELECT * FROM supplements ORDER BY name LIMIT ? OFFSET ?",
         (limit, offset),
     )
+
+
+async def list_supplements_alpha(conn: aiosqlite.Connection, limit: int = 30, offset: int = 0) -> list[aiosqlite.Row]:
+    return await fetchall(
+        conn,
+        """SELECT slug, name_ru, evidence_grade
+           FROM supplements
+           WHERE is_active=1
+           ORDER BY name_ru COLLATE NOCASE ASC
+           LIMIT ? OFFSET ?""",
+        (limit, offset),
+    )
+
+
+async def admin_get_global_stats(conn: aiosqlite.Connection) -> dict:
+    today = date.today()
+    threshold_1d = (today - timedelta(days=1)).isoformat()
+    threshold_7d = (today - timedelta(days=7)).isoformat()
+    threshold_30d = (today - timedelta(days=30)).isoformat()
+
+    users_total = 0
+    if await _table_exists(conn, "users"):
+        row = await fetchone(conn, "SELECT COUNT(*) AS total FROM users")
+        users_total = int(row["total"] or 0) if row else 0
+
+    activity_tables: list[tuple[str, str]] = []
+    for name in ("daily_checkins", "intake_log", "user_intake_log"):
+        if not await _table_exists(conn, name):
+            continue
+        date_col = await _get_date_col(conn, name)
+        cols = await _table_columns(conn, name)
+        if date_col and "user_id" in cols:
+            activity_tables.append((name, date_col))
+
+    async def _count_active(threshold: str) -> int:
+        if not activity_tables:
+            return 0
+        selects = [f"SELECT user_id FROM {table} WHERE {date_col} >= ?" for table, date_col in activity_tables]
+        sql = "SELECT COUNT(DISTINCT user_id) AS total FROM (" + " UNION ".join(selects) + ")"
+        params = tuple(threshold for _ in activity_tables)
+        row = await fetchone(conn, sql, params)
+        return int(row["total"] or 0) if row else 0
+
+    active_1d = await _count_active(threshold_1d)
+    active_7d = await _count_active(threshold_7d)
+    active_30d = await _count_active(threshold_30d)
+
+    avg_active_supplements_overall = None
+    for name in ("user_supplements", "user_stack_items", "user_base_stack"):
+        if not await _table_exists(conn, name):
+            continue
+        cols = await _table_columns(conn, name)
+        active_col = "is_active" if "is_active" in cols else "active" if "active" in cols else None
+        if "user_id" not in cols or not active_col:
+            continue
+        row = await fetchone(
+            conn,
+            f"""SELECT AVG(cnt) AS avg_cnt FROM (
+                   SELECT user_id, COUNT(*) AS cnt
+                   FROM {name}
+                   WHERE {active_col}=1
+                   GROUP BY user_id
+               )""",
+        )
+        avg_active_supplements_overall = float(row["avg_cnt"]) if row and row["avg_cnt"] is not None else None
+        break
+
+    avg_enabled_reminders = None
+    if await _table_exists(conn, "reminders"):
+        cols = await _table_columns(conn, "reminders")
+        enabled_col = "is_enabled" if "is_enabled" in cols else "enabled" if "enabled" in cols else None
+        if "user_id" in cols and enabled_col:
+            row = await fetchone(
+                conn,
+                f"""SELECT AVG(cnt) AS avg_cnt FROM (
+                       SELECT user_id, COUNT(*) AS cnt
+                       FROM reminders
+                       WHERE {enabled_col}=1
+                       GROUP BY user_id
+                   )""",
+            )
+            avg_enabled_reminders = float(row["avg_cnt"]) if row and row["avg_cnt"] is not None else None
+    if avg_enabled_reminders is None and await _table_exists(conn, "user_schedule_slots"):
+        cols = await _table_columns(conn, "user_schedule_slots")
+        if "user_id" in cols and "slots_json" in cols:
+            rows = await fetchall(conn, "SELECT user_id, slots_json FROM user_schedule_slots")
+            counts: list[int] = []
+            for row in rows:
+                raw = row["slots_json"]
+                try:
+                    slots = json.loads(raw) if raw else []
+                except Exception:
+                    slots = []
+                if not isinstance(slots, list):
+                    slots = []
+                enabled_count = 0
+                for slot in slots:
+                    if isinstance(slot, dict) and bool(slot.get("is_enabled", False)):
+                        enabled_count += 1
+                counts.append(enabled_count)
+            if counts:
+                avg_enabled_reminders = float(sum(counts) / len(counts))
+
+    checkins_30d_total = 0
+    if await _table_exists(conn, "daily_checkins"):
+        date_col = await _get_date_col(conn, "daily_checkins")
+        if date_col:
+            row = await fetchone(
+                conn,
+                f"SELECT COUNT(*) AS total FROM daily_checkins WHERE {date_col} >= ?",
+                (threshold_30d,),
+            )
+            checkins_30d_total = int(row["total"] or 0) if row else 0
+
+    intake_30d_total = 0
+    for intake_table in ("intake_log", "user_intake_log"):
+        if not await _table_exists(conn, intake_table):
+            continue
+        date_col = await _get_date_col(conn, intake_table)
+        if not date_col:
+            continue
+        row = await fetchone(
+            conn,
+            f"SELECT COUNT(*) AS total FROM {intake_table} WHERE {date_col} >= ?",
+            (threshold_30d,),
+        )
+        intake_30d_total = int(row["total"] or 0) if row else 0
+        break
+
+    return {
+        "users_total": users_total,
+        "active_1d": active_1d,
+        "active_7d": active_7d,
+        "active_30d": active_30d,
+        "avg_active_supplements_overall": avg_active_supplements_overall,
+        "avg_enabled_reminders": avg_enabled_reminders,
+        "checkins_30d_total": checkins_30d_total,
+        "intake_30d_total": intake_30d_total,
+    }
 
 # curated stacks
 async def list_curated_stacks(conn: aiosqlite.Connection, limit: int, offset: int = 0):

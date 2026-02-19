@@ -176,7 +176,6 @@ CREATE TABLE IF NOT EXISTS intake_log (
   updated_at    TEXT NOT NULL,
   UNIQUE(user_id, date_local, slot_id)
 );
-CREATE INDEX IF NOT EXISTS idx_intake_user_date_slot ON intake_log(user_id, date_local, slot_id);
 
 CREATE TABLE IF NOT EXISTS user_schedule_slots (
   user_id INTEGER PRIMARY KEY,
@@ -324,14 +323,18 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     await _ensure_column(conn, "supplements", "timing_ru", "TEXT")
     await _ensure_column(conn, "supplements", "safety_ru", "TEXT")
     await _ensure_column(conn, "supplements", "purchase_url", "TEXT")
+    await _ensure_column(conn, "supplements", "tags_json", "TEXT")
+    await _ensure_column(conn, "supplements", "mechanisms", "TEXT")
     await _ensure_column(conn, "supplements", "supplement_type", "TEXT DEFAULT ''")
     await _ensure_column(conn, "supplements", "functional_groups", "TEXT DEFAULT ''")
     await _ensure_column(conn, "supplements", "functional_groups_json", "TEXT NOT NULL DEFAULT '[]'")
+    await _ensure_column(conn, "supplements", "evidence_grade", "TEXT")
     await _ensure_column(conn, "supplements", "body_effects_json", "TEXT NOT NULL DEFAULT '[]'")
     await _ensure_column(conn, "supplements", "body_targets", "TEXT DEFAULT ''")
     await _ensure_column(conn, "supplements", "body_targets_json", "TEXT NOT NULL DEFAULT '[]'")
     await _ensure_column(conn, "supplements", "body_burdens", "TEXT DEFAULT ''")
     await _ensure_column(conn, "supplements", "body_burdens_json", "TEXT NOT NULL DEFAULT '[]'")
+    await _ensure_column(conn, "supplements", "safety_notes", "TEXT")
     await _ensure_column(conn, "supplements", "interaction_classes", "TEXT DEFAULT '[]'")
     await _ensure_column(conn, "supplements", "interaction_classes_json", "TEXT DEFAULT '[]'")
     await _ensure_column(conn, "supplements", "payload_json", "TEXT")
@@ -383,6 +386,9 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     )
     await conn.execute(
         "UPDATE supplements SET tags='' WHERE tags IS NULL"
+    )
+    await conn.execute(
+        "UPDATE supplements SET tags_json='[]' WHERE tags_json IS NULL OR tags_json=''"
     )
     await conn.execute(
         "UPDATE supplements SET goals='' WHERE goals IS NULL"
@@ -619,6 +625,18 @@ async def _ensure_intake_log_slots(conn: aiosqlite.Connection) -> None:
     await _ensure_column(conn, "intake_log", "note", "TEXT DEFAULT ''")
     await _ensure_column(conn, "intake_log", "created_at", "TEXT NOT NULL DEFAULT ''")
     await _ensure_column(conn, "intake_log", "updated_at", "TEXT NOT NULL DEFAULT ''")
+
+    cols = await fetchall(conn, "PRAGMA table_info(intake_log)")
+    col_names = {c["name"] for c in cols}
+    if "day" in col_names:
+        await conn.execute(
+            "UPDATE intake_log SET date_local=day WHERE (date_local IS NULL OR date_local='') AND day IS NOT NULL AND day!=''"
+        )
+    if "date" in col_names:
+        await conn.execute(
+            "UPDATE intake_log SET date_local=date WHERE (date_local IS NULL OR date_local='') AND date IS NOT NULL AND date!=''"
+        )
+
     await conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_intake_unique_slot ON intake_log(user_id, date_local, slot_id)"
     )

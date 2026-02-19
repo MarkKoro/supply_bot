@@ -46,6 +46,10 @@ from keyboards import (
     settings_menu,
     ai_checkin_entry_kb,
     ai_checkin_voice_kb,
+    today_home_kb,
+    today_slots_kb,
+    slot_intake_kb,
+    intake_pick_kb,
 )
 import tz
 from openai_client import (
@@ -131,6 +135,120 @@ def _parse_user_time_input(raw: str) -> str | None:
         if 0 <= hours <= 23 and 0 <= minutes <= 59:
             return f"{hours:02d}:{minutes:02d}"
     return None
+
+def _today_date_for_user(tz_name: str | None) -> str:
+    return db.get_user_local_date(tz_name or None)
+
+
+def _slot_map(slots: list[dict]) -> dict[str, dict]:
+    out: dict[str, dict] = {}
+    for slot in slots:
+        slot_id = str(slot.get("slot_id") or "").strip()
+        if slot_id:
+            out[slot_id] = slot
+    return out
+
+
+def _planned_counts(planned_items: list[dict], intake_record: dict | None) -> tuple[int, int]:
+    total = len(planned_items)
+    taken = intake_record.get("taken_slugs", []) if isinstance(intake_record, dict) else []
+    return (len(set([str(x) for x in taken if x])), total)
+
+
+async def _show_today_home(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, tg_uid: int) -> None:
+    user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
+    slots = await db.get_user_slots(conn, user_id)
+    await show(
+        update,
+        context,
+        "📅 <b>Сегодня</b>\n\nОтмечай приём и смотри напоминания. Всё в 2–3 тапа.",
+        today_home_kb(slots),
+        route="today:home",
+    )
+
+
+async def _show_today_slots(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, tg_uid: int) -> None:
+    user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
+    tz_name = await db.get_user_tz(conn, tg_uid)
+    date_local = _today_date_for_user(tz_name)
+    slots = await db.get_user_slots(conn, user_id)
+    await show(
+        update,
+        context,
+        f"📅 <b>Слоты на {date_local}</b>",
+        today_slots_kb(slots, date_local),
+        route="today:slots",
+        payload={"date_local": date_local},
+    )
+
+
+async def _show_slot_screen(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, tg_uid: int, slot_id: str) -> None:
+    user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
+    tz_name = await db.get_user_tz(conn, tg_uid)
+    date_local = _today_date_for_user(tz_name)
+    slots = await db.get_user_slots(conn, user_id)
+    slot = _slot_map(slots).get(slot_id)
+    if not slot:
+        await _show_today_slots(update, context, conn, tg_uid)
+        return
+    planned = await db.get_user_base_stack(conn, user_id)
+    record = await db.get_or_create_intake_log_slot(conn, user_id, date_local, slot_id)
+    taken_count, total_count = _planned_counts(planned, record)
+    title = str(slot.get("title_ru") or "Слот")
+    tm = str(slot.get("time_local") or "--:--")
+    text = (
+        f"⏱ <b>{title} · {tm}</b>\n\n"
+        f"Запланировано: {total_count}\n"
+        f"Отмечено: {taken_count} / {total_count}"
+    )
+    await show(update, context, text, slot_intake_kb(slot_id, taken_count, total_count), route=f"today:slot:{slot_id}")
+
+
+
+async def _show_intake_picker(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    conn,
+    tg_uid: int,
+    slot_id: str,
+    page: int,
+) -> None:
+    user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
+    tz_name = await db.get_user_tz(conn, tg_uid)
+    date_local = _today_date_for_user(tz_name)
+    planned = await db.get_user_base_stack(conn, user_id)
+    key = ("intake_pick", date_local, slot_id)
+    selected = context.user_data.get(key)
+    if not isinstance(selected, set):
+        rec = await db.get_or_create_intake_log_slot(conn, user_id, date_local, slot_id)
+        selected = set(str(x) for x in rec.get("taken_slugs", []) if isinstance(x, str))
+    context.user_data[key] = selected
+    await show(
+        update,
+        context,
+        "🧾 <b>Выбери, что принял</b>",
+        intake_pick_kb(slot_id, planned, selected, page),
+        route=f"intake:pick:{slot_id}:{page}",
+        payload={"slot_id": slot_id, "page": page},
+    )
+
+
+async def _show_reminders_home(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, tg_uid: int) -> None:
+    user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
+    slots = await db.get_user_slots(conn, user_id)
+    lines = ["⏰ <b>Напоминания</b>"]
+    for slot in slots:
+        state = "вкл" if slot.get("is_enabled", True) else "выкл"
+        lines.append(f"• {slot.get('title_ru', 'Слот')} — {slot.get('time_local', '--:--')} ({state})")
+    text = "\n".join(lines)
+    rows = [
+        [InlineKeyboardButton("Изменить время", callback_data="rem:edit")],
+    ]
+    for slot in slots:
+        rows.append([InlineKeyboardButton(f"Вкл/Выкл: {slot.get('title_ru','Слот')}", callback_data=f"rem:toggle:{slot.get('slot_id','')}")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="today:home")])
+    await show(update, context, text, InlineKeyboardMarkup(rows), route="rem:home")
+
 
 
 CATALOG_TYPE_TITLES = {
@@ -1605,6 +1723,119 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         if data == "menu:curated":
             await _show_curated_page(update, context, conn, 0)
+            return
+
+        if data == "menu:today" or data == "today:home":
+            await _show_today_home(update, context, conn, tg_uid)
+            return
+
+        if data == "today:slots":
+            await _show_today_slots(update, context, conn, tg_uid)
+            return
+
+        if data.startswith("today:slot:"):
+            slot_id = data.split(":", 2)[2]
+            await _show_slot_screen(update, context, conn, tg_uid, slot_id)
+            return
+
+        if data.startswith("intake:all:"):
+            slot_id = data.split(":", 2)[2]
+            user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
+            tz_name = await db.get_user_tz(conn, tg_uid)
+            date_local = _today_date_for_user(tz_name)
+            planned = await db.get_user_base_stack(conn, user_id)
+            planned_slugs = [str(item.get("slug") or "") for item in planned if str(item.get("slug") or "")]
+            await db.upsert_intake_log(conn, user_id, date_local, slot_id, planned_slugs, [], note="")
+            await q.answer("Готово. Отмечено: всё.", show_alert=False)
+            await _show_slot_screen(update, context, conn, tg_uid, slot_id)
+            return
+
+        if data.startswith("intake:skip:"):
+            slot_id = data.split(":", 2)[2]
+            user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
+            tz_name = await db.get_user_tz(conn, tg_uid)
+            date_local = _today_date_for_user(tz_name)
+            planned = await db.get_user_base_stack(conn, user_id)
+            planned_slugs = [str(item.get("slug") or "") for item in planned if str(item.get("slug") or "")]
+            await db.upsert_intake_log(conn, user_id, date_local, slot_id, [], planned_slugs, note="")
+            await q.answer("Ок. На этот слот отмечено: пропуск.", show_alert=False)
+            await _show_today_slots(update, context, conn, tg_uid)
+            return
+
+        if data.startswith("intake:pick:"):
+            parts = data.split(":")
+            slot_id = parts[2]
+            page = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
+            await _show_intake_picker(update, context, conn, tg_uid, slot_id, page)
+            return
+
+        if data.startswith("intake:toggle:"):
+            parts = data.split(":")
+            slot_id = parts[2]
+            slug = parts[3]
+            page = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 0
+            user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
+            tz_name = await db.get_user_tz(conn, tg_uid)
+            date_local = _today_date_for_user(tz_name)
+            key = ("intake_pick", date_local, slot_id)
+            selected = context.user_data.get(key)
+            if not isinstance(selected, set):
+                rec = await db.get_or_create_intake_log_slot(conn, user_id, date_local, slot_id)
+                selected = set(str(x) for x in rec.get("taken_slugs", []) if isinstance(x, str))
+            if slug in selected:
+                selected.remove(slug)
+            else:
+                selected.add(slug)
+            context.user_data[key] = selected
+            await _show_intake_picker(update, context, conn, tg_uid, slot_id, page)
+            return
+
+        if data.startswith("intake:save:"):
+            parts = data.split(":")
+            slot_id = parts[2]
+            user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
+            tz_name = await db.get_user_tz(conn, tg_uid)
+            date_local = _today_date_for_user(tz_name)
+            planned = await db.get_user_base_stack(conn, user_id)
+            planned_slugs = [str(item.get("slug") or "") for item in planned if str(item.get("slug") or "")]
+            key = ("intake_pick", date_local, slot_id)
+            selected = context.user_data.get(key)
+            if not isinstance(selected, set):
+                selected = set()
+            taken = sorted(set([slug for slug in planned_slugs if slug in selected]))
+            skipped = sorted(set([slug for slug in planned_slugs if slug not in selected]))
+            await db.upsert_intake_log(conn, user_id, date_local, slot_id, taken, skipped, note="")
+            await q.answer(f"Сохранено: {len(taken)} из {len(planned_slugs)}.", show_alert=False)
+            await _show_slot_screen(update, context, conn, tg_uid, slot_id)
+            return
+
+        if data == "rem:home":
+            await _show_reminders_home(update, context, conn, tg_uid)
+            return
+
+        if data == "rem:edit":
+            user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
+            slots = await db.get_user_slots(conn, user_id)
+            rows = [[InlineKeyboardButton(f"{slot.get('title_ru', 'Слот')} · {slot.get('time_local', '--:--')}", callback_data=f"rem:set:{slot.get('slot_id','')}")] for slot in slots]
+            rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="rem:home")])
+            await show(update, context, "Выбери слот и отправь время в формате HH:MM.", InlineKeyboardMarkup(rows), route="rem:edit")
+            return
+
+        if data.startswith("rem:set:"):
+            slot_id = data.split(":", 2)[2]
+            context.user_data[WAITING_KEY] = f"rem:set:{slot_id}"
+            await show(update, context, "Напиши новое время в формате HH:MM.", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="rem:home")]]), route=f"rem:set:{slot_id}")
+            return
+
+        if data.startswith("rem:toggle:"):
+            slot_id = data.split(":", 2)[2]
+            user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
+            slots = await db.get_user_slots(conn, user_id)
+            for slot in slots:
+                if str(slot.get("slot_id") or "") == slot_id:
+                    slot["is_enabled"] = not bool(slot.get("is_enabled", True))
+            await db.set_user_slots(conn, user_id, slots)
+            await _show_reminders_home(update, context, conn, tg_uid)
             return
 
         if data == "menu:my":
@@ -3119,6 +3350,25 @@ async def _render_route(
                 target_message_id=target_message_id,
             )
             return
+    if route in {"menu:today", "today:home"}:
+        await _show_today_home(update, context, conn, tg_uid)
+        return
+    if route == "today:slots":
+        await _show_today_slots(update, context, conn, tg_uid)
+        return
+    if route.startswith("today:slot:"):
+        await _show_slot_screen(update, context, conn, tg_uid, route.split(":", 2)[2])
+        return
+    if route.startswith("intake:pick:"):
+        parts = route.split(":")
+        slot_id = parts[2]
+        page = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
+        await _show_intake_picker(update, context, conn, tg_uid, slot_id, page)
+        return
+    if route == "rem:home":
+        await _show_reminders_home(update, context, conn, tg_uid)
+        return
+
     if route == "menu:settings":
         await show(
             update,
@@ -3520,9 +3770,9 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     finally:
         await conn.close()
     waiting = context.user_data.get(WAITING_KEY)
-    if waiting and waiting.startswith(("mysupp:set_dose:", "mysupp:rem_add:")):
-        _, _, supplement_id_text = waiting.split(":", 2)
-        supplement_id = int(supplement_id_text)
+    if waiting and waiting.startswith(("mysupp:set_dose:", "mysupp:rem_add:", "rem:set:")):
+        _, _, value_text = waiting.split(":", 2)
+        supplement_id = int(value_text) if waiting.startswith(("mysupp:set_dose:", "mysupp:rem_add:")) else None
         s = context.application.bot_data["settings"]
         tg_uid = update.effective_user.id
         conn = await db.connect(s.DB_PATH)
@@ -3541,7 +3791,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     await db.set_user_supp_dose(conn, tg_uid, supplement_id, trimmed)
                     context.user_data.pop(WAITING_KEY, None)
                     await show_my_supp_hub(update, context, tg_uid, supplement_id, conn=conn)
-            else:
+            elif waiting.startswith("mysupp:rem_add:"):
                 parsed_time = _parse_user_time_input(txt)
                 if not parsed_time:
                     await show(
@@ -3555,6 +3805,26 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     await db.upsert_reminder(conn, tg_uid, supplement_id, parsed_time, enabled=1)
                     context.user_data.pop(WAITING_KEY, None)
                     await _show_my_supp_reminders(update, context, conn, tg_uid, supplement_id)
+            else:
+                parsed_time = _parse_user_time_input(txt)
+                slot_id = waiting.split(":", 2)[2]
+                user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
+                slots = await db.get_user_slots(conn, user_id)
+                if not parsed_time:
+                    await show(
+                        update,
+                        context,
+                        "Не понял время. Пример: 08:30",
+                        InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="rem:home")]]),
+                        route=f"rem:set:{slot_id}",
+                    )
+                else:
+                    for slot in slots:
+                        if str(slot.get("slot_id") or "") == slot_id:
+                            slot["time_local"] = parsed_time
+                    await db.set_user_slots(conn, user_id, slots)
+                    context.user_data.pop(WAITING_KEY, None)
+                    await show(update, context, "Время обновлено.", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="rem:home")]]), route="rem:home")
         finally:
             await conn.close()
 
@@ -4029,13 +4299,13 @@ async def _bootstrap() -> Application:
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(
         on_menu,
-        pattern=r"^(main$|menu:|settings:|add_pick:|compat_pick:|cat:|curated:|supp:|card:|mysupp:)",
+        pattern=r"^(main$|menu:|settings:|add_pick:|compat_pick:|cat:|curated:|supp:|card:|mysupp:|today:|intake:|rem:(home|edit|set:|toggle:))",
     ))
     app.add_handler(CallbackQueryHandler(on_ai_add, pattern=r"^aiadd:"))
     app.add_handler(CallbackQueryHandler(on_ai_checkin, pattern=r"^aicheck:"))
     app.add_handler(CallbackQueryHandler(on_noop, pattern=r"^noop$"))
     app.add_handler(CallbackQueryHandler(on_timezone, pattern=r"^tz:"))
-    app.add_handler(CallbackQueryHandler(on_reminder_action, pattern=r"^rem:"))
+    app.add_handler(CallbackQueryHandler(on_reminder_action, pattern=r"^rem:(done|skip|snooze|done_all|skip_all|snooze_all)"))
     app.add_handler(MessageHandler(filters.VOICE, on_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_error_handler(on_error)

@@ -167,12 +167,21 @@ CREATE TABLE IF NOT EXISTS reminder_fires (
 CREATE TABLE IF NOT EXISTS intake_log (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  supplement_id INTEGER NOT NULL REFERENCES supplements(id) ON DELETE CASCADE,
-  taken_at      TEXT NOT NULL,
-  dose          TEXT,
-  note          TEXT
+  date_local    TEXT NOT NULL,
+  slot_id       TEXT NOT NULL,
+  taken_slugs_json TEXT NOT NULL DEFAULT '[]',
+  skipped_slugs_json TEXT NOT NULL DEFAULT '[]',
+  note          TEXT DEFAULT '',
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL,
+  UNIQUE(user_id, date_local, slot_id)
 );
-CREATE INDEX IF NOT EXISTS idx_intake_user_time ON intake_log(user_id, taken_at);
+CREATE INDEX IF NOT EXISTS idx_intake_user_date_slot ON intake_log(user_id, date_local, slot_id);
+
+CREATE TABLE IF NOT EXISTS user_schedule_slots (
+  user_id INTEGER PRIMARY KEY,
+  slots_json TEXT NOT NULL DEFAULT '[]'
+);
 
 CREATE TABLE IF NOT EXISTS daily_checkins (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -338,6 +347,8 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     await _ensure_reminder_fires(conn)
     await _ensure_daily_checkins(conn)
     await _ensure_day_plan_items(conn)
+    await _ensure_intake_log_slots(conn)
+    await _ensure_user_schedule_slots(conn)
     await _ensure_curated_stacks(conn)
     await _ensure_curated_stack_items(conn)
     await conn.execute(
@@ -580,6 +591,47 @@ async def _ensure_user_intake_log(conn: aiosqlite.Connection) -> None:
     await conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_user_intake_unique ON user_intake_log(user_id, supplement_id, local_date)"
     )
+
+async def _ensure_intake_log_slots(conn: aiosqlite.Connection) -> None:
+    table = await fetchone(
+        conn,
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='intake_log'",
+    )
+    if not table:
+        await conn.execute(
+            """CREATE TABLE IF NOT EXISTS intake_log (
+              id            INTEGER PRIMARY KEY AUTOINCREMENT,
+              user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+              date_local    TEXT NOT NULL,
+              slot_id       TEXT NOT NULL,
+              taken_slugs_json TEXT NOT NULL DEFAULT '[]',
+              skipped_slugs_json TEXT NOT NULL DEFAULT '[]',
+              note          TEXT DEFAULT '',
+              created_at    TEXT NOT NULL,
+              updated_at    TEXT NOT NULL,
+              UNIQUE(user_id, date_local, slot_id)
+            )"""
+        )
+    await _ensure_column(conn, "intake_log", "date_local", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "intake_log", "slot_id", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "intake_log", "taken_slugs_json", "TEXT NOT NULL DEFAULT '[]'")
+    await _ensure_column(conn, "intake_log", "skipped_slugs_json", "TEXT NOT NULL DEFAULT '[]'")
+    await _ensure_column(conn, "intake_log", "note", "TEXT DEFAULT ''")
+    await _ensure_column(conn, "intake_log", "created_at", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "intake_log", "updated_at", "TEXT NOT NULL DEFAULT ''")
+    await conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_intake_unique_slot ON intake_log(user_id, date_local, slot_id)"
+    )
+
+
+async def _ensure_user_schedule_slots(conn: aiosqlite.Connection) -> None:
+    await conn.execute(
+        """CREATE TABLE IF NOT EXISTS user_schedule_slots (
+          user_id INTEGER PRIMARY KEY,
+          slots_json TEXT NOT NULL DEFAULT '[]'
+        )"""
+    )
+
 
 async def _ensure_user_supp_settings(conn: aiosqlite.Connection) -> None:
     table = await fetchone(
@@ -1175,6 +1227,44 @@ def local_date(tz_name: str | None) -> str:
 
 def get_local_date_str(tz_name: str | None) -> str:
     return datetime.now(parse_utc_tz(tz_name)).date().isoformat()
+
+DEFAULT_USER_SLOTS = [
+    {"slot_id": "morning", "title_ru": "Утро", "time_local": "08:30", "is_enabled": True},
+    {"slot_id": "noon", "title_ru": "День", "time_local": "13:30", "is_enabled": True},
+    {"slot_id": "evening", "title_ru": "Вечер", "time_local": "19:30", "is_enabled": True},
+    {"slot_id": "night", "title_ru": "Ночь", "time_local": "22:30", "is_enabled": True},
+]
+
+
+def default_user_slots() -> list[dict]:
+    return [dict(item) for item in DEFAULT_USER_SLOTS]
+
+
+def _normalize_slots(slots_list: list[dict] | None) -> list[dict]:
+    if not isinstance(slots_list, list):
+        return default_user_slots()
+    out: list[dict] = []
+    seen: set[str] = set()
+    for raw in slots_list:
+        if not isinstance(raw, dict):
+            continue
+        slot_id = str(raw.get("slot_id") or "").strip()
+        if not slot_id or slot_id in seen:
+            continue
+        time_local = str(raw.get("time_local") or "").strip()
+        if not re.match(r"^([01]\d|2[0-3]):[0-5]\d$", time_local):
+            continue
+        title_ru = str(raw.get("title_ru") or "").strip() or "Слот"
+        out.append(
+            {
+                "slot_id": slot_id,
+                "title_ru": title_ru,
+                "time_local": time_local,
+                "is_enabled": bool(raw.get("is_enabled", True)),
+            }
+        )
+        seen.add(slot_id)
+    return out or default_user_slots()
 
 def next_run_datetime_for_hhmm(hhmm: str, tz_name: str | None) -> datetime:
     tzinfo = parse_utc_tz(tz_name)
@@ -2787,6 +2877,128 @@ async def get_user_base_stack(conn: aiosqlite.Connection, user_id: int) -> list[
             }
         )
     return items
+
+async def get_user_slots(conn: aiosqlite.Connection, user_id: int) -> list[dict]:
+    row = await fetchone(
+        conn,
+        "SELECT slots_json FROM user_schedule_slots WHERE user_id=?",
+        (user_id,),
+    )
+    if not row:
+        slots = default_user_slots()
+        await conn.execute(
+            "INSERT INTO user_schedule_slots(user_id, slots_json) VALUES(?,?)",
+            (user_id, json.dumps(slots, ensure_ascii=False)),
+        )
+        await conn.commit()
+        return slots
+    try:
+        slots_raw = json.loads(str(row["slots_json"] or "[]"))
+    except json.JSONDecodeError:
+        slots_raw = []
+    slots = _normalize_slots(slots_raw)
+    if slots != slots_raw:
+        await set_user_slots(conn, user_id, slots)
+    return slots
+
+
+async def set_user_slots(conn: aiosqlite.Connection, user_id: int, slots_list: list[dict]) -> None:
+    slots = _normalize_slots(slots_list)
+    await conn.execute(
+        """INSERT INTO user_schedule_slots(user_id, slots_json)
+           VALUES(?,?)
+           ON CONFLICT(user_id) DO UPDATE SET
+             slots_json=excluded.slots_json""",
+        (user_id, json.dumps(slots, ensure_ascii=False)),
+    )
+    await conn.commit()
+
+
+async def upsert_intake_log(
+    conn: aiosqlite.Connection,
+    user_id: int,
+    date_local: str,
+    slot_id: str,
+    taken_slugs: list[str],
+    skipped_slugs: list[str],
+    note: str = "",
+) -> None:
+    now = utc_now_iso()
+    await conn.execute(
+        """INSERT INTO intake_log(user_id, date_local, slot_id, taken_slugs_json, skipped_slugs_json, note, created_at, updated_at)
+           VALUES(?,?,?,?,?,?,?,?)
+           ON CONFLICT(user_id, date_local, slot_id) DO UPDATE SET
+             taken_slugs_json=excluded.taken_slugs_json,
+             skipped_slugs_json=excluded.skipped_slugs_json,
+             note=excluded.note,
+             updated_at=excluded.updated_at""",
+        (
+            user_id,
+            date_local,
+            slot_id,
+            json.dumps(sorted(set(taken_slugs)), ensure_ascii=False),
+            json.dumps(sorted(set(skipped_slugs)), ensure_ascii=False),
+            note or "",
+            now,
+            now,
+        ),
+    )
+    await conn.commit()
+
+
+async def get_intake_log(conn: aiosqlite.Connection, user_id: int, date_local: str) -> dict[str, dict]:
+    rows = await fetchall(
+        conn,
+        "SELECT * FROM intake_log WHERE user_id=? AND date_local=?",
+        (user_id, date_local),
+    )
+    out: dict[str, dict] = {}
+    for row in rows:
+        try:
+            taken = json.loads(str(row["taken_slugs_json"] or "[]"))
+        except json.JSONDecodeError:
+            taken = []
+        try:
+            skipped = json.loads(str(row["skipped_slugs_json"] or "[]"))
+        except json.JSONDecodeError:
+            skipped = []
+        slot_id = str(row["slot_id"] or "")
+        out[slot_id] = {
+            "id": int(row["id"]),
+            "user_id": int(row["user_id"]),
+            "date_local": str(row["date_local"] or ""),
+            "slot_id": slot_id,
+            "taken_slugs": taken if isinstance(taken, list) else [],
+            "skipped_slugs": skipped if isinstance(skipped, list) else [],
+            "note": str(row["note"] or ""),
+            "created_at": str(row["created_at"] or ""),
+            "updated_at": str(row["updated_at"] or ""),
+        }
+    return out
+
+
+async def get_or_create_intake_log_slot(
+    conn: aiosqlite.Connection,
+    user_id: int,
+    date_local: str,
+    slot_id: str,
+) -> dict:
+    logs = await get_intake_log(conn, user_id, date_local)
+    if slot_id in logs:
+        return logs[slot_id]
+    await upsert_intake_log(conn, user_id, date_local, slot_id, [], [], note="")
+    logs = await get_intake_log(conn, user_id, date_local)
+    return logs.get(slot_id, {
+        "user_id": user_id,
+        "date_local": date_local,
+        "slot_id": slot_id,
+        "taken_slugs": [],
+        "skipped_slugs": [],
+        "note": "",
+        "created_at": "",
+        "updated_at": "",
+    })
+
 
 async def get_catalog_candidates(conn: aiosqlite.Connection, goals: list[str], limit: int = 60) -> list[dict]:
     keywords_map = {

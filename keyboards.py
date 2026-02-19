@@ -48,9 +48,19 @@ def catalog_kb(items: list[dict], page: int, pages: int) -> InlineKeyboardMarkup
 
 def catalog_home() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔎 Поиск", callback_data="cat:search")],
-        [InlineKeyboardButton("🧠 По доказательности", callback_data="cat:mode:evidence")],
-        [InlineKeyboardButton("🎯 По целям/влиянию", callback_data="cat:mode:class")],
+        [
+            InlineKeyboardButton("🔎 Поиск", callback_data="cat:search"),
+            InlineKeyboardButton("🧠 Доказательность", callback_data="cat:mode:evidence"),
+        ],
+        [
+            InlineKeyboardButton("🎯 По целям/влиянию", callback_data="cat:mode:class"),
+            InlineKeyboardButton("🧪 По типу", callback_data="cat:mode:type"),
+        ],
+        [
+            InlineKeyboardButton("🫀 Куда влияет", callback_data="cat:mode:body:benefit"),
+            InlineKeyboardButton("⚠️ Нагрузка", callback_data="cat:mode:body:burden"),
+        ],
+        [InlineKeyboardButton("🧩 По группе", callback_data="cat:mode:group")],
         [InlineKeyboardButton("💊 Мои БАДы", callback_data="menu:my")],
         [InlineKeyboardButton("🧠 Готовые стеки", callback_data="menu:curated")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")],
@@ -87,7 +97,8 @@ def catalog_list(rows, has_prev: bool, has_next: bool) -> InlineKeyboardMarkup:
     btns = []
     for r in rows:
         title = r["name_ru"] or r["name_en"] or r["name"]
-        btns.append([InlineKeyboardButton(f"💊 {title}", callback_data=f"cat:open:{r['id']}")])
+        grade = (r.get("evidence_grade") or "?").strip() if isinstance(r, dict) else "?"
+        btns.append([InlineKeyboardButton(f"• {title} — {grade}", callback_data=f"cat:open:{r['id']}")])
     nav: list[InlineKeyboardButton] = []
     if has_prev:
         nav.append(InlineKeyboardButton("◀️", callback_data="cat:page:prev"))
@@ -95,6 +106,72 @@ def catalog_list(rows, has_prev: bool, has_next: bool) -> InlineKeyboardMarkup:
         nav.append(InlineKeyboardButton("▶️", callback_data="cat:page:next"))
     if nav:
         btns.append(nav)
+    btns.append([InlineKeyboardButton("⬅️ Назад", callback_data="cat:home")])
+    return InlineKeyboardMarkup(btns)
+
+
+def catalog_type_kb() -> InlineKeyboardMarkup:
+    rows = [
+        ("Витамины", "vitamin"),
+        ("Минералы", "mineral"),
+        ("Аминокислоты", "amino_acid"),
+        ("Жирные кислоты", "fatty_acid"),
+        ("Пробиотики", "probiotic"),
+        ("Пребиотики/клетчатка", "prebiotic_fiber"),
+        ("Ферменты", "enzyme"),
+        ("Экстракты растений", "botanical_extract"),
+        ("Грибы", "mushroom"),
+        ("Ноотропы", "nootropic"),
+        ("Спортивные", "ergogenic"),
+        ("Другое", "other"),
+    ]
+    btns = [[InlineKeyboardButton(label, callback_data=f"cat:type:{token}")] for label, token in rows]
+    btns.append([InlineKeyboardButton("⬅️ Назад", callback_data="cat:home")])
+    return InlineKeyboardMarkup(btns)
+
+
+def catalog_body_kb(mode: str) -> InlineKeyboardMarkup:
+    rows = [
+        ("Мозг/ЦНС", "brain_cns"),
+        ("Сердце", "heart_cv"),
+        ("Сосуды/кровь", "vessels_blood"),
+        ("Печень", "liver"),
+        ("Почки", "kidney"),
+        ("ЖКТ", "gut"),
+        ("Глюкоза/инсулин", "pancreas_glucose"),
+        ("Щитовидка", "thyroid"),
+        ("Иммунитет", "immune"),
+        ("Суставы", "joints"),
+        ("Кости", "bone"),
+        ("Мышцы", "muscle"),
+        ("Кожа/волосы", "skin_hair"),
+        ("Гормоны/репродукция", "reproductive_hormones"),
+    ]
+    btns = [[InlineKeyboardButton(label, callback_data=f"cat:body:{mode}:{token}")] for label, token in rows]
+    btns.append([InlineKeyboardButton("⬅️ Назад", callback_data="cat:home")])
+    return InlineKeyboardMarkup(btns)
+
+
+def catalog_group_kb() -> InlineKeyboardMarkup:
+    rows = [
+        ("Адаптогены", "adaptogen"),
+        ("Стимуляторы", "stimulant"),
+        ("Успокаивающее", "calming"),
+        ("Сон", "sleep_aid"),
+        ("Фокус/ноотропы", "nootropic_focus"),
+        ("Стресс/настроение", "mood_stress"),
+        ("Противовоспалительное", "anti_inflammatory"),
+        ("Антиоксиданты", "antioxidant"),
+        ("Сердце", "cardio_support"),
+        ("Глюкоза/метаболизм", "metabolic_glucose"),
+        ("ЖКТ", "gut_support"),
+        ("Иммунитет", "immune_support"),
+        ("Суставы", "joint_support"),
+        ("Кости", "bone_support"),
+        ("Выносливость", "performance_endurance"),
+        ("Восстановление", "recovery_muscle"),
+    ]
+    btns = [[InlineKeyboardButton(label, callback_data=f"cat:group:{token}")] for label, token in rows]
     btns.append([InlineKeyboardButton("⬅️ Назад", callback_data="cat:home")])
     return InlineKeyboardMarkup(btns)
 

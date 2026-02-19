@@ -32,6 +32,9 @@ from keyboards import (
     catalog_list,
     catalog_search_results,
     catalog_class_picker,
+    catalog_type_kb,
+    catalog_body_kb,
+    catalog_group_kb,
     curated_stacks_list,
     curated_stack_card,
     supplement_page,
@@ -128,6 +131,58 @@ def _parse_user_time_input(raw: str) -> str | None:
         if 0 <= hours <= 23 and 0 <= minutes <= 59:
             return f"{hours:02d}:{minutes:02d}"
     return None
+
+
+CATALOG_TYPE_TITLES = {
+    "vitamin": "Витамины",
+    "mineral": "Минералы",
+    "amino_acid": "Аминокислоты",
+    "fatty_acid": "Жирные кислоты",
+    "probiotic": "Пробиотики",
+    "prebiotic_fiber": "Пребиотики/клетчатка",
+    "enzyme": "Ферменты",
+    "botanical_extract": "Экстракты растений",
+    "mushroom": "Грибы",
+    "nootropic": "Ноотропы",
+    "ergogenic": "Спортивные",
+    "other": "Другое",
+}
+
+CATALOG_BODY_TITLES = {
+    "brain_cns": "Мозг/ЦНС",
+    "heart_cv": "Сердце",
+    "vessels_blood": "Сосуды/кровь",
+    "liver": "Печень",
+    "kidney": "Почки",
+    "gut": "ЖКТ",
+    "pancreas_glucose": "Глюкоза/инсулин",
+    "thyroid": "Щитовидка",
+    "immune": "Иммунитет",
+    "joints": "Суставы",
+    "bone": "Кости",
+    "muscle": "Мышцы",
+    "skin_hair": "Кожа/волосы",
+    "reproductive_hormones": "Гормоны/репродукция",
+}
+
+CATALOG_GROUP_TITLES = {
+    "adaptogen": "Адаптогены",
+    "stimulant": "Стимуляторы",
+    "calming": "Успокаивающее",
+    "sleep_aid": "Сон",
+    "nootropic_focus": "Фокус/ноотропы",
+    "mood_stress": "Стресс/настроение",
+    "anti_inflammatory": "Противовоспалительное",
+    "antioxidant": "Антиоксиданты",
+    "cardio_support": "Сердце",
+    "metabolic_glucose": "Глюкоза/метаболизм",
+    "gut_support": "ЖКТ",
+    "immune_support": "Иммунитет",
+    "joint_support": "Суставы",
+    "bone_support": "Кости",
+    "performance_endurance": "Выносливость",
+    "recovery_muscle": "Восстановление",
+}
 
 async def _safe_answer_callback(update: Update) -> None:
     q = update.callback_query
@@ -1659,6 +1714,22 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await _show_catalog_class_picker(update, context, conn, 0)
             return
 
+        if data == "cat:mode:type":
+            await _show_catalog_type_picker(update, context)
+            return
+
+        if data == "cat:mode:body:benefit":
+            await _show_catalog_body_picker(update, context, "benefit")
+            return
+
+        if data == "cat:mode:body:burden":
+            await _show_catalog_body_picker(update, context, "burden")
+            return
+
+        if data == "cat:mode:group":
+            await _show_catalog_group_picker(update, context)
+            return
+
         if data.startswith("cat:class:page:"):
             page = int(data.split(":")[-1])
             await _show_catalog_class_picker(update, context, conn, page)
@@ -1672,6 +1743,54 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "page": 0,
                 "query": "",
                 "class_key": class_key,
+            })
+            return
+
+        if data.startswith("cat:type:"):
+            token = data.split(":", 2)[-1]
+            await _show_catalog_list(update, context, conn, tg_uid, {
+                "mode": "list",
+                "list_mode": "type",
+                "page": 0,
+                "query": "",
+                "class_key": "",
+                "type_token": token,
+            })
+            return
+
+        if data.startswith("cat:body:benefit:"):
+            token = data.split(":", 3)[-1]
+            await _show_catalog_list(update, context, conn, tg_uid, {
+                "mode": "list",
+                "list_mode": "body_benefit",
+                "page": 0,
+                "query": "",
+                "class_key": "",
+                "body_token": token,
+            })
+            return
+
+        if data.startswith("cat:body:burden:"):
+            token = data.split(":", 3)[-1]
+            await _show_catalog_list(update, context, conn, tg_uid, {
+                "mode": "list",
+                "list_mode": "body_burden",
+                "page": 0,
+                "query": "",
+                "class_key": "",
+                "body_token": token,
+            })
+            return
+
+        if data.startswith("cat:group:"):
+            token = data.split(":", 2)[-1]
+            await _show_catalog_list(update, context, conn, tg_uid, {
+                "mode": "list",
+                "list_mode": "group",
+                "page": 0,
+                "query": "",
+                "class_key": "",
+                "group_token": token,
             })
             return
 
@@ -3971,6 +4090,9 @@ async def _load_catalog_payload(conn, tg_uid: int) -> dict:
     payload_data.setdefault("page", 0)
     payload_data.setdefault("query", "")
     payload_data.setdefault("class_key", "")
+    payload_data.setdefault("type_token", "")
+    payload_data.setdefault("body_token", "")
+    payload_data.setdefault("group_token", "")
     return payload_data
 
 async def _show_catalog_class_picker(
@@ -4003,6 +4125,50 @@ async def _show_catalog_class_picker(
         target_message_id=target_message_id,
     )
 
+
+async def _show_catalog_type_picker(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    await show(
+        update,
+        context,
+        "🧪 <b>Каталог — По типу</b>\nВыбери категорию. Дальше покажу список.",
+        catalog_type_kb(),
+        route="cat:mode:type",
+        payload={"mode": "home"},
+    )
+
+
+async def _show_catalog_body_picker(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    mode: str,
+) -> None:
+    title = "Каталог — Куда влияет" if mode == "benefit" else "Каталог — Нагрузка"
+    await show(
+        update,
+        context,
+        f"🫀 <b>{title}</b>\nВыбери категорию. Дальше покажу список.",
+        catalog_body_kb(mode),
+        route=f"cat:mode:body:{mode}",
+        payload={"mode": "home"},
+    )
+
+
+async def _show_catalog_group_picker(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    await show(
+        update,
+        context,
+        "🧩 <b>Каталог — По группе</b>\nВыбери категорию. Дальше покажу список.",
+        catalog_group_kb(),
+        route="cat:mode:group",
+        payload={"mode": "home"},
+    )
+
 async def _show_catalog_list(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -4018,16 +4184,37 @@ async def _show_catalog_list(
     offset = page * CATALOG_PAGE_SIZE
     query = str(payload.get("query") or "").strip()
     class_key = str(payload.get("class_key") or "").strip()
+    type_token = str(payload.get("type_token") or "").strip()
+    body_token = str(payload.get("body_token") or "").strip()
+    group_token = str(payload.get("group_token") or "").strip()
 
     if list_mode == "search":
         rows, total = await db.search_supplements(conn, query, page=page, page_size=CATALOG_PAGE_SIZE)
     elif list_mode == "class":
         total = await db.count_supplements_by_class(conn, class_key)
         rows = await db.list_supplements_by_class(conn, class_key, limit=CATALOG_PAGE_SIZE, offset=offset)
+    elif list_mode == "type":
+        rows = await db.list_supplements_by_type(conn, type_token, limit=CATALOG_PAGE_SIZE + 1, offset=offset)
+        total = offset + len(rows)
+    elif list_mode == "body_benefit":
+        rows = await db.list_supplements_by_body_target(conn, body_token, limit=CATALOG_PAGE_SIZE + 1, offset=offset)
+        total = offset + len(rows)
+    elif list_mode == "body_burden":
+        rows = await db.list_supplements_by_body_burden(conn, body_token, limit=CATALOG_PAGE_SIZE + 1, offset=offset)
+        total = offset + len(rows)
+    elif list_mode == "group":
+        rows = await db.list_supplements_by_functional_group(conn, group_token, limit=CATALOG_PAGE_SIZE + 1, offset=offset)
+        total = offset + len(rows)
     else:
         total = await db.count_supplements(conn)
         rows = await db.list_supplements_sorted(conn, "evidence", limit=CATALOG_PAGE_SIZE, offset=offset)
         list_mode = "evidence"
+
+    if list_mode in {"type", "body_benefit", "body_burden", "group"}:
+        has_next = len(rows) > CATALOG_PAGE_SIZE
+        rows = rows[:CATALOG_PAGE_SIZE]
+    else:
+        has_next = (offset + len(rows)) < total
 
     if not rows:
         if total == 0 and list_mode == "evidence":
@@ -4060,9 +4247,20 @@ async def _show_catalog_list(
         lines.append(f"Поиск: «{query}»")
     elif list_mode == "class":
         lines.append(f"Класс: {rules.get_catalog_class_title(class_key)}")
+    elif list_mode == "type":
+        lines.append(f"По типу: {CATALOG_TYPE_TITLES.get(type_token, type_token or 'Не задано')}")
+    elif list_mode == "body_benefit":
+        lines.append(f"Куда влияет: {CATALOG_BODY_TITLES.get(body_token, body_token or 'Не задано')}")
+    elif list_mode == "body_burden":
+        lines.append(f"Нагрузка: {CATALOG_BODY_TITLES.get(body_token, body_token or 'Не задано')}")
+    elif list_mode == "group":
+        lines.append(f"По группе: {CATALOG_GROUP_TITLES.get(group_token, group_token or 'Не задано')}")
     else:
         lines.append("Сортировка: по доказательности")
-    lines.append(f"Стр. {page + 1} из {total_pages}")
+    if list_mode in {"type", "body_benefit", "body_burden", "group"}:
+        lines.append(f"Показаны первые {CATALOG_PAGE_SIZE if rows else 0}")
+    else:
+        lines.append(f"Стр. {page + 1} из {total_pages}")
 
     await show(
         update,
@@ -4071,7 +4269,7 @@ async def _show_catalog_list(
         catalog_list(
             rows,
             has_prev=page > 0,
-            has_next=(offset + len(rows)) < total,
+            has_next=has_next,
         ),
         route="cat:list",
         payload={
@@ -4080,6 +4278,9 @@ async def _show_catalog_list(
             "page": page,
             "query": query,
             "class_key": class_key,
+            "type_token": type_token,
+            "body_token": body_token,
+            "group_token": group_token,
         },
         target_chat_id=target_chat_id,
         target_message_id=target_message_id,

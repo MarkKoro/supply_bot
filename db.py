@@ -1636,6 +1636,86 @@ async def list_supplements_by_class(
         (like_json, like_plain, like_plain, like_plain, limit, offset),
     )
 
+
+async def list_supplements_by_type(
+    conn: aiosqlite.Connection,
+    sup_type: str,
+    limit: int = 50,
+    offset: int = 0,
+):
+    token = sup_type.strip().lower()
+    if not token:
+        return []
+    like_token = f"% {token} %"
+    return await fetchall(
+        conn,
+        """SELECT * FROM supplements
+           WHERE is_active=1 AND (" " || lower(supplement_type) || " ") LIKE ?
+           ORDER BY name_ru COLLATE NOCASE ASC
+           LIMIT ? OFFSET ?""",
+        (like_token, limit, offset),
+    )
+
+
+async def list_supplements_by_body_target(
+    conn: aiosqlite.Connection,
+    system_token: str,
+    limit: int = 50,
+    offset: int = 0,
+):
+    token = system_token.strip().lower()
+    if not token:
+        return []
+    like_token = f"% {token} %"
+    return await fetchall(
+        conn,
+        """SELECT * FROM supplements
+           WHERE is_active=1 AND (" " || lower(body_targets) || " ") LIKE ?
+           ORDER BY name_ru COLLATE NOCASE ASC
+           LIMIT ? OFFSET ?""",
+        (like_token, limit, offset),
+    )
+
+
+async def list_supplements_by_body_burden(
+    conn: aiosqlite.Connection,
+    system_token: str,
+    limit: int = 50,
+    offset: int = 0,
+):
+    token = system_token.strip().lower()
+    if not token:
+        return []
+    like_token = f"% {token} %"
+    return await fetchall(
+        conn,
+        """SELECT * FROM supplements
+           WHERE is_active=1 AND (" " || lower(body_burdens) || " ") LIKE ?
+           ORDER BY name_ru COLLATE NOCASE ASC
+           LIMIT ? OFFSET ?""",
+        (like_token, limit, offset),
+    )
+
+
+async def list_supplements_by_functional_group(
+    conn: aiosqlite.Connection,
+    group_token: str,
+    limit: int = 50,
+    offset: int = 0,
+):
+    token = group_token.strip().lower()
+    if not token:
+        return []
+    like_token = f"% {token} %"
+    return await fetchall(
+        conn,
+        """SELECT * FROM supplements
+           WHERE is_active=1 AND (" " || lower(functional_groups) || " ") LIKE ?
+           ORDER BY name_ru COLLATE NOCASE ASC
+           LIMIT ? OFFSET ?""",
+        (like_token, limit, offset),
+    )
+
 async def count_supplements(conn: aiosqlite.Connection) -> int:
     row = await fetchone(conn, "SELECT COUNT(*) AS total FROM supplements WHERE is_active=1")
     return int(row["total"] or 0)

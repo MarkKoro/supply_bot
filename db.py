@@ -1738,14 +1738,18 @@ async def list_supplements_sorted(
     offset: int = 0,
 ):
     if sort_key == "alpha":
-        order = "name_ru COLLATE NOCASE"
+        order = "name_ru COLLATE NOCASE ASC, slug COLLATE NOCASE ASC"
     elif sort_key == "effect":
         order = "avg_effect_percent_est DESC, name_ru COLLATE NOCASE"
     else:
         order = "human_trials_count_est DESC, participants_total_est DESC"
     return await fetchall(
         conn,
-        f"SELECT * FROM supplements WHERE is_active=1 ORDER BY {order} LIMIT ? OFFSET ?",
+        f"""SELECT id, slug, name, name_ru, name_en, evidence_grade
+            FROM supplements
+            WHERE is_active=1
+            ORDER BY {order}
+            LIMIT ? OFFSET ?""",
         (limit, offset),
     )
 

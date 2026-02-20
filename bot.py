@@ -2131,7 +2131,13 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
 
         if data == "cat:mode:list":
-            await _show_catalog_alpha_list(update, context, conn, page=0)
+            await _show_catalog_list(update, context, conn, tg_uid, {
+                "mode": "list",
+                "list_mode": "alpha",
+                "page": 0,
+                "query": "",
+                "class_key": "",
+            })
             return
 
         if data.startswith("cat:list:"):
@@ -2139,7 +2145,13 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 page = int(data.split(":")[-1])
             except ValueError:
                 page = 0
-            await _show_catalog_alpha_list(update, context, conn, page=max(page, 0))
+            await _show_catalog_list(update, context, conn, tg_uid, {
+                "mode": "list",
+                "list_mode": "alpha",
+                "page": max(page, 0),
+                "query": "",
+                "class_key": "",
+            })
             return
 
         if data == "cat:mode:class":
@@ -3413,8 +3425,6 @@ async def render_view(
                 mode = payload_data.get("mode") or "home"
                 if mode == "list":
                     await _show_catalog_list(update, context, conn, tg_user_id, payload_data)
-                elif mode == "alpha_list":
-                    await _show_catalog_alpha_list(update, context, conn, page=int(payload_data.get("page") or 0))
                 else:
                     await _show_catalog_home(update, context, conn)
                 return
@@ -3689,7 +3699,21 @@ async def _render_route(
             page = int(parts[2])
         elif isinstance(payload, dict):
             page = int(payload.get("page") or 0)
-        await _show_catalog_alpha_list(update, context, conn, page=page)
+        await _show_catalog_list(
+            update,
+            context,
+            conn,
+            tg_uid,
+            {
+                "mode": "list",
+                "list_mode": "alpha",
+                "page": max(page, 0),
+                "query": "",
+                "class_key": "",
+            },
+            target_chat_id=target_chat_id,
+            target_message_id=target_message_id,
+        )
         return
     if route == "admin:stats":
         await _show_admin_stats(update, context, conn)
@@ -5002,6 +5026,9 @@ async def _show_catalog_list(
     elif list_mode == "class":
         total = await db.count_supplements_by_class(conn, class_key)
         rows = await db.list_supplements_by_class(conn, class_key, limit=CATALOG_PAGE_SIZE, offset=offset)
+    elif list_mode == "alpha":
+        total = await db.count_supplements(conn)
+        rows = await db.list_supplements_sorted(conn, "alpha", limit=CATALOG_PAGE_SIZE, offset=offset)
     elif list_mode == "type":
         rows = await db.list_supplements_by_type(conn, type_token, limit=CATALOG_PAGE_SIZE + 1, offset=offset)
         total = offset + len(rows)
@@ -5026,7 +5053,7 @@ async def _show_catalog_list(
         has_next = (offset + len(rows)) < total
 
     if not rows:
-        if total == 0 and list_mode == "evidence":
+        if total == 0 and list_mode in {"evidence", "alpha"}:
             await show(
                 update,
                 context,
@@ -5051,7 +5078,7 @@ async def _show_catalog_list(
         return
 
     total_pages = max(1, (total + CATALOG_PAGE_SIZE - 1) // CATALOG_PAGE_SIZE)
-    lines = ["📚 <b>Каталог</b>"]
+    lines = ["📄 <b>Список добавок</b>"] if list_mode == "alpha" else ["📚 <b>Каталог</b>"]
     if list_mode == "search":
         lines.append(f"Поиск: «{query}»")
     elif list_mode == "class":
@@ -5064,10 +5091,14 @@ async def _show_catalog_list(
         lines.append(f"Нагрузка: {CATALOG_BODY_TITLES.get(body_token, body_token or 'Не задано')}")
     elif list_mode == "group":
         lines.append(f"По группе: {CATALOG_GROUP_TITLES.get(group_token, group_token or 'Не задано')}")
+    elif list_mode == "alpha":
+        lines.append("Сортировка: по алфавиту")
     else:
         lines.append("Сортировка: по доказательности")
     if list_mode in {"type", "body_benefit", "body_burden", "group"}:
         lines.append(f"Показаны первые {CATALOG_PAGE_SIZE if rows else 0}")
+    elif list_mode == "alpha":
+        lines.append(f"Стр. {page + 1}/{total_pages} • всего {total}")
     else:
         lines.append(f"Стр. {page + 1} из {total_pages}")
 

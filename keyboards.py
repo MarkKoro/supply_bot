@@ -129,7 +129,7 @@ def catalog_home(*, is_admin: bool = False) -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("🧩 По группе", callback_data="cat:mode:group"),
-            InlineKeyboardButton("📃 Список", callback_data="cat:mode:list"),
+            InlineKeyboardButton("📄 Список", callback_data="cat:mode:list"),
         ],
         [
             InlineKeyboardButton("💊 Мои БАДы", callback_data="menu:my"),

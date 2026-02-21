@@ -190,6 +190,7 @@ CREATE TABLE IF NOT EXISTS reminder_fires (
 );
 
 CREATE TABLE IF NOT EXISTS intake_log (
+  -- LEGACY: kept for backward compatibility, do not use for status source of truth.
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   date_local    TEXT NOT NULL,
@@ -241,6 +242,7 @@ CREATE TABLE IF NOT EXISTS user_schedules (
 );
 
 CREATE TABLE IF NOT EXISTS user_intake_log (
+  -- LEGACY: kept for backward compatibility, do not use for status source of truth.
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   supplement_id INTEGER NOT NULL REFERENCES supplements(id) ON DELETE CASCADE,
@@ -2860,14 +2862,8 @@ async def get_today_intake_status(
     supplement_id: int,
     local_date: str,
 ) -> str | None:
-    user_id = await get_or_create_user(conn, tg_user_id)
-    row = await fetchone(
-        conn,
-        """SELECT status FROM user_intake_log
-           WHERE user_id=? AND supplement_id=? AND local_date=?""",
-        (user_id, supplement_id, local_date),
-    )
-    return str(row["status"]) if row else None
+    # LEGACY API: intake status source of truth is supplement_day_state.
+    return await get_day_status(conn, tg_user_id, local_date, supplement_id)
 
 async def set_today_intake_status(
     conn: aiosqlite.Connection,
@@ -2876,23 +2872,69 @@ async def set_today_intake_status(
     local_date: str,
     status: str | None,
 ) -> None:
-    user_id = await get_or_create_user(conn, tg_user_id)
-    if status is None:
+    # LEGACY API: writes are redirected to supplement_day_state only.
+    await set_day_status(conn, tg_user_id, local_date, supplement_id, status)
+
+
+async def set_day_status(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    day: str,
+    supplement_id: int,
+    status: str | None,
+) -> None:
+    if status not in {"taken", "skipped", "none", None}:
+        raise ValueError("status must be one of: taken, skipped, none")
+    normalized = None if status in {None, "none"} else status
+    if normalized is None:
         await conn.execute(
-            "DELETE FROM user_intake_log WHERE user_id=? AND supplement_id=? AND local_date=?",
-            (user_id, supplement_id, local_date),
+            "DELETE FROM supplement_day_state WHERE user_id=? AND supplement_id=? AND day=?",
+            (tg_user_id, supplement_id, day),
         )
         await conn.commit()
         return
     await conn.execute(
-        """INSERT INTO user_intake_log(user_id, supplement_id, local_date, status, updated_at)
-           VALUES(?,?,?,?,?)
-           ON CONFLICT(user_id, supplement_id, local_date) DO UPDATE SET
-             status=excluded.status,
-             updated_at=excluded.updated_at""",
-        (user_id, supplement_id, local_date, status, utc_now_iso()),
+        """INSERT INTO supplement_day_state(user_id, supplement_id, day, status, dose_override)
+           VALUES(?,?,?,?,NULL)
+           ON CONFLICT(user_id, supplement_id, day) DO UPDATE SET
+             status=excluded.status""",
+        (tg_user_id, supplement_id, day, normalized),
     )
     await conn.commit()
+
+
+async def get_day_status(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    day: str,
+    supplement_id: int,
+) -> str | None:
+    row = await fetchone(
+        conn,
+        """SELECT status FROM supplement_day_state
+           WHERE user_id=? AND supplement_id=? AND day=?""",
+        (tg_user_id, supplement_id, day),
+    )
+    return str(row["status"]) if row else None
+
+
+async def get_day_status_map(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    day: str,
+) -> dict[int, str]:
+    rows = await fetchall(
+        conn,
+        "SELECT supplement_id, status FROM supplement_day_state WHERE user_id=? AND day=?",
+        (tg_user_id, day),
+    )
+    out: dict[int, str] = {}
+    for row in rows:
+        sid = int(row["supplement_id"])
+        status = str(row["status"] or "")
+        if status in {"taken", "skipped"}:
+            out[sid] = status
+    return out
 
 async def set_today_status(
     conn: aiosqlite.Connection,
@@ -2901,14 +2943,7 @@ async def set_today_status(
     status: str,
 ) -> None:
     day = await ensure_daily_rollover(conn, tg_user_id)
-    await conn.execute(
-        """INSERT INTO supplement_day_state(user_id, supplement_id, day, status, dose_override)
-           VALUES(?,?,?,?,NULL)
-           ON CONFLICT(user_id, supplement_id, day) DO UPDATE SET
-             status=excluded.status""",
-        (tg_user_id, supplement_id, day, status),
-    )
-    await conn.commit()
+    await set_day_status(conn, tg_user_id, day, supplement_id, status)
 
 async def get_today_status(
     conn: aiosqlite.Connection,
@@ -2916,13 +2951,7 @@ async def get_today_status(
     supplement_id: int,
 ) -> str | None:
     day = await ensure_daily_rollover(conn, tg_user_id)
-    row = await fetchone(
-        conn,
-        """SELECT status FROM supplement_day_state
-           WHERE user_id=? AND supplement_id=? AND day=?""",
-        (tg_user_id, supplement_id, day),
-    )
-    return str(row["status"]) if row else None
+    return await get_day_status(conn, tg_user_id, day, supplement_id)
 
 async def list_supplement_day_states(
     conn: aiosqlite.Connection,
@@ -2948,11 +2977,7 @@ async def clear_today_status(
     supplement_id: int,
 ) -> None:
     day = await ensure_daily_rollover(conn, tg_user_id)
-    await conn.execute(
-        "DELETE FROM supplement_day_state WHERE user_id=? AND supplement_id=? AND day=?",
-        (tg_user_id, supplement_id, day),
-    )
-    await conn.commit()
+    await set_day_status(conn, tg_user_id, day, supplement_id, None)
 
 async def get_user_supp_settings(conn: aiosqlite.Connection, user_id: int, supplement_id: int) -> dict:
     row = await fetchone(

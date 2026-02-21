@@ -48,8 +48,6 @@ from keyboards import (
     ai_checkin_voice_kb,
     today_home_kb,
     today_slots_kb,
-    slot_intake_kb,
-    intake_pick_kb,
     admin_stats_kb,
     admin_stacks_kb,
     admin_stacks_list_kb,
@@ -169,19 +167,64 @@ def _today_date_for_user(tz_name: str | None) -> str:
     return db.get_user_local_date(tz_name or None)
 
 
-def _slot_map(slots: list[dict]) -> dict[str, dict]:
-    out: dict[str, dict] = {}
+def _slot_id_for_item(item: dict, slots: list[dict]) -> str:
+    time_local = str(item.get("time_local") or "").strip()
+    if not time_local:
+        return str(slots[0].get("slot_id") or "morning") if slots else "morning"
+    hhmm = time_local[:5]
+    try:
+        hour = int(hhmm.split(":", 1)[0])
+    except Exception:
+        return str(slots[0].get("slot_id") or "morning") if slots else "morning"
+    if hour < 11:
+        preferred = "morning"
+    elif hour < 16:
+        preferred = "noon"
+    elif hour < 21:
+        preferred = "evening"
+    else:
+        preferred = "night"
+    slot_ids = {str(slot.get("slot_id") or "") for slot in slots}
+    if preferred in slot_ids:
+        return preferred
+    return str(slots[0].get("slot_id") or "morning") if slots else "morning"
+
+
+async def _today_slots_payload(conn, tg_uid: int) -> tuple[str, list[dict]]:
+    user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
+    tz_name = await db.get_user_tz(conn, tg_uid)
+    date_local = _today_date_for_user(tz_name)
+    slots = await db.get_user_slots(conn, user_id)
+    status_map = await db.get_day_status_map(conn, tg_uid, date_local)
+    planned = await db.get_user_base_stack(conn, user_id)
+    grouped: dict[str, list[dict]] = {}
+    for item in planned:
+        slot_id = _slot_id_for_item(item, slots)
+        grouped.setdefault(slot_id, []).append(
+            {
+                "supplement_id": int(item.get("supplement_id") or 0),
+                "ru_name": str(item.get("ru_name") or item.get("slug") or ""),
+                "slug": str(item.get("slug") or ""),
+                "status": status_map.get(int(item.get("supplement_id") or 0), "none"),
+            }
+        )
+    slots_payload: list[dict] = []
     for slot in slots:
-        slot_id = str(slot.get("slot_id") or "").strip()
-        if slot_id:
-            out[slot_id] = slot
-    return out
-
-
-def _planned_counts(planned_items: list[dict], intake_record: dict | None) -> tuple[int, int]:
-    total = len(planned_items)
-    taken = intake_record.get("taken_slugs", []) if isinstance(intake_record, dict) else []
-    return (len(set([str(x) for x in taken if x])), total)
+        if not slot.get("is_enabled", True):
+            continue
+        sid = str(slot.get("slot_id") or "")
+        slot_items = grouped.get(sid, [])
+        slot_items.sort(key=lambda x: x["ru_name"])
+        slots_payload.append(
+            {
+                "slot_id": sid,
+                "title_ru": str(slot.get("title_ru") or "Слот"),
+                "time_local": str(slot.get("time_local") or "--:--"),
+                "is_enabled": bool(slot.get("is_enabled", True)),
+                "items": slot_items,
+            }
+        )
+    return date_local, slots_payload
 
 
 async def _show_today_home(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, tg_uid: int) -> None:
@@ -197,10 +240,7 @@ async def _show_today_home(update: Update, context: ContextTypes.DEFAULT_TYPE, c
 
 
 async def _show_today_slots(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, tg_uid: int) -> None:
-    user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
-    tz_name = await db.get_user_tz(conn, tg_uid)
-    date_local = _today_date_for_user(tz_name)
-    slots = await db.get_user_slots(conn, user_id)
+    date_local, slots = await _today_slots_payload(conn, tg_uid)
     await show(
         update,
         context,
@@ -212,25 +252,7 @@ async def _show_today_slots(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
 
 async def _show_slot_screen(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, tg_uid: int, slot_id: str) -> None:
-    user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
-    tz_name = await db.get_user_tz(conn, tg_uid)
-    date_local = _today_date_for_user(tz_name)
-    slots = await db.get_user_slots(conn, user_id)
-    slot = _slot_map(slots).get(slot_id)
-    if not slot:
-        await _show_today_slots(update, context, conn, tg_uid)
-        return
-    planned = await db.get_user_base_stack(conn, user_id)
-    record = await db.get_or_create_intake_log_slot(conn, user_id, date_local, slot_id)
-    taken_count, total_count = _planned_counts(planned, record)
-    title = str(slot.get("title_ru") or "Слот")
-    tm = str(slot.get("time_local") or "--:--")
-    text = (
-        f"⏱ <b>{title} · {tm}</b>\n\n"
-        f"Запланировано: {total_count}\n"
-        f"Отмечено: {taken_count} / {total_count}"
-    )
-    await show(update, context, text, slot_intake_kb(slot_id, taken_count, total_count), route=f"today:slot:{slot_id}")
+    await _show_today_slots(update, context, conn, tg_uid)
 
 
 
@@ -242,24 +264,7 @@ async def _show_intake_picker(
     slot_id: str,
     page: int,
 ) -> None:
-    user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
-    tz_name = await db.get_user_tz(conn, tg_uid)
-    date_local = _today_date_for_user(tz_name)
-    planned = await db.get_user_base_stack(conn, user_id)
-    key = ("intake_pick", date_local, slot_id)
-    selected = context.user_data.get(key)
-    if not isinstance(selected, set):
-        rec = await db.get_or_create_intake_log_slot(conn, user_id, date_local, slot_id)
-        selected = set(str(x) for x in rec.get("taken_slugs", []) if isinstance(x, str))
-    context.user_data[key] = selected
-    await show(
-        update,
-        context,
-        "🧾 <b>Выбери, что принял</b>",
-        intake_pick_kb(slot_id, planned, selected, page),
-        route=f"intake:pick:{slot_id}:{page}",
-        payload={"slot_id": slot_id, "page": page},
-    )
+    await _show_today_slots(update, context, conn, tg_uid)
 
 
 async def _show_reminders_home(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, tg_uid: int) -> None:
@@ -1927,75 +1932,52 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await _show_slot_screen(update, context, conn, tg_uid, slot_id)
             return
 
-        if data.startswith("intake:all:"):
-            slot_id = data.split(":", 2)[2]
-            user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
+        if data.startswith("today:toggle:"):
+            supplement_id_raw = data.split(":", 2)[2]
+            if not supplement_id_raw.isdigit():
+                await q.answer("Некорректный supplement_id", show_alert=False)
+                return
+            supplement_id = int(supplement_id_raw)
             tz_name = await db.get_user_tz(conn, tg_uid)
             date_local = _today_date_for_user(tz_name)
-            planned = await db.get_user_base_stack(conn, user_id)
-            planned_slugs = [str(item.get("slug") or "") for item in planned if str(item.get("slug") or "")]
-            await db.upsert_intake_log(conn, user_id, date_local, slot_id, planned_slugs, [], note="")
-            await q.answer("Готово. Отмечено: всё.", show_alert=False)
-            await _show_slot_screen(update, context, conn, tg_uid, slot_id)
+            current = await db.get_day_status(conn, tg_uid, date_local, supplement_id)
+            if current == "taken":
+                next_status = "skipped"
+                msg = "Отмечено: пропущено"
+            elif current == "skipped":
+                next_status = "none"
+                msg = "Статус сброшен"
+            else:
+                next_status = "taken"
+                msg = "Отмечено: принято"
+            await db.set_day_status(conn, tg_uid, date_local, supplement_id, next_status)
+            await q.answer(msg, show_alert=False)
+            await _show_today_slots(update, context, conn, tg_uid)
+            return
+
+        if data.startswith("intake:all:"):
+            await q.answer("Используй переключатели статуса в списке Сегодня.", show_alert=False)
+            await _show_today_slots(update, context, conn, tg_uid)
             return
 
         if data.startswith("intake:skip:"):
-            slot_id = data.split(":", 2)[2]
-            user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
-            tz_name = await db.get_user_tz(conn, tg_uid)
-            date_local = _today_date_for_user(tz_name)
-            planned = await db.get_user_base_stack(conn, user_id)
-            planned_slugs = [str(item.get("slug") or "") for item in planned if str(item.get("slug") or "")]
-            await db.upsert_intake_log(conn, user_id, date_local, slot_id, [], planned_slugs, note="")
-            await q.answer("Ок. На этот слот отмечено: пропуск.", show_alert=False)
+            await q.answer("Используй переключатели статуса в списке Сегодня.", show_alert=False)
             await _show_today_slots(update, context, conn, tg_uid)
             return
 
         if data.startswith("intake:pick:"):
-            parts = data.split(":")
-            slot_id = parts[2]
-            page = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
-            await _show_intake_picker(update, context, conn, tg_uid, slot_id, page)
+            await q.answer("Используй переключатели статуса в списке Сегодня.", show_alert=False)
+            await _show_today_slots(update, context, conn, tg_uid)
             return
 
         if data.startswith("intake:toggle:"):
-            parts = data.split(":")
-            slot_id = parts[2]
-            slug = parts[3]
-            page = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 0
-            user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
-            tz_name = await db.get_user_tz(conn, tg_uid)
-            date_local = _today_date_for_user(tz_name)
-            key = ("intake_pick", date_local, slot_id)
-            selected = context.user_data.get(key)
-            if not isinstance(selected, set):
-                rec = await db.get_or_create_intake_log_slot(conn, user_id, date_local, slot_id)
-                selected = set(str(x) for x in rec.get("taken_slugs", []) if isinstance(x, str))
-            if slug in selected:
-                selected.remove(slug)
-            else:
-                selected.add(slug)
-            context.user_data[key] = selected
-            await _show_intake_picker(update, context, conn, tg_uid, slot_id, page)
+            await q.answer("Используй переключатели статуса в списке Сегодня.", show_alert=False)
+            await _show_today_slots(update, context, conn, tg_uid)
             return
 
         if data.startswith("intake:save:"):
-            parts = data.split(":")
-            slot_id = parts[2]
-            user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
-            tz_name = await db.get_user_tz(conn, tg_uid)
-            date_local = _today_date_for_user(tz_name)
-            planned = await db.get_user_base_stack(conn, user_id)
-            planned_slugs = [str(item.get("slug") or "") for item in planned if str(item.get("slug") or "")]
-            key = ("intake_pick", date_local, slot_id)
-            selected = context.user_data.get(key)
-            if not isinstance(selected, set):
-                selected = set()
-            taken = sorted(set([slug for slug in planned_slugs if slug in selected]))
-            skipped = sorted(set([slug for slug in planned_slugs if slug not in selected]))
-            await db.upsert_intake_log(conn, user_id, date_local, slot_id, taken, skipped, note="")
-            await q.answer(f"Сохранено: {len(taken)} из {len(planned_slugs)}.", show_alert=False)
-            await _show_slot_screen(update, context, conn, tg_uid, slot_id)
+            await q.answer("Используй переключатели статуса в списке Сегодня.", show_alert=False)
+            await _show_today_slots(update, context, conn, tg_uid)
             return
 
         if data == "rem:home":

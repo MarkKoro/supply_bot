@@ -26,18 +26,26 @@ def today_home_kb(slots: list[dict]) -> InlineKeyboardMarkup:
 
 def today_slots_kb(slots: list[dict], date_local: str) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
-    pair: list[InlineKeyboardButton] = []
     for slot in slots:
         if not slot.get("is_enabled", True):
             continue
         title = str(slot.get("title_ru") or "Слот")
         time_local = str(slot.get("time_local") or "--:--")
-        pair.append(InlineKeyboardButton(f"{title} · {time_local}", callback_data=f"today:slot:{slot.get('slot_id') or ''}"))
-        if len(pair) == 2:
-            rows.append(pair)
-            pair = []
-    if pair:
-        rows.append(pair)
+        rows.append([InlineKeyboardButton(f"{title} · {time_local}", callback_data="noop")])
+        for item in slot.get("items", []):
+            sid = int(item.get("supplement_id") or 0)
+            name = str(item.get("ru_name") or item.get("slug") or f"ID {sid}")
+            current = str(item.get("status") or "none")
+            if current == "taken":
+                action = "⏭️"
+                marker = "✅"
+            elif current == "skipped":
+                action = "↩️"
+                marker = "⏭️"
+            else:
+                action = "✅"
+                marker = "⚪"
+            rows.append([InlineKeyboardButton(f"{action} {name} {marker}", callback_data=f"today:toggle:{sid}")])
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="today:home")])
     return InlineKeyboardMarkup(rows)
 

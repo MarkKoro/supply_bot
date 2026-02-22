@@ -238,6 +238,7 @@ CREATE TABLE IF NOT EXISTS user_schedules (
   user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   supplement_id INTEGER NOT NULL REFERENCES supplements(id) ON DELETE CASCADE,
   time_hhmm     TEXT,
+  slot_id       TEXT,
   is_enabled    INTEGER NOT NULL DEFAULT 1,
   UNIQUE(user_id, supplement_id)
 );
@@ -494,6 +495,7 @@ async def _ensure_aliases_table(conn: aiosqlite.Connection) -> None:
         await conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_alias_unique_norm ON supplement_aliases(supplement_id, alias_norm)"
         )
+        await conn.execute("UPDATE user_schedules SET slot_id='morning' WHERE slot_id IS NULL OR slot_id=''")
         return
 
     await _ensure_column(conn, "supplement_aliases", "alias_raw", "TEXT")
@@ -606,13 +608,23 @@ async def _ensure_user_schedules(conn: aiosqlite.Connection) -> None:
               user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
               supplement_id INTEGER NOT NULL REFERENCES supplements(id) ON DELETE CASCADE,
               time_hhmm     TEXT,
+              slot_id       TEXT,
               is_enabled    INTEGER NOT NULL DEFAULT 1,
               UNIQUE(user_id, supplement_id)
             )"""
         )
+        await conn.execute(
+            "UPDATE user_schedules SET slot_id='morning' WHERE slot_id IS NULL OR slot_id=''"
+        )
         return
 
     await _ensure_column(conn, "user_schedules", "time_hhmm", "TEXT")
+    cols = await _table_columns(conn, "user_schedules")
+    if "slot_id" not in cols:
+        await conn.execute("ALTER TABLE user_schedules ADD COLUMN slot_id TEXT")
+    await conn.execute(
+        "UPDATE user_schedules SET slot_id='morning' WHERE slot_id IS NULL OR slot_id=''"
+    )
     await _ensure_column(conn, "user_schedules", "is_enabled", "INTEGER NOT NULL DEFAULT 1")
     await conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_user_schedules_unique ON user_schedules(user_id, supplement_id)"
@@ -1482,7 +1494,10 @@ def _normalize_slots(slots_list: list[dict] | None) -> list[dict]:
             }
         )
         seen.add(slot_id)
-    return out or default_user_slots()
+    if not out:
+        return default_user_slots()
+    out.sort(key=lambda item: str(item.get("time_local") or "99:99"))
+    return out
 
 def next_run_datetime_for_hhmm(hhmm: str, tz_name: str | None) -> datetime:
     tzinfo = parse_utc_tz(tz_name)
@@ -2599,6 +2614,15 @@ async def add_user_supplement(conn: aiosqlite.Connection, tg_user_id: int, suppl
            ) VALUES(?,?,?,?,?,?,?,?)""",
         (user_id, supplement_id, "", "", 0, "", "", utc_now_iso()),
     )
+    await conn.execute(
+        """INSERT OR IGNORE INTO user_schedules(user_id, supplement_id, time_hhmm, slot_id, is_enabled)
+           VALUES(?, ?, NULL, 'morning', 1)""",
+        (user_id, supplement_id),
+    )
+    await conn.execute(
+        "UPDATE user_schedules SET slot_id='morning' WHERE user_id=? AND supplement_id=? AND (slot_id IS NULL OR slot_id='')",
+        (user_id, supplement_id),
+    )
     await conn.commit()
 
 async def add_user_supp(conn: aiosqlite.Connection, user_id: int, supplement_id: int) -> None:
@@ -3020,12 +3044,16 @@ async def set_user_schedule_time(
 ) -> None:
     user_id = await get_or_create_user(conn, tg_user_id)
     await conn.execute(
-        """INSERT INTO user_schedules(user_id, supplement_id, time_hhmm, is_enabled)
-           VALUES(?,?,?,?)
+        """INSERT INTO user_schedules(user_id, supplement_id, time_hhmm, slot_id, is_enabled)
+           VALUES(?,?,?,?,?)
            ON CONFLICT(user_id, supplement_id) DO UPDATE SET
              time_hhmm=excluded.time_hhmm,
              is_enabled=excluded.is_enabled""",
-        (user_id, supplement_id, time_hhmm, 1 if time_hhmm else 0),
+        (user_id, supplement_id, time_hhmm, "morning", 1 if time_hhmm else 0),
+    )
+    await conn.execute(
+        "UPDATE user_schedules SET slot_id='morning' WHERE user_id=? AND supplement_id=? AND (slot_id IS NULL OR slot_id='')",
+        (user_id, supplement_id),
     )
     await conn.commit()
 
@@ -3056,24 +3084,7 @@ async def set_day_status(
     supplement_id: int,
     status: str | None,
 ) -> None:
-    if status not in {"taken", "skipped", "none", None}:
-        raise ValueError("status must be one of: taken, skipped, none")
-    normalized = None if status in {None, "none"} else status
-    if normalized is None:
-        await conn.execute(
-            "DELETE FROM supplement_day_state WHERE user_id=? AND supplement_id=? AND day=?",
-            (tg_user_id, supplement_id, day),
-        )
-        await conn.commit()
-        return
-    await conn.execute(
-        """INSERT INTO supplement_day_state(user_id, supplement_id, day, status, dose_override)
-           VALUES(?,?,?,?,NULL)
-           ON CONFLICT(user_id, supplement_id, day) DO UPDATE SET
-             status=excluded.status""",
-        (tg_user_id, supplement_id, day, normalized),
-    )
-    await conn.commit()
+    await set_day_state(conn, tg_user_id, day, supplement_id, status or "none")
 
 
 async def get_day_status(
@@ -3082,13 +3093,8 @@ async def get_day_status(
     day: str,
     supplement_id: int,
 ) -> str | None:
-    row = await fetchone(
-        conn,
-        """SELECT status FROM supplement_day_state
-           WHERE user_id=? AND supplement_id=? AND day=?""",
-        (tg_user_id, supplement_id, day),
-    )
-    return str(row["status"]) if row else None
+    state_map = await get_day_state_map(conn, tg_user_id, day)
+    return state_map.get(int(supplement_id))
 
 
 async def get_day_status_map(
@@ -3096,10 +3102,45 @@ async def get_day_status_map(
     tg_user_id: int,
     day: str,
 ) -> dict[int, str]:
+    return await get_day_state_map(conn, tg_user_id, day)
+
+
+async def set_day_state(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    local_date: str,
+    supplement_id: int,
+    status: str,
+) -> None:
+    if status not in {"taken", "skipped", "none"}:
+        raise ValueError("status must be one of: taken, skipped, none")
+    user_id = await get_or_create_user(conn, tg_user_id)
+    if status == "none":
+        await conn.execute(
+            "DELETE FROM supplement_day_state WHERE user_id=? AND day=? AND supplement_id=?",
+            (user_id, local_date, supplement_id),
+        )
+        await conn.commit()
+        return
+    await conn.execute(
+        """INSERT INTO supplement_day_state(user_id, day, supplement_id, status)
+           VALUES(?,?,?,?)
+           ON CONFLICT(user_id, supplement_id, day) DO UPDATE SET status=excluded.status""",
+        (user_id, local_date, supplement_id, status),
+    )
+    await conn.commit()
+
+
+async def get_day_state_map(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    local_date: str,
+) -> dict[int, str]:
+    user_id = await get_or_create_user(conn, tg_user_id)
     rows = await fetchall(
         conn,
         "SELECT supplement_id, status FROM supplement_day_state WHERE user_id=? AND day=?",
-        (tg_user_id, day),
+        (user_id, local_date),
     )
     out: dict[int, str] = {}
     for row in rows:
@@ -3141,7 +3182,8 @@ async def list_supplement_day_states(
         f"WHERE user_id=? AND supplement_id IN ({placeholders}) AND day>=? AND day<=? "
         "ORDER BY day"
     )
-    params = [tg_user_id, *supplement_ids, start_day, end_day]
+    user_id = await get_or_create_user(conn, tg_user_id)
+    params = [user_id, *supplement_ids, start_day, end_day]
     return await fetchall(conn, query, tuple(params))
 
 async def clear_today_status(
@@ -3355,7 +3397,7 @@ async def list_day_plan_history(
            JOIN supplements s ON s.id=dpi.supplement_id
            JOIN users u ON u.id=dpi.user_id
            LEFT JOIN supplement_day_state sds
-             ON sds.user_id=u.tg_user_id AND sds.supplement_id=dpi.supplement_id AND sds.day=dpi.date_local
+             ON sds.user_id=u.id AND sds.supplement_id=dpi.supplement_id AND sds.day=dpi.date_local
            WHERE dpi.user_id=? AND dpi.date_local>=? AND dpi.date_local<=?
            ORDER BY dpi.date_local DESC, dpi.id DESC
            LIMIT ?""",
@@ -3367,7 +3409,7 @@ async def get_user_base_stack(conn: aiosqlite.Connection, user_id: int) -> list[
         conn,
         """SELECT us.supplement_id, us.dose_text,
                   s.slug, s.name_ru, s.name_en, s.name,
-                  sch.time_hhmm
+                  sch.time_hhmm, sch.slot_id
            FROM user_supplements us
            JOIN supplements s ON s.id=us.supplement_id
            LEFT JOIN user_schedules sch ON sch.user_id=us.user_id AND sch.supplement_id=us.supplement_id
@@ -3385,9 +3427,62 @@ async def get_user_base_stack(conn: aiosqlite.Connection, user_id: int) -> list[
                 "ru_name": name_ru,
                 "dose_text": str(row["dose_text"] or "").strip(),
                 "time_local": str(row["time_hhmm"] or "").strip(),
+                "slot_id": str(row["slot_id"] or "").strip(),
             }
         )
     return items
+
+
+async def get_today_plan_groups(conn: aiosqlite.Connection, tg_user_id: int, local_date: str) -> list[dict]:
+    user_id = await get_or_create_user(conn, tg_user_id)
+    slots = await get_user_slots(conn, user_id)
+    slots_by_id = {str(s.get("slot_id") or ""): s for s in slots}
+    slot_title_by_time = {
+        str(s.get("time_local") or ""): str(s.get("title_ru") or "Слот")
+        for s in slots
+    }
+    rows = await fetchall(
+        conn,
+        """SELECT us.supplement_id,
+                  COALESCE(NULLIF(uss.dose_text,''), us.dose_text, '') AS dose_text,
+                  s.slug, COALESCE(NULLIF(s.name_ru,''), NULLIF(s.name_en,''), s.name) AS name_ru,
+                  sch.slot_id, sch.time_hhmm
+           FROM user_supplements us
+           JOIN supplements s ON s.id=us.supplement_id
+           LEFT JOIN user_supp_settings uss ON uss.user_id=us.user_id AND uss.supplement_id=us.supplement_id
+           LEFT JOIN user_schedules sch ON sch.user_id=us.user_id AND sch.supplement_id=us.supplement_id
+           WHERE us.user_id=? AND us.is_active=1
+           ORDER BY s.name_ru, s.name, us.supplement_id""",
+        (user_id,),
+    )
+    by_time: dict[str, dict] = {}
+    for row in rows:
+        item_slot_id = str(row["slot_id"] or "").strip() or "morning"
+        slot_info = slots_by_id.get(item_slot_id) or (slots[0] if slots else {"slot_id": "morning", "title_ru": "Утро", "time_local": "08:30"})
+        effective_time = str(row["time_hhmm"] or "").strip() or str(slot_info.get("time_local") or "08:30")
+        if not re.match(r"^([01]\d|2[0-3]):[0-5]\d$", effective_time):
+            effective_time = str(slot_info.get("time_local") or "08:30")
+        group = by_time.setdefault(
+            effective_time,
+            {
+                "slot_id": str(slot_info.get("slot_id") or item_slot_id),
+                "title": slot_title_by_time.get(effective_time, effective_time),
+                "time": effective_time,
+                "items": [],
+            },
+        )
+        group["items"].append(
+            {
+                "supplement_id": int(row["supplement_id"]),
+                "slug": str(row["slug"] or "").strip(),
+                "name_ru": str(row["name_ru"] or "").strip(),
+                "dose_text": str(row["dose_text"] or "").strip(),
+            }
+        )
+    out = sorted(by_time.values(), key=lambda g: str(g.get("time") or "99:99"))
+    for group in out:
+        group["items"].sort(key=lambda item: (str(item.get("name_ru") or ""), int(item.get("supplement_id") or 0)))
+    return out
 
 async def get_user_slots(conn: aiosqlite.Connection, user_id: int) -> list[dict]:
     row = await fetchone(

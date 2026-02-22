@@ -81,6 +81,8 @@ async def _auth_user_id(init_data: str) -> int:
 
 
 async def _premium_guard(tg_user_id: int) -> bool:
+    if tg_user_id in s.ADMIN_IDS:
+        return True
     conn = await db.connect(s.DB_PATH)
     try:
         return await db.is_premium_active(conn, tg_user_id)
@@ -126,8 +128,8 @@ async def api_me(x_telegram_init_data: str = Header(default="", alias="X-Telegra
     tg_user_id = await _auth_user_id(x_telegram_init_data)
     conn = await db.connect(s.DB_PATH)
     try:
-        premium = await db.is_premium_active(conn, tg_user_id)
-        premium_until = await db.get_premium_until(conn, tg_user_id)
+        premium = tg_user_id in s.ADMIN_IDS or await db.is_premium_active(conn, tg_user_id)
+        premium_until = None if tg_user_id in s.ADMIN_IDS else await db.get_premium_until(conn, tg_user_id)
     finally:
         await conn.close()
     return JSONResponse({"ok": True, "premium": premium, "premium_until_utc": premium_until, "plans": _plans_payload()})

@@ -1470,6 +1470,8 @@ async def _show_premium_hub(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 async def require_premium_or_upsell(update: Update, context: ContextTypes.DEFAULT_TYPE, feature_name: str) -> bool:
     s = context.application.bot_data["settings"]
     tg_uid = update.effective_user.id if update.effective_user else 0
+    if tg_uid in s.ADMIN_IDS:
+        return True
     conn = await db.connect(s.DB_PATH)
     try:
         active = await db.is_premium_active(conn, tg_uid)

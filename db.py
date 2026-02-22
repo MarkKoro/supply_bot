@@ -3737,6 +3737,134 @@ async def get_today_plan_groups(conn: aiosqlite.Connection, tg_user_id: int, loc
         group["items"].sort(key=lambda item: (str(item.get("name_ru") or ""), int(item.get("supplement_id") or 0)))
     return out
 
+
+BODY_MAP_SYSTEM_KEYS = [
+    "brain", "heart", "liver", "kidney", "gut", "lungs", "thyroid", "pancreas",
+    "joints", "muscle", "bone", "skin", "immune", "blood", "endocrine",
+]
+
+
+def _is_endocrine_like(system_raw: str) -> bool:
+    value = (system_raw or "").strip().lower()
+    return any(token in value for token in ("hormon", "endocr", "adrenal", "insulin", "thyroid", "pancrea", "testoster", "estrogen", "cortisol"))
+
+
+def _body_map_system_key(system_raw: str | None) -> str | None:
+    system = str(system_raw or "").strip().lower()
+    if not system:
+        return None
+    if system in BODY_MAP_SYSTEM_KEYS:
+        return system
+    aliases = {
+        "stomach": "gut",
+        "intestine": "gut",
+        "kidneys": "kidney",
+        "cns": "brain",
+    }
+    if system in aliases:
+        return aliases[system]
+    if _is_endocrine_like(system):
+        return "endocrine"
+    return None
+
+
+async def get_today_supplement_ids(conn: aiosqlite.Connection, tg_user_id: int, local_date: str) -> list[int]:
+    groups = await get_today_plan_groups(conn, tg_user_id, local_date)
+    ids: set[int] = set()
+    for group in groups:
+        for item in list(group.get("items") or []):
+            sid = int(item.get("supplement_id") or 0)
+            if sid > 0:
+                ids.add(sid)
+    return sorted(ids)
+
+
+async def body_map_aggregate(conn: aiosqlite.Connection, tg_user_id: int, local_date: str) -> dict:
+    await get_or_create_user(conn, tg_user_id)
+    ids = await get_today_supplement_ids(conn, tg_user_id, local_date)
+    systems = {
+        key: {
+            "benefit_count": 0,
+            "burden_count": 0,
+            "benefit_strength_sum": 0,
+            "burden_strength_sum": 0,
+            "top": [],
+        }
+        for key in BODY_MAP_SYSTEM_KEYS
+    }
+    if not ids:
+        return {"day": local_date, "systems": systems, "max_count": 0}
+
+    placeholders = ",".join("?" for _ in ids)
+    rows = await fetchall(
+        conn,
+        f"""SELECT id, slug, COALESCE(NULLIF(name_ru,''), NULLIF(name_en,''), name) AS title, body_effects_json
+            FROM supplements
+            WHERE id IN ({placeholders})""",
+        tuple(ids),
+    )
+    for row in rows:
+        sid = int(row["id"] or 0)
+        slug = str(row["slug"] or "").strip()
+        title = str(row["title"] or "").strip()
+        raw_effects = row["body_effects_json"]
+        try:
+            effects = json.loads(raw_effects or "[]")
+            if not isinstance(effects, list):
+                effects = []
+        except Exception:
+            effects = []
+
+        for effect in effects:
+            if not isinstance(effect, dict):
+                continue
+            system_key = _body_map_system_key(effect.get("system"))
+            if not system_key:
+                continue
+            direction = str(effect.get("direction") or "").strip().lower()
+            try:
+                strength = int(effect.get("strength") or 0)
+            except Exception:
+                strength = 0
+            if strength < 0:
+                strength = 0
+
+            entry = systems[system_key]
+            if direction in {"benefit", "mixed"}:
+                entry["benefit_count"] += 1
+                entry["benefit_strength_sum"] += strength
+            if direction in {"burden", "mixed"}:
+                entry["burden_count"] += 1
+                entry["burden_strength_sum"] += strength
+            if direction not in {"benefit", "burden", "mixed"}:
+                continue
+            entry["top"].append(
+                {
+                    "supplement_id": sid,
+                    "slug": slug,
+                    "name_ru": title,
+                    "direction": direction,
+                    "strength": strength,
+                }
+            )
+
+    max_count = 0
+    for key in BODY_MAP_SYSTEM_KEYS:
+        top = systems[key]["top"]
+        top.sort(
+            key=lambda item: (
+                0 if item.get("direction") == "burden" else 1,
+                -(int(item.get("strength") or 0)),
+                str(item.get("name_ru") or ""),
+            )
+        )
+        systems[key]["top"] = top[:12]
+        total = int(systems[key]["benefit_count"] or 0) + int(systems[key]["burden_count"] or 0)
+        if total > max_count:
+            max_count = total
+
+    return {"day": local_date, "systems": systems, "max_count": max_count}
+
 async def get_user_slots(conn: aiosqlite.Connection, user_id: int) -> list[dict]:
     rows = await fetchall(
         conn,

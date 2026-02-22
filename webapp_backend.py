@@ -211,6 +211,23 @@ async def api_today_toggle(body: TodayToggleBody, x_telegram_init_data: str = He
 
 
 
+
+
+@app.get("/api/body_map")
+async def api_body_map(x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    if not await _premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
+
+    conn = await db.connect(s.DB_PATH)
+    try:
+        tz_name = await db.get_user_tz(conn, tg_user_id)
+        day = db.get_user_local_date(tz_name or None)
+        payload = await db.body_map_aggregate(conn, tg_user_id, day)
+    finally:
+        await conn.close()
+    return JSONResponse({"ok": True, **payload})
+
 @app.get("/api/catalog")
 async def api_catalog(
     q: str = "",

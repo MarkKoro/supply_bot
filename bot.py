@@ -8,9 +8,9 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, Update
 from telegram.ext import (
-    Application, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters
+    Application, CommandHandler, CallbackQueryHandler, MessageHandler, PreCheckoutQueryHandler, ContextTypes, filters
 )
 
 from settings import get_settings
@@ -52,6 +52,9 @@ from keyboards import (
     today_home_kb,
     today_slots_kb,
     slot_intake_kb,
+    premium_plans_kb,
+    premium_methods_kb,
+    premium_upsell_kb,
     intake_pick_kb,
     admin_stats_kb,
     admin_stacks_kb,
@@ -1439,6 +1442,158 @@ async def home(
         target_message_id=target_message_id,
     )
 
+def _premium_plans_payload(s) -> list[dict]:
+    labels = {"m1": "1 месяц", "m3": "3 месяца", "m6": "6 месяцев", "m12": "12 месяцев"}
+    plans: list[dict] = []
+    for plan_id, months in s.PREMIUM_PLANS.items():
+        rub_kop = int(s.PREMIUM_PRICES_RUB.get(plan_id, 0) or 0)
+        stars = int(s.PREMIUM_PRICES_STARS.get(plan_id, 0) or 0)
+        title = f"{labels.get(plan_id, plan_id)}"
+        if rub_kop > 0:
+            title += f" · {rub_kop / 100:.0f} ₽"
+        if stars > 0:
+            title += f" / {stars}⭐"
+        plans.append({"plan_id": plan_id, "months": int(months), "title": title})
+    return plans
+
+
+async def _show_premium_hub(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    s = context.application.bot_data["settings"]
+    plans = _premium_plans_payload(s)
+    text = (
+        "⭐ <b>Premium</b>\n\n"
+        "Открывает WebApp, AI check-in и расширенные функции.\n"
+        "Выбери тариф:"
+    )
+    await show(update, context, text, premium_plans_kb(plans), route="menu:premium")
+
+
+async def require_premium_or_upsell(update: Update, context: ContextTypes.DEFAULT_TYPE, feature_name: str) -> bool:
+    s = context.application.bot_data["settings"]
+    tg_uid = update.effective_user.id if update.effective_user else 0
+    conn = await db.connect(s.DB_PATH)
+    try:
+        active = await db.is_premium_active(conn, tg_uid)
+    finally:
+        await conn.close()
+    if active:
+        return True
+    await show(
+        update,
+        context,
+        f"🔒 <b>{feature_name}</b> доступно только с Premium.",
+        premium_upsell_kb(),
+        route="menu:premium_required",
+    )
+    return False
+
+
+async def _send_subscription_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE, plan_id: str, method: str) -> None:
+    s = context.application.bot_data["settings"]
+    chat_id = update.effective_chat.id if update.effective_chat else (update.effective_user.id if update.effective_user else 0)
+    if plan_id not in s.PREMIUM_PLANS:
+        await show(update, context, "Неизвестный тариф.", premium_upsell_kb(), route="menu:premium")
+        return
+    nonce = int(time.time())
+    payload = f"sub:{plan_id}:{method}:{nonce}"
+    if method == "stars":
+        if not s.BILLING_ENABLED_STARS:
+            await show(update, context, "Оплата Stars сейчас недоступна.", premium_upsell_kb(), route="menu:premium")
+            return
+        amount = int(s.PREMIUM_PRICES_STARS.get(plan_id, 0) or 0)
+        await context.bot.send_invoice(
+            chat_id=chat_id,
+            title="Premium подписка",
+            description="Доступ к WebApp + AI + расширенным функциям",
+            payload=payload,
+            provider_token="",
+            currency="XTR",
+            prices=[LabeledPrice(label="Premium", amount=amount)],
+            need_shipping_address=False,
+            is_flexible=False,
+        )
+        return
+    if method == "yookassa":
+        if not s.BILLING_ENABLED_RUB or not s.YOOKASSA_PROVIDER_TOKEN:
+            await show(update, context, "Оплата картой временно недоступна.", premium_upsell_kb(), route="menu:premium")
+            return
+        amount = int(s.PREMIUM_PRICES_RUB.get(plan_id, 0) or 0)
+        await context.bot.send_invoice(
+            chat_id=chat_id,
+            title="Premium подписка",
+            description="Доступ к WebApp + AI + расширенным функциям",
+            payload=payload,
+            provider_token=s.YOOKASSA_PROVIDER_TOKEN,
+            currency="RUB",
+            prices=[LabeledPrice(label="Premium", amount=amount)],
+            need_shipping_address=False,
+            is_flexible=False,
+        )
+        return
+    await show(update, context, "Неизвестный метод оплаты.", premium_upsell_kb(), route="menu:premium")
+
+
+async def premium_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _show_premium_hub(update, context)
+
+
+async def on_precheckout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.pre_checkout_query
+    if not query:
+        return
+    payload = str(query.invoice_payload or "")
+    if not payload.startswith("sub:"):
+        await query.answer(ok=False, error_message="Некорректный payload")
+        return
+    await query.answer(ok=True)
+
+
+async def on_success_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    msg = update.effective_message
+    if not msg or not msg.successful_payment or not update.effective_user:
+        return
+    sp = msg.successful_payment
+    payload = str(sp.invoice_payload or "")
+    parts = payload.split(":")
+    if len(parts) < 4 or parts[0] != "sub":
+        return
+    plan_id = parts[1]
+    method = parts[2]
+    s = context.application.bot_data["settings"]
+    months = int(s.PREMIUM_PLANS.get(plan_id, 0) or 0)
+    if months <= 0:
+        await msg.reply_text("Не удалось определить тариф для активации.")
+        return
+    conn = await db.connect(s.DB_PATH)
+    try:
+        is_new = await db.log_payment_paid(
+            conn,
+            update.effective_user.id,
+            provider=method,
+            currency=str(sp.currency or ""),
+            amount=int(sp.total_amount or 0),
+            payload=payload,
+            telegram_payment_charge_id=sp.telegram_payment_charge_id,
+            provider_payment_charge_id=sp.provider_payment_charge_id,
+        )
+        if not is_new:
+            await msg.reply_text("Оплата уже учтена ✅")
+            return
+        until_iso = await db.extend_premium(conn, update.effective_user.id, months, source=method, plan_id=plan_id)
+    finally:
+        await conn.close()
+
+    s2 = context.application.bot_data["settings"]
+    rows = []
+    if s2.WEBAPP_URL:
+        rows.append([InlineKeyboardButton("🔓 Открыть WebApp", url=s2.WEBAPP_URL)])
+    rows.append([InlineKeyboardButton("⭐ Премиум", callback_data="menu:premium")])
+    await msg.reply_text(
+        f"Оплата прошла успешно! Premium активен до: {until_iso}",
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
+
+
 def _home_text() -> str:
     return (
         "💊 <b>Supply Bot</b>\n\n"
@@ -1724,6 +1879,52 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "⚙️ <b>Настройки</b>",
                 settings_menu(),
                 route="menu:settings",
+            )
+            return
+        if data == "menu:premium":
+            await _show_premium_hub(update, context)
+            return
+        if data == "premium:about":
+            await show(
+                update,
+                context,
+                "⭐ <b>Что входит в Premium</b>\n\n• Полный доступ к WebApp\n• AI check-in\n• Расширенные функции",
+                premium_upsell_kb(),
+                route="menu:premium",
+            )
+            return
+        if data.startswith("premium:plan:"):
+            plan_id = data.split(":", 2)[2]
+            s_cfg = context.application.bot_data["settings"]
+            await show(
+                update,
+                context,
+                "Выбери способ оплаты:",
+                premium_methods_kb(plan_id, s_cfg.BILLING_ENABLED_STARS, s_cfg.BILLING_ENABLED_RUB),
+                route="menu:premium",
+            )
+            return
+        if data.startswith("premium:buy:"):
+            _, _, plan_id, method = data.split(":", 3)
+            await _send_subscription_invoice(update, context, plan_id, method)
+            return
+        if data == "menu:webapp":
+            ok = await require_premium_or_upsell(update, context, "WebApp")
+            if not ok:
+                return
+            s_cfg = context.application.bot_data["settings"]
+            if not s_cfg.WEBAPP_URL:
+                await show(update, context, "WEBAPP_URL не настроен.", premium_upsell_kb(), route="menu:premium")
+                return
+            await show(
+                update,
+                context,
+                "WebApp разблокирован ✅",
+                InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔓 Открыть WebApp", url=s_cfg.WEBAPP_URL)],
+                    [InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")],
+                ]),
+                route="menu:webapp",
             )
             return
         if data == "settings:initial_pick":
@@ -2917,6 +3118,9 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
 
         if data == "menu:checkin_ai":
+            allowed = await require_premium_or_upsell(update, context, "AI check-in")
+            if not allowed:
+                return
             context.user_data.pop(WAITING_KEY, None)
             await _render_ai_checkin_entry(update, context)
             return
@@ -3017,6 +3221,9 @@ async def on_noop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await _safe_answer_callback(update)
 
 async def on_ai_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    allowed = await require_premium_or_upsell(update, context, "AI check-in")
+    if not allowed:
+        return
     q = update.callback_query
     if not q:
         return
@@ -4824,6 +5031,7 @@ async def _bootstrap() -> Application:
     app.bot_data["render_route"] = _render_route
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("premium", premium_command))
     app.add_handler(CallbackQueryHandler(
         on_menu,
         pattern=r"^(main$|menu:|settings:|schedule:|supplement:|admin:|add_pick:|compat_pick:|cat:|curated:|supp:|card:|mysupp:|today:|intake:|rem:(home|edit|set:|toggle:))",
@@ -4834,6 +5042,8 @@ async def _bootstrap() -> Application:
     app.add_handler(CallbackQueryHandler(on_timezone, pattern=r"^tz:"))
     app.add_handler(CallbackQueryHandler(on_reminder_action, pattern=r"^rem:(done|skip|snooze|done_all|skip_all|snooze_all)"))
     app.add_handler(MessageHandler(filters.VOICE, on_voice))
+    app.add_handler(PreCheckoutQueryHandler(on_precheckout))
+    app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, on_success_payment))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_error_handler(on_error)
     app.job_queue.run_repeating(reminders_tick, interval=60, first=5, name="reminders_tick")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 import os
+import json
 from dataclasses import dataclass
 from dotenv import load_dotenv
 
@@ -20,6 +21,13 @@ class Settings:
     AI_MAX_PER_DAY: int
     DEBUG: bool
     ADMIN_IDS: list[int]
+    WEBAPP_URL: str
+    YOOKASSA_PROVIDER_TOKEN: str
+    BILLING_ENABLED_RUB: bool
+    BILLING_ENABLED_STARS: bool
+    PREMIUM_PRICES_RUB: dict[str, int]
+    PREMIUM_PRICES_STARS: dict[str, int]
+    PREMIUM_PLANS: dict[str, int]
 
 def _parse_admin_ids(value: str) -> list[int]:
     ids: list[int] = []
@@ -36,10 +44,54 @@ def _parse_admin_ids(value: str) -> list[int]:
 def _parse_bool(value: str) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
+
+def _parse_prices_map(value: str, fallback: dict[str, int]) -> dict[str, int]:
+    raw = (value or "").strip()
+    if not raw:
+        return dict(fallback)
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return dict(fallback)
+    if not isinstance(parsed, dict):
+        return dict(fallback)
+    out: dict[str, int] = {}
+    for key, amount in parsed.items():
+        k = str(key).strip()
+        if not k:
+            continue
+        try:
+            val = int(amount)
+        except Exception:
+            continue
+        if val > 0:
+            out[k] = val
+    return out or dict(fallback)
+
 def get_settings() -> Settings:
     tg = os.getenv("TG_TOKEN", "").strip()
     if not tg:
         raise RuntimeError("TG_TOKEN is missing in .env")
+
+    premium_prices_rub_default = {
+        "m1": 20000,
+        "m3": 54000,
+        "m6": 96000,
+        "m12": 168000,
+    }
+    premium_prices_stars_default = {
+        "m1": 250,
+        "m3": 650,
+        "m6": 1200,
+        "m12": 2000,
+    }
+    premium_plans_default = {
+        "m1": 1,
+        "m3": 3,
+        "m6": 6,
+        "m12": 12,
+    }
+    yookassa_provider_token = os.getenv("YOOKASSA_PROVIDER_TOKEN", "").strip()
 
     return Settings(
         TG_TOKEN=tg,
@@ -64,4 +116,11 @@ def get_settings() -> Settings:
         AI_MAX_PER_DAY=int(os.getenv("AI_MAX_PER_DAY", "1").strip()),
         DEBUG=_parse_bool(os.getenv("DEBUG", "")),
         ADMIN_IDS=_parse_admin_ids(os.getenv("ADMIN_IDS", "")),
+        WEBAPP_URL=os.getenv("WEBAPP_URL", "").strip(),
+        YOOKASSA_PROVIDER_TOKEN=yookassa_provider_token,
+        BILLING_ENABLED_RUB=_parse_bool(os.getenv("BILLING_ENABLED_RUB", "1" if yookassa_provider_token else "0")),
+        BILLING_ENABLED_STARS=_parse_bool(os.getenv("BILLING_ENABLED_STARS", "1")),
+        PREMIUM_PRICES_RUB=_parse_prices_map(os.getenv("PREMIUM_PRICES_RUB", ""), premium_prices_rub_default),
+        PREMIUM_PRICES_STARS=_parse_prices_map(os.getenv("PREMIUM_PRICES_STARS", ""), premium_prices_stars_default),
+        PREMIUM_PLANS=_parse_prices_map(os.getenv("PREMIUM_PLANS", ""), premium_plans_default),
     )

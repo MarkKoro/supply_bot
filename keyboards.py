@@ -27,25 +27,14 @@ def today_home_kb(slots: list[dict]) -> InlineKeyboardMarkup:
 def today_slots_kb(slots: list[dict], date_local: str) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     for slot in slots:
-        if not slot.get("is_enabled", True):
-            continue
-        title = str(slot.get("title_ru") or "Слот")
-        time_local = str(slot.get("time_local") or "--:--")
-        rows.append([InlineKeyboardButton(f"{title} · {time_local}", callback_data="noop")])
-        for item in slot.get("items", []):
-            sid = int(item.get("supplement_id") or 0)
-            name = str(item.get("ru_name") or item.get("slug") or f"ID {sid}")
-            current = str(item.get("status") or "none")
-            if current == "taken":
-                action = "⏭️"
-                marker = "✅"
-            elif current == "skipped":
-                action = "↩️"
-                marker = "⏭️"
-            else:
-                action = "✅"
-                marker = "⚪"
-            rows.append([InlineKeyboardButton(f"{action} {name} {marker}", callback_data=f"today:toggle:{sid}")])
+        title = str(slot.get("title") or slot.get("title_ru") or "Слот")
+        time_local = str(slot.get("time") or slot.get("time_local") or "--:--")
+        slot_id = str(slot.get("slot_id") or "")
+        taken = int(slot.get("taken") or 0)
+        skipped = int(slot.get("skipped") or 0)
+        total = int(slot.get("total") or 0)
+        rows.append([InlineKeyboardButton(f"{title} · {time_local}", callback_data=f"today:slot:{slot_id}")])
+        rows.append([InlineKeyboardButton(f"✅ {taken}/{total} · ⛔ {skipped}", callback_data=f"today:slot:{slot_id}")])
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="today:home")])
     return InlineKeyboardMarkup(rows)
 
@@ -69,10 +58,10 @@ def intake_pick_kb(slot_id: str, items: list[dict], selected_set: set[str], page
     page_items = items[start:end]
     rows: list[list[InlineKeyboardButton]] = []
     for item in page_items:
-        slug = str(item.get("slug") or "")
-        title = str(item.get("ru_name") or item.get("name_ru") or item.get("name") or slug)
-        mark = "☑️" if slug in selected_set else "⬜"
-        rows.append([InlineKeyboardButton(f"{mark} {title}", callback_data=f"intake:toggle:{slot_id}:{slug}:{safe_page}")])
+        supplement_id = int(item.get("supplement_id") or 0)
+        title = str(item.get("ru_name") or item.get("name_ru") or item.get("name") or item.get("slug") or f"ID {supplement_id}")
+        mark = "☑️" if str(supplement_id) in selected_set else "⬜"
+        rows.append([InlineKeyboardButton(f"{mark} {title}", callback_data=f"intake:toggle:{slot_id}:{supplement_id}:{safe_page}")])
 
     nav: list[InlineKeyboardButton] = []
     if safe_page > 0:

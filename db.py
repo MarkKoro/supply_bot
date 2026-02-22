@@ -2680,6 +2680,176 @@ async def list_linked_supplements(conn: aiosqlite.Connection, ids: list[int]) ->
     by_id = {int(row["id"]): dict(row) for row in rows}
     return [by_id[item] for item in cleaned if item in by_id]
 
+
+def _catalog_where_clause(
+    q: str | None,
+    evidence: list[str] | None,
+    targets: list[str] | None,
+    burdens: list[str] | None,
+) -> tuple[str, list]:
+    clauses = ["s.is_active=1"]
+    params: list = []
+
+    qn = normalize_text(q)
+    if qn:
+        clauses.append("s.search_blob LIKE ?")
+        params.append(f"%{qn}%")
+
+    evidence_clean = [str(item or "").strip().upper() for item in (evidence or [])]
+    evidence_clean = [item for item in evidence_clean if item in {"A", "B", "C", "D"}]
+    if evidence_clean:
+        placeholders = ",".join(["?"] * len(evidence_clean))
+        clauses.append(f"UPPER(COALESCE(s.evidence_grade, '')) IN ({placeholders})")
+        params.extend(evidence_clean)
+
+    targets_clean = [normalize_text(item) for item in (targets or []) if str(item or "").strip()]
+    if targets_clean:
+        target_parts: list[str] = []
+        for token in targets_clean:
+            target_parts.append("(LOWER(COALESCE(s.body_targets_json, '')) LIKE ? OR LOWER(COALESCE(s.tags_json, '')) LIKE ? OR LOWER(COALESCE(s.goals, '')) LIKE ? OR LOWER(COALESCE(s.rules_tags, '')) LIKE ?)")
+            params.extend([f'%"{token}"%', f'%"{token}"%', f"%{token}%", f"%{token}%"])
+        clauses.append(f"({' OR '.join(target_parts)})")
+
+    burdens_clean = [normalize_text(item) for item in (burdens or []) if str(item or "").strip()]
+    if burdens_clean:
+        burden_parts: list[str] = []
+        for token in burdens_clean:
+            burden_parts.append("LOWER(COALESCE(s.body_burdens_json, '')) LIKE ?")
+            params.append(f'%"{token}"%')
+        clauses.append(f"({' OR '.join(burden_parts)})")
+
+    return " AND ".join(clauses), params
+
+
+def _catalog_order_by(sort: str | None) -> str:
+    alpha = "COALESCE(NULLIF(s.name_ru, ''), NULLIF(s.name_en, ''), s.name) COLLATE NOCASE, s.id"
+    key = str(sort or "").strip().lower()
+    if key == "evidence":
+        return (
+            "CASE UPPER(COALESCE(s.evidence_grade, '')) "
+            "WHEN 'A' THEN 1 WHEN 'B' THEN 2 WHEN 'C' THEN 3 WHEN 'D' THEN 4 ELSE 5 END, "
+            f"{alpha}"
+        )
+    if key == "effect":
+        return (
+            "CAST(COALESCE(NULLIF(s.avg_effect_percent_est, ''), '0') AS REAL) DESC, "
+            f"{alpha}"
+        )
+    if key == "trials":
+        return (
+            "CAST(COALESCE(NULLIF(s.human_trials_count_est, ''), '0') AS INTEGER) DESC, "
+            "CAST(COALESCE(NULLIF(s.participants_total_est, ''), '0') AS INTEGER) DESC, "
+            f"{alpha}"
+        )
+    return alpha
+
+
+async def catalog_search(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    q: str | None,
+    evidence: list[str] | None,
+    targets: list[str] | None,
+    burdens: list[str] | None,
+    sort: str | None,
+    page: int,
+    page_size: int,
+) -> dict:
+    user_id = await get_or_create_user(conn, tg_user_id)
+    page = max(int(page), 0)
+    page_size = max(1, min(int(page_size), 100))
+    offset = page * page_size
+
+    where_sql, where_params = _catalog_where_clause(q, evidence, targets, burdens)
+    total_row = await fetchone(
+        conn,
+        f"SELECT COUNT(*) AS total FROM supplements s WHERE {where_sql}",
+        tuple(where_params),
+    )
+    total = int(total_row["total"] or 0) if total_row else 0
+
+    order_sql = _catalog_order_by(sort)
+    rows = await fetchall(
+        conn,
+        f"""SELECT s.id,
+                   s.slug,
+                   COALESCE(NULLIF(s.name_ru, ''), NULLIF(s.name_en, ''), s.name) AS name_ru,
+                   COALESCE(NULLIF(s.name_en, ''), s.name) AS name_en,
+                   COALESCE(s.evidence_grade, '') AS evidence_grade,
+                   COALESCE(s.confidence, '') AS confidence,
+                   us.supplement_id AS in_stack_id,
+                   CASE WHEN COALESCE(TRIM(s.purchase_url), '') <> '' THEN 1 ELSE 0 END AS has_purchase
+            FROM supplements s
+            LEFT JOIN user_supplements us
+              ON us.user_id=? AND us.supplement_id=s.id
+            WHERE {where_sql}
+            ORDER BY {order_sql}
+            LIMIT ? OFFSET ?""",
+        (user_id, *where_params, page_size, offset),
+    )
+    items = []
+    for row in rows:
+        items.append(
+            {
+                "id": int(row["id"]),
+                "slug": str(row["slug"] or ""),
+                "name_ru": str(row["name_ru"] or ""),
+                "name_en": str(row["name_en"] or ""),
+                "evidence_grade": str(row["evidence_grade"] or ""),
+                "confidence": str(row["confidence"] or ""),
+                "in_stack": row["in_stack_id"] is not None,
+                "has_purchase": bool(int(row["has_purchase"] or 0)),
+            }
+        )
+    return {"items": items, "total": total, "page": page, "page_size": page_size}
+
+
+async def get_supplement_detail_for_user(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    slug: str,
+) -> dict | None:
+    user_id = await get_or_create_user(conn, tg_user_id)
+    row = await fetchone(
+        conn,
+        """SELECT s.id, s.slug, s.name_ru, s.name_en, s.name,
+                  s.evidence_grade, s.confidence,
+                  s.summary_verified, s.summary_theoretical,
+                  s.molecular_mechanisms,
+                  s.dose_ru, s.timing_ru, s.safety_ru,
+                  s.purchase_url,
+                  s.tags_json, s.body_targets_json, s.body_burdens_json,
+                  s.body_effects_json,
+                  us.supplement_id AS in_stack_id
+           FROM supplements s
+           LEFT JOIN user_supplements us ON us.user_id=? AND us.supplement_id=s.id
+           WHERE s.slug=? AND s.is_active=1
+           LIMIT 1""",
+        (user_id, slug),
+    )
+    if not row:
+        return None
+    return {
+        "id": int(row["id"]),
+        "slug": str(row["slug"] or ""),
+        "name_ru": str(row["name_ru"] or row["name_en"] or row["name"] or ""),
+        "name_en": str(row["name_en"] or row["name"] or ""),
+        "evidence_grade": str(row["evidence_grade"] or ""),
+        "confidence": str(row["confidence"] or ""),
+        "summary_verified": str(row["summary_verified"] or ""),
+        "summary_theoretical": str(row["summary_theoretical"] or ""),
+        "molecular_mechanisms": str(row["molecular_mechanisms"] or ""),
+        "dose_ru": str(row["dose_ru"] or ""),
+        "timing_ru": str(row["timing_ru"] or ""),
+        "safety_ru": str(row["safety_ru"] or ""),
+        "purchase_url": str(row["purchase_url"] or ""),
+        "tags_json": str(row["tags_json"] or "[]"),
+        "body_targets_json": str(row["body_targets_json"] or "[]"),
+        "body_burdens_json": str(row["body_burdens_json"] or "[]"),
+        "body_effects_json": str(row["body_effects_json"] or "[]"),
+        "in_stack": row["in_stack_id"] is not None,
+    }
+
 # user library
 async def add_user_supplement(conn: aiosqlite.Connection, tg_user_id: int, supplement_id: int) -> None:
     user_id = await get_or_create_user(conn, tg_user_id)

@@ -1181,10 +1181,9 @@ async def _finalize_ai_checkin(
     }
     await db.upsert_daily_checkin(
         conn,
-        user_id=user_id,
-        date_local=day,
-        tz_name=tz_name,
-        answers={
+        tg_uid,
+        day,
+        {
             "sleep_range": answers.get("sleep_range"),
             "energy": answers.get("energy"),
             "stress": answers.get("stress"),

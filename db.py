@@ -215,6 +215,9 @@ CREATE TABLE IF NOT EXISTS daily_checkins (
   date_local    TEXT NOT NULL,
   tz_name       TEXT NOT NULL,
   answers_json  TEXT NOT NULL,
+  ai_prompt_hash TEXT,
+  ai_raw_json   TEXT,
+  applied_json  TEXT,
   created_at_utc TEXT NOT NULL,
   UNIQUE(user_id, date_local)
 );
@@ -838,6 +841,9 @@ async def _rebuild_daily_checkins_table(conn: aiosqlite.Connection) -> None:
     tz_expr = _pick_expr("tz_name", [], "'UTC'")
     answers_expr = _pick_expr("answers_json", ["payload_json"], "'{}'")
     created_expr = _pick_expr("created_at_utc", ["created_at"], "datetime('now')")
+    prompt_hash_expr = _pick_expr("ai_prompt_hash", [], "''")
+    ai_raw_expr = _pick_expr("ai_raw_json", [], "''")
+    applied_expr = _pick_expr("applied_json", [], "''")
 
     await conn.execute("DROP TABLE IF EXISTS daily_checkins__new")
     await conn.execute(
@@ -847,16 +853,22 @@ async def _rebuild_daily_checkins_table(conn: aiosqlite.Connection) -> None:
           date_local    TEXT NOT NULL,
           tz_name       TEXT NOT NULL,
           answers_json  TEXT NOT NULL,
+          ai_prompt_hash TEXT,
+          ai_raw_json   TEXT,
+          applied_json  TEXT,
           created_at_utc TEXT NOT NULL,
           UNIQUE(user_id, date_local)
         )"""
     )
     await conn.execute(
-        f"""INSERT INTO daily_checkins__new(user_id, date_local, tz_name, answers_json, created_at_utc)
+        f"""INSERT INTO daily_checkins__new(user_id, date_local, tz_name, answers_json, ai_prompt_hash, ai_raw_json, applied_json, created_at_utc)
            SELECT user_id,
                   {date_expr} AS date_local,
                   {tz_expr} AS tz_name,
                   {answers_expr} AS answers_json,
+                  {prompt_hash_expr} AS ai_prompt_hash,
+                  {ai_raw_expr} AS ai_raw_json,
+                  {applied_expr} AS applied_json,
                   {created_expr} AS created_at_utc
            FROM daily_checkins"""
     )
@@ -876,6 +888,9 @@ async def _ensure_daily_checkins(conn: aiosqlite.Connection) -> None:
               date_local    TEXT NOT NULL,
               tz_name       TEXT NOT NULL,
               answers_json  TEXT NOT NULL,
+              ai_prompt_hash TEXT,
+              ai_raw_json   TEXT,
+              applied_json  TEXT,
               created_at_utc TEXT NOT NULL,
               UNIQUE(user_id, date_local)
             )"""
@@ -884,6 +899,9 @@ async def _ensure_daily_checkins(conn: aiosqlite.Connection) -> None:
     await _ensure_column(conn, "daily_checkins", "date_local", "TEXT NOT NULL DEFAULT ''")
     await _ensure_column(conn, "daily_checkins", "tz_name", "TEXT NOT NULL DEFAULT ''")
     await _ensure_column(conn, "daily_checkins", "answers_json", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "daily_checkins", "ai_prompt_hash", "TEXT")
+    await _ensure_column(conn, "daily_checkins", "ai_raw_json", "TEXT")
+    await _ensure_column(conn, "daily_checkins", "applied_json", "TEXT")
     await _ensure_column(conn, "daily_checkins", "created_at_utc", "TEXT NOT NULL DEFAULT ''")
     cols = await fetchall(conn, "PRAGMA table_info(daily_checkins)")
     col_names = {c["name"] for c in cols}
@@ -3584,14 +3602,10 @@ async def get_user_by_tg_id(conn: aiosqlite.Connection, tg_id: int) -> dict | No
     row = await fetchone(conn, "SELECT * FROM users WHERE tg_user_id=?", (tg_id,))
     return dict(row) if row else None
 
-async def upsert_daily_checkin(
-    conn: aiosqlite.Connection,
-    *,
-    user_id: int,
-    date_local: str,
-    tz_name: str,
-    answers: dict,
-) -> None:
+async def upsert_daily_checkin(conn: aiosqlite.Connection, tg_user_id: int, local_date: str, answers: dict) -> int:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    tz_name = await get_user_tz(conn, int(tg_user_id)) or "UTC"
+    now = utc_now_iso()
     await conn.execute(
         """INSERT INTO daily_checkins(user_id, date_local, tz_name, answers_json, created_at_utc)
            VALUES(?,?,?,?,?)
@@ -3599,15 +3613,181 @@ async def upsert_daily_checkin(
              tz_name=excluded.tz_name,
              answers_json=excluded.answers_json,
              created_at_utc=excluded.created_at_utc""",
+        (user_id, local_date, tz_name, json.dumps(answers, ensure_ascii=False), now),
+    )
+    row = await fetchone(
+        conn,
+        "SELECT id FROM daily_checkins WHERE user_id=? AND date_local=?",
+        (user_id, local_date),
+    )
+    await conn.commit()
+    return int(row["id"]) if row else 0
+
+
+
+async def save_ai_result(
+    conn: aiosqlite.Connection,
+    checkin_id: int,
+    ai_raw_json: dict | list,
+    prompt_hash: str,
+) -> None:
+    await conn.execute(
+        """UPDATE daily_checkins
+           SET ai_raw_json=?, ai_prompt_hash=?
+           WHERE id=?""",
         (
-            user_id,
-            date_local,
-            tz_name,
-            json.dumps(answers, ensure_ascii=False),
-            utc_now_iso(),
+            json.dumps(ai_raw_json, ensure_ascii=False),
+            (prompt_hash or "").strip(),
+            int(checkin_id),
         ),
     )
     await conn.commit()
+
+
+async def apply_ai_plan_items(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    local_date: str,
+    selected: list[dict],
+) -> None:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    now = utc_now_iso()
+    applied_min: list[dict] = []
+    for item in list(selected or []):
+        supplement_id = int(item.get("supplement_id") or 0)
+        if supplement_id <= 0:
+            continue
+        action = str(item.get("action") or "add").strip().lower()
+        if action not in {"add", "remove", "adjust"}:
+            action = "add"
+        reason = str(item.get("reason") or "").strip()
+        await conn.execute(
+            """INSERT INTO day_plan_items(
+                 user_id, date_local, supplement_id, action, reason, source, created_at_utc
+               ) VALUES(?,?,?,?,?,?,?)
+               ON CONFLICT(user_id, date_local, supplement_id, action) DO UPDATE SET
+                 reason=excluded.reason,
+                 source='ai',
+                 created_at_utc=excluded.created_at_utc""",
+            (user_id, local_date, supplement_id, action, reason, "ai", now),
+        )
+        suggested_time = _normalize_hhmm(item.get("suggested_time")) if item.get("suggested_time") else None
+        slot_id = str(item.get("slot_id") or "").strip() or None
+        if action == "add":
+            if slot_id:
+                await set_schedule_slot(conn, user_id, supplement_id, slot_id)
+            if suggested_time:
+                await set_schedule_time_override(conn, user_id, supplement_id, suggested_time)
+        applied_min.append(
+            {
+                "supplement_id": supplement_id,
+                "action": action,
+                "slot_id": slot_id,
+                "suggested_time": suggested_time,
+            }
+        )
+
+    row = await fetchone(
+        conn,
+        "SELECT id FROM daily_checkins WHERE user_id=? AND date_local=? ORDER BY id DESC LIMIT 1",
+        (user_id, local_date),
+    )
+    if row:
+        await conn.execute(
+            "UPDATE daily_checkins SET applied_json=? WHERE id=?",
+            (json.dumps(applied_min, ensure_ascii=False), int(row["id"])),
+        )
+    await conn.commit()
+
+
+async def build_ai_context_compact(conn: aiosqlite.Connection, tg_user_id: int, local_date: str) -> dict:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    stack_rows = await fetchall(
+        conn,
+        """SELECT s.slug, COALESCE(NULLIF(s.name_ru,''), NULLIF(s.name_en,''), s.name) AS name_ru,
+                  sch.slot_id, sch.time_hhmm
+           FROM user_supplements us
+           JOIN supplements s ON s.id=us.supplement_id
+           LEFT JOIN user_schedules sch
+             ON sch.user_id=us.user_id AND sch.supplement_id=us.supplement_id
+           WHERE us.user_id=? AND us.is_active=1
+           ORDER BY s.name
+           LIMIT 60""",
+        (user_id,),
+    )
+    stack = [
+        {
+            "slug": str(r["slug"] or ""),
+            "name": str(r["name_ru"] or ""),
+            "slot_id": str(r["slot_id"] or "") or None,
+            "time_override": _normalize_hhmm(r["time_hhmm"]) if r["time_hhmm"] else None,
+        }
+        for r in stack_rows
+    ]
+
+    end = datetime.strptime(local_date, "%Y-%m-%d").date()
+    start = end - timedelta(days=6)
+    rows = await fetchall(
+        conn,
+        """SELECT date_local, ai_raw_json, answers_json
+           FROM daily_checkins
+           WHERE user_id=? AND date_local>=? AND date_local<=?
+           ORDER BY date_local DESC
+           LIMIT 7""",
+        (user_id, start.isoformat(), end.isoformat()),
+    )
+    last7 = []
+    for r in rows:
+        day = str(r["date_local"] or "")
+        status_rows = await fetchall(
+            conn,
+            "SELECT status FROM supplement_day_state WHERE user_id=? AND day=?",
+            (user_id, day),
+        )
+        total = len(status_rows)
+        taken = sum(1 for x in status_rows if str(x["status"] or "") == "taken")
+        adherence_pct = int(round((taken / total) * 100)) if total else 0
+        ai_added = []
+        try:
+            raw = json.loads(r["ai_raw_json"] or "[]")
+            for it in list(raw or []):
+                if str(it.get("action") or "add") == "add" and it.get("slug"):
+                    ai_added.append(str(it.get("slug")))
+        except Exception:
+            pass
+        notes_short = ""
+        try:
+            ans = json.loads(r["answers_json"] or "{}")
+            notes_short = str(ans.get("note") or "").strip()[:120]
+        except Exception:
+            pass
+        last7.append({"date": day, "adherence_pct": adherence_pct, "ai_added": ai_added[:6], "notes_short": notes_short})
+
+    burdens = await body_map_aggregate(conn, int(tg_user_id), local_date)
+    systems = burdens.get("systems") if isinstance(burdens, dict) else {}
+    burden_out = {
+        "liver": int((systems or {}).get("liver", {}).get("burden_count", 0) or 0),
+        "kidney": int((systems or {}).get("kidney", {}).get("burden_count", 0) or 0),
+        "gut": int((systems or {}).get("gut", {}).get("burden_count", 0) or 0),
+    }
+
+    return {"date": local_date, "stack": stack, "last7": last7, "burdens": burden_out}
+
+
+async def get_daily_checkin_by_id(conn: aiosqlite.Connection, checkin_id: int, tg_user_id: int) -> dict | None:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    row = await fetchone(conn, "SELECT * FROM daily_checkins WHERE id=? AND user_id=?", (int(checkin_id), user_id))
+    return dict(row) if row else None
+
+
+async def get_today_checkin(conn: aiosqlite.Connection, tg_user_id: int, local_date: str) -> dict | None:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    row = await fetchone(
+        conn,
+        "SELECT * FROM daily_checkins WHERE user_id=? AND date_local=? ORDER BY id DESC LIMIT 1",
+        (user_id, local_date),
+    )
+    return dict(row) if row else None
 
 async def list_recent_checkins(conn: aiosqlite.Connection, user_id: int, limit: int = 3):
     return await fetchall(

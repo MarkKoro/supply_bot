@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 
@@ -9,6 +10,7 @@ from pydantic import BaseModel
 from telegram_webapp_auth import verify_init_data
 import db
 from settings import get_settings
+from openai_client import OpenAIConfig, _sync_call
 
 BASE_DIR = Path(__file__).resolve().parent
 WEBAPP_DIR = BASE_DIR / "webapp"
@@ -51,6 +53,16 @@ class BillingInvoiceBody(BaseModel):
 class CatalogToggleBody(BaseModel):
     supplement_id: int
     action: str
+
+
+class CheckinBody(BaseModel):
+    answers: dict
+
+
+class CheckinApplyBody(BaseModel):
+    checkin_id: int
+    selected_ids: list[int] = []
+    mode: str
 
 
 async def _auth_user_id(init_data: str) -> int:
@@ -366,3 +378,166 @@ async def api_schedule_set(body: ScheduleSetBody, x_telegram_init_data: str = He
     finally:
         await conn.close()
     return JSONResponse({"ok": True})
+
+
+def _validate_answers(payload: dict) -> dict:
+    energy = str(payload.get("energy") or "").strip().lower()
+    sleep = str(payload.get("sleep") or "").strip().lower()
+    stress = str(payload.get("stress") or "").strip().lower()
+    training = str(payload.get("training") or "").strip().lower()
+    goals = [str(x).strip().lower() for x in list(payload.get("goals") or []) if str(x).strip()]
+    note = str(payload.get("note") or "").strip()[:280]
+    if energy not in {"low", "ok", "high"}:
+        raise HTTPException(status_code=400, detail="invalid energy")
+    if sleep not in {"poor", "ok", "great"}:
+        raise HTTPException(status_code=400, detail="invalid sleep")
+    if stress not in {"low", "medium", "high"}:
+        raise HTTPException(status_code=400, detail="invalid stress")
+    if training not in {"none", "light", "hard"}:
+        raise HTTPException(status_code=400, detail="invalid training")
+    allowed_goals = {"brain", "mood", "sleep", "recovery", "gut", "immune", "joints", "performance"}
+    goals = [g for g in goals if g in allowed_goals][:8]
+    return {"energy": energy, "sleep": sleep, "stress": stress, "training": training, "goals": goals, "note": note}
+
+
+def _prompt_hash(answers: dict, ctx: dict) -> str:
+    raw = json.dumps({"answers": answers, "ctx": ctx}, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+async def _ai_recommendations(answers: dict, ctx: dict) -> tuple[list[dict], dict]:
+    if not s.OPENAI_API_KEY:
+        raise RuntimeError("AI_UNAVAILABLE")
+    cfg = OpenAIConfig(api_key=s.OPENAI_API_KEY, model=s.OPENAI_MODEL or "gpt-4o-mini")
+    instructions = (
+        "Ты ассистент по БАДам. Верни строго JSON-массив, без markdown и лишнего текста. "
+        "Формат каждого элемента: action, slug, name_ru, reason_ru, priority, suggested_time, suggested_slot_id. "
+        "action только add/remove/adjust. priority только 1..3. "
+        "Консервативный стиль, без медицинских заявлений и без рецептурных препаратов."
+    )
+    prompt = json.dumps({"answers": answers, "context": ctx}, ensure_ascii=False)
+    text = await __import__('asyncio').to_thread(_sync_call, cfg, instructions=instructions, input_text=prompt, max_output_tokens=800, timeout_s=20)
+    data = json.loads(text)
+    if not isinstance(data, list):
+        raise RuntimeError("AI_BAD_FORMAT")
+    return data, {"model": cfg.model}
+
+
+async def _normalize_recommendations(conn, recs: list[dict]) -> list[dict]:
+    out = []
+    for item in recs:
+        slug = str(item.get("slug") or "").strip().lower()
+        if not slug:
+            continue
+        row = await db.fetchone(conn, "SELECT id, COALESCE(NULLIF(name_ru,''), NULLIF(name_en,''), name) AS name_ru, slug FROM supplements WHERE slug=?", (slug,))
+        if not row:
+            continue
+        action = str(item.get("action") or "add").strip().lower()
+        if action not in {"add", "remove", "adjust"}:
+            action = "add"
+        suggested_time = str(item.get("suggested_time") or "").strip() or None
+        suggested_slot_id = str(item.get("suggested_slot_id") or "").strip() or None
+        out.append({
+            "action": action,
+            "slug": str(row["slug"]),
+            "name_ru": str(item.get("name_ru") or row["name_ru"] or ""),
+            "reason": str(item.get("reason_ru") or "").strip(),
+            "priority": min(3, max(1, int(item.get("priority") or 2))),
+            "suggested_time": suggested_time,
+            "suggested_slot_id": suggested_slot_id,
+            "supplement_id": int(row["id"]),
+        })
+        if len(out) >= 12:
+            break
+    return out
+
+
+@app.post("/api/checkin")
+async def api_checkin(body: CheckinBody, x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    if not await _premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
+
+    answers = _validate_answers(body.answers or {})
+    conn = await db.connect(s.DB_PATH)
+    try:
+        tz_name = await db.get_user_tz(conn, tg_user_id)
+        local_date = db.get_user_local_date(tz_name or None)
+        checkin_id = await db.upsert_daily_checkin(conn, tg_user_id, local_date, answers)
+        ctx = await db.build_ai_context_compact(conn, tg_user_id, local_date)
+        p_hash = _prompt_hash(answers, ctx)
+        try:
+            recs_raw, meta = await _ai_recommendations(answers, ctx)
+            recs = await _normalize_recommendations(conn, recs_raw)
+            await db.save_ai_result(conn, checkin_id, recs, p_hash)
+            return JSONResponse({"ok": True, "checkin_id": checkin_id, "recommendations": recs, "meta": meta})
+        except Exception:
+            await db.save_ai_result(conn, checkin_id, {"error": "AI_UNAVAILABLE"}, p_hash)
+            return JSONResponse({"ok": False, "checkin_id": checkin_id, "error": "AI_UNAVAILABLE"})
+    finally:
+        await conn.close()
+
+
+@app.post("/api/checkin/apply")
+async def api_checkin_apply(body: CheckinApplyBody, x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    if not await _premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
+    conn = await db.connect(s.DB_PATH)
+    try:
+        tz_name = await db.get_user_tz(conn, tg_user_id)
+        local_date = db.get_user_local_date(tz_name or None)
+        checkin = await db.get_daily_checkin_by_id(conn, int(body.checkin_id), tg_user_id)
+        if not checkin:
+            return JSONResponse({"ok": False, "error": "NOT_FOUND"}, status_code=404)
+        recs = json.loads(checkin.get("ai_raw_json") or "[]") if checkin.get("ai_raw_json") else []
+        if not isinstance(recs, list):
+            recs = []
+        if body.mode == "all":
+            picked = recs
+        else:
+            selected = set(int(x) for x in (body.selected_ids or []))
+            picked = [x for x in recs if int(x.get("supplement_id") or 0) in selected]
+        selected_items = [
+            {
+                "action": str(x.get("action") or "add"),
+                "slug": str(x.get("slug") or ""),
+                "supplement_id": int(x.get("supplement_id") or 0),
+                "reason": str(x.get("reason") or ""),
+                "suggested_time": x.get("suggested_time"),
+                "slot_id": x.get("suggested_slot_id"),
+            }
+            for x in picked
+        ]
+        await db.apply_ai_plan_items(conn, tg_user_id, local_date, selected_items)
+    finally:
+        await conn.close()
+    return JSONResponse({"ok": True})
+
+
+@app.get("/api/checkin/today")
+async def api_checkin_today(x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    if not await _premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
+    conn = await db.connect(s.DB_PATH)
+    try:
+        tz_name = await db.get_user_tz(conn, tg_user_id)
+        local_date = db.get_user_local_date(tz_name or None)
+        row = await db.get_today_checkin(conn, tg_user_id, local_date)
+    finally:
+        await conn.close()
+    if not row:
+        return JSONResponse({"ok": True, "checkin": None})
+    recs = []
+    try:
+        parsed = json.loads(row.get("ai_raw_json") or "[]")
+        recs = parsed if isinstance(parsed, list) else []
+    except Exception:
+        recs = []
+    answers = {}
+    try:
+        answers = json.loads(row.get("answers_json") or "{}")
+    except Exception:
+        pass
+    return JSONResponse({"ok": True, "checkin": {"id": int(row.get("id") or 0), "answers": answers, "recommendations": recs}})

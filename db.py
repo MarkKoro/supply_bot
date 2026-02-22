@@ -316,6 +316,9 @@ CREATE TABLE IF NOT EXISTS payments (
   status TEXT NOT NULL,
   created_at_utc TEXT NOT NULL
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_tg_charge_unique
+  ON payments(telegram_payment_charge_id)
+  WHERE telegram_payment_charge_id IS NOT NULL AND telegram_payment_charge_id != '';
 """
 
 async def connect(db_path: str) -> aiosqlite.Connection:
@@ -1062,6 +1065,11 @@ async def _ensure_payments_table(conn: aiosqlite.Connection) -> None:
     await _ensure_column(conn, "payments", "provider_payment_charge_id", "TEXT")
     await _ensure_column(conn, "payments", "status", "TEXT NOT NULL DEFAULT ''")
     await _ensure_column(conn, "payments", "created_at_utc", "TEXT NOT NULL DEFAULT ''")
+    await conn.execute(
+        """CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_tg_charge_unique
+           ON payments(telegram_payment_charge_id)
+           WHERE telegram_payment_charge_id IS NOT NULL AND telegram_payment_charge_id != ''"""
+    )
 
 async def _backfill_user_supplements(conn: aiosqlite.Connection) -> None:
     cols = await fetchall(conn, "PRAGMA table_info(user_supplements)")
@@ -1296,18 +1304,20 @@ def _add_months_utc(dt: datetime, months: int) -> datetime:
     day = min(dt.day, max_day)
     return dt.replace(year=year, month=month, day=day)
 
-async def get_premium_until(conn: aiosqlite.Connection, user_id: int) -> datetime | None:
-    row = await fetchone(conn, "SELECT premium_until_utc FROM users WHERE tg_user_id=?", (user_id,))
+async def get_premium_until(conn: aiosqlite.Connection, tg_user_id: int) -> str | None:
+    row = await fetchone(conn, "SELECT premium_until_utc FROM users WHERE tg_user_id=?", (tg_user_id,))
     if not row:
         return None
-    return _parse_utc_iso_dt(row["premium_until_utc"])
+    value = str(row["premium_until_utc"] or "").strip()
+    return value or None
 
 async def is_premium_active(
     conn: aiosqlite.Connection,
-    user_id: int,
+    tg_user_id: int,
     now_utc: datetime | None = None,
 ) -> bool:
-    premium_until = await get_premium_until(conn, user_id)
+    premium_until_iso = await get_premium_until(conn, tg_user_id)
+    premium_until = _parse_utc_iso_dt(premium_until_iso)
     if premium_until is None:
         return False
     now = now_utc or datetime.now(timezone.utc)
@@ -1319,71 +1329,83 @@ async def is_premium_active(
 
 async def set_premium_until(
     conn: aiosqlite.Connection,
-    user_id: int,
+    tg_user_id: int,
     until_utc: datetime,
     source: str,
-    plan: str,
-) -> None:
-    await get_or_create_user(conn, user_id)
+    plan_id: str,
+) -> str:
+    await get_or_create_user(conn, tg_user_id)
     until_value = _to_utc_iso(until_utc)
     await conn.execute(
         """UPDATE users
            SET premium_until_utc=?, premium_source=?, premium_plan=?, premium_updated_at_utc=?
            WHERE tg_user_id=?""",
-        (until_value, source, plan, utc_now_iso(), user_id),
+        (until_value, source, plan_id, utc_now_iso(), tg_user_id),
     )
     await conn.commit()
+    return until_value
 
 async def extend_premium(
     conn: aiosqlite.Connection,
-    user_id: int,
+    tg_user_id: int,
     months: int,
     source: str,
-    plan: str,
-) -> datetime:
+    plan_id: str,
+) -> str:
     if months <= 0:
         raise ValueError("months must be > 0")
     now = datetime.now(timezone.utc)
-    current_until = await get_premium_until(conn, user_id)
+    current_until = _parse_utc_iso_dt(await get_premium_until(conn, tg_user_id))
     baseline = now
     if current_until is not None and current_until > now:
         baseline = current_until
     new_until = _add_months_utc(baseline, months)
-    await set_premium_until(conn, user_id, new_until, source, plan)
-    return new_until
+    return await set_premium_until(conn, tg_user_id, new_until, source, plan_id)
 
 async def log_payment_paid(
     conn: aiosqlite.Connection,
-    user_id: int,
+    tg_user_id: int,
     provider: str,
     currency: str,
     amount: int,
     payload: str,
     telegram_payment_charge_id: str | None = None,
     provider_payment_charge_id: str | None = None,
-    status: str = "paid",
-    created_at_utc: str | None = None,
-) -> int:
-    created = created_at_utc or utc_now_iso()
-    cur = await conn.execute(
-        """INSERT INTO payments(
-               user_id, provider, currency, amount, payload,
-               telegram_payment_charge_id, provider_payment_charge_id, status, created_at_utc
-           ) VALUES(?,?,?,?,?,?,?,?,?)""",
-        (
-            user_id,
-            provider,
-            currency,
-            amount,
-            payload,
-            telegram_payment_charge_id,
-            provider_payment_charge_id,
-            status,
-            created,
-        ),
-    )
-    await conn.commit()
-    return int(cur.lastrowid)
+) -> bool:
+    created = utc_now_iso()
+    if telegram_payment_charge_id:
+        existing = await fetchone(
+            conn,
+            "SELECT id FROM payments WHERE telegram_payment_charge_id=?",
+            (telegram_payment_charge_id,),
+        )
+        if existing:
+            return False
+    user_id = await get_or_create_user(conn, tg_user_id)
+    try:
+        await conn.execute(
+            """INSERT INTO payments(
+                   user_id, provider, currency, amount, payload,
+                   telegram_payment_charge_id, provider_payment_charge_id, status, created_at_utc
+               ) VALUES(?,?,?,?,?,?,?,?,?)""",
+            (
+                user_id,
+                provider,
+                currency,
+                amount,
+                payload,
+                telegram_payment_charge_id,
+                provider_payment_charge_id,
+                "paid",
+                created,
+            ),
+        )
+        await conn.commit()
+        return True
+    except aiosqlite.IntegrityError:
+        if telegram_payment_charge_id:
+            return False
+        raise
 
 async def set_user_last_view(
     conn: aiosqlite.Connection,

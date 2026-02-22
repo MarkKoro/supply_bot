@@ -9,6 +9,8 @@ def main_menu(*, is_admin: bool = False) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("💊 Мои БАДы", callback_data="menu:my")],
         [InlineKeyboardButton("📚 Каталог БАДов", callback_data="menu:catalog")],
         [InlineKeyboardButton("📝 Ежедневный опрос", callback_data="menu:checkin_ai")],
+        [InlineKeyboardButton("🔓 Открыть WebApp", callback_data="menu:webapp")],
+        [InlineKeyboardButton("⭐ Премиум", callback_data="menu:premium")],
     ]
     if is_admin:
         rows.append([InlineKeyboardButton("📊 Статистика", callback_data="admin:stats")])
@@ -691,3 +693,34 @@ def supplement_time_kb(supplement_id: int, slots: list[dict]) -> InlineKeyboardM
     rows.append([InlineKeyboardButton(f"Следовать слоту", callback_data=f"supplement:clear_override:{supplement_id}")])
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"mysupp:open:{supplement_id}")])
     return InlineKeyboardMarkup(rows)
+
+
+def premium_plans_kb(plans: list[dict]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for plan in plans:
+        plan_id = str(plan.get("plan_id") or "")
+        title = str(plan.get("title") or plan_id)
+        rows.append([InlineKeyboardButton(title, callback_data=f"premium:plan:{plan_id}")])
+    rows.append([InlineKeyboardButton("📦 Что входит", callback_data="premium:about")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")])
+    return InlineKeyboardMarkup(rows)
+
+
+def premium_methods_kb(plan_id: str, stars_enabled: bool, rub_enabled: bool) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if stars_enabled:
+        rows.append([InlineKeyboardButton("Купить за ⭐", callback_data=f"premium:buy:{plan_id}:stars")])
+    if rub_enabled:
+        rows.append([InlineKeyboardButton("Купить за ₽", callback_data=f"premium:buy:{plan_id}:yookassa")])
+    rows.append([InlineKeyboardButton("📦 Что входит", callback_data="premium:about")])
+    rows.append([InlineKeyboardButton("🔓 Открыть WebApp", callback_data="menu:webapp")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="menu:premium")])
+    return InlineKeyboardMarkup(rows)
+
+
+def premium_upsell_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⭐ Купить Premium", callback_data="menu:premium")],
+        [InlineKeyboardButton("🔓 Открыть WebApp", callback_data="menu:webapp")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")],
+    ])

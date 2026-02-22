@@ -6,82 +6,95 @@
   <title>SupplyBot WebApp</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; padding: 18px; }
-    .box { padding: 12px; border: 1px solid #ddd; border-radius: 12px; margin: 12px 0; }
-    pre { white-space: pre-wrap; word-break: break-word; }
-    button { padding: 10px 14px; border-radius: 10px; border: 1px solid #ddd; background: #fff; cursor: pointer; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; padding: 16px; background:#fafafa; color:#111; }
+    .card { background:#fff; border:1px solid #e4e4e4; border-radius:14px; padding:14px; margin:10px 0; }
+    .tabs { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+    .tab { padding:12px; border:1px dashed #ccc; border-radius:10px; opacity:.7; }
+    button { padding:10px 12px; border-radius:10px; border:1px solid #ccc; background:#fff; cursor:pointer; margin-right:8px; margin-top:8px; }
+    .muted { color:#666; font-size:13px; }
   </style>
 </head>
 <body>
-  <h1>SupplyBot WebApp</h1>
-
-  <div class="box">
-    <div><b>Telegram WebApp initData:</b></div>
-    <pre id="initdata">loading...</pre>
-  </div>
-
-  <div class="box">
-    <div><b>Auth verify result:</b></div>
-    <pre id="verify">waiting...</pre>
-    <button id="btn">Verify initData</button>
-  </div>
-
-  <div class="box">
-    <div><b>Health:</b></div>
-    <pre id="health">loading...</pre>
-  </div>
-
+  <div id="app">Загрузка...</div>
 <script>
-  const elInit = document.getElementById('initdata');
-  const elVerify = document.getElementById('verify');
-  const elHealth = document.getElementById('health');
-  const btn = document.getElementById('btn');
+const tg = window.Telegram?.WebApp;
+if (tg) tg.ready();
 
-  function safe(obj) { return JSON.stringify(obj, null, 2); }
+function h(headers={}) {
+  return {"Content-Type":"application/json", "X-Telegram-Init-Data": tg?.initData || "", ...headers};
+}
 
+async function apiMe(){
+  const r = await fetch('./api/me', {headers: h()});
+  return await r.json();
+}
+
+async function buy(planId, method){
+  const r = await fetch('./api/billing/create_invoice_link', {
+    method:'POST', headers:h(), body:JSON.stringify({plan_id:planId, method})
+  });
+  const j = await r.json();
+  if(!j.ok){ alert('Не удалось создать счёт'); return; }
+  tg?.openInvoice(j.invoice_link, async (status)=>{
+    if (status === 'paid' || status === 'success') {
+      const me = await apiMe();
+      if (me.premium) location.reload();
+    }
+  });
+}
+
+function renderPaywall(me){
+  const plans = me.plans || [];
+  const plansHtml = plans.map(p => `
+    <div class="card">
+      <b>${p.plan_id}</b> · ${p.months} мес.
+      <div class="muted">${p.price_stars} ⭐ / ${Math.round((p.price_rub||0)/100)} ₽</div>
+      ${p.stars_enabled ? `<button onclick="buy('${p.plan_id}','stars')">Купить за ⭐</button>` : ''}
+      ${p.rub_enabled ? `<button onclick="buy('${p.plan_id}','yookassa')">Купить за ₽</button>` : ''}
+    </div>
+  `).join('');
+
+  document.getElementById('app').innerHTML = `
+    <div class="card">
+      <h2>🔒 Premium доступ</h2>
+      <div class="muted">Без подписки доступна только витрина.</div>
+    </div>
+    <div class="card tabs">
+      <div class="tab">Today (preview)</div>
+      <div class="tab">Catalog (preview)</div>
+      <div class="tab">BodyMap (preview)</div>
+      <div class="tab">Survey (preview)</div>
+    </div>
+    <div class="card"><b>Как это выглядит:</b><div class="muted">Персональный Today, трекинг и AI-инсайты в полной версии.</div></div>
+    ${plansHtml}
+  `;
+}
+
+function renderPremium(me){
+  document.getElementById('app').innerHTML = `
+    <div class="card">
+      <h2>✅ Premium активен</h2>
+      <div>До: ${me.premium_until_utc || '—'}</div>
+      <button onclick="openToday()">Открыть Today</button>
+    </div>
+  `;
+}
+
+async function openToday(){
+  const r = await fetch('./api/today', {headers:h()});
+  const j = await r.json();
+  alert(JSON.stringify(j, null, 2));
+}
+
+(async function init(){
   try {
-    const tg = window.Telegram?.WebApp;
-    if (!tg) {
-      elInit.textContent = "Telegram.WebApp not found (открылось не внутри Telegram?)";
-    } else {
-      tg.ready();
-      // Для удобства показываем и initData и user (если есть)
-      elInit.textContent = tg.initData ? tg.initData : "(empty initData)";
-      // можно: tg.expand();
-    }
-  } catch (e) {
-    elInit.textContent = String(e);
+    const me = await apiMe();
+    if (!me.premium) return renderPaywall(me);
+    return renderPremium(me);
+  } catch(e){
+    document.getElementById('app').textContent = String(e);
   }
-
-  async function runHealth() {
-    try {
-      const r = await fetch("./health");
-      const j = await r.json();
-      elHealth.textContent = safe(j);
-    } catch (e) {
-      elHealth.textContent = String(e);
-    }
-  }
-
-  async function verify() {
-    try {
-      const tg = window.Telegram?.WebApp;
-      const initData = tg?.initData || "";
-      const r = await fetch("./api/telegram/verify", {
-        method: "POST",
-        headers: {"Content-Type":"application/json"},
-        body: JSON.stringify({init_data: initData})
-      });
-      const j = await r.json();
-      elVerify.textContent = safe(j);
-    } catch (e) {
-      elVerify.textContent = String(e);
-    }
-  }
-
-  btn.addEventListener('click', verify);
-
-  runHealth();
+})();
 </script>
 </body>
 </html>

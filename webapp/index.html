@@ -257,6 +257,14 @@
     .sheet-backdrop { position: fixed; inset:0; background: rgba(2,5,16,0.58); z-index: 32; }
     .sheet { position: fixed; left:10px; right:10px; bottom: calc(82px + env(safe-area-inset-bottom)); z-index: 33; max-height: 66vh; overflow: auto; opacity:1; transform: translateY(0); transition: all .18s ease; }
     .sheet-empty { padding:12px; border-radius: 14px; background: rgba(255,255,255,0.05); color: var(--muted); text-align:center; }
+
+    .progress { height:8px; border-radius:999px; background: rgba(255,255,255,.15); overflow:hidden; margin-top:8px; }
+    .progress > i { display:block; height:100%; background: linear-gradient(90deg, #82a7ff, #49d88d); }
+    .survey-option { width:100%; border-radius:14px; border:1px solid rgba(255,255,255,.2); padding:12px; margin-top:8px; background: rgba(255,255,255,.07); color:var(--text); text-align:left; font-weight:700; }
+    .survey-option.active { box-shadow: 0 0 0 1px rgba(130,167,255,.8) inset, 0 0 16px rgba(130,167,255,.45); background: rgba(130,167,255,.2); }
+    .survey-goals { display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; }
+    .survey-note { width:100%; min-height:110px; border-radius:14px; border:1px solid rgba(255,255,255,.2); background: rgba(255,255,255,.08); color:var(--text); padding:10px; }
+    .rec-card { border:1px solid rgba(255,255,255,.16); border-radius:14px; padding:10px; margin-top:8px; background: rgba(255,255,255,.06); }
   </style>
 </head>
 <body>
@@ -283,7 +291,16 @@
     searchDebounce: null,
     bodyMap: null,
     loadingBodyMap: false,
-    bodyMapSheet: null
+    bodyMapSheet: null,
+    survey: {
+      step: 0,
+      loading: false,
+      view: "wizard",
+      checkinId: null,
+      recommendations: [],
+      selected: {},
+      answers: { energy:"", sleep:"", stress:"", training:"", goals:[], note:"" }
+    }
   };
 
   const APP_NAME = "SupplyBot";
@@ -350,6 +367,7 @@
       } else {
         renderMainApp();
         await loadToday();
+        await loadSurveyToday();
       }
     } catch (e) {
       if (String(e.message).includes("UNAUTHORIZED") && !state.initData) {
@@ -563,20 +581,76 @@
       return;
     }
 
-    target.innerHTML = `
-      <div class="card fade">
-        <h3 style="margin-top:0">Survey</h3>
-        <p class="muted" style="margin-bottom:0">Скоро: опрос карточками</p>
-      </div>
-      <div class="card fade">
-        <div class="muted">Раздел в разработке. Навигация и стили уже готовы.</div>
-      </div>
-    `;
+    target.innerHTML = renderSurvey();
+    bindSurveyEvents();
   }
 
 
   function esc(text) {
     return String(text || "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+  }
+
+
+  const SURVEY_STEPS = [
+    { key: "energy", title: "Энергия", options: [["low","Низкая"],["ok","Нормальная"],["high","Высокая"]] },
+    { key: "sleep", title: "Сон", options: [["poor","Плохой"],["ok","Ок"],["great","Отличный"]] },
+    { key: "stress", title: "Стресс", options: [["low","Низкий"],["medium","Средний"],["high","Высокий"]] },
+    { key: "training", title: "Тренировка сегодня", options: [["none","Нет"],["light","Легкая"],["hard","Тяжелая"]] },
+    { key: "goals", title: "Фокус целей", goals: ["brain","mood","sleep","recovery","gut","immune","joints","performance"] },
+    { key: "note", title: "Заметка", note: true }
+  ];
+
+  function surveyStorageKey() {
+    const uid = tg?.initDataUnsafe?.user?.id || "anon";
+    const d = new Date().toISOString().slice(0,10);
+    return `survey:${uid}:${d}`;
+  }
+
+  async function loadSurveyToday() {
+    try {
+      const data = await api('./api/checkin/today');
+      const saved = localStorage.getItem(surveyStorageKey());
+      if (saved) state.survey.answers = { ...state.survey.answers, ...JSON.parse(saved) };
+      if (data?.checkin) {
+        state.survey.checkinId = data.checkin.id;
+        state.survey.answers = { ...state.survey.answers, ...(data.checkin.answers || {}) };
+        state.survey.recommendations = data.checkin.recommendations || [];
+        state.survey.selected = Object.fromEntries((state.survey.recommendations || []).map((x) => [x.supplement_id, true]));
+        if (state.survey.recommendations.length) state.survey.view = 'review';
+      }
+    } catch {}
+  }
+
+  function renderSurvey() {
+    const sv = state.survey;
+    if (sv.loading) return `<div class="card">⏳ анализ…</div>`;
+    if (sv.view === 'review') {
+      const rows = (sv.recommendations || []).map((r) => `<div class="rec-card"><div class="row"><label><input type="checkbox" data-rec-toggle="${r.supplement_id}" ${sv.selected[r.supplement_id] !== false ? 'checked' : ''}/> <strong>${esc(r.name_ru || r.slug)}</strong></label><span class="badge ${r.action==='remove'?'minus':(r.action==='adjust'?'':'plus')}">${r.action==='add'?'+':(r.action==='remove'?'−':'≈')}</span></div><div class="muted" style="margin-top:6px">${esc(r.reason || '')}</div></div>`).join('');
+      return `<div class="card fade"><h3 style="margin-top:0">Рекомендации</h3>${rows || '<div class="muted">Нет рекомендаций</div>'}<div class="row" style="margin-top:10px"><button class="btn" id="applyAll">Применить всё</button><button class="btn secondary" id="applySelected">Применить выбранное</button></div><div class="row" style="margin-top:8px"><button class="btn secondary" id="cancelSurvey">Отмена</button></div></div>`;
+    }
+    const step = SURVEY_STEPS[sv.step];
+    const p = Math.round(((sv.step+1)/SURVEY_STEPS.length)*100);
+    let body = '';
+    if (step.options) {
+      body = step.options.map(([v,t]) => `<button class="survey-option ${sv.answers[step.key]===v?'active':''}" data-survey-pick="${step.key}:${v}">${t}</button>`).join('');
+    } else if (step.goals) {
+      body = `<div class="survey-goals">${step.goals.map((g)=>`<button class="chip ${sv.answers.goals.includes(g)?'green':''}" data-goal-toggle="${g}">${g}</button>`).join('')}</div>`;
+    } else {
+      body = `<textarea id="surveyNote" maxlength="280" class="survey-note" placeholder="Короткая заметка">${esc(sv.answers.note || '')}</textarea><div class="muted" style="margin-top:6px">${(sv.answers.note||'').length}/280</div>`;
+    }
+    return `<div class="card fade"><div class="row"><strong>${step.title}</strong><span class="muted">${sv.step+1}/${SURVEY_STEPS.length}</span></div><div class="progress"><i style="width:${p}%"></i></div>${body}<div class="row" style="margin-top:12px"><button class="btn secondary" id="surveyBack" ${sv.step===0?'disabled':''}>Назад</button><button class="btn" id="surveyNext">${sv.step===SURVEY_STEPS.length-1?'Получить рекомендации':'Далее'}</button></div></div>`;
+  }
+
+  function bindSurveyEvents() {
+    appEl.querySelectorAll('[data-survey-pick]').forEach((el)=>el.addEventListener('click', ()=>{ haptic(); const [k,v]=el.dataset.surveyPick.split(':'); state.survey.answers[k]=v; localStorage.setItem(surveyStorageKey(), JSON.stringify(state.survey.answers)); renderActiveTab(); }));
+    appEl.querySelectorAll('[data-goal-toggle]').forEach((el)=>el.addEventListener('click', ()=>{ haptic(); const g=el.dataset.goalToggle; const set=new Set(state.survey.answers.goals||[]); if (set.has(g)) set.delete(g); else set.add(g); state.survey.answers.goals=[...set]; localStorage.setItem(surveyStorageKey(), JSON.stringify(state.survey.answers)); renderActiveTab(); }));
+    document.getElementById('surveyNote')?.addEventListener('input', (e)=>{ state.survey.answers.note=String(e.target.value||'').slice(0,280); localStorage.setItem(surveyStorageKey(), JSON.stringify(state.survey.answers)); renderActiveTab(); });
+    document.getElementById('surveyBack')?.addEventListener('click', ()=>{ haptic(); state.survey.step=Math.max(0,state.survey.step-1); renderActiveTab(); });
+    document.getElementById('surveyNext')?.addEventListener('click', async ()=>{ haptic(); if (state.survey.step < SURVEY_STEPS.length-1) { state.survey.step += 1; renderActiveTab(); return; } state.survey.loading=true; renderActiveTab(); try { const res=await api('./api/checkin',{method:'POST', body:{answers: state.survey.answers}}); state.survey.loading=false; state.survey.checkinId=res.checkin_id; state.survey.recommendations=res.recommendations||[]; state.survey.selected=Object.fromEntries((state.survey.recommendations||[]).map((x)=>[x.supplement_id,true])); state.survey.view='review'; renderActiveTab(); } catch(e){ state.survey.loading=false; showToast('AI временно недоступен, попробуйте ещё раз'); renderActiveTab(); } });
+    appEl.querySelectorAll('[data-rec-toggle]').forEach((el)=>el.addEventListener('change',(e)=>{ state.survey.selected[Number(el.dataset.recToggle)] = !!e.target.checked; }));
+    document.getElementById('applyAll')?.addEventListener('click', async ()=>{ haptic(); try { await api('./api/checkin/apply',{method:'POST', body:{checkin_id: state.survey.checkinId, selected_ids:[], mode:'all'}}); showToast('Применено'); await loadToday(true); state.activeTab='today'; renderMainApp(); renderActiveTab(); } catch { showToast('Не удалось применить'); } });
+    document.getElementById('applySelected')?.addEventListener('click', async ()=>{ haptic(); const ids=Object.keys(state.survey.selected).filter((k)=>state.survey.selected[k]).map(Number); try { await api('./api/checkin/apply',{method:'POST', body:{checkin_id: state.survey.checkinId, selected_ids:ids, mode:'selected'}}); showToast('Применено'); await loadToday(true); state.activeTab='today'; renderMainApp(); renderActiveTab(); } catch { showToast('Не удалось применить'); } });
+    document.getElementById('cancelSurvey')?.addEventListener('click', ()=>{ haptic(); state.survey.view='wizard'; renderActiveTab(); });
   }
 
   function renderCatalog() {

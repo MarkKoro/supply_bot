@@ -1,4 +1,5 @@
 from __future__ import annotations
+import calendar
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -301,6 +302,19 @@ CREATE TABLE IF NOT EXISTS curated_stack_items (
   sort_order INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_curated_stack_items_stack_sort ON curated_stack_items(stack_id, sort_order);
+
+CREATE TABLE IF NOT EXISTS payments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL,
+  provider TEXT NOT NULL,
+  currency TEXT NOT NULL,
+  amount INTEGER NOT NULL,
+  payload TEXT NOT NULL,
+  telegram_payment_charge_id TEXT,
+  provider_payment_charge_id TEXT,
+  status TEXT NOT NULL,
+  created_at_utc TEXT NOT NULL
+);
 """
 
 async def connect(db_path: str) -> aiosqlite.Connection:
@@ -327,6 +341,10 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     await _ensure_column(conn, "users", "last_chat_id", "INTEGER NOT NULL DEFAULT 0")
     await _ensure_column(conn, "users", "last_message_id", "INTEGER NOT NULL DEFAULT 0")
     await _ensure_column(conn, "users", "initial_stack_json", "TEXT NOT NULL DEFAULT '[]'")
+    await _ensure_column(conn, "users", "premium_until_utc", "TEXT")
+    await _ensure_column(conn, "users", "premium_plan", "TEXT")
+    await _ensure_column(conn, "users", "premium_source", "TEXT")
+    await _ensure_column(conn, "users", "premium_updated_at_utc", "TEXT")
     await _ensure_column(conn, "supplements", "name_ru", "TEXT")
     await _ensure_column(conn, "supplements", "name_en", "TEXT")
     await _ensure_column(conn, "supplements", "aliases", "TEXT DEFAULT ''")
@@ -381,6 +399,7 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     await _ensure_user_schedule_slots(conn)
     await _ensure_curated_stacks(conn)
     await _ensure_curated_stack_items(conn)
+    await _ensure_payments_table(conn)
     await conn.execute(
         "UPDATE supplements SET interaction_classes='[]' WHERE interaction_classes IS NULL OR interaction_classes=''"
     )
@@ -955,6 +974,38 @@ async def _ensure_curated_stack_items(conn: aiosqlite.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_curated_stack_items_stack_sort ON curated_stack_items(stack_id, sort_order)"
     )
 
+async def _ensure_payments_table(conn: aiosqlite.Connection) -> None:
+    table = await fetchone(
+        conn,
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='payments'",
+    )
+    if not table:
+        await conn.execute(
+            """CREATE TABLE IF NOT EXISTS payments (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              user_id INTEGER NOT NULL,
+              provider TEXT NOT NULL,
+              currency TEXT NOT NULL,
+              amount INTEGER NOT NULL,
+              payload TEXT NOT NULL,
+              telegram_payment_charge_id TEXT,
+              provider_payment_charge_id TEXT,
+              status TEXT NOT NULL,
+              created_at_utc TEXT NOT NULL
+            )"""
+        )
+        return
+
+    await _ensure_column(conn, "payments", "user_id", "INTEGER NOT NULL DEFAULT 0")
+    await _ensure_column(conn, "payments", "provider", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "payments", "currency", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "payments", "amount", "INTEGER NOT NULL DEFAULT 0")
+    await _ensure_column(conn, "payments", "payload", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "payments", "telegram_payment_charge_id", "TEXT")
+    await _ensure_column(conn, "payments", "provider_payment_charge_id", "TEXT")
+    await _ensure_column(conn, "payments", "status", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "payments", "created_at_utc", "TEXT NOT NULL DEFAULT ''")
+
 async def _backfill_user_supplements(conn: aiosqlite.Connection) -> None:
     cols = await fetchall(conn, "PRAGMA table_info(user_supplements)")
     col_names = {c["name"] for c in cols}
@@ -1154,6 +1205,128 @@ async def set_user_tz(conn: aiosqlite.Connection, tg_user_id: int, tz_name: str)
         (tz_name, tg_user_id),
     )
     await conn.commit()
+
+def _parse_utc_iso_dt(value: str | None) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        candidate = raw.replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(candidate)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+def _to_utc_iso(dt: datetime) -> str:
+    if dt.tzinfo is None:
+        value = dt.replace(tzinfo=timezone.utc)
+    else:
+        value = dt.astimezone(timezone.utc)
+    return value.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+def _add_months_utc(dt: datetime, months: int) -> datetime:
+    if months < 0:
+        raise ValueError("months must be >= 0")
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    dt = dt.astimezone(timezone.utc)
+    target_month = dt.month - 1 + months
+    year = dt.year + target_month // 12
+    month = target_month % 12 + 1
+    max_day = calendar.monthrange(year, month)[1]
+    day = min(dt.day, max_day)
+    return dt.replace(year=year, month=month, day=day)
+
+async def get_premium_until(conn: aiosqlite.Connection, user_id: int) -> datetime | None:
+    row = await fetchone(conn, "SELECT premium_until_utc FROM users WHERE tg_user_id=?", (user_id,))
+    if not row:
+        return None
+    return _parse_utc_iso_dt(row["premium_until_utc"])
+
+async def is_premium_active(
+    conn: aiosqlite.Connection,
+    user_id: int,
+    now_utc: datetime | None = None,
+) -> bool:
+    premium_until = await get_premium_until(conn, user_id)
+    if premium_until is None:
+        return False
+    now = now_utc or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    else:
+        now = now.astimezone(timezone.utc)
+    return premium_until > now
+
+async def set_premium_until(
+    conn: aiosqlite.Connection,
+    user_id: int,
+    until_utc: datetime,
+    source: str,
+    plan: str,
+) -> None:
+    await get_or_create_user(conn, user_id)
+    until_value = _to_utc_iso(until_utc)
+    await conn.execute(
+        """UPDATE users
+           SET premium_until_utc=?, premium_source=?, premium_plan=?, premium_updated_at_utc=?
+           WHERE tg_user_id=?""",
+        (until_value, source, plan, utc_now_iso(), user_id),
+    )
+    await conn.commit()
+
+async def extend_premium(
+    conn: aiosqlite.Connection,
+    user_id: int,
+    months: int,
+    source: str,
+    plan: str,
+) -> datetime:
+    if months <= 0:
+        raise ValueError("months must be > 0")
+    now = datetime.now(timezone.utc)
+    current_until = await get_premium_until(conn, user_id)
+    baseline = now
+    if current_until is not None and current_until > now:
+        baseline = current_until
+    new_until = _add_months_utc(baseline, months)
+    await set_premium_until(conn, user_id, new_until, source, plan)
+    return new_until
+
+async def log_payment_paid(
+    conn: aiosqlite.Connection,
+    user_id: int,
+    provider: str,
+    currency: str,
+    amount: int,
+    payload: str,
+    telegram_payment_charge_id: str | None = None,
+    provider_payment_charge_id: str | None = None,
+    status: str = "paid",
+    created_at_utc: str | None = None,
+) -> int:
+    created = created_at_utc or utc_now_iso()
+    cur = await conn.execute(
+        """INSERT INTO payments(
+               user_id, provider, currency, amount, payload,
+               telegram_payment_charge_id, provider_payment_charge_id, status, created_at_utc
+           ) VALUES(?,?,?,?,?,?,?,?,?)""",
+        (
+            user_id,
+            provider,
+            currency,
+            amount,
+            payload,
+            telegram_payment_charge_id,
+            provider_payment_charge_id,
+            status,
+            created,
+        ),
+    )
+    await conn.commit()
+    return int(cur.lastrowid)
 
 async def set_user_last_view(
     conn: aiosqlite.Connection,

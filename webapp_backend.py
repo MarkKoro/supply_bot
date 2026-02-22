@@ -29,6 +29,22 @@ class TodayToggleBody(BaseModel):
     status: str
 
 
+class SlotTimeBody(BaseModel):
+    slot_id: str
+    time_local: str
+
+
+class AddSlotBody(BaseModel):
+    time_local: str
+    title_ru: str | None = None
+
+
+class ScheduleSetBody(BaseModel):
+    supplement_id: int
+    slot_id: str
+    time_hhmm: str | None = None
+
+
 async def _auth_user_id(init_data: str) -> int:
     ok, parsed = verify_init_data(init_data, BOT_TOKEN)
     if not ok:
@@ -47,58 +63,28 @@ async def _auth_user_id(init_data: str) -> int:
 async def _today_payload(tg_user_id: int) -> dict:
     conn = await db.connect(s.DB_PATH)
     try:
-        user_id = await db.get_or_create_user(conn, tg_user_id, tz_name="")
         tz_name = await db.get_user_tz(conn, tg_user_id)
         day = db.get_user_local_date(tz_name or None)
-        slots = await db.get_user_slots(conn, user_id)
+        groups = await db.get_today_plan_groups(conn, tg_user_id, day)
         status_map = await db.get_day_status_map(conn, tg_user_id, day)
-        stack = await db.get_user_base_stack(conn, user_id)
-        enabled_slots = [slot for slot in slots if slot.get("is_enabled", True)]
-
-        def _slot_id_for_item(item: dict) -> str:
-            tm = str(item.get("time_local") or "").strip()
-            if not tm:
-                return str(enabled_slots[0].get("slot_id") or "morning") if enabled_slots else "morning"
-            try:
-                hour = int(tm[:2])
-            except Exception:
-                return str(enabled_slots[0].get("slot_id") or "morning") if enabled_slots else "morning"
-            if hour < 11:
-                pref = "morning"
-            elif hour < 16:
-                pref = "noon"
-            elif hour < 21:
-                pref = "evening"
-            else:
-                pref = "night"
-            available = {str(slot.get("slot_id") or "") for slot in enabled_slots}
-            if pref in available:
-                return pref
-            return str(enabled_slots[0].get("slot_id") or "morning") if enabled_slots else "morning"
-
-        grouped: dict[str, list[dict]] = {}
-        for item in stack:
-            sid = int(item.get("supplement_id") or 0)
-            slot_id = _slot_id_for_item(item)
-            grouped.setdefault(slot_id, []).append(
-                {
-                    "supplement_id": sid,
-                    "name": str(item.get("ru_name") or item.get("slug") or ""),
-                    "slug": str(item.get("slug") or ""),
-                    "status": status_map.get(sid, "none"),
-                }
-            )
-
         data_slots = []
-        for slot in enabled_slots:
-            slot_id = str(slot.get("slot_id") or "")
-            items = grouped.get(slot_id, [])
-            items.sort(key=lambda x: x["name"])
+        for group in groups:
+            items = []
+            for item in list(group.get("items") or []):
+                sid = int(item.get("supplement_id") or 0)
+                items.append(
+                    {
+                        "supplement_id": sid,
+                        "name": str(item.get("name_ru") or item.get("slug") or ""),
+                        "slug": str(item.get("slug") or ""),
+                        "status": status_map.get(sid, "none"),
+                    }
+                )
             data_slots.append(
                 {
-                    "slot_id": slot_id,
-                    "title": str(slot.get("title_ru") or "Слот"),
-                    "time_local": str(slot.get("time_local") or "--:--"),
+                    "slot_id": str(group.get("slot_id") or ""),
+                    "title": str(group.get("title") or "Слот"),
+                    "time_local": str(group.get("time") or "--:--"),
                     "items": items,
                 }
             )
@@ -142,6 +128,73 @@ async def api_today_toggle(
         tz_name = await db.get_user_tz(conn, tg_user_id)
         day = db.get_user_local_date(tz_name or None)
         await db.set_day_status(conn, tg_user_id, day, int(body.supplement_id), body.status)
+    finally:
+        await conn.close()
+    return JSONResponse({"ok": True})
+
+
+@app.get("/api/schedule")
+async def api_schedule(x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    conn = await db.connect(s.DB_PATH)
+    try:
+        user_id = await db.get_or_create_user(conn, tg_user_id, tz_name="")
+        slots = await db.get_user_slots(conn, user_id)
+        schedules_map = await db.get_user_schedule_map(conn, user_id)
+        schedules = [
+            {
+                "supplement_id": sid,
+                "slot_id": str(data.get("slot_id") or "morning"),
+                "time_hhmm": data.get("time_hhmm"),
+            }
+            for sid, data in schedules_map.items()
+        ]
+    finally:
+        await conn.close()
+    return JSONResponse({"ok": True, "slots": slots, "schedules": schedules})
+
+
+@app.post("/api/schedule/slot_time")
+async def api_schedule_slot_time(
+    body: SlotTimeBody,
+    x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
+):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    conn = await db.connect(s.DB_PATH)
+    try:
+        user_id = await db.get_or_create_user(conn, tg_user_id, tz_name="")
+        await db.set_user_slot_time(conn, user_id, body.slot_id, body.time_local)
+    finally:
+        await conn.close()
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/schedule/add_slot")
+async def api_schedule_add_slot(
+    body: AddSlotBody,
+    x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
+):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    conn = await db.connect(s.DB_PATH)
+    try:
+        user_id = await db.get_or_create_user(conn, tg_user_id, tz_name="")
+        slot_id = await db.add_custom_slot(conn, user_id, body.time_local, body.title_ru)
+    finally:
+        await conn.close()
+    return JSONResponse({"ok": True, "slot_id": slot_id})
+
+
+@app.post("/api/schedule/set")
+async def api_schedule_set(
+    body: ScheduleSetBody,
+    x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
+):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    conn = await db.connect(s.DB_PATH)
+    try:
+        user_id = await db.get_or_create_user(conn, tg_user_id, tz_name="")
+        await db.set_schedule_slot(conn, user_id, int(body.supplement_id), body.slot_id)
+        await db.set_schedule_time_override(conn, user_id, int(body.supplement_id), body.time_hhmm)
     finally:
         await conn.close()
     return JSONResponse({"ok": True})

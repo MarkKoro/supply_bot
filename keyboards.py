@@ -592,6 +592,7 @@ def my_supplement_hub(
         [InlineKeyboardButton("✖️ Отметить: не буду сегодня", callback_data=f"mysupp:mark:skip:{supplement_id}")],
         [InlineKeyboardButton("⏰ Напоминания", callback_data=f"mysupp:rem:{supplement_id}")],
         [InlineKeyboardButton("🧾 Доза", callback_data=f"mysupp:set_dose:{supplement_id}")],
+        [InlineKeyboardButton("⏰ Время приёма", callback_data=f"supplement:set_time:{supplement_id}")],
         [InlineKeyboardButton("🗑 Удалить из моих", callback_data=f"mysupp:remove:{supplement_id}")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="mysupp:list:0")],
     ]
@@ -662,5 +663,31 @@ def settings_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🕒 Часовой пояс", callback_data="settings:tz")],
         [InlineKeyboardButton("✨ Начальный подбор", callback_data="settings:initial_pick")],
+        [InlineKeyboardButton("⏰ Расписание", callback_data="settings:schedule")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")],
     ])
+
+
+def schedule_menu_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Изменить время слота", callback_data="schedule:slot_pick")],
+        [InlineKeyboardButton("➕ Добавить время", callback_data="schedule:add_custom")],
+        [InlineKeyboardButton("Назначить время добавкам", callback_data="menu:my")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="menu:settings")],
+    ])
+
+
+def schedule_slots_pick_kb(slots: list[dict], prefix: str = "schedule:slot_time_set") -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(f"[{slot.get('time_local','--:--')}] {slot.get('title_ru','Слот')}", callback_data=f"{prefix}:{slot.get('slot_id','')}")] for slot in slots]
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="settings:schedule")])
+    return InlineKeyboardMarkup(rows)
+
+
+def supplement_time_kb(supplement_id: int, slots: list[dict]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for slot in slots:
+        rows.append([InlineKeyboardButton(f"Слот: {slot.get('title_ru','Слот')} ({slot.get('time_local','--:--')})", callback_data=f"supplement:set_slot:{supplement_id}:{slot.get('slot_id','')}")])
+    rows.append([InlineKeyboardButton(f"Поставить своё время", callback_data=f"supplement:set_override:{supplement_id}")])
+    rows.append([InlineKeyboardButton(f"Следовать слоту", callback_data=f"supplement:clear_override:{supplement_id}")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"mysupp:open:{supplement_id}")])
+    return InlineKeyboardMarkup(rows)

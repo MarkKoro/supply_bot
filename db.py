@@ -701,12 +701,57 @@ async def _ensure_intake_log_slots(conn: aiosqlite.Connection) -> None:
 
 
 async def _ensure_user_schedule_slots(conn: aiosqlite.Connection) -> None:
-    await conn.execute(
-        """CREATE TABLE IF NOT EXISTS user_schedule_slots (
-          user_id INTEGER PRIMARY KEY,
-          slots_json TEXT NOT NULL DEFAULT '[]'
-        )"""
-    )
+    exists = await _table_exists(conn, "user_schedule_slots")
+    legacy_rows: list[aiosqlite.Row] = []
+    if exists:
+        cols = await _table_columns(conn, "user_schedule_slots")
+        if "slots_json" in cols:
+            legacy_rows = await fetchall(conn, "SELECT user_id, slots_json FROM user_schedule_slots")
+            await conn.execute("ALTER TABLE user_schedule_slots RENAME TO user_schedule_slots_legacy")
+            exists = False
+
+    if not exists:
+        await conn.execute(
+            """CREATE TABLE IF NOT EXISTS user_schedule_slots (
+              user_id INTEGER NOT NULL,
+              slot_id TEXT NOT NULL,
+              title_ru TEXT NOT NULL DEFAULT '',
+              time_local TEXT NOT NULL DEFAULT '08:00',
+              is_enabled INTEGER NOT NULL DEFAULT 1,
+              PRIMARY KEY(user_id, slot_id)
+            )"""
+        )
+
+    cols = await _table_columns(conn, "user_schedule_slots")
+    if "slot_id" not in cols:
+        await conn.execute("ALTER TABLE user_schedule_slots ADD COLUMN slot_id TEXT")
+    if "title_ru" not in cols:
+        await conn.execute("ALTER TABLE user_schedule_slots ADD COLUMN title_ru TEXT NOT NULL DEFAULT ''")
+    if "time_local" not in cols:
+        await conn.execute("ALTER TABLE user_schedule_slots ADD COLUMN time_local TEXT NOT NULL DEFAULT '08:00'")
+    if "is_enabled" not in cols:
+        await conn.execute("ALTER TABLE user_schedule_slots ADD COLUMN is_enabled INTEGER NOT NULL DEFAULT 1")
+
+    for row in legacy_rows:
+        user_id = int(row["user_id"] or 0)
+        try:
+            parsed = json.loads(str(row["slots_json"] or "[]"))
+        except json.JSONDecodeError:
+            parsed = []
+        for slot in _normalize_slots(parsed):
+            await conn.execute(
+                """INSERT OR REPLACE INTO user_schedule_slots(user_id, slot_id, title_ru, time_local, is_enabled)
+                   VALUES(?,?,?,?,?)""",
+                (
+                    user_id,
+                    str(slot.get("slot_id") or ""),
+                    str(slot.get("title_ru") or "Слот"),
+                    str(slot.get("time_local") or "08:00"),
+                    1 if slot.get("is_enabled", True) else 0,
+                ),
+            )
+
+    await conn.execute("DROP TABLE IF EXISTS user_schedule_slots_legacy")
 
 
 async def _ensure_user_supp_settings(conn: aiosqlite.Connection) -> None:
@@ -1459,15 +1504,32 @@ def get_local_date_str(tz_name: str | None) -> str:
     return datetime.now(parse_utc_tz(tz_name)).date().isoformat()
 
 DEFAULT_USER_SLOTS = [
-    {"slot_id": "morning", "title_ru": "Утро", "time_local": "08:30", "is_enabled": True},
-    {"slot_id": "noon", "title_ru": "День", "time_local": "13:30", "is_enabled": True},
-    {"slot_id": "evening", "title_ru": "Вечер", "time_local": "19:30", "is_enabled": True},
-    {"slot_id": "night", "title_ru": "Ночь", "time_local": "22:30", "is_enabled": True},
+    {"slot_id": "morning", "title_ru": "Утро", "time_local": "08:00", "is_enabled": True},
+    {"slot_id": "noon", "title_ru": "День", "time_local": "14:00", "is_enabled": True},
+    {"slot_id": "evening", "title_ru": "Вечер", "time_local": "19:00", "is_enabled": True},
 ]
 
 
 def default_user_slots() -> list[dict]:
     return [dict(item) for item in DEFAULT_USER_SLOTS]
+
+
+def _is_valid_hhmm(value: str) -> bool:
+    return bool(re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", str(value or "").strip()))
+
+
+def _normalize_hhmm(value: str) -> str | None:
+    s = str(value or "").strip()
+    if _is_valid_hhmm(s):
+        return s
+    match = re.fullmatch(r"([0-2]?\d)[:.]([0-5]?\d)", s)
+    if not match:
+        return None
+    hour = int(match.group(1))
+    minute = int(match.group(2))
+    if 0 <= hour <= 23 and 0 <= minute <= 59:
+        return f"{hour:02d}:{minute:02d}"
+    return None
 
 
 def _normalize_slots(slots_list: list[dict] | None) -> list[dict]:
@@ -1481,8 +1543,8 @@ def _normalize_slots(slots_list: list[dict] | None) -> list[dict]:
         slot_id = str(raw.get("slot_id") or "").strip()
         if not slot_id or slot_id in seen:
             continue
-        time_local = str(raw.get("time_local") or "").strip()
-        if not re.match(r"^([01]\d|2[0-3]):[0-5]\d$", time_local):
+        time_local = _normalize_hhmm(str(raw.get("time_local") or "").strip()) or ""
+        if not _is_valid_hhmm(time_local):
             continue
         title_ru = str(raw.get("title_ru") or "").strip() or "Слот"
         out.append(
@@ -3440,6 +3502,7 @@ async def get_today_plan_groups(conn: aiosqlite.Connection, tg_user_id: int, loc
     slot_title_by_time = {
         str(s.get("time_local") or ""): str(s.get("title_ru") or "Слот")
         for s in slots
+        if bool(s.get("is_enabled", True))
     }
     rows = await fetchall(
         conn,
@@ -3458,10 +3521,8 @@ async def get_today_plan_groups(conn: aiosqlite.Connection, tg_user_id: int, loc
     by_time: dict[str, dict] = {}
     for row in rows:
         item_slot_id = str(row["slot_id"] or "").strip() or "morning"
-        slot_info = slots_by_id.get(item_slot_id) or (slots[0] if slots else {"slot_id": "morning", "title_ru": "Утро", "time_local": "08:30"})
-        effective_time = str(row["time_hhmm"] or "").strip() or str(slot_info.get("time_local") or "08:30")
-        if not re.match(r"^([01]\d|2[0-3]):[0-5]\d$", effective_time):
-            effective_time = str(slot_info.get("time_local") or "08:30")
+        slot_info = slots_by_id.get(item_slot_id) or (slots[0] if slots else {"slot_id": "morning", "title_ru": "Утро", "time_local": "08:00"})
+        effective_time = _normalize_hhmm(str(row["time_hhmm"] or "").strip() or str(slot_info.get("time_local") or "08:00")) or str(slot_info.get("time_local") or "08:00")
         group = by_time.setdefault(
             effective_time,
             {
@@ -3485,39 +3546,170 @@ async def get_today_plan_groups(conn: aiosqlite.Connection, tg_user_id: int, loc
     return out
 
 async def get_user_slots(conn: aiosqlite.Connection, user_id: int) -> list[dict]:
-    row = await fetchone(
+    rows = await fetchall(
         conn,
-        "SELECT slots_json FROM user_schedule_slots WHERE user_id=?",
+        """SELECT slot_id, title_ru, time_local, is_enabled
+           FROM user_schedule_slots
+           WHERE user_id=?""",
         (user_id,),
     )
-    if not row:
-        slots = default_user_slots()
-        await conn.execute(
-            "INSERT INTO user_schedule_slots(user_id, slots_json) VALUES(?,?)",
-            (user_id, json.dumps(slots, ensure_ascii=False)),
+    slots = []
+    for row in rows:
+        time_local = _normalize_hhmm(str(row["time_local"] or "")) or ""
+        if not _is_valid_hhmm(time_local):
+            continue
+        slots.append(
+            {
+                "slot_id": str(row["slot_id"] or "").strip(),
+                "title_ru": str(row["title_ru"] or "Слот").strip() or "Слот",
+                "time_local": time_local,
+                "is_enabled": bool(int(row["is_enabled"] or 0)),
+            }
         )
-        await conn.commit()
-        return slots
-    try:
-        slots_raw = json.loads(str(row["slots_json"] or "[]"))
-    except json.JSONDecodeError:
-        slots_raw = []
-    slots = _normalize_slots(slots_raw)
-    if slots != slots_raw:
-        await set_user_slots(conn, user_id, slots)
-    return slots
+
+    by_id = {str(slot.get("slot_id") or ""): slot for slot in slots if str(slot.get("slot_id") or "")}
+    changed = False
+    for base in default_user_slots():
+        base_id = str(base["slot_id"])
+        if base_id not in by_id:
+            by_id[base_id] = dict(base)
+            changed = True
+
+    out = list(by_id.values())
+    out.sort(key=lambda item: (str(item.get("time_local") or "99:99"), str(item.get("slot_id") or "")))
+
+    if changed or len(out) != len(rows):
+        await set_user_slots(conn, user_id, out)
+        return await get_user_slots(conn, user_id)
+    return out
 
 
 async def set_user_slots(conn: aiosqlite.Connection, user_id: int, slots_list: list[dict]) -> None:
     slots = _normalize_slots(slots_list)
+    by_id = {str(slot.get("slot_id") or ""): dict(slot) for slot in slots}
+    for base in default_user_slots():
+        base_id = str(base["slot_id"])
+        if base_id not in by_id:
+            by_id[base_id] = dict(base)
+
+    await conn.execute("DELETE FROM user_schedule_slots WHERE user_id=?", (user_id,))
+    for slot in by_id.values():
+        await conn.execute(
+            """INSERT INTO user_schedule_slots(user_id, slot_id, title_ru, time_local, is_enabled)
+               VALUES(?,?,?,?,?)""",
+            (
+                user_id,
+                str(slot.get("slot_id") or "").strip(),
+                str(slot.get("title_ru") or "Слот").strip() or "Слот",
+                str(slot.get("time_local") or "08:00").strip(),
+                1 if slot.get("is_enabled", True) else 0,
+            ),
+        )
+    await conn.commit()
+
+
+async def upsert_user_slot(
+    conn: aiosqlite.Connection,
+    user_id: int,
+    slot_id: str,
+    title_ru: str,
+    time_local: str,
+    is_enabled: int = 1,
+) -> None:
+    normalized = _normalize_hhmm(time_local)
+    if not normalized:
+        raise ValueError("invalid HH:MM")
     await conn.execute(
-        """INSERT INTO user_schedule_slots(user_id, slots_json)
-           VALUES(?,?)
-           ON CONFLICT(user_id) DO UPDATE SET
-             slots_json=excluded.slots_json""",
-        (user_id, json.dumps(slots, ensure_ascii=False)),
+        """INSERT INTO user_schedule_slots(user_id, slot_id, title_ru, time_local, is_enabled)
+           VALUES(?,?,?,?,?)
+           ON CONFLICT(user_id, slot_id) DO UPDATE SET
+             title_ru=excluded.title_ru,
+             time_local=excluded.time_local,
+             is_enabled=excluded.is_enabled""",
+        (user_id, slot_id, (title_ru or "Слот").strip(), normalized, 1 if is_enabled else 0),
     )
     await conn.commit()
+
+
+async def set_user_slot_time(conn: aiosqlite.Connection, user_id: int, slot_id: str, time_local: str) -> None:
+    normalized = _normalize_hhmm(time_local)
+    if not normalized:
+        raise ValueError("invalid HH:MM")
+    slots = await get_user_slots(conn, user_id)
+    existing = next((s for s in slots if str(s.get("slot_id") or "") == slot_id), None)
+    if existing:
+        title = str(existing.get("title_ru") or "Слот")
+    else:
+        title = normalized if slot_id.startswith("t_") else "Слот"
+    await upsert_user_slot(conn, user_id, slot_id, title, normalized, is_enabled=1)
+
+
+async def add_custom_slot(conn: aiosqlite.Connection, user_id: int, time_local: str, title_ru: str | None = None) -> str:
+    normalized = _normalize_hhmm(time_local)
+    if not normalized:
+        raise ValueError("invalid HH:MM")
+    base = f"t_{normalized.replace(':', '')}"
+    slot_id = base
+    n = 2
+    while await fetchone(conn, "SELECT 1 FROM user_schedule_slots WHERE user_id=? AND slot_id=?", (user_id, slot_id)):
+        slot_id = f"{base}_{n}"
+        n += 1
+    await upsert_user_slot(conn, user_id, slot_id, (title_ru or normalized), normalized, is_enabled=1)
+    return slot_id
+
+
+async def set_schedule_slot(conn: aiosqlite.Connection, user_id: int, supplement_id: int, slot_id: str) -> None:
+    await conn.execute(
+        """INSERT INTO user_schedules(user_id, supplement_id, time_hhmm, slot_id, is_enabled)
+           VALUES(?, ?, NULL, ?, 1)
+           ON CONFLICT(user_id, supplement_id) DO UPDATE SET
+             slot_id=excluded.slot_id,
+             is_enabled=1""",
+        (user_id, supplement_id, slot_id),
+    )
+    await conn.commit()
+
+
+async def set_schedule_time_override(
+    conn: aiosqlite.Connection,
+    user_id: int,
+    supplement_id: int,
+    time_hhmm: str | None,
+) -> None:
+    normalized = None
+    if time_hhmm is not None:
+        normalized = _normalize_hhmm(time_hhmm)
+        if not normalized:
+            raise ValueError("invalid HH:MM")
+    await conn.execute(
+        """INSERT INTO user_schedules(user_id, supplement_id, time_hhmm, slot_id, is_enabled)
+           VALUES(?, ?, ?, 'morning', 1)
+           ON CONFLICT(user_id, supplement_id) DO UPDATE SET
+             time_hhmm=excluded.time_hhmm,
+             is_enabled=1""",
+        (user_id, supplement_id, normalized),
+    )
+    await conn.execute(
+        "UPDATE user_schedules SET slot_id='morning' WHERE user_id=? AND supplement_id=? AND (slot_id IS NULL OR slot_id='')",
+        (user_id, supplement_id),
+    )
+    await conn.commit()
+
+
+async def get_user_schedule_map(conn: aiosqlite.Connection, user_id: int) -> dict[int, dict]:
+    rows = await fetchall(
+        conn,
+        "SELECT supplement_id, slot_id, time_hhmm FROM user_schedules WHERE user_id=?",
+        (user_id,),
+    )
+    out: dict[int, dict] = {}
+    for row in rows:
+        sid = int(row["supplement_id"] or 0)
+        out[sid] = {
+            "slot_id": str(row["slot_id"] or "").strip() or "morning",
+            "time_hhmm": _normalize_hhmm(str(row["time_hhmm"] or "")) if row["time_hhmm"] else None,
+        }
+    return out
 
 
 async def upsert_intake_log(

@@ -44,6 +44,9 @@ from keyboards import (
     my_supplement_reminders,
     timezone_picker,
     settings_menu,
+    schedule_menu_kb,
+    schedule_slots_pick_kb,
+    supplement_time_kb,
     ai_checkin_entry_kb,
     ai_checkin_voice_kb,
     today_home_kb,
@@ -283,6 +286,42 @@ async def _show_reminders_home(update: Update, context: ContextTypes.DEFAULT_TYP
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="today:home")])
     await show(update, context, text, InlineKeyboardMarkup(rows), route="rem:home")
 
+
+
+
+async def _show_schedule_home(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, tg_uid: int) -> None:
+    user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
+    slots = await db.get_user_slots(conn, user_id)
+    lines = ["⏰ <b>Расписание</b>"]
+    for slot in slots:
+        if not slot.get("is_enabled", True):
+            continue
+        lines.append(f"• [{slot.get('time_local','--:--')}] {slot.get('title_ru','Слот')}")
+    await show(update, context, "\n".join(lines), schedule_menu_kb(), route="settings:schedule")
+
+
+async def _show_supplement_time_screen(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    conn,
+    tg_uid: int,
+    supplement_id: int,
+) -> None:
+    user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
+    supplement = await db.get_user_supplement(conn, tg_uid, supplement_id)
+    if not supplement:
+        await show(update, context, "Добавка не найдена.", my_list_back(), route="mysupp:list:0")
+        return
+    slots = await db.get_user_slots(conn, user_id)
+    schedule_map = await db.get_user_schedule_map(conn, user_id)
+    current = schedule_map.get(supplement_id, {"slot_id": "morning", "time_hhmm": None})
+    slot = next((s for s in slots if str(s.get("slot_id") or "") == str(current.get("slot_id") or "")), None)
+    slot_title = str(slot.get("title_ru") or "Утро") if slot else "Утро"
+    override = current.get("time_hhmm")
+    mode = override if override else "по времени слота"
+    title = (supplement["name_ru"] or supplement["name"] or "").strip()
+    text = f"⏰ <b>Время приёма</b>\n\n💊 {title}\nСлот: {slot_title}\nТекущее время: {mode}"
+    await show(update, context, text, supplement_time_kb(supplement_id, slots), route=f"supplement:set_time:{supplement_id}")
 
 
 CATALOG_TYPE_TITLES = {
@@ -1740,6 +1779,23 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             context.user_data["tz_back_data"] = "menu:settings"
             await _show_timezone_picker(update, context, 0)
             return
+        if data == "settings:schedule":
+            await _show_schedule_home(update, context, conn, tg_uid)
+            return
+        if data == "schedule:slot_pick":
+            user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
+            slots = await db.get_user_slots(conn, user_id)
+            await show(update, context, "Выбери слот для изменения времени:", schedule_slots_pick_kb(slots), route="schedule:slot_pick")
+            return
+        if data.startswith("schedule:slot_time_set:"):
+            slot_id = data.split(":", 2)[2]
+            context.user_data[WAITING_KEY] = f"schedule:slot_time_set:{slot_id}"
+            await show(update, context, "Введи время в формате HH:MM", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="settings:schedule")]]), route=f"schedule:slot_time_set:{slot_id}")
+            return
+        if data == "schedule:add_custom":
+            context.user_data[WAITING_KEY] = "schedule:add_custom"
+            await show(update, context, "Введи время в формате HH:MM", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="settings:schedule")]]), route="schedule:add_custom")
+            return
 
         if data == "menu:add":
             context.user_data[WAITING_KEY] = "add_query"
@@ -2750,6 +2806,34 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 elif action == "skip":
                     await db.set_today_status(conn, tg_uid, supplement_id, "skipped")
                 await _show_my_list(update, context, conn, tg_uid, page)
+            return
+
+        if data.startswith("supplement:set_time:"):
+            supplement_id = int(data.split(":", 2)[2])
+            await _show_supplement_time_screen(update, context, conn, tg_uid, supplement_id)
+            return
+
+        if data.startswith("supplement:set_slot:"):
+            parts = data.split(":")
+            if len(parts) >= 4:
+                supplement_id = int(parts[2])
+                slot_id = parts[3]
+                user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
+                await db.set_schedule_slot(conn, user_id, supplement_id, slot_id)
+                await _show_supplement_time_screen(update, context, conn, tg_uid, supplement_id)
+            return
+
+        if data.startswith("supplement:set_override:"):
+            supplement_id = int(data.split(":", 2)[2])
+            context.user_data[WAITING_KEY] = f"supplement:set_override:{supplement_id}"
+            await show(update, context, "Введи время в формате HH:MM", my_hub_back(supplement_id), route=f"supplement:set_override:{supplement_id}")
+            return
+
+        if data.startswith("supplement:clear_override:"):
+            supplement_id = int(data.split(":", 2)[2])
+            user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
+            await db.set_schedule_time_override(conn, user_id, supplement_id, None)
+            await _show_supplement_time_screen(update, context, conn, tg_uid, supplement_id)
             return
 
         if data.startswith("mysupp:set_dose:"):
@@ -4183,9 +4267,11 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     finally:
         await conn.close()
     waiting = context.user_data.get(WAITING_KEY)
-    if waiting and waiting.startswith(("mysupp:set_dose:", "mysupp:rem_add:", "rem:set:")):
-        _, _, value_text = waiting.split(":", 2)
-        supplement_id = int(value_text) if waiting.startswith(("mysupp:set_dose:", "mysupp:rem_add:")) else None
+    if waiting and waiting.startswith(("mysupp:set_dose:", "mysupp:rem_add:", "rem:set:", "schedule:add_custom", "schedule:slot_time_set:", "supplement:set_override:")):
+        supplement_id = None
+        if waiting.startswith(("mysupp:set_dose:", "mysupp:rem_add:", "supplement:set_override:")):
+            _, _, value_text = waiting.split(":", 2)
+            supplement_id = int(value_text)
         s = context.application.bot_data["settings"]
         tg_uid = update.effective_user.id
         conn = await db.connect(s.DB_PATH)
@@ -4218,6 +4304,34 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     await db.upsert_reminder(conn, tg_uid, supplement_id, parsed_time, enabled=1)
                     context.user_data.pop(WAITING_KEY, None)
                     await _show_my_supp_reminders(update, context, conn, tg_uid, supplement_id)
+            elif waiting == "schedule:add_custom":
+                parsed_time = _parse_user_time_input(txt)
+                user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
+                if not parsed_time:
+                    await show(update, context, "Не понял время. Пример: 16:00", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="settings:schedule")]]), route="schedule:add_custom")
+                else:
+                    await db.add_custom_slot(conn, user_id, parsed_time)
+                    context.user_data.pop(WAITING_KEY, None)
+                    await _show_schedule_home(update, context, conn, tg_uid)
+            elif waiting.startswith("schedule:slot_time_set:"):
+                parsed_time = _parse_user_time_input(txt)
+                slot_id = waiting.split(":", 2)[2]
+                user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
+                if not parsed_time:
+                    await show(update, context, "Не понял время. Пример: 08:30", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="settings:schedule")]]), route=f"schedule:slot_time_set:{slot_id}")
+                else:
+                    await db.set_user_slot_time(conn, user_id, slot_id, parsed_time)
+                    context.user_data.pop(WAITING_KEY, None)
+                    await _show_schedule_home(update, context, conn, tg_uid)
+            elif waiting.startswith("supplement:set_override:"):
+                parsed_time = _parse_user_time_input(txt)
+                user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
+                if not parsed_time:
+                    await show(update, context, "Не понял время. Пример: 16:00", my_hub_back(supplement_id), route=f"supplement:set_override:{supplement_id}")
+                else:
+                    await db.set_schedule_time_override(conn, user_id, supplement_id, parsed_time)
+                    context.user_data.pop(WAITING_KEY, None)
+                    await _show_supplement_time_screen(update, context, conn, tg_uid, supplement_id)
             else:
                 parsed_time = _parse_user_time_input(txt)
                 slot_id = waiting.split(":", 2)[2]
@@ -4712,7 +4826,7 @@ async def _bootstrap() -> Application:
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(
         on_menu,
-        pattern=r"^(main$|menu:|settings:|admin:|add_pick:|compat_pick:|cat:|curated:|supp:|card:|mysupp:|today:|intake:|rem:(home|edit|set:|toggle:))",
+        pattern=r"^(main$|menu:|settings:|schedule:|supplement:|admin:|add_pick:|compat_pick:|cat:|curated:|supp:|card:|mysupp:|today:|intake:|rem:(home|edit|set:|toggle:))",
     ))
     app.add_handler(CallbackQueryHandler(on_ai_add, pattern=r"^aiadd:"))
     app.add_handler(CallbackQueryHandler(on_ai_checkin, pattern=r"^aicheck:"))

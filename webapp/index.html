@@ -239,6 +239,24 @@
       padding-top: 8px;
       background: linear-gradient(to top, rgba(10,13,33,0.96) 40%, transparent);
     }
+
+    .legend-grid { display:grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap:8px; margin-top:8px; }
+    .legend-pill { border-radius: 12px; padding: 8px; font-size: 12px; text-align:center; background: rgba(255,255,255,0.06); }
+    .legend-benefit { box-shadow: 0 0 14px rgba(73,216,141,0.55); }
+    .legend-burden { box-shadow: 0 0 14px rgba(255,107,121,0.6); }
+    .legend-mixed { box-shadow: 0 0 14px rgba(255,191,92,0.7); }
+    .bodymap-svg { width: 100%; max-height: 380px; }
+    .organ-shape { cursor: pointer; transition: transform .15s ease, filter .15s ease; stroke: rgba(255,255,255,0.5); stroke-width: 1.1; }
+    .organ-shape:active { transform: scale(0.98); }
+    .bodymap-grid { display:grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap:8px; margin-top:8px; }
+    .organ-card { border:1px solid rgba(255,255,255,.15); border-radius:14px; padding:10px; background: rgba(255,255,255,0.06); }
+    .organ-card .title { font-weight:700; }
+    .badge { border-radius:999px; padding:2px 8px; font-size:12px; font-weight:700; }
+    .badge.plus { background: rgba(73,216,141,0.2); color:#b7ffd5; }
+    .badge.minus { background: rgba(255,107,121,0.24); color:#ffd0d5; }
+    .sheet-backdrop { position: fixed; inset:0; background: rgba(2,5,16,0.58); z-index: 32; }
+    .sheet { position: fixed; left:10px; right:10px; bottom: calc(82px + env(safe-area-inset-bottom)); z-index: 33; max-height: 66vh; overflow: auto; opacity:1; transform: translateY(0); transition: all .18s ease; }
+    .sheet-empty { padding:12px; border-radius: 14px; background: rgba(255,255,255,0.05); color: var(--muted); text-align:center; }
   </style>
 </head>
 <body>
@@ -262,7 +280,10 @@
       filters: { evidence: [], targets: [], burdens: [], sort: "alpha" },
       detail: null, detailLoading: false, filtersOpen: false
     },
-    searchDebounce: null
+    searchDebounce: null,
+    bodyMap: null,
+    loadingBodyMap: false,
+    bodyMapSheet: null
   };
 
   const APP_NAME = "SupplyBot";
@@ -493,6 +514,9 @@
         if (tab === "catalog" && !state.catalog.items.length) {
           await loadCatalog();
         }
+        if (tab === "bodymap" && !state.bodyMap) {
+          await loadBodyMap();
+        }
       });
     });
 
@@ -503,6 +527,8 @@
         await loadToday(true);
       } else if (state.activeTab === "catalog") {
         await loadCatalog(true);
+      } else if (state.activeTab === "bodymap") {
+        await loadBodyMap(true);
       } else {
         showToast("Раздел обновлён");
       }
@@ -531,14 +557,16 @@
       return;
     }
 
-    const map = {
-      bodymap: "Скоро: карта организма",
-      survey: "Скоро: опрос карточками"
-    };
+    if (state.activeTab === "bodymap") {
+      target.innerHTML = renderBodyMap();
+      bindBodyMapEvents();
+      return;
+    }
+
     target.innerHTML = `
       <div class="card fade">
-        <h3 style="margin-top:0">${tabs.find(t => t.id === state.activeTab)?.title}</h3>
-        <p class="muted" style="margin-bottom:0">${map[state.activeTab]}</p>
+        <h3 style="margin-top:0">Survey</h3>
+        <p class="muted" style="margin-bottom:0">Скоро: опрос карточками</p>
       </div>
       <div class="card fade">
         <div class="muted">Раздел в разработке. Навигация и стили уже готовы.</div>
@@ -623,6 +651,19 @@
     finally { state.catalog.loading = false; renderActiveTab(); }
   }
 
+  function bindDetailModalEvents() {
+    appEl.querySelector('[data-detail-close]')?.addEventListener('click', ()=>{ state.catalog.detail=null; renderActiveTab(); });
+    appEl.querySelector('[data-open-shop]')?.addEventListener('click', ()=>{ const u=state.catalog.detail?.purchase_url; if(u) tg?.openLink?.(u); });
+    appEl.querySelector('[data-stack-toggle]')?.addEventListener('click', async (e)=>{
+      const b=e.currentTarget; const id=Number(b.dataset.id); const inStack=b.dataset.in==='1';
+      const action=inStack?'remove':'add'; haptic();
+      const detail=state.catalog.detail; const prev=detail.in_stack; detail.in_stack=!inStack;
+      const listItem=state.catalog.items.find(i=>i.id===id); if(listItem) listItem.in_stack=detail.in_stack; renderActiveTab();
+      try { const r=await api('./api/my_supplements/toggle',{method:'POST',body:{supplement_id:id,action}}); detail.in_stack=!!r.in_stack; if(listItem) listItem.in_stack=detail.in_stack; showToast(detail.in_stack?'Добавлено в стек':'Убрано из стека'); renderActiveTab(); }
+      catch { detail.in_stack=prev; if(listItem) listItem.in_stack=prev; renderActiveTab(); showToast('Не удалось обновить стек'); }
+    });
+  }
+
   function bindCatalogEvents() {
     document.getElementById('catalogSearch')?.addEventListener('input', (e) => {
       state.catalog.q = e.target.value;
@@ -636,22 +677,126 @@
       haptic();
       try { const d=await api(`./api/supplement/${el.dataset.catalogOpen}`); state.catalog.detail=d.item; renderActiveTab(); } catch { showToast('Не удалось открыть карточку'); }
     }));
-    appEl.querySelector('[data-detail-close]')?.addEventListener('click', ()=>{ state.catalog.detail=null; renderActiveTab(); });
-    appEl.querySelector('[data-open-shop]')?.addEventListener('click', ()=>{ const u=state.catalog.detail?.purchase_url; if(u) tg?.openLink?.(u); });
-    appEl.querySelector('[data-stack-toggle]')?.addEventListener('click', async (e)=>{
-      const b=e.currentTarget; const id=Number(b.dataset.id); const inStack=b.dataset.in==='1';
-      const action=inStack?'remove':'add'; haptic();
-      const detail=state.catalog.detail; const prev=detail.in_stack; detail.in_stack=!inStack;
-      const listItem=state.catalog.items.find(i=>i.id===id); if(listItem) listItem.in_stack=detail.in_stack; renderActiveTab();
-      try { const r=await api('./api/my_supplements/toggle',{method:'POST',body:{supplement_id:id,action}}); detail.in_stack=!!r.in_stack; if(listItem) listItem.in_stack=detail.in_stack; showToast(detail.in_stack?'Добавлено в стек':'Убрано из стека'); renderActiveTab(); }
-      catch { detail.in_stack=prev; if(listItem) listItem.in_stack=prev; renderActiveTab(); showToast('Не удалось обновить стек'); }
-    });
+    bindDetailModalEvents();
     appEl.querySelectorAll('[data-filter-close]').forEach((el)=>el.addEventListener('click',()=>{ state.catalog.filtersOpen=false; renderActiveTab(); }));
     appEl.querySelectorAll('[data-filter-toggle]').forEach((el)=>el.addEventListener('click',()=>{
       const [k,v]=el.dataset.filterToggle.split(':'); const arr=state.catalog.filters[k]; const idx=arr.indexOf(v); if(idx>=0) arr.splice(idx,1); else arr.push(v); renderActiveTab(); const s=document.getElementById('sortSelect'); if(s) s.value=state.catalog.filters.sort;
     }));
     document.getElementById('applyFilters')?.addEventListener('click', async ()=>{ const s=document.getElementById('sortSelect'); if(s) state.catalog.filters.sort=s.value; state.catalog.filtersOpen=false; state.catalog.page=0; await loadCatalog(true); });
     document.getElementById('resetFilters')?.addEventListener('click', async ()=>{ state.catalog.filters={evidence:[],targets:[],burdens:[],sort:'alpha'}; state.catalog.filtersOpen=false; state.catalog.page=0; await loadCatalog(true); });
+  }
+
+
+
+  const SYSTEM_LABELS = {
+    brain: 'Мозг', heart: 'Сердце', liver: 'Печень', kidney: 'Почки', gut: 'ЖКТ', lungs: 'Лёгкие',
+    thyroid: 'Щитовидка', pancreas: 'Поджелудочная', joints: 'Суставы', muscle: 'Мышцы', bone: 'Кости',
+    skin: 'Кожа', immune: 'Иммунитет', blood: 'Кровь', endocrine: 'Эндокринная'
+  };
+  const SVG_SYSTEMS = ['brain','lungs','heart','liver','gut','kidney','thyroid','pancreas'];
+
+  function bodyMapSystem(key) {
+    return state.bodyMap?.systems?.[key] || { benefit_count: 0, burden_count: 0, top: [] };
+  }
+
+  function bodyMapVisual(key) {
+    const s = bodyMapSystem(key);
+    const total = Number(s.benefit_count || 0) + Number(s.burden_count || 0);
+    const max = Number(state.bodyMap?.max_count || 0);
+    const intensity = max === 0 || total === 0 ? 0 : Math.min(1, Math.max(0.15, total / max));
+    let color = '255,255,255';
+    if (s.burden_count > s.benefit_count) color = '255,107,121';
+    else if (s.benefit_count > s.burden_count) color = '73,216,141';
+    else if (total > 0) color = '255,191,92';
+    return { total, intensity, color };
+  }
+
+  function renderBodyMap() {
+    if (state.loadingBodyMap && !state.bodyMap) return '<div class="card">Загружаем BodyMap...</div>';
+    if (!state.bodyMap) return '<div class="card">Нет данных BodyMap. Нажмите refresh.</div>';
+    const extra = Object.keys(SYSTEM_LABELS).filter((k)=>!SVG_SYSTEMS.includes(k));
+    const organPath = (key, shape) => {
+      const v = bodyMapVisual(key);
+      const style = `filter: drop-shadow(0 0 ${Math.round(22*v.intensity)}px rgba(${v.color},${v.intensity})); fill: rgba(${v.color},${0.26 + v.intensity*0.35});`;
+      return `<g data-system="${key}" class="organ-hotspot"><${shape} class="organ-shape" style="${style}"/></g>`;
+    };
+    const sheet = state.bodyMapSheet ? renderBodyMapSheet(state.bodyMapSheet) : '';
+    return `
+      <div class="card fade"><strong>BodyMap · ${esc(state.bodyMap.day || '')}</strong>
+        <div class="legend-grid">
+          <div class="legend-pill legend-benefit">Зелёный = польза</div>
+          <div class="legend-pill legend-burden">Красный = нагрузка</div>
+          <div class="legend-pill legend-mixed">Янтарный = mixed</div>
+        </div>
+      </div>
+      <div class="card fade">
+        <svg class="bodymap-svg" viewBox="0 0 220 420" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Body map">
+          <path d="M110 20 C145 20 166 48 166 84 C166 113 148 132 145 162 C142 193 155 222 155 262 C155 325 133 386 110 396 C87 386 65 325 65 262 C65 222 78 193 75 162 C72 132 54 113 54 84 C54 48 75 20 110 20 Z" fill="rgba(255,255,255,0.07)" stroke="rgba(255,255,255,0.3)"/>
+          ${organPath('brain','ellipse cx="110" cy="72" rx="25" ry="18"')}
+          ${organPath('thyroid','rect x="99" y="100" width="22" height="10" rx="5"')}
+          ${organPath('lungs','ellipse cx="110" cy="136" rx="34" ry="26"')}
+          ${organPath('heart','ellipse cx="109" cy="152" rx="14" ry="13"')}
+          ${organPath('liver','ellipse cx="125" cy="192" rx="30" ry="16"')}
+          ${organPath('pancreas','rect x="88" y="214" width="44" height="10" rx="4"')}
+          ${organPath('gut','ellipse cx="110" cy="252" rx="32" ry="28"')}
+          ${organPath('kidney','ellipse cx="110" cy="228" rx="44" ry="12"')}
+        </svg>
+      </div>
+      <div class="card fade">
+        <div class="muted">Другие системы</div>
+        <div class="bodymap-grid">
+          ${extra.map((k)=>{const s=bodyMapSystem(k);const v=bodyMapVisual(k);return `<button class="organ-card" data-system="${k}" style="box-shadow: inset 0 0 ${Math.round(15*v.intensity)}px rgba(${v.color},${v.intensity});"><div class="title">${SYSTEM_LABELS[k]}</div><div class="muted">${s.benefit_count||0} + / ${s.burden_count||0} -</div></button>`;}).join('')}
+        </div>
+      </div>
+      ${sheet}
+      ${state.catalog.detail ? renderDetailModal(state.catalog.detail) : ""}
+    `;
+  }
+
+  function renderBodyMapSheet(systemKey) {
+    const data = bodyMapSystem(systemKey);
+    const list = data.top || [];
+    return `<div class="sheet-backdrop" data-sheet-close></div><div class="card sheet" role="dialog">
+      <div class="row"><strong>${SYSTEM_LABELS[systemKey] || systemKey}</strong><button class="btn secondary" data-sheet-close>Закрыть</button></div>
+      <div class="row" style="margin-top:8px"><span class="badge plus">Польза: ${data.benefit_count || 0}</span><span class="badge minus">Нагрузка: ${data.burden_count || 0}</span></div>
+      <div style="margin-top:10px">${list.length ? list.map((item)=>`<button class="item-row" data-bodymap-open="${esc(item.slug)}"><span class="badge ${item.direction==='burden'?'minus':'plus'}">${item.direction==='burden'?'-':'+'}</span><span>${esc(item.name_ru || item.slug)}</span></button>`).join('') : '<div class="sheet-empty">нет данных</div>'}</div>
+      <div class="row" style="margin-top:10px"><button class="btn" data-bodymap-catalog="${systemKey}">Открыть в каталоге</button></div>
+    </div>`;
+  }
+
+  function bindBodyMapEvents() {
+    bindDetailModalEvents();
+    appEl.querySelectorAll('[data-system]').forEach((el)=>el.addEventListener('click', ()=>{ haptic(); state.bodyMapSheet = el.dataset.system; renderActiveTab(); }));
+    appEl.querySelectorAll('[data-sheet-close]').forEach((el)=>el.addEventListener('click', ()=>{ state.bodyMapSheet = null; renderActiveTab(); }));
+    appEl.querySelectorAll('[data-bodymap-open]').forEach((el)=>el.addEventListener('click', async ()=>{
+      haptic();
+      try { const d=await api(`./api/supplement/${el.dataset.bodymapOpen}`); state.catalog.detail=d.item; renderActiveTab(); }
+      catch { showToast('Не удалось открыть карточку'); }
+    }));
+    appEl.querySelectorAll('[data-bodymap-catalog]').forEach((el)=>el.addEventListener('click', async ()=>{
+      haptic();
+      state.catalog.q='';
+      state.catalog.page=0;
+      state.catalog.filters.targets=[el.dataset.bodymapCatalog];
+      state.activeTab='catalog';
+      renderMainApp();
+      await loadCatalog(true);
+    }));
+  }
+
+  async function loadBodyMap(force) {
+    if (state.loadingBodyMap && !force) return;
+    state.loadingBodyMap = true;
+    renderActiveTab();
+    try {
+      const map = await api('./api/body_map');
+      state.bodyMap = map;
+    } catch (e) {
+      if (e.message !== 'PREMIUM_REQUIRED') showToast('Не удалось загрузить BodyMap');
+    } finally {
+      state.loadingBodyMap = false;
+      renderActiveTab();
+    }
   }
 
   async function loadToday(force) {

@@ -48,6 +48,11 @@ class BillingInvoiceBody(BaseModel):
     method: str
 
 
+class CatalogToggleBody(BaseModel):
+    supplement_id: int
+    action: str
+
+
 async def _auth_user_id(init_data: str) -> int:
     ok, parsed = verify_init_data(init_data, BOT_TOKEN)
     if not ok:
@@ -202,6 +207,89 @@ async def api_today_toggle(body: TodayToggleBody, x_telegram_init_data: str = He
     finally:
         await conn.close()
     return JSONResponse({"ok": True})
+
+
+
+
+@app.get("/api/catalog")
+async def api_catalog(
+    q: str = "",
+    page: int = 0,
+    page_size: int = 20,
+    evidence: str = "",
+    targets: str = "",
+    burdens: str = "",
+    sort: str = "",
+    x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
+):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    if not await _premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "error": "PREMIUM_REQUIRED", "code": "PREMIUM_REQUIRED"}, status_code=402)
+
+    evidence_list = [item.strip().upper() for item in evidence.split(",") if item.strip()]
+    targets_list = [item.strip().lower() for item in targets.split(",") if item.strip()]
+    burdens_list = [item.strip().lower() for item in burdens.split(",") if item.strip()]
+
+    conn = await db.connect(s.DB_PATH)
+    try:
+        payload = await db.catalog_search(
+            conn,
+            tg_user_id=tg_user_id,
+            q=(q or "").strip() or None,
+            evidence=evidence_list or None,
+            targets=targets_list or None,
+            burdens=burdens_list or None,
+            sort=(sort or "").strip() or None,
+            page=page,
+            page_size=page_size,
+        )
+    finally:
+        await conn.close()
+    return JSONResponse({"ok": True, **payload})
+
+
+@app.get("/api/supplement/{slug}")
+async def api_supplement_detail(slug: str, x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    if not await _premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "error": "PREMIUM_REQUIRED", "code": "PREMIUM_REQUIRED"}, status_code=402)
+
+    conn = await db.connect(s.DB_PATH)
+    try:
+        item = await db.get_supplement_detail_for_user(conn, tg_user_id, slug)
+    finally:
+        await conn.close()
+
+    if not item:
+        return JSONResponse({"ok": False, "error": "NOT_FOUND"}, status_code=404)
+    return JSONResponse({"ok": True, "item": item})
+
+
+@app.post("/api/my_supplements/toggle")
+async def api_my_supplements_toggle(
+    body: CatalogToggleBody,
+    x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
+):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    if not await _premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "error": "PREMIUM_REQUIRED", "code": "PREMIUM_REQUIRED"}, status_code=402)
+
+    action = str(body.action or "").strip().lower()
+    if action not in {"add", "remove"}:
+        return JSONResponse({"ok": False, "error": "INVALID_ACTION"}, status_code=400)
+
+    conn = await db.connect(s.DB_PATH)
+    try:
+        if action == "add":
+            await db.add_user_supplement(conn, tg_user_id, int(body.supplement_id))
+            in_stack = True
+        else:
+            await db.remove_user_supplement(conn, tg_user_id, int(body.supplement_id))
+            in_stack = False
+    finally:
+        await conn.close()
+
+    return JSONResponse({"ok": True, "in_stack": in_stack})
 
 
 @app.get("/api/schedule")

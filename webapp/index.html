@@ -256,7 +256,13 @@
     activeTab: "today",
     today: null,
     loadingToday: false,
-    toastTimer: null
+    toastTimer: null,
+    catalog: {
+      q: "", page: 0, items: [], total: 0, loading: false,
+      filters: { evidence: [], targets: [], burdens: [], sort: "alpha" },
+      detail: null, detailLoading: false, filtersOpen: false
+    },
+    searchDebounce: null
   };
 
   const APP_NAME = "SupplyBot";
@@ -484,6 +490,9 @@
         if (tab === "today" && !state.today) {
           await loadToday();
         }
+        if (tab === "catalog" && !state.catalog.items.length) {
+          await loadCatalog();
+        }
       });
     });
 
@@ -492,6 +501,8 @@
       haptic();
       if (state.activeTab === "today") {
         await loadToday(true);
+      } else if (state.activeTab === "catalog") {
+        await loadCatalog(true);
       } else {
         showToast("Раздел обновлён");
       }
@@ -514,8 +525,13 @@
       return;
     }
 
+    if (state.activeTab === "catalog") {
+      target.innerHTML = renderCatalog();
+      bindCatalogEvents();
+      return;
+    }
+
     const map = {
-      catalog: "Скоро: поиск RU/EN + фильтры",
       bodymap: "Скоро: карта организма",
       survey: "Скоро: опрос карточками"
     };
@@ -528,6 +544,114 @@
         <div class="muted">Раздел в разработке. Навигация и стили уже готовы.</div>
       </div>
     `;
+  }
+
+
+  function esc(text) {
+    return String(text || "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+  }
+
+  function renderCatalog() {
+    const c = state.catalog;
+    const filters = c.filters;
+    const subtitle = `Найдено: ${c.total}`;
+    const itemsHtml = c.items.map((item) => `
+      <button class="card item-row" data-catalog-open="${item.slug}" style="display:block; width:100%; margin-top:0;">
+        <div class="row"><strong>${esc(item.name_ru || item.name_en)}</strong><span>${item.has_purchase ? '🛒' : ''}</span></div>
+        <div class="muted" style="margin-top:6px">${esc(item.evidence_grade || '—')} • ${esc(item.confidence || '—')} ${item.in_stack ? '• ✅ в стеке' : ''}</div>
+      </button>`).join('');
+    return `
+      <div class="card fade">
+        <div class="row" style="gap:8px; align-items:stretch;">
+          <input id="catalogSearch" placeholder="Поиск RU/EN..." value="${esc(c.q)}" style="flex:1; border:0; border-radius:999px; padding:10px 12px; color:var(--text); background:rgba(255,255,255,0.12)"/>
+          <button class="btn secondary" id="catalogClear">✕</button>
+          <button class="btn" id="catalogFilters">Фильтры</button>
+        </div>
+        <div class="muted" style="margin-top:8px">${subtitle}</div>
+      </div>
+      ${c.loading ? '<div class="card">Загружаем каталог...</div>' : (itemsHtml || '<div class="card">Ничего не найдено.</div>')}
+      ${c.items.length < c.total ? '<div class="card cta-sticky"><button class="btn" id="catalogMore" style="width:100%">Загрузить ещё</button></div>' : ''}
+      ${c.filtersOpen ? renderFilterSheet(filters) : ''}
+      ${c.detail ? renderDetailModal(c.detail) : ''}
+    `;
+  }
+
+  function renderFilterSheet(filters) {
+    const ev = ['A','B','C','D'];
+    const tgts = ['brain','heart','gut','liver','kidney','sleep','mood','joints','muscle','skin','immune'];
+    const br = ['liver','kidney','gut'];
+    const chip=(v,arr,key)=>`<button class="chip ${arr.includes(v)?'green':''}" data-filter-toggle="${key}:${v}">${v}</button>`;
+    return `<div class="card" style="position:fixed;left:10px;right:10px;bottom:90px;z-index:30;max-height:60vh;overflow:auto">
+      <div class="row"><strong>Фильтры</strong><button class="btn secondary" data-filter-close>Закрыть</button></div>
+      <div style="margin-top:8px">Evidence: ${ev.map(v=>chip(v,filters.evidence,'evidence')).join(' ')}</div>
+      <div style="margin-top:8px">Targets: ${tgts.map(v=>chip(v,filters.targets,'targets')).join(' ')}</div>
+      <div style="margin-top:8px">Burdens: ${br.map(v=>chip(v,filters.burdens,'burdens')).join(' ')}</div>
+      <div style="margin-top:8px"><select id="sortSelect" style="width:100%;padding:8px;border-radius:10px"><option value="alpha">alpha</option><option value="evidence">evidence</option><option value="trials">trials</option><option value="effect">effect</option></select></div>
+      <div class="row" style="margin-top:10px"><button class="btn" id="applyFilters">Применить</button><button class="btn secondary" id="resetFilters">Сбросить</button></div>
+    </div>`;
+  }
+
+  function renderDetailModal(item) {
+    const chips = (val) => { try { return JSON.parse(val || '[]'); } catch { return []; } };
+    const arr=[...chips(item.tags_json),...chips(item.body_targets_json),...chips(item.body_burdens_json)].slice(0,20);
+    return `<div class="card" style="position:fixed; inset:auto 10px 90px; z-index:35; max-height:65vh; overflow:auto">
+      <div class="row"><strong>${esc(item.name_ru || item.name_en)}</strong><button class="btn secondary" data-detail-close>✕</button></div>
+      <div class="muted" style="margin-top:6px">${esc(item.evidence_grade || '—')} • ${esc(item.confidence || '—')}</div>
+      <p>${esc(item.summary_verified || item.summary_theoretical || '')}</p>
+      <details><summary>Дозировка / Тайминг / Безопасность</summary><div class="muted">${esc(item.dose_ru)}<br/>${esc(item.timing_ru)}<br/>${esc(item.safety_ru)}</div></details>
+      ${item.molecular_mechanisms ? `<details><summary>Механизмы</summary><div class="muted">${esc(item.molecular_mechanisms)}</div></details>` : ''}
+      <div style="margin-top:8px">${arr.map(t=>`<span class="chip" style="margin:2px">${esc(t)}</span>`).join('')}</div>
+      <div class="row" style="margin-top:10px"><button class="btn" data-stack-toggle data-id="${item.id}" data-in="${item.in_stack ? '1':'0'}">${item.in_stack ? 'Убрать из стека' : 'Добавить в мой стек'}</button>${item.purchase_url ? '<button class="btn secondary" data-open-shop>Перейти в магазин</button>' : ''}</div>
+    </div>`;
+  }
+
+  async function loadCatalog(force) {
+    if (state.catalog.loading && !force) return;
+    state.catalog.loading = true;
+    renderActiveTab();
+    const c = state.catalog;
+    const f = c.filters;
+    const qp = new URLSearchParams({ q: c.q || '', page: String(c.page), page_size: '20', sort: f.sort || 'alpha' });
+    if (f.evidence.length) qp.set('evidence', f.evidence.join(','));
+    if (f.targets.length) qp.set('targets', f.targets.join(','));
+    if (f.burdens.length) qp.set('burdens', f.burdens.join(','));
+    try {
+      const res = await api(`./api/catalog?${qp.toString()}`);
+      state.catalog.items = c.page === 0 ? res.items : c.items.concat(res.items);
+      state.catalog.total = res.total || 0;
+    } catch (e) { if (e.message !== 'PREMIUM_REQUIRED') showToast('Ошибка загрузки каталога'); }
+    finally { state.catalog.loading = false; renderActiveTab(); }
+  }
+
+  function bindCatalogEvents() {
+    document.getElementById('catalogSearch')?.addEventListener('input', (e) => {
+      state.catalog.q = e.target.value;
+      clearTimeout(state.searchDebounce);
+      state.searchDebounce = setTimeout(async () => { state.catalog.page = 0; await loadCatalog(true); }, 300);
+    });
+    document.getElementById('catalogClear')?.addEventListener('click', async () => { state.catalog.q=''; state.catalog.page=0; haptic(); await loadCatalog(true); });
+    document.getElementById('catalogFilters')?.addEventListener('click', () => { state.catalog.filtersOpen = true; haptic(); renderActiveTab(); const s=document.getElementById('sortSelect'); if(s) s.value=state.catalog.filters.sort || 'alpha'; });
+    document.getElementById('catalogMore')?.addEventListener('click', async () => { state.catalog.page += 1; await loadCatalog(true); });
+    appEl.querySelectorAll('[data-catalog-open]').forEach((el)=>el.addEventListener('click', async ()=>{
+      haptic();
+      try { const d=await api(`./api/supplement/${el.dataset.catalogOpen}`); state.catalog.detail=d.item; renderActiveTab(); } catch { showToast('Не удалось открыть карточку'); }
+    }));
+    appEl.querySelector('[data-detail-close]')?.addEventListener('click', ()=>{ state.catalog.detail=null; renderActiveTab(); });
+    appEl.querySelector('[data-open-shop]')?.addEventListener('click', ()=>{ const u=state.catalog.detail?.purchase_url; if(u) tg?.openLink?.(u); });
+    appEl.querySelector('[data-stack-toggle]')?.addEventListener('click', async (e)=>{
+      const b=e.currentTarget; const id=Number(b.dataset.id); const inStack=b.dataset.in==='1';
+      const action=inStack?'remove':'add'; haptic();
+      const detail=state.catalog.detail; const prev=detail.in_stack; detail.in_stack=!inStack;
+      const listItem=state.catalog.items.find(i=>i.id===id); if(listItem) listItem.in_stack=detail.in_stack; renderActiveTab();
+      try { const r=await api('./api/my_supplements/toggle',{method:'POST',body:{supplement_id:id,action}}); detail.in_stack=!!r.in_stack; if(listItem) listItem.in_stack=detail.in_stack; showToast(detail.in_stack?'Добавлено в стек':'Убрано из стека'); renderActiveTab(); }
+      catch { detail.in_stack=prev; if(listItem) listItem.in_stack=prev; renderActiveTab(); showToast('Не удалось обновить стек'); }
+    });
+    appEl.querySelectorAll('[data-filter-close]').forEach((el)=>el.addEventListener('click',()=>{ state.catalog.filtersOpen=false; renderActiveTab(); }));
+    appEl.querySelectorAll('[data-filter-toggle]').forEach((el)=>el.addEventListener('click',()=>{
+      const [k,v]=el.dataset.filterToggle.split(':'); const arr=state.catalog.filters[k]; const idx=arr.indexOf(v); if(idx>=0) arr.splice(idx,1); else arr.push(v); renderActiveTab(); const s=document.getElementById('sortSelect'); if(s) s.value=state.catalog.filters.sort;
+    }));
+    document.getElementById('applyFilters')?.addEventListener('click', async ()=>{ const s=document.getElementById('sortSelect'); if(s) state.catalog.filters.sort=s.value; state.catalog.filtersOpen=false; state.catalog.page=0; await loadCatalog(true); });
+    document.getElementById('resetFilters')?.addEventListener('click', async ()=>{ state.catalog.filters={evidence:[],targets:[],burdens:[],sort:'alpha'}; state.catalog.filtersOpen=false; state.catalog.page=0; await loadCatalog(true); });
   }
 
   async function loadToday(force) {

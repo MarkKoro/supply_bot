@@ -9,6 +9,8 @@ def main_menu(*, is_admin: bool = False) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("💊 Мои БАДы", callback_data="menu:my")],
         [InlineKeyboardButton("📚 Каталог БАДов", callback_data="menu:catalog")],
         [InlineKeyboardButton("📝 Ежедневный опрос", callback_data="menu:checkin_ai")],
+        [InlineKeyboardButton("🔓 Открыть WebApp", callback_data="menu:webapp")],
+        [InlineKeyboardButton("⭐ Премиум", callback_data="menu:premium")],
     ]
     if is_admin:
         rows.append([InlineKeyboardButton("📊 Статистика", callback_data="admin:stats")])
@@ -27,25 +29,14 @@ def today_home_kb(slots: list[dict]) -> InlineKeyboardMarkup:
 def today_slots_kb(slots: list[dict], date_local: str) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     for slot in slots:
-        if not slot.get("is_enabled", True):
-            continue
-        title = str(slot.get("title_ru") or "Слот")
-        time_local = str(slot.get("time_local") or "--:--")
-        rows.append([InlineKeyboardButton(f"{title} · {time_local}", callback_data="noop")])
-        for item in slot.get("items", []):
-            sid = int(item.get("supplement_id") or 0)
-            name = str(item.get("ru_name") or item.get("slug") or f"ID {sid}")
-            current = str(item.get("status") or "none")
-            if current == "taken":
-                action = "⏭️"
-                marker = "✅"
-            elif current == "skipped":
-                action = "↩️"
-                marker = "⏭️"
-            else:
-                action = "✅"
-                marker = "⚪"
-            rows.append([InlineKeyboardButton(f"{action} {name} {marker}", callback_data=f"today:toggle:{sid}")])
+        title = str(slot.get("title") or slot.get("title_ru") or "Слот")
+        time_local = str(slot.get("time") or slot.get("time_local") or "--:--")
+        slot_id = str(slot.get("slot_id") or "")
+        taken = int(slot.get("taken") or 0)
+        skipped = int(slot.get("skipped") or 0)
+        total = int(slot.get("total") or 0)
+        rows.append([InlineKeyboardButton(f"{title} · {time_local}", callback_data=f"today:slot:{slot_id}")])
+        rows.append([InlineKeyboardButton(f"✅ {taken}/{total} · ⛔ {skipped}", callback_data=f"today:slot:{slot_id}")])
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="today:home")])
     return InlineKeyboardMarkup(rows)
 
@@ -69,10 +60,10 @@ def intake_pick_kb(slot_id: str, items: list[dict], selected_set: set[str], page
     page_items = items[start:end]
     rows: list[list[InlineKeyboardButton]] = []
     for item in page_items:
-        slug = str(item.get("slug") or "")
-        title = str(item.get("ru_name") or item.get("name_ru") or item.get("name") or slug)
-        mark = "☑️" if slug in selected_set else "⬜"
-        rows.append([InlineKeyboardButton(f"{mark} {title}", callback_data=f"intake:toggle:{slot_id}:{slug}:{safe_page}")])
+        supplement_id = int(item.get("supplement_id") or 0)
+        title = str(item.get("ru_name") or item.get("name_ru") or item.get("name") or item.get("slug") or f"ID {supplement_id}")
+        mark = "☑️" if str(supplement_id) in selected_set else "⬜"
+        rows.append([InlineKeyboardButton(f"{mark} {title}", callback_data=f"intake:toggle:{slot_id}:{supplement_id}:{safe_page}")])
 
     nav: list[InlineKeyboardButton] = []
     if safe_page > 0:
@@ -603,6 +594,7 @@ def my_supplement_hub(
         [InlineKeyboardButton("✖️ Отметить: не буду сегодня", callback_data=f"mysupp:mark:skip:{supplement_id}")],
         [InlineKeyboardButton("⏰ Напоминания", callback_data=f"mysupp:rem:{supplement_id}")],
         [InlineKeyboardButton("🧾 Доза", callback_data=f"mysupp:set_dose:{supplement_id}")],
+        [InlineKeyboardButton("⏰ Время приёма", callback_data=f"supplement:set_time:{supplement_id}")],
         [InlineKeyboardButton("🗑 Удалить из моих", callback_data=f"mysupp:remove:{supplement_id}")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="mysupp:list:0")],
     ]
@@ -673,5 +665,62 @@ def settings_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🕒 Часовой пояс", callback_data="settings:tz")],
         [InlineKeyboardButton("✨ Начальный подбор", callback_data="settings:initial_pick")],
+        [InlineKeyboardButton("⏰ Расписание", callback_data="settings:schedule")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")],
+    ])
+
+
+def schedule_menu_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Изменить время слота", callback_data="schedule:slot_pick")],
+        [InlineKeyboardButton("➕ Добавить время", callback_data="schedule:add_custom")],
+        [InlineKeyboardButton("Назначить время добавкам", callback_data="menu:my")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="menu:settings")],
+    ])
+
+
+def schedule_slots_pick_kb(slots: list[dict], prefix: str = "schedule:slot_time_set") -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(f"[{slot.get('time_local','--:--')}] {slot.get('title_ru','Слот')}", callback_data=f"{prefix}:{slot.get('slot_id','')}")] for slot in slots]
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="settings:schedule")])
+    return InlineKeyboardMarkup(rows)
+
+
+def supplement_time_kb(supplement_id: int, slots: list[dict]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for slot in slots:
+        rows.append([InlineKeyboardButton(f"Слот: {slot.get('title_ru','Слот')} ({slot.get('time_local','--:--')})", callback_data=f"supplement:set_slot:{supplement_id}:{slot.get('slot_id','')}")])
+    rows.append([InlineKeyboardButton(f"Поставить своё время", callback_data=f"supplement:set_override:{supplement_id}")])
+    rows.append([InlineKeyboardButton(f"Следовать слоту", callback_data=f"supplement:clear_override:{supplement_id}")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"mysupp:open:{supplement_id}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def premium_plans_kb(plans: list[dict]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for plan in plans:
+        plan_id = str(plan.get("plan_id") or "")
+        title = str(plan.get("title") or plan_id)
+        rows.append([InlineKeyboardButton(title, callback_data=f"premium:plan:{plan_id}")])
+    rows.append([InlineKeyboardButton("📦 Что входит", callback_data="premium:about")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")])
+    return InlineKeyboardMarkup(rows)
+
+
+def premium_methods_kb(plan_id: str, stars_enabled: bool, rub_enabled: bool) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if stars_enabled:
+        rows.append([InlineKeyboardButton("Купить за ⭐", callback_data=f"premium:buy:{plan_id}:stars")])
+    if rub_enabled:
+        rows.append([InlineKeyboardButton("Купить за ₽", callback_data=f"premium:buy:{plan_id}:yookassa")])
+    rows.append([InlineKeyboardButton("📦 Что входит", callback_data="premium:about")])
+    rows.append([InlineKeyboardButton("🔓 Открыть WebApp", callback_data="menu:webapp")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="menu:premium")])
+    return InlineKeyboardMarkup(rows)
+
+
+def premium_upsell_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⭐ Купить Premium", callback_data="menu:premium")],
+        [InlineKeyboardButton("🔓 Открыть WebApp", callback_data="menu:webapp")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")],
     ])

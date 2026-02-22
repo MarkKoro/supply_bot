@@ -8,9 +8,9 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, Update
 from telegram.ext import (
-    Application, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters
+    Application, CommandHandler, CallbackQueryHandler, MessageHandler, PreCheckoutQueryHandler, ContextTypes, filters
 )
 
 from settings import get_settings
@@ -44,10 +44,18 @@ from keyboards import (
     my_supplement_reminders,
     timezone_picker,
     settings_menu,
+    schedule_menu_kb,
+    schedule_slots_pick_kb,
+    supplement_time_kb,
     ai_checkin_entry_kb,
     ai_checkin_voice_kb,
     today_home_kb,
     today_slots_kb,
+    slot_intake_kb,
+    premium_plans_kb,
+    premium_methods_kb,
+    premium_upsell_kb,
+    intake_pick_kb,
     admin_stats_kb,
     admin_stacks_kb,
     admin_stacks_list_kb,
@@ -167,61 +175,32 @@ def _today_date_for_user(tz_name: str | None) -> str:
     return db.get_user_local_date(tz_name or None)
 
 
-def _slot_id_for_item(item: dict, slots: list[dict]) -> str:
-    time_local = str(item.get("time_local") or "").strip()
-    if not time_local:
-        return str(slots[0].get("slot_id") or "morning") if slots else "morning"
-    hhmm = time_local[:5]
-    try:
-        hour = int(hhmm.split(":", 1)[0])
-    except Exception:
-        return str(slots[0].get("slot_id") or "morning") if slots else "morning"
-    if hour < 11:
-        preferred = "morning"
-    elif hour < 16:
-        preferred = "noon"
-    elif hour < 21:
-        preferred = "evening"
-    else:
-        preferred = "night"
-    slot_ids = {str(slot.get("slot_id") or "") for slot in slots}
-    if preferred in slot_ids:
-        return preferred
-    return str(slots[0].get("slot_id") or "morning") if slots else "morning"
-
-
 async def _today_slots_payload(conn, tg_uid: int) -> tuple[str, list[dict]]:
-    user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
     tz_name = await db.get_user_tz(conn, tg_uid)
     date_local = _today_date_for_user(tz_name)
-    slots = await db.get_user_slots(conn, user_id)
-    status_map = await db.get_day_status_map(conn, tg_uid, date_local)
-    planned = await db.get_user_base_stack(conn, user_id)
-    grouped: dict[str, list[dict]] = {}
-    for item in planned:
-        slot_id = _slot_id_for_item(item, slots)
-        grouped.setdefault(slot_id, []).append(
-            {
-                "supplement_id": int(item.get("supplement_id") or 0),
-                "ru_name": str(item.get("ru_name") or item.get("slug") or ""),
-                "slug": str(item.get("slug") or ""),
-                "status": status_map.get(int(item.get("supplement_id") or 0), "none"),
-            }
-        )
+    groups = await db.get_today_plan_groups(conn, tg_uid, date_local)
+    status_map = await db.get_day_state_map(conn, tg_uid, date_local)
     slots_payload: list[dict] = []
-    for slot in slots:
-        if not slot.get("is_enabled", True):
-            continue
-        sid = str(slot.get("slot_id") or "")
-        slot_items = grouped.get(sid, [])
-        slot_items.sort(key=lambda x: x["ru_name"])
+    for group in groups:
+        items = list(group.get("items") or [])
+        taken = 0
+        skipped = 0
+        for item in items:
+            sid = int(item.get("supplement_id") or 0)
+            st = status_map.get(sid, "none")
+            if st == "taken":
+                taken += 1
+            elif st == "skipped":
+                skipped += 1
         slots_payload.append(
             {
-                "slot_id": sid,
-                "title_ru": str(slot.get("title_ru") or "Слот"),
-                "time_local": str(slot.get("time_local") or "--:--"),
-                "is_enabled": bool(slot.get("is_enabled", True)),
-                "items": slot_items,
+                "slot_id": str(group.get("slot_id") or ""),
+                "title": str(group.get("title") or "Слот"),
+                "time": str(group.get("time") or "--:--"),
+                "items": items,
+                "total": len(items),
+                "taken": taken,
+                "skipped": skipped,
             }
         )
     return date_local, slots_payload
@@ -252,7 +231,18 @@ async def _show_today_slots(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
 
 async def _show_slot_screen(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, tg_uid: int, slot_id: str) -> None:
-    await _show_today_slots(update, context, conn, tg_uid)
+    date_local, slots = await _today_slots_payload(conn, tg_uid)
+    slot = next((s for s in slots if str(s.get("slot_id") or "") == slot_id), None)
+    if not slot:
+        await show(update, context, "Слот не найден.", back("today:slots"), route="today:slots")
+        return
+    title = str(slot.get("title") or "Слот")
+    time_local = str(slot.get("time") or "--:--")
+    taken = int(slot.get("taken") or 0)
+    total = int(slot.get("total") or 0)
+    skipped = int(slot.get("skipped") or 0)
+    text = f"🕒 <b>{title} · {time_local}</b>\n📅 {date_local}\n\n✅ Принято: {taken}/{total}\n⛔ Пропущено: {skipped}"
+    await show(update, context, text, slot_intake_kb(slot_id, taken, total), route=f"today:slot:{slot_id}")
 
 
 
@@ -264,7 +254,23 @@ async def _show_intake_picker(
     slot_id: str,
     page: int,
 ) -> None:
-    await _show_today_slots(update, context, conn, tg_uid)
+    date_local, slots = await _today_slots_payload(conn, tg_uid)
+    slot = next((s for s in slots if str(s.get("slot_id") or "") == slot_id), None)
+    if not slot:
+        await show(update, context, "Слот не найден.", back("today:slots"), route="today:slots")
+        return
+    state_map = await db.get_day_state_map(conn, tg_uid, date_local)
+    items = list(slot.get("items") or [])
+    selected = {str(int(item.get("supplement_id") or 0)) for item in items if state_map.get(int(item.get("supplement_id") or 0)) == "taken"}
+    title = str(slot.get("title") or "Слот")
+    time_local = str(slot.get("time") or "--:--")
+    await show(
+        update,
+        context,
+        f"🧾 <b>Выбор приёма</b>\n{title} · {time_local}",
+        intake_pick_kb(slot_id, items, selected, page),
+        route=f"intake:pick:{slot_id}:{max(0, page)}",
+    )
 
 
 async def _show_reminders_home(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, tg_uid: int) -> None:
@@ -283,6 +289,42 @@ async def _show_reminders_home(update: Update, context: ContextTypes.DEFAULT_TYP
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="today:home")])
     await show(update, context, text, InlineKeyboardMarkup(rows), route="rem:home")
 
+
+
+
+async def _show_schedule_home(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, tg_uid: int) -> None:
+    user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
+    slots = await db.get_user_slots(conn, user_id)
+    lines = ["⏰ <b>Расписание</b>"]
+    for slot in slots:
+        if not slot.get("is_enabled", True):
+            continue
+        lines.append(f"• [{slot.get('time_local','--:--')}] {slot.get('title_ru','Слот')}")
+    await show(update, context, "\n".join(lines), schedule_menu_kb(), route="settings:schedule")
+
+
+async def _show_supplement_time_screen(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    conn,
+    tg_uid: int,
+    supplement_id: int,
+) -> None:
+    user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
+    supplement = await db.get_user_supplement(conn, tg_uid, supplement_id)
+    if not supplement:
+        await show(update, context, "Добавка не найдена.", my_list_back(), route="mysupp:list:0")
+        return
+    slots = await db.get_user_slots(conn, user_id)
+    schedule_map = await db.get_user_schedule_map(conn, user_id)
+    current = schedule_map.get(supplement_id, {"slot_id": "morning", "time_hhmm": None})
+    slot = next((s for s in slots if str(s.get("slot_id") or "") == str(current.get("slot_id") or "")), None)
+    slot_title = str(slot.get("title_ru") or "Утро") if slot else "Утро"
+    override = current.get("time_hhmm")
+    mode = override if override else "по времени слота"
+    title = (supplement["name_ru"] or supplement["name"] or "").strip()
+    text = f"⏰ <b>Время приёма</b>\n\n💊 {title}\nСлот: {slot_title}\nТекущее время: {mode}"
+    await show(update, context, text, supplement_time_kb(supplement_id, slots), route=f"supplement:set_time:{supplement_id}")
 
 
 CATALOG_TYPE_TITLES = {
@@ -1139,10 +1181,9 @@ async def _finalize_ai_checkin(
     }
     await db.upsert_daily_checkin(
         conn,
-        user_id=user_id,
-        date_local=day,
-        tz_name=tz_name,
-        answers={
+        tg_uid,
+        day,
+        {
             "sleep_range": answers.get("sleep_range"),
             "energy": answers.get("energy"),
             "stress": answers.get("stress"),
@@ -1399,6 +1440,158 @@ async def home(
         target_chat_id=target_chat_id,
         target_message_id=target_message_id,
     )
+
+def _premium_plans_payload(s) -> list[dict]:
+    labels = {"m1": "1 месяц", "m3": "3 месяца", "m6": "6 месяцев", "m12": "12 месяцев"}
+    plans: list[dict] = []
+    for plan_id, months in s.PREMIUM_PLANS.items():
+        rub_kop = int(s.PREMIUM_PRICES_RUB.get(plan_id, 0) or 0)
+        stars = int(s.PREMIUM_PRICES_STARS.get(plan_id, 0) or 0)
+        title = f"{labels.get(plan_id, plan_id)}"
+        if rub_kop > 0:
+            title += f" · {rub_kop / 100:.0f} ₽"
+        if stars > 0:
+            title += f" / {stars}⭐"
+        plans.append({"plan_id": plan_id, "months": int(months), "title": title})
+    return plans
+
+
+async def _show_premium_hub(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    s = context.application.bot_data["settings"]
+    plans = _premium_plans_payload(s)
+    text = (
+        "⭐ <b>Premium</b>\n\n"
+        "Открывает WebApp, AI check-in и расширенные функции.\n"
+        "Выбери тариф:"
+    )
+    await show(update, context, text, premium_plans_kb(plans), route="menu:premium")
+
+
+async def require_premium_or_upsell(update: Update, context: ContextTypes.DEFAULT_TYPE, feature_name: str) -> bool:
+    s = context.application.bot_data["settings"]
+    tg_uid = update.effective_user.id if update.effective_user else 0
+    conn = await db.connect(s.DB_PATH)
+    try:
+        active = await db.is_premium_active(conn, tg_uid)
+    finally:
+        await conn.close()
+    if active:
+        return True
+    await show(
+        update,
+        context,
+        f"🔒 <b>{feature_name}</b> доступно только с Premium.",
+        premium_upsell_kb(),
+        route="menu:premium_required",
+    )
+    return False
+
+
+async def _send_subscription_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE, plan_id: str, method: str) -> None:
+    s = context.application.bot_data["settings"]
+    chat_id = update.effective_chat.id if update.effective_chat else (update.effective_user.id if update.effective_user else 0)
+    if plan_id not in s.PREMIUM_PLANS:
+        await show(update, context, "Неизвестный тариф.", premium_upsell_kb(), route="menu:premium")
+        return
+    nonce = int(time.time())
+    payload = f"sub:{plan_id}:{method}:{nonce}"
+    if method == "stars":
+        if not s.BILLING_ENABLED_STARS:
+            await show(update, context, "Оплата Stars сейчас недоступна.", premium_upsell_kb(), route="menu:premium")
+            return
+        amount = int(s.PREMIUM_PRICES_STARS.get(plan_id, 0) or 0)
+        await context.bot.send_invoice(
+            chat_id=chat_id,
+            title="Premium подписка",
+            description="Доступ к WebApp + AI + расширенным функциям",
+            payload=payload,
+            provider_token="",
+            currency="XTR",
+            prices=[LabeledPrice(label="Premium", amount=amount)],
+            need_shipping_address=False,
+            is_flexible=False,
+        )
+        return
+    if method == "yookassa":
+        if not s.BILLING_ENABLED_RUB or not s.YOOKASSA_PROVIDER_TOKEN:
+            await show(update, context, "Оплата картой временно недоступна.", premium_upsell_kb(), route="menu:premium")
+            return
+        amount = int(s.PREMIUM_PRICES_RUB.get(plan_id, 0) or 0)
+        await context.bot.send_invoice(
+            chat_id=chat_id,
+            title="Premium подписка",
+            description="Доступ к WebApp + AI + расширенным функциям",
+            payload=payload,
+            provider_token=s.YOOKASSA_PROVIDER_TOKEN,
+            currency="RUB",
+            prices=[LabeledPrice(label="Premium", amount=amount)],
+            need_shipping_address=False,
+            is_flexible=False,
+        )
+        return
+    await show(update, context, "Неизвестный метод оплаты.", premium_upsell_kb(), route="menu:premium")
+
+
+async def premium_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _show_premium_hub(update, context)
+
+
+async def on_precheckout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.pre_checkout_query
+    if not query:
+        return
+    payload = str(query.invoice_payload or "")
+    if not payload.startswith("sub:"):
+        await query.answer(ok=False, error_message="Некорректный payload")
+        return
+    await query.answer(ok=True)
+
+
+async def on_success_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    msg = update.effective_message
+    if not msg or not msg.successful_payment or not update.effective_user:
+        return
+    sp = msg.successful_payment
+    payload = str(sp.invoice_payload or "")
+    parts = payload.split(":")
+    if len(parts) < 4 or parts[0] != "sub":
+        return
+    plan_id = parts[1]
+    method = parts[2]
+    s = context.application.bot_data["settings"]
+    months = int(s.PREMIUM_PLANS.get(plan_id, 0) or 0)
+    if months <= 0:
+        await msg.reply_text("Не удалось определить тариф для активации.")
+        return
+    conn = await db.connect(s.DB_PATH)
+    try:
+        is_new = await db.log_payment_paid(
+            conn,
+            update.effective_user.id,
+            provider=method,
+            currency=str(sp.currency or ""),
+            amount=int(sp.total_amount or 0),
+            payload=payload,
+            telegram_payment_charge_id=sp.telegram_payment_charge_id,
+            provider_payment_charge_id=sp.provider_payment_charge_id,
+        )
+        if not is_new:
+            await msg.reply_text("Оплата уже учтена ✅")
+            return
+        until_iso = await db.extend_premium(conn, update.effective_user.id, months, source=method, plan_id=plan_id)
+    finally:
+        await conn.close()
+
+    s2 = context.application.bot_data["settings"]
+    rows = []
+    if s2.WEBAPP_URL:
+        rows.append([InlineKeyboardButton("🔓 Открыть WebApp", url=s2.WEBAPP_URL)])
+    rows.append([InlineKeyboardButton("⭐ Премиум", callback_data="menu:premium")])
+    await msg.reply_text(
+        f"Оплата прошла успешно! Premium активен до: {until_iso}",
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
+
 
 def _home_text() -> str:
     return (
@@ -1687,6 +1880,52 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 route="menu:settings",
             )
             return
+        if data == "menu:premium":
+            await _show_premium_hub(update, context)
+            return
+        if data == "premium:about":
+            await show(
+                update,
+                context,
+                "⭐ <b>Что входит в Premium</b>\n\n• Полный доступ к WebApp\n• AI check-in\n• Расширенные функции",
+                premium_upsell_kb(),
+                route="menu:premium",
+            )
+            return
+        if data.startswith("premium:plan:"):
+            plan_id = data.split(":", 2)[2]
+            s_cfg = context.application.bot_data["settings"]
+            await show(
+                update,
+                context,
+                "Выбери способ оплаты:",
+                premium_methods_kb(plan_id, s_cfg.BILLING_ENABLED_STARS, s_cfg.BILLING_ENABLED_RUB),
+                route="menu:premium",
+            )
+            return
+        if data.startswith("premium:buy:"):
+            _, _, plan_id, method = data.split(":", 3)
+            await _send_subscription_invoice(update, context, plan_id, method)
+            return
+        if data == "menu:webapp":
+            ok = await require_premium_or_upsell(update, context, "WebApp")
+            if not ok:
+                return
+            s_cfg = context.application.bot_data["settings"]
+            if not s_cfg.WEBAPP_URL:
+                await show(update, context, "WEBAPP_URL не настроен.", premium_upsell_kb(), route="menu:premium")
+                return
+            await show(
+                update,
+                context,
+                "WebApp разблокирован ✅",
+                InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔓 Открыть WebApp", url=s_cfg.WEBAPP_URL)],
+                    [InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")],
+                ]),
+                route="menu:webapp",
+            )
+            return
         if data == "settings:initial_pick":
             if not s.OPENAI_API_KEY:
                 await show(
@@ -1739,6 +1978,23 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if data == "settings:tz":
             context.user_data["tz_back_data"] = "menu:settings"
             await _show_timezone_picker(update, context, 0)
+            return
+        if data == "settings:schedule":
+            await _show_schedule_home(update, context, conn, tg_uid)
+            return
+        if data == "schedule:slot_pick":
+            user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
+            slots = await db.get_user_slots(conn, user_id)
+            await show(update, context, "Выбери слот для изменения времени:", schedule_slots_pick_kb(slots), route="schedule:slot_pick")
+            return
+        if data.startswith("schedule:slot_time_set:"):
+            slot_id = data.split(":", 2)[2]
+            context.user_data[WAITING_KEY] = f"schedule:slot_time_set:{slot_id}"
+            await show(update, context, "Введи время в формате HH:MM", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="settings:schedule")]]), route=f"schedule:slot_time_set:{slot_id}")
+            return
+        if data == "schedule:add_custom":
+            context.user_data[WAITING_KEY] = "schedule:add_custom"
+            await show(update, context, "Введи время в формате HH:MM", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="settings:schedule")]]), route="schedule:add_custom")
             return
 
         if data == "menu:add":
@@ -1940,44 +2196,70 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             supplement_id = int(supplement_id_raw)
             tz_name = await db.get_user_tz(conn, tg_uid)
             date_local = _today_date_for_user(tz_name)
-            current = await db.get_day_status(conn, tg_uid, date_local, supplement_id)
-            if current == "taken":
+            current = await db.get_day_state_map(conn, tg_uid, date_local)
+            cur_status = current.get(supplement_id)
+            if cur_status == "taken":
                 next_status = "skipped"
                 msg = "Отмечено: пропущено"
-            elif current == "skipped":
+            elif cur_status == "skipped":
                 next_status = "none"
                 msg = "Статус сброшен"
             else:
                 next_status = "taken"
                 msg = "Отмечено: принято"
-            await db.set_day_status(conn, tg_uid, date_local, supplement_id, next_status)
+            await db.set_day_state(conn, tg_uid, date_local, supplement_id, next_status)
             await q.answer(msg, show_alert=False)
             await _show_today_slots(update, context, conn, tg_uid)
             return
 
         if data.startswith("intake:all:"):
-            await q.answer("Используй переключатели статуса в списке Сегодня.", show_alert=False)
-            await _show_today_slots(update, context, conn, tg_uid)
+            slot_id = data.split(":", 2)[2]
+            date_local, slots = await _today_slots_payload(conn, tg_uid)
+            slot = next((s for s in slots if str(s.get("slot_id") or "") == slot_id), None)
+            for item in list(slot.get("items") or []) if slot else []:
+                await db.set_day_state(conn, tg_uid, date_local, int(item.get("supplement_id") or 0), "taken")
+            await q.answer("Отмечено: выпил всё", show_alert=False)
+            await _show_slot_screen(update, context, conn, tg_uid, slot_id)
             return
 
         if data.startswith("intake:skip:"):
-            await q.answer("Используй переключатели статуса в списке Сегодня.", show_alert=False)
-            await _show_today_slots(update, context, conn, tg_uid)
+            slot_id = data.split(":", 2)[2]
+            date_local, slots = await _today_slots_payload(conn, tg_uid)
+            slot = next((s for s in slots if str(s.get("slot_id") or "") == slot_id), None)
+            for item in list(slot.get("items") or []) if slot else []:
+                await db.set_day_state(conn, tg_uid, date_local, int(item.get("supplement_id") or 0), "skipped")
+            await q.answer("Отмечено: пропустить всё", show_alert=False)
+            await _show_slot_screen(update, context, conn, tg_uid, slot_id)
             return
 
         if data.startswith("intake:pick:"):
-            await q.answer("Используй переключатели статуса в списке Сегодня.", show_alert=False)
-            await _show_today_slots(update, context, conn, tg_uid)
+            parts = data.split(":")
+            slot_id = parts[2] if len(parts) > 2 else ""
+            page = int(parts[3]) if len(parts) > 3 and str(parts[3]).isdigit() else 0
+            await _show_intake_picker(update, context, conn, tg_uid, slot_id, page)
             return
 
         if data.startswith("intake:toggle:"):
-            await q.answer("Используй переключатели статуса в списке Сегодня.", show_alert=False)
-            await _show_today_slots(update, context, conn, tg_uid)
+            parts = data.split(":")
+            if len(parts) < 5:
+                await q.answer("Некорректные данные", show_alert=False)
+                return
+            slot_id = parts[2]
+            supplement_id = int(parts[3]) if str(parts[3]).isdigit() else 0
+            page = int(parts[4]) if str(parts[4]).isdigit() else 0
+            tz_name = await db.get_user_tz(conn, tg_uid)
+            date_local = _today_date_for_user(tz_name)
+            state_map = await db.get_day_state_map(conn, tg_uid, date_local)
+            next_status = "none" if state_map.get(supplement_id) == "taken" else "taken"
+            await db.set_day_state(conn, tg_uid, date_local, supplement_id, next_status)
+            await q.answer("Обновлено", show_alert=False)
+            await _show_intake_picker(update, context, conn, tg_uid, slot_id, page)
             return
 
         if data.startswith("intake:save:"):
-            await q.answer("Используй переключатели статуса в списке Сегодня.", show_alert=False)
-            await _show_today_slots(update, context, conn, tg_uid)
+            slot_id = data.split(":")[2] if len(data.split(":")) > 2 else ""
+            await q.answer("Сохранено", show_alert=False)
+            await _show_slot_screen(update, context, conn, tg_uid, slot_id)
             return
 
         if data == "rem:home":
@@ -2726,6 +3008,34 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 await _show_my_list(update, context, conn, tg_uid, page)
             return
 
+        if data.startswith("supplement:set_time:"):
+            supplement_id = int(data.split(":", 2)[2])
+            await _show_supplement_time_screen(update, context, conn, tg_uid, supplement_id)
+            return
+
+        if data.startswith("supplement:set_slot:"):
+            parts = data.split(":")
+            if len(parts) >= 4:
+                supplement_id = int(parts[2])
+                slot_id = parts[3]
+                user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
+                await db.set_schedule_slot(conn, user_id, supplement_id, slot_id)
+                await _show_supplement_time_screen(update, context, conn, tg_uid, supplement_id)
+            return
+
+        if data.startswith("supplement:set_override:"):
+            supplement_id = int(data.split(":", 2)[2])
+            context.user_data[WAITING_KEY] = f"supplement:set_override:{supplement_id}"
+            await show(update, context, "Введи время в формате HH:MM", my_hub_back(supplement_id), route=f"supplement:set_override:{supplement_id}")
+            return
+
+        if data.startswith("supplement:clear_override:"):
+            supplement_id = int(data.split(":", 2)[2])
+            user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
+            await db.set_schedule_time_override(conn, user_id, supplement_id, None)
+            await _show_supplement_time_screen(update, context, conn, tg_uid, supplement_id)
+            return
+
         if data.startswith("mysupp:set_dose:"):
             supplement_id = int(data.split(":")[-1])
             supplement = await db.get_supplement_by_id(conn, supplement_id)
@@ -2807,6 +3117,9 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
 
         if data == "menu:checkin_ai":
+            allowed = await require_premium_or_upsell(update, context, "AI check-in")
+            if not allowed:
+                return
             context.user_data.pop(WAITING_KEY, None)
             await _render_ai_checkin_entry(update, context)
             return
@@ -2907,6 +3220,9 @@ async def on_noop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await _safe_answer_callback(update)
 
 async def on_ai_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    allowed = await require_premium_or_upsell(update, context, "AI check-in")
+    if not allowed:
+        return
     q = update.callback_query
     if not q:
         return
@@ -4157,9 +4473,11 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     finally:
         await conn.close()
     waiting = context.user_data.get(WAITING_KEY)
-    if waiting and waiting.startswith(("mysupp:set_dose:", "mysupp:rem_add:", "rem:set:")):
-        _, _, value_text = waiting.split(":", 2)
-        supplement_id = int(value_text) if waiting.startswith(("mysupp:set_dose:", "mysupp:rem_add:")) else None
+    if waiting and waiting.startswith(("mysupp:set_dose:", "mysupp:rem_add:", "rem:set:", "schedule:add_custom", "schedule:slot_time_set:", "supplement:set_override:")):
+        supplement_id = None
+        if waiting.startswith(("mysupp:set_dose:", "mysupp:rem_add:", "supplement:set_override:")):
+            _, _, value_text = waiting.split(":", 2)
+            supplement_id = int(value_text)
         s = context.application.bot_data["settings"]
         tg_uid = update.effective_user.id
         conn = await db.connect(s.DB_PATH)
@@ -4192,6 +4510,34 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     await db.upsert_reminder(conn, tg_uid, supplement_id, parsed_time, enabled=1)
                     context.user_data.pop(WAITING_KEY, None)
                     await _show_my_supp_reminders(update, context, conn, tg_uid, supplement_id)
+            elif waiting == "schedule:add_custom":
+                parsed_time = _parse_user_time_input(txt)
+                user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
+                if not parsed_time:
+                    await show(update, context, "Не понял время. Пример: 16:00", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="settings:schedule")]]), route="schedule:add_custom")
+                else:
+                    await db.add_custom_slot(conn, user_id, parsed_time)
+                    context.user_data.pop(WAITING_KEY, None)
+                    await _show_schedule_home(update, context, conn, tg_uid)
+            elif waiting.startswith("schedule:slot_time_set:"):
+                parsed_time = _parse_user_time_input(txt)
+                slot_id = waiting.split(":", 2)[2]
+                user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
+                if not parsed_time:
+                    await show(update, context, "Не понял время. Пример: 08:30", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="settings:schedule")]]), route=f"schedule:slot_time_set:{slot_id}")
+                else:
+                    await db.set_user_slot_time(conn, user_id, slot_id, parsed_time)
+                    context.user_data.pop(WAITING_KEY, None)
+                    await _show_schedule_home(update, context, conn, tg_uid)
+            elif waiting.startswith("supplement:set_override:"):
+                parsed_time = _parse_user_time_input(txt)
+                user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
+                if not parsed_time:
+                    await show(update, context, "Не понял время. Пример: 16:00", my_hub_back(supplement_id), route=f"supplement:set_override:{supplement_id}")
+                else:
+                    await db.set_schedule_time_override(conn, user_id, supplement_id, parsed_time)
+                    context.user_data.pop(WAITING_KEY, None)
+                    await _show_supplement_time_screen(update, context, conn, tg_uid, supplement_id)
             else:
                 parsed_time = _parse_user_time_input(txt)
                 slot_id = waiting.split(":", 2)[2]
@@ -4684,9 +5030,10 @@ async def _bootstrap() -> Application:
     app.bot_data["render_route"] = _render_route
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("premium", premium_command))
     app.add_handler(CallbackQueryHandler(
         on_menu,
-        pattern=r"^(main$|menu:|settings:|admin:|add_pick:|compat_pick:|cat:|curated:|supp:|card:|mysupp:|today:|intake:|rem:(home|edit|set:|toggle:))",
+        pattern=r"^(main$|menu:|settings:|schedule:|supplement:|admin:|add_pick:|compat_pick:|cat:|curated:|supp:|card:|mysupp:|today:|intake:|rem:(home|edit|set:|toggle:))",
     ))
     app.add_handler(CallbackQueryHandler(on_ai_add, pattern=r"^aiadd:"))
     app.add_handler(CallbackQueryHandler(on_ai_checkin, pattern=r"^aicheck:"))
@@ -4694,6 +5041,8 @@ async def _bootstrap() -> Application:
     app.add_handler(CallbackQueryHandler(on_timezone, pattern=r"^tz:"))
     app.add_handler(CallbackQueryHandler(on_reminder_action, pattern=r"^rem:(done|skip|snooze|done_all|skip_all|snooze_all)"))
     app.add_handler(MessageHandler(filters.VOICE, on_voice))
+    app.add_handler(PreCheckoutQueryHandler(on_precheckout))
+    app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, on_success_payment))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_error_handler(on_error)
     app.job_queue.run_repeating(reminders_tick, interval=60, first=5, name="reminders_tick")

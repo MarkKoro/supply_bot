@@ -2,86 +2,1025 @@
 <html lang="ru">
 <head>
   <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
   <title>SupplyBot WebApp</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; padding: 18px; }
-    .box { padding: 12px; border: 1px solid #ddd; border-radius: 12px; margin: 12px 0; }
-    pre { white-space: pre-wrap; word-break: break-word; }
-    button { padding: 10px 14px; border-radius: 10px; border: 1px solid #ddd; background: #fff; cursor: pointer; }
+    :root {
+      --bg-1: #0a1230;
+      --bg-2: #37245e;
+      --bg-3: #111a3f;
+      --card: rgba(255, 255, 255, 0.08);
+      --card-strong: rgba(255, 255, 255, 0.13);
+      --text: #eef2ff;
+      --muted: rgba(235, 240, 255, 0.72);
+      --accent: #82a7ff;
+      --green: #49d88d;
+      --red: #ff6b79;
+      --neutral: rgba(255,255,255,0.17);
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      height: 100%;
+      margin: 0;
+      font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(1200px 700px at 15% -10%, #3256d7 0%, transparent 60%),
+        radial-gradient(1000px 600px at 100% 0%, #7a39cf 0%, transparent 55%),
+        linear-gradient(160deg, var(--bg-1) 0%, var(--bg-2) 55%, var(--bg-3) 100%);
+      overflow: hidden;
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      opacity: 0.08;
+      background-image: radial-gradient(rgba(255,255,255,0.9) 0.5px, transparent 0.5px);
+      background-size: 3px 3px;
+      mix-blend-mode: screen;
+    }
+
+    #app {
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      position: relative;
+    }
+
+    .main-content {
+      flex: 1;
+      overflow-y: auto;
+      padding: 14px 14px calc(100px + env(safe-area-inset-bottom));
+      -webkit-overflow-scrolling: touch;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+
+    .headline { margin: 0; font-size: 20px; }
+    .subline { color: var(--muted); font-size: 13px; margin-top: 3px; }
+
+    .btn, .chip {
+      border: 0;
+      border-radius: 14px;
+      color: var(--text);
+      background: linear-gradient(170deg, rgba(255,255,255,0.2), rgba(255,255,255,0.08));
+      box-shadow:
+        0 9px 20px rgba(0,0,0,0.35),
+        0 2px 0 rgba(255,255,255,0.2) inset,
+        0 -2px 0 rgba(0,0,0,0.35) inset;
+      transition: transform .12s ease, box-shadow .12s ease, opacity .12s ease;
+    }
+
+    .btn {
+      cursor: pointer;
+      padding: 10px 14px;
+      font-size: 14px;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+
+    .btn:active, .pressed {
+      transform: translateY(1px);
+      box-shadow:
+        0 3px 8px rgba(0,0,0,0.35),
+        0 1px 0 rgba(255,255,255,0.08) inset,
+        0 -1px 0 rgba(0,0,0,0.55) inset;
+    }
+
+    .btn.secondary { opacity: 0.85; }
+    .btn[disabled] { opacity: .45; cursor: not-allowed; }
+
+    .card {
+      border-radius: 20px;
+      padding: 14px;
+      background: var(--card);
+      border: 1px solid rgba(255,255,255,0.16);
+      box-shadow:
+        0 16px 34px rgba(0,0,0,0.30),
+        0 1px 0 rgba(255,255,255,0.22) inset,
+        0 -2px 0 rgba(0,0,0,0.36) inset;
+      backdrop-filter: blur(8px);
+      margin-bottom: 12px;
+    }
+
+    .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .muted { color: var(--muted); }
+
+    .tabs {
+      position: fixed;
+      left: 10px;
+      right: 10px;
+      bottom: calc(10px + env(safe-area-inset-bottom));
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+      padding: 8px;
+      border-radius: 22px;
+      background: rgba(8, 13, 34, 0.85);
+      border: 1px solid rgba(255,255,255,0.16);
+      backdrop-filter: blur(10px);
+      box-shadow: 0 20px 40px rgba(0,0,0,0.45);
+      z-index: 20;
+    }
+
+    .tab {
+      border: 0;
+      border-radius: 14px;
+      min-height: 52px;
+      color: var(--muted);
+      background: transparent;
+      font-size: 11px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 3px;
+    }
+
+    .tab.active {
+      color: white;
+      background: rgba(126, 165, 255, 0.18);
+      box-shadow: 0 0 18px rgba(126, 165, 255, 0.45), 0 0 0 1px rgba(160, 195, 255, 0.45) inset;
+    }
+
+    .tab-emoji { font-size: 17px; line-height: 1; }
+
+    .slot-actions { display:flex; gap:8px; flex-wrap:wrap; margin-top: 8px; }
+    .chip { border-radius: 999px; padding: 5px 10px; font-size: 12px; font-weight: 700; }
+    .chip.green { background: rgba(72,216,141,0.2); color: #bbffd9; }
+
+    .item-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      width: 100%;
+      border: 0;
+      text-align: left;
+      padding: 10px;
+      border-radius: 13px;
+      margin-top: 8px;
+      background: rgba(255,255,255,0.06);
+      color: inherit;
+    }
+
+    .status-pill {
+      min-width: 72px;
+      text-align: center;
+      padding: 7px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+      border: 1px solid transparent;
+    }
+
+    .status-taken { background: rgba(73,216,141,0.24); border-color: rgba(158,255,205,0.72); box-shadow: 0 0 12px rgba(73,216,141,0.42); }
+    .status-skipped { background: rgba(255,107,121,0.24); border-color: rgba(255,167,177,0.65); box-shadow: 0 0 10px rgba(255,107,121,0.35); }
+    .status-none { background: var(--neutral); border-color: rgba(255,255,255,0.2); }
+
+    .fade { animation: fadeIn .22s ease; }
+    @keyframes fadeIn { from {opacity: 0; transform: translateY(6px);} to {opacity: 1; transform: translateY(0);} }
+
+    .preview-grid { display: grid; gap: 10px; }
+    .preview-card {
+      border-radius: 16px;
+      padding: 12px;
+      border: 1px solid rgba(255,255,255,0.18);
+      background: rgba(255,255,255,0.06);
+      filter: blur(2px);
+      opacity: 0.75;
+    }
+
+    .plans { display: grid; gap: 10px; }
+
+    .toast-wrap {
+      position: fixed;
+      left: 0; right: 0;
+      bottom: calc(80px + env(safe-area-inset-bottom));
+      display: flex;
+      justify-content: center;
+      pointer-events: none;
+      z-index: 25;
+    }
+
+    .toast {
+      background: rgba(10, 12, 28, 0.94);
+      border: 1px solid rgba(255,255,255,0.2);
+      border-radius: 999px;
+      padding: 10px 14px;
+      font-size: 13px;
+      box-shadow: 0 10px 24px rgba(0,0,0,0.4);
+    }
+
+    .devbox textarea {
+      width: 100%;
+      min-height: 80px;
+      margin-top: 8px;
+      border-radius: 12px;
+      padding: 10px;
+      border: 1px solid rgba(255,255,255,0.3);
+      color: #fff;
+      background: rgba(10, 13, 31, 0.85);
+    }
+
+    .cta-sticky {
+      position: sticky;
+      bottom: 10px;
+      padding-top: 8px;
+      background: linear-gradient(to top, rgba(10,13,33,0.96) 40%, transparent);
+    }
+
+    .legend-grid { display:grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap:8px; margin-top:8px; }
+    .legend-pill { border-radius: 12px; padding: 8px; font-size: 12px; text-align:center; background: rgba(255,255,255,0.06); }
+    .legend-benefit { box-shadow: 0 0 14px rgba(73,216,141,0.55); }
+    .legend-burden { box-shadow: 0 0 14px rgba(255,107,121,0.6); }
+    .legend-mixed { box-shadow: 0 0 14px rgba(255,191,92,0.7); }
+    .bodymap-svg { width: 100%; max-height: 380px; }
+    .organ-shape { cursor: pointer; transition: transform .15s ease, filter .15s ease; stroke: rgba(255,255,255,0.5); stroke-width: 1.1; }
+    .organ-shape:active { transform: scale(0.98); }
+    .bodymap-grid { display:grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap:8px; margin-top:8px; }
+    .organ-card { border:1px solid rgba(255,255,255,.15); border-radius:14px; padding:10px; background: rgba(255,255,255,0.06); }
+    .organ-card .title { font-weight:700; }
+    .badge { border-radius:999px; padding:2px 8px; font-size:12px; font-weight:700; }
+    .badge.plus { background: rgba(73,216,141,0.2); color:#b7ffd5; }
+    .badge.minus { background: rgba(255,107,121,0.24); color:#ffd0d5; }
+    .sheet-backdrop { position: fixed; inset:0; background: rgba(2,5,16,0.58); z-index: 32; }
+    .sheet { position: fixed; left:10px; right:10px; bottom: calc(82px + env(safe-area-inset-bottom)); z-index: 33; max-height: 66vh; overflow: auto; opacity:1; transform: translateY(0); transition: all .18s ease; }
+    .sheet-empty { padding:12px; border-radius: 14px; background: rgba(255,255,255,0.05); color: var(--muted); text-align:center; }
+
+    .progress { height:8px; border-radius:999px; background: rgba(255,255,255,.15); overflow:hidden; margin-top:8px; }
+    .progress > i { display:block; height:100%; background: linear-gradient(90deg, #82a7ff, #49d88d); }
+    .survey-option { width:100%; border-radius:14px; border:1px solid rgba(255,255,255,.2); padding:12px; margin-top:8px; background: rgba(255,255,255,.07); color:var(--text); text-align:left; font-weight:700; }
+    .survey-option.active { box-shadow: 0 0 0 1px rgba(130,167,255,.8) inset, 0 0 16px rgba(130,167,255,.45); background: rgba(130,167,255,.2); }
+    .survey-goals { display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; }
+    .survey-note { width:100%; min-height:110px; border-radius:14px; border:1px solid rgba(255,255,255,.2); background: rgba(255,255,255,.08); color:var(--text); padding:10px; }
+    .rec-card { border:1px solid rgba(255,255,255,.16); border-radius:14px; padding:10px; margin-top:8px; background: rgba(255,255,255,.06); }
   </style>
 </head>
 <body>
-  <h1>SupplyBot WebApp</h1>
-
-  <div class="box">
-    <div><b>Telegram WebApp initData:</b></div>
-    <pre id="initdata">loading...</pre>
-  </div>
-
-  <div class="box">
-    <div><b>Auth verify result:</b></div>
-    <pre id="verify">waiting...</pre>
-    <button id="btn">Verify initData</button>
-  </div>
-
-  <div class="box">
-    <div><b>Health:</b></div>
-    <pre id="health">loading...</pre>
-  </div>
-
+  <div id="app"></div>
+  <div id="toastWrap" class="toast-wrap"></div>
 <script>
-  const elInit = document.getElementById('initdata');
-  const elVerify = document.getElementById('verify');
-  const elHealth = document.getElementById('health');
-  const btn = document.getElementById('btn');
+(function () {
+  const tg = window.Telegram?.WebApp;
+  tg?.ready();
+  tg?.expand();
 
-  function safe(obj) { return JSON.stringify(obj, null, 2); }
-
-  try {
-    const tg = window.Telegram?.WebApp;
-    if (!tg) {
-      elInit.textContent = "Telegram.WebApp not found (открылось не внутри Telegram?)";
-    } else {
-      tg.ready();
-      // Для удобства показываем и initData и user (если есть)
-      elInit.textContent = tg.initData ? tg.initData : "(empty initData)";
-      // можно: tg.expand();
+  const state = {
+    initData: tg?.initData || "",
+    me: null,
+    activeTab: "today",
+    today: null,
+    loadingToday: false,
+    toastTimer: null,
+    catalog: {
+      q: "", page: 0, items: [], total: 0, loading: false,
+      filters: { evidence: [], targets: [], burdens: [], sort: "alpha" },
+      detail: null, detailLoading: false, filtersOpen: false
+    },
+    searchDebounce: null,
+    bodyMap: null,
+    loadingBodyMap: false,
+    bodyMapSheet: null,
+    survey: {
+      step: 0,
+      loading: false,
+      view: "wizard",
+      checkinId: null,
+      recommendations: [],
+      selected: {},
+      answers: { energy:"", sleep:"", stress:"", training:"", goals:[], note:"" }
     }
-  } catch (e) {
-    elInit.textContent = String(e);
+  };
+
+  const APP_NAME = "SupplyBot";
+  const appEl = document.getElementById("app");
+  const tabs = [
+    { id: "today", title: "Today", icon: "✅" },
+    { id: "catalog", title: "Catalog", icon: "📚" },
+    { id: "bodymap", title: "BodyMap", icon: "🧠" },
+    { id: "survey", title: "Survey", icon: "📝" }
+  ];
+
+  const themeText = tg?.themeParams?.text_color || "#eef2ff";
+  document.documentElement.style.setProperty("--text", themeText);
+
+  function haptic() {
+    tg?.HapticFeedback?.impactOccurred?.("light");
   }
 
-  async function runHealth() {
+  function showToast(text) {
+    const wrap = document.getElementById("toastWrap");
+    wrap.innerHTML = `<div class="toast fade">${text}</div>`;
+    clearTimeout(state.toastTimer);
+    state.toastTimer = setTimeout(() => { wrap.innerHTML = ""; }, 2200);
+  }
+
+  function formatDate() {
+    return new Date().toLocaleDateString("ru-RU", { weekday: "short", day: "2-digit", month: "short" });
+  }
+
+  async function api(path, { method = "GET", body } = {}) {
+    const res = await fetch(path, {
+      method,
+      headers: {
+        "Content-Type": "application/json",
+        "X-Telegram-Init-Data": state.initData
+      },
+      body: body ? JSON.stringify(body) : undefined
+    });
+
+    if (res.status === 401) {
+      showToast("Открой WebApp внутри Telegram");
+      throw new Error("UNAUTHORIZED");
+    }
+
+    if (res.status === 402) {
+      state.me = { ...(state.me || {}), premium: false };
+      renderPaywall();
+      throw new Error("PREMIUM_REQUIRED");
+    }
+
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.ok === false) {
+      throw new Error(data.error || `HTTP_${res.status}`);
+    }
+    return data;
+  }
+
+  async function boot() {
     try {
-      const r = await fetch("./health");
-      const j = await r.json();
-      elHealth.textContent = safe(j);
+      const me = await api("./api/me");
+      state.me = me;
+      if (!me.premium) {
+        renderPaywall();
+      } else {
+        renderMainApp();
+        await loadToday();
+        await loadSurveyToday();
+      }
     } catch (e) {
-      elHealth.textContent = String(e);
+      if (String(e.message).includes("UNAUTHORIZED") && !state.initData) {
+        renderInitDataFallback();
+      } else if (!state.me) {
+        renderInitDataFallback("Не удалось загрузить /api/me");
+      }
     }
   }
 
-  async function verify() {
+  function renderInitDataFallback(errorText) {
+    appEl.innerHTML = `
+      <div class="main-content">
+        <div class="card devbox fade">
+          <h3 style="margin:0">Dev fallback</h3>
+          <p class="muted">Вставьте initData для теста в обычном браузере.</p>
+          ${errorText ? `<p class="muted">${errorText}</p>` : ""}
+          <textarea id="initDataInput" placeholder="query_id=...&user=...&hash=..."></textarea>
+          <div style="margin-top:8px">
+            <button class="btn" id="saveInitBtn">Применить</button>
+          </div>
+        </div>
+      </div>
+    `;
+    document.getElementById("saveInitBtn")?.addEventListener("click", async () => {
+      const value = document.getElementById("initDataInput").value.trim();
+      if (!value) return showToast("Нужно вставить initData");
+      state.initData = value;
+      showToast("initData сохранён");
+      await boot();
+    });
+  }
+
+  function renderPaywall() {
+    const plans = state.me?.plans || [];
+    const plansHtml = plans.map((p) => {
+      const rub = p.price_rub ? Math.round(p.price_rub / 100) : null;
+      return `
+        <div class="card fade">
+          <div class="row">
+            <strong>${p.months} мес.</strong>
+            <span class="muted">${p.plan_id}</span>
+          </div>
+          <div class="muted" style="margin-top:6px;">
+            ${p.price_stars || "—"} ⭐ ${rub !== null ? `• ${rub} ₽` : ""}
+          </div>
+          <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
+            ${p.stars_enabled ? `<button class="btn" data-plan="${p.plan_id}" data-method="stars">Купить за ⭐</button>` : ""}
+            ${p.rub_enabled ? `<button class="btn secondary" data-plan="${p.plan_id}" data-method="yookassa">Купить за ₽</button>` : ""}
+          </div>
+        </div>
+      `;
+    }).join("");
+
+    appEl.innerHTML = `
+      <div class="main-content">
+        <div class="card fade">
+          <h2 style="margin:0 0 4px">Премиум открывает WebApp</h2>
+          <div class="muted">Today • Каталог • Карта • Опрос</div>
+        </div>
+
+        <div class="preview-grid">
+          ${["Today: чекбоксы и прогресс", "Catalog: RU/EN каталог", "BodyMap: органы и протоколы", "Survey: умные карточки"].map(t => `<div class="preview-card">${t}<br><span class="muted">Контент скрыт до Premium</span></div>`).join("")}
+        </div>
+
+        <div class="cta-sticky">
+          <div class="card" style="margin-top:12px; margin-bottom:8px;"><b>Купить подписку</b><div class="muted">Выберите удобный план и оплату ⭐ или ₽</div></div>
+        </div>
+
+        <div class="plans">${plansHtml || '<div class="card">Планы пока недоступны.</div>'}</div>
+      </div>
+      ${renderTabs(true)}
+    `;
+
+    appEl.querySelectorAll("[data-plan]").forEach((el) => {
+      el.addEventListener("click", () => purchase(el.dataset.plan, el.dataset.method, el));
+    });
+  }
+
+  async function purchase(planId, method, btnEl) {
+    haptic();
+    if (!tg?.openInvoice) {
+      showToast("Оплата доступна только в Telegram");
+      return;
+    }
+    const prevText = btnEl.textContent;
+    btnEl.textContent = "Создаю счёт...";
+    btnEl.disabled = true;
     try {
-      const tg = window.Telegram?.WebApp;
-      const initData = tg?.initData || "";
-      const r = await fetch("./api/telegram/verify", {
+      const data = await api("./api/billing/create_invoice_link", {
         method: "POST",
-        headers: {"Content-Type":"application/json"},
-        body: JSON.stringify({init_data: initData})
+        body: { plan_id: planId, method }
       });
-      const j = await r.json();
-      elVerify.textContent = safe(j);
+
+      tg.openInvoice(data.invoice_link, async (status) => {
+        if (["paid", "success"].includes(status)) {
+          showToast("Оплата успешна, обновляю доступ...");
+          try {
+            state.me = await api("./api/me");
+            if (state.me.premium) {
+              renderMainApp();
+              await loadToday();
+            } else {
+              showToast("Платёж обработан, ждём активацию");
+            }
+          } catch (_) {
+            showToast("Не удалось обновить доступ");
+          }
+        } else if (status === "cancelled") {
+          showToast("Платёж отменён");
+        } else {
+          showToast(`Статус оплаты: ${status}`);
+        }
+      });
     } catch (e) {
-      elVerify.textContent = String(e);
+      showToast("Не удалось создать счёт");
+    } finally {
+      btnEl.textContent = prevText;
+      btnEl.disabled = false;
     }
   }
 
-  btn.addEventListener('click', verify);
+  function renderTabs(isLocked) {
+    return `<nav class="tabs">
+      ${tabs.map(t => `<button class="tab ${state.activeTab === t.id ? "active" : ""}" data-tab="${t.id}" ${isLocked ? "disabled" : ""}>
+        <span class="tab-emoji">${t.icon}</span>
+        <span>${t.title}</span>
+      </button>`).join("")}
+    </nav>`;
+  }
 
-  runHealth();
+  function renderMainApp() {
+    appEl.innerHTML = `
+      <div class="main-content" id="mainContent">
+        <header class="topbar fade">
+          <div>
+            <h1 class="headline">${APP_NAME}</h1>
+            <div class="subline">${formatDate()}</div>
+          </div>
+          <button class="btn" id="refreshBtn" aria-label="Refresh">⟳</button>
+        </header>
+        <section id="tabContent" class="fade"></section>
+      </div>
+      ${renderTabs(false)}
+    `;
+
+    bindMainEvents();
+    renderActiveTab();
+  }
+
+  function bindMainEvents() {
+    appEl.querySelectorAll(".tab[data-tab]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const tab = btn.dataset.tab;
+        if (state.activeTab === tab) return;
+        haptic();
+        state.activeTab = tab;
+        renderMainApp();
+        if (tab === "today" && !state.today) {
+          await loadToday();
+        }
+        if (tab === "catalog" && !state.catalog.items.length) {
+          await loadCatalog();
+        }
+        if (tab === "bodymap" && !state.bodyMap) {
+          await loadBodyMap();
+        }
+      });
+    });
+
+    const refreshBtn = document.getElementById("refreshBtn");
+    refreshBtn?.addEventListener("click", async () => {
+      haptic();
+      if (state.activeTab === "today") {
+        await loadToday(true);
+      } else if (state.activeTab === "catalog") {
+        await loadCatalog(true);
+      } else if (state.activeTab === "bodymap") {
+        await loadBodyMap(true);
+      } else {
+        showToast("Раздел обновлён");
+      }
+    });
+  }
+
+  function renderActiveTab() {
+    const target = document.getElementById("tabContent");
+    if (!target) return;
+
+    if (state.activeTab === "today") {
+      if (state.loadingToday) {
+        target.innerHTML = `<div class="card">Загружаем Today...</div>`;
+      } else if (!state.today) {
+        target.innerHTML = `<div class="card">Нет данных Today. Нажмите refresh.</div>`;
+      } else {
+        target.innerHTML = renderToday();
+        bindTodayEvents();
+      }
+      return;
+    }
+
+    if (state.activeTab === "catalog") {
+      target.innerHTML = renderCatalog();
+      bindCatalogEvents();
+      return;
+    }
+
+    if (state.activeTab === "bodymap") {
+      target.innerHTML = renderBodyMap();
+      bindBodyMapEvents();
+      return;
+    }
+
+    target.innerHTML = renderSurvey();
+    bindSurveyEvents();
+  }
+
+
+  function esc(text) {
+    return String(text || "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+  }
+
+
+  const SURVEY_STEPS = [
+    { key: "energy", title: "Энергия", options: [["low","Низкая"],["ok","Нормальная"],["high","Высокая"]] },
+    { key: "sleep", title: "Сон", options: [["poor","Плохой"],["ok","Ок"],["great","Отличный"]] },
+    { key: "stress", title: "Стресс", options: [["low","Низкий"],["medium","Средний"],["high","Высокий"]] },
+    { key: "training", title: "Тренировка сегодня", options: [["none","Нет"],["light","Легкая"],["hard","Тяжелая"]] },
+    { key: "goals", title: "Фокус целей", goals: ["brain","mood","sleep","recovery","gut","immune","joints","performance"] },
+    { key: "note", title: "Заметка", note: true }
+  ];
+
+  function surveyStorageKey() {
+    const uid = tg?.initDataUnsafe?.user?.id || "anon";
+    const d = new Date().toISOString().slice(0,10);
+    return `survey:${uid}:${d}`;
+  }
+
+  async function loadSurveyToday() {
+    try {
+      const data = await api('./api/checkin/today');
+      const saved = localStorage.getItem(surveyStorageKey());
+      if (saved) state.survey.answers = { ...state.survey.answers, ...JSON.parse(saved) };
+      if (data?.checkin) {
+        state.survey.checkinId = data.checkin.id;
+        state.survey.answers = { ...state.survey.answers, ...(data.checkin.answers || {}) };
+        state.survey.recommendations = data.checkin.recommendations || [];
+        state.survey.selected = Object.fromEntries((state.survey.recommendations || []).map((x) => [x.supplement_id, true]));
+        if (state.survey.recommendations.length) state.survey.view = 'review';
+      }
+    } catch {}
+  }
+
+  function renderSurvey() {
+    const sv = state.survey;
+    if (sv.loading) return `<div class="card">⏳ анализ…</div>`;
+    if (sv.view === 'review') {
+      const rows = (sv.recommendations || []).map((r) => `<div class="rec-card"><div class="row"><label><input type="checkbox" data-rec-toggle="${r.supplement_id}" ${sv.selected[r.supplement_id] !== false ? 'checked' : ''}/> <strong>${esc(r.name_ru || r.slug)}</strong></label><span class="badge ${r.action==='remove'?'minus':(r.action==='adjust'?'':'plus')}">${r.action==='add'?'+':(r.action==='remove'?'−':'≈')}</span></div><div class="muted" style="margin-top:6px">${esc(r.reason || '')}</div></div>`).join('');
+      return `<div class="card fade"><h3 style="margin-top:0">Рекомендации</h3>${rows || '<div class="muted">Нет рекомендаций</div>'}<div class="row" style="margin-top:10px"><button class="btn" id="applyAll">Применить всё</button><button class="btn secondary" id="applySelected">Применить выбранное</button></div><div class="row" style="margin-top:8px"><button class="btn secondary" id="cancelSurvey">Отмена</button></div></div>`;
+    }
+    const step = SURVEY_STEPS[sv.step];
+    const p = Math.round(((sv.step+1)/SURVEY_STEPS.length)*100);
+    let body = '';
+    if (step.options) {
+      body = step.options.map(([v,t]) => `<button class="survey-option ${sv.answers[step.key]===v?'active':''}" data-survey-pick="${step.key}:${v}">${t}</button>`).join('');
+    } else if (step.goals) {
+      body = `<div class="survey-goals">${step.goals.map((g)=>`<button class="chip ${sv.answers.goals.includes(g)?'green':''}" data-goal-toggle="${g}">${g}</button>`).join('')}</div>`;
+    } else {
+      body = `<textarea id="surveyNote" maxlength="280" class="survey-note" placeholder="Короткая заметка">${esc(sv.answers.note || '')}</textarea><div class="muted" style="margin-top:6px">${(sv.answers.note||'').length}/280</div>`;
+    }
+    return `<div class="card fade"><div class="row"><strong>${step.title}</strong><span class="muted">${sv.step+1}/${SURVEY_STEPS.length}</span></div><div class="progress"><i style="width:${p}%"></i></div>${body}<div class="row" style="margin-top:12px"><button class="btn secondary" id="surveyBack" ${sv.step===0?'disabled':''}>Назад</button><button class="btn" id="surveyNext">${sv.step===SURVEY_STEPS.length-1?'Получить рекомендации':'Далее'}</button></div></div>`;
+  }
+
+  function bindSurveyEvents() {
+    appEl.querySelectorAll('[data-survey-pick]').forEach((el)=>el.addEventListener('click', ()=>{ haptic(); const [k,v]=el.dataset.surveyPick.split(':'); state.survey.answers[k]=v; localStorage.setItem(surveyStorageKey(), JSON.stringify(state.survey.answers)); renderActiveTab(); }));
+    appEl.querySelectorAll('[data-goal-toggle]').forEach((el)=>el.addEventListener('click', ()=>{ haptic(); const g=el.dataset.goalToggle; const set=new Set(state.survey.answers.goals||[]); if (set.has(g)) set.delete(g); else set.add(g); state.survey.answers.goals=[...set]; localStorage.setItem(surveyStorageKey(), JSON.stringify(state.survey.answers)); renderActiveTab(); }));
+    document.getElementById('surveyNote')?.addEventListener('input', (e)=>{ state.survey.answers.note=String(e.target.value||'').slice(0,280); localStorage.setItem(surveyStorageKey(), JSON.stringify(state.survey.answers)); renderActiveTab(); });
+    document.getElementById('surveyBack')?.addEventListener('click', ()=>{ haptic(); state.survey.step=Math.max(0,state.survey.step-1); renderActiveTab(); });
+    document.getElementById('surveyNext')?.addEventListener('click', async ()=>{ haptic(); if (state.survey.step < SURVEY_STEPS.length-1) { state.survey.step += 1; renderActiveTab(); return; } state.survey.loading=true; renderActiveTab(); try { const res=await api('./api/checkin',{method:'POST', body:{answers: state.survey.answers}}); state.survey.loading=false; state.survey.checkinId=res.checkin_id; state.survey.recommendations=res.recommendations||[]; state.survey.selected=Object.fromEntries((state.survey.recommendations||[]).map((x)=>[x.supplement_id,true])); state.survey.view='review'; renderActiveTab(); } catch(e){ state.survey.loading=false; showToast('AI временно недоступен, попробуйте ещё раз'); renderActiveTab(); } });
+    appEl.querySelectorAll('[data-rec-toggle]').forEach((el)=>el.addEventListener('change',(e)=>{ state.survey.selected[Number(el.dataset.recToggle)] = !!e.target.checked; }));
+    document.getElementById('applyAll')?.addEventListener('click', async ()=>{ haptic(); try { await api('./api/checkin/apply',{method:'POST', body:{checkin_id: state.survey.checkinId, selected_ids:[], mode:'all'}}); showToast('Применено'); await loadToday(true); state.activeTab='today'; renderMainApp(); renderActiveTab(); } catch { showToast('Не удалось применить'); } });
+    document.getElementById('applySelected')?.addEventListener('click', async ()=>{ haptic(); const ids=Object.keys(state.survey.selected).filter((k)=>state.survey.selected[k]).map(Number); try { await api('./api/checkin/apply',{method:'POST', body:{checkin_id: state.survey.checkinId, selected_ids:ids, mode:'selected'}}); showToast('Применено'); await loadToday(true); state.activeTab='today'; renderMainApp(); renderActiveTab(); } catch { showToast('Не удалось применить'); } });
+    document.getElementById('cancelSurvey')?.addEventListener('click', ()=>{ haptic(); state.survey.view='wizard'; renderActiveTab(); });
+  }
+
+  function renderCatalog() {
+    const c = state.catalog;
+    const filters = c.filters;
+    const subtitle = `Найдено: ${c.total}`;
+    const itemsHtml = c.items.map((item) => `
+      <button class="card item-row" data-catalog-open="${item.slug}" style="display:block; width:100%; margin-top:0;">
+        <div class="row"><strong>${esc(item.name_ru || item.name_en)}</strong><span>${item.has_purchase ? '🛒' : ''}</span></div>
+        <div class="muted" style="margin-top:6px">${esc(item.evidence_grade || '—')} • ${esc(item.confidence || '—')} ${item.in_stack ? '• ✅ в стеке' : ''}</div>
+      </button>`).join('');
+    return `
+      <div class="card fade">
+        <div class="row" style="gap:8px; align-items:stretch;">
+          <input id="catalogSearch" placeholder="Поиск RU/EN..." value="${esc(c.q)}" style="flex:1; border:0; border-radius:999px; padding:10px 12px; color:var(--text); background:rgba(255,255,255,0.12)"/>
+          <button class="btn secondary" id="catalogClear">✕</button>
+          <button class="btn" id="catalogFilters">Фильтры</button>
+        </div>
+        <div class="muted" style="margin-top:8px">${subtitle}</div>
+      </div>
+      ${c.loading ? '<div class="card">Загружаем каталог...</div>' : (itemsHtml || '<div class="card">Ничего не найдено.</div>')}
+      ${c.items.length < c.total ? '<div class="card cta-sticky"><button class="btn" id="catalogMore" style="width:100%">Загрузить ещё</button></div>' : ''}
+      ${c.filtersOpen ? renderFilterSheet(filters) : ''}
+      ${c.detail ? renderDetailModal(c.detail) : ''}
+    `;
+  }
+
+  function renderFilterSheet(filters) {
+    const ev = ['A','B','C','D'];
+    const tgts = ['brain','heart','gut','liver','kidney','sleep','mood','joints','muscle','skin','immune'];
+    const br = ['liver','kidney','gut'];
+    const chip=(v,arr,key)=>`<button class="chip ${arr.includes(v)?'green':''}" data-filter-toggle="${key}:${v}">${v}</button>`;
+    return `<div class="card" style="position:fixed;left:10px;right:10px;bottom:90px;z-index:30;max-height:60vh;overflow:auto">
+      <div class="row"><strong>Фильтры</strong><button class="btn secondary" data-filter-close>Закрыть</button></div>
+      <div style="margin-top:8px">Evidence: ${ev.map(v=>chip(v,filters.evidence,'evidence')).join(' ')}</div>
+      <div style="margin-top:8px">Targets: ${tgts.map(v=>chip(v,filters.targets,'targets')).join(' ')}</div>
+      <div style="margin-top:8px">Burdens: ${br.map(v=>chip(v,filters.burdens,'burdens')).join(' ')}</div>
+      <div style="margin-top:8px"><select id="sortSelect" style="width:100%;padding:8px;border-radius:10px"><option value="alpha">alpha</option><option value="evidence">evidence</option><option value="trials">trials</option><option value="effect">effect</option></select></div>
+      <div class="row" style="margin-top:10px"><button class="btn" id="applyFilters">Применить</button><button class="btn secondary" id="resetFilters">Сбросить</button></div>
+    </div>`;
+  }
+
+  function renderDetailModal(item) {
+    const chips = (val) => { try { return JSON.parse(val || '[]'); } catch { return []; } };
+    const arr=[...chips(item.tags_json),...chips(item.body_targets_json),...chips(item.body_burdens_json)].slice(0,20);
+    return `<div class="card" style="position:fixed; inset:auto 10px 90px; z-index:35; max-height:65vh; overflow:auto">
+      <div class="row"><strong>${esc(item.name_ru || item.name_en)}</strong><button class="btn secondary" data-detail-close>✕</button></div>
+      <div class="muted" style="margin-top:6px">${esc(item.evidence_grade || '—')} • ${esc(item.confidence || '—')}</div>
+      <p>${esc(item.summary_verified || item.summary_theoretical || '')}</p>
+      <details><summary>Дозировка / Тайминг / Безопасность</summary><div class="muted">${esc(item.dose_ru)}<br/>${esc(item.timing_ru)}<br/>${esc(item.safety_ru)}</div></details>
+      ${item.molecular_mechanisms ? `<details><summary>Механизмы</summary><div class="muted">${esc(item.molecular_mechanisms)}</div></details>` : ''}
+      <div style="margin-top:8px">${arr.map(t=>`<span class="chip" style="margin:2px">${esc(t)}</span>`).join('')}</div>
+      <div class="row" style="margin-top:10px"><button class="btn" data-stack-toggle data-id="${item.id}" data-in="${item.in_stack ? '1':'0'}">${item.in_stack ? 'Убрать из стека' : 'Добавить в мой стек'}</button>${item.purchase_url ? '<button class="btn secondary" data-open-shop>Перейти в магазин</button>' : ''}</div>
+    </div>`;
+  }
+
+  async function loadCatalog(force) {
+    if (state.catalog.loading && !force) return;
+    state.catalog.loading = true;
+    renderActiveTab();
+    const c = state.catalog;
+    const f = c.filters;
+    const qp = new URLSearchParams({ q: c.q || '', page: String(c.page), page_size: '20', sort: f.sort || 'alpha' });
+    if (f.evidence.length) qp.set('evidence', f.evidence.join(','));
+    if (f.targets.length) qp.set('targets', f.targets.join(','));
+    if (f.burdens.length) qp.set('burdens', f.burdens.join(','));
+    try {
+      const res = await api(`./api/catalog?${qp.toString()}`);
+      state.catalog.items = c.page === 0 ? res.items : c.items.concat(res.items);
+      state.catalog.total = res.total || 0;
+    } catch (e) { if (e.message !== 'PREMIUM_REQUIRED') showToast('Ошибка загрузки каталога'); }
+    finally { state.catalog.loading = false; renderActiveTab(); }
+  }
+
+  function bindDetailModalEvents() {
+    appEl.querySelector('[data-detail-close]')?.addEventListener('click', ()=>{ state.catalog.detail=null; renderActiveTab(); });
+    appEl.querySelector('[data-open-shop]')?.addEventListener('click', ()=>{ const u=state.catalog.detail?.purchase_url; if(u) tg?.openLink?.(u); });
+    appEl.querySelector('[data-stack-toggle]')?.addEventListener('click', async (e)=>{
+      const b=e.currentTarget; const id=Number(b.dataset.id); const inStack=b.dataset.in==='1';
+      const action=inStack?'remove':'add'; haptic();
+      const detail=state.catalog.detail; const prev=detail.in_stack; detail.in_stack=!inStack;
+      const listItem=state.catalog.items.find(i=>i.id===id); if(listItem) listItem.in_stack=detail.in_stack; renderActiveTab();
+      try { const r=await api('./api/my_supplements/toggle',{method:'POST',body:{supplement_id:id,action}}); detail.in_stack=!!r.in_stack; if(listItem) listItem.in_stack=detail.in_stack; showToast(detail.in_stack?'Добавлено в стек':'Убрано из стека'); renderActiveTab(); }
+      catch { detail.in_stack=prev; if(listItem) listItem.in_stack=prev; renderActiveTab(); showToast('Не удалось обновить стек'); }
+    });
+  }
+
+  function bindCatalogEvents() {
+    document.getElementById('catalogSearch')?.addEventListener('input', (e) => {
+      state.catalog.q = e.target.value;
+      clearTimeout(state.searchDebounce);
+      state.searchDebounce = setTimeout(async () => { state.catalog.page = 0; await loadCatalog(true); }, 300);
+    });
+    document.getElementById('catalogClear')?.addEventListener('click', async () => { state.catalog.q=''; state.catalog.page=0; haptic(); await loadCatalog(true); });
+    document.getElementById('catalogFilters')?.addEventListener('click', () => { state.catalog.filtersOpen = true; haptic(); renderActiveTab(); const s=document.getElementById('sortSelect'); if(s) s.value=state.catalog.filters.sort || 'alpha'; });
+    document.getElementById('catalogMore')?.addEventListener('click', async () => { state.catalog.page += 1; await loadCatalog(true); });
+    appEl.querySelectorAll('[data-catalog-open]').forEach((el)=>el.addEventListener('click', async ()=>{
+      haptic();
+      try { const d=await api(`./api/supplement/${el.dataset.catalogOpen}`); state.catalog.detail=d.item; renderActiveTab(); } catch { showToast('Не удалось открыть карточку'); }
+    }));
+    bindDetailModalEvents();
+    appEl.querySelectorAll('[data-filter-close]').forEach((el)=>el.addEventListener('click',()=>{ state.catalog.filtersOpen=false; renderActiveTab(); }));
+    appEl.querySelectorAll('[data-filter-toggle]').forEach((el)=>el.addEventListener('click',()=>{
+      const [k,v]=el.dataset.filterToggle.split(':'); const arr=state.catalog.filters[k]; const idx=arr.indexOf(v); if(idx>=0) arr.splice(idx,1); else arr.push(v); renderActiveTab(); const s=document.getElementById('sortSelect'); if(s) s.value=state.catalog.filters.sort;
+    }));
+    document.getElementById('applyFilters')?.addEventListener('click', async ()=>{ const s=document.getElementById('sortSelect'); if(s) state.catalog.filters.sort=s.value; state.catalog.filtersOpen=false; state.catalog.page=0; await loadCatalog(true); });
+    document.getElementById('resetFilters')?.addEventListener('click', async ()=>{ state.catalog.filters={evidence:[],targets:[],burdens:[],sort:'alpha'}; state.catalog.filtersOpen=false; state.catalog.page=0; await loadCatalog(true); });
+  }
+
+
+
+  const SYSTEM_LABELS = {
+    brain: 'Мозг', heart: 'Сердце', liver: 'Печень', kidney: 'Почки', gut: 'ЖКТ', lungs: 'Лёгкие',
+    thyroid: 'Щитовидка', pancreas: 'Поджелудочная', joints: 'Суставы', muscle: 'Мышцы', bone: 'Кости',
+    skin: 'Кожа', immune: 'Иммунитет', blood: 'Кровь', endocrine: 'Эндокринная'
+  };
+  const SVG_SYSTEMS = ['brain','lungs','heart','liver','gut','kidney','thyroid','pancreas'];
+
+  function bodyMapSystem(key) {
+    return state.bodyMap?.systems?.[key] || { benefit_count: 0, burden_count: 0, top: [] };
+  }
+
+  function bodyMapVisual(key) {
+    const s = bodyMapSystem(key);
+    const total = Number(s.benefit_count || 0) + Number(s.burden_count || 0);
+    const max = Number(state.bodyMap?.max_count || 0);
+    const intensity = max === 0 || total === 0 ? 0 : Math.min(1, Math.max(0.15, total / max));
+    let color = '255,255,255';
+    if (s.burden_count > s.benefit_count) color = '255,107,121';
+    else if (s.benefit_count > s.burden_count) color = '73,216,141';
+    else if (total > 0) color = '255,191,92';
+    return { total, intensity, color };
+  }
+
+  function renderBodyMap() {
+    if (state.loadingBodyMap && !state.bodyMap) return '<div class="card">Загружаем BodyMap...</div>';
+    if (!state.bodyMap) return '<div class="card">Нет данных BodyMap. Нажмите refresh.</div>';
+    const extra = Object.keys(SYSTEM_LABELS).filter((k)=>!SVG_SYSTEMS.includes(k));
+    const organPath = (key, shape) => {
+      const v = bodyMapVisual(key);
+      const style = `filter: drop-shadow(0 0 ${Math.round(22*v.intensity)}px rgba(${v.color},${v.intensity})); fill: rgba(${v.color},${0.26 + v.intensity*0.35});`;
+      return `<g data-system="${key}" class="organ-hotspot"><${shape} class="organ-shape" style="${style}"/></g>`;
+    };
+    const sheet = state.bodyMapSheet ? renderBodyMapSheet(state.bodyMapSheet) : '';
+    return `
+      <div class="card fade"><strong>BodyMap · ${esc(state.bodyMap.day || '')}</strong>
+        <div class="legend-grid">
+          <div class="legend-pill legend-benefit">Зелёный = польза</div>
+          <div class="legend-pill legend-burden">Красный = нагрузка</div>
+          <div class="legend-pill legend-mixed">Янтарный = mixed</div>
+        </div>
+      </div>
+      <div class="card fade">
+        <svg class="bodymap-svg" viewBox="0 0 220 420" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Body map">
+          <path d="M110 20 C145 20 166 48 166 84 C166 113 148 132 145 162 C142 193 155 222 155 262 C155 325 133 386 110 396 C87 386 65 325 65 262 C65 222 78 193 75 162 C72 132 54 113 54 84 C54 48 75 20 110 20 Z" fill="rgba(255,255,255,0.07)" stroke="rgba(255,255,255,0.3)"/>
+          ${organPath('brain','ellipse cx="110" cy="72" rx="25" ry="18"')}
+          ${organPath('thyroid','rect x="99" y="100" width="22" height="10" rx="5"')}
+          ${organPath('lungs','ellipse cx="110" cy="136" rx="34" ry="26"')}
+          ${organPath('heart','ellipse cx="109" cy="152" rx="14" ry="13"')}
+          ${organPath('liver','ellipse cx="125" cy="192" rx="30" ry="16"')}
+          ${organPath('pancreas','rect x="88" y="214" width="44" height="10" rx="4"')}
+          ${organPath('gut','ellipse cx="110" cy="252" rx="32" ry="28"')}
+          ${organPath('kidney','ellipse cx="110" cy="228" rx="44" ry="12"')}
+        </svg>
+      </div>
+      <div class="card fade">
+        <div class="muted">Другие системы</div>
+        <div class="bodymap-grid">
+          ${extra.map((k)=>{const s=bodyMapSystem(k);const v=bodyMapVisual(k);return `<button class="organ-card" data-system="${k}" style="box-shadow: inset 0 0 ${Math.round(15*v.intensity)}px rgba(${v.color},${v.intensity});"><div class="title">${SYSTEM_LABELS[k]}</div><div class="muted">${s.benefit_count||0} + / ${s.burden_count||0} -</div></button>`;}).join('')}
+        </div>
+      </div>
+      ${sheet}
+      ${state.catalog.detail ? renderDetailModal(state.catalog.detail) : ""}
+    `;
+  }
+
+  function renderBodyMapSheet(systemKey) {
+    const data = bodyMapSystem(systemKey);
+    const list = data.top || [];
+    return `<div class="sheet-backdrop" data-sheet-close></div><div class="card sheet" role="dialog">
+      <div class="row"><strong>${SYSTEM_LABELS[systemKey] || systemKey}</strong><button class="btn secondary" data-sheet-close>Закрыть</button></div>
+      <div class="row" style="margin-top:8px"><span class="badge plus">Польза: ${data.benefit_count || 0}</span><span class="badge minus">Нагрузка: ${data.burden_count || 0}</span></div>
+      <div style="margin-top:10px">${list.length ? list.map((item)=>`<button class="item-row" data-bodymap-open="${esc(item.slug)}"><span class="badge ${item.direction==='burden'?'minus':'plus'}">${item.direction==='burden'?'-':'+'}</span><span>${esc(item.name_ru || item.slug)}</span></button>`).join('') : '<div class="sheet-empty">нет данных</div>'}</div>
+      <div class="row" style="margin-top:10px"><button class="btn" data-bodymap-catalog="${systemKey}">Открыть в каталоге</button></div>
+    </div>`;
+  }
+
+  function bindBodyMapEvents() {
+    bindDetailModalEvents();
+    appEl.querySelectorAll('[data-system]').forEach((el)=>el.addEventListener('click', ()=>{ haptic(); state.bodyMapSheet = el.dataset.system; renderActiveTab(); }));
+    appEl.querySelectorAll('[data-sheet-close]').forEach((el)=>el.addEventListener('click', ()=>{ state.bodyMapSheet = null; renderActiveTab(); }));
+    appEl.querySelectorAll('[data-bodymap-open]').forEach((el)=>el.addEventListener('click', async ()=>{
+      haptic();
+      try { const d=await api(`./api/supplement/${el.dataset.bodymapOpen}`); state.catalog.detail=d.item; renderActiveTab(); }
+      catch { showToast('Не удалось открыть карточку'); }
+    }));
+    appEl.querySelectorAll('[data-bodymap-catalog]').forEach((el)=>el.addEventListener('click', async ()=>{
+      haptic();
+      state.catalog.q='';
+      state.catalog.page=0;
+      state.catalog.filters.targets=[el.dataset.bodymapCatalog];
+      state.activeTab='catalog';
+      renderMainApp();
+      await loadCatalog(true);
+    }));
+  }
+
+  async function loadBodyMap(force) {
+    if (state.loadingBodyMap && !force) return;
+    state.loadingBodyMap = true;
+    renderActiveTab();
+    try {
+      const map = await api('./api/body_map');
+      state.bodyMap = map;
+    } catch (e) {
+      if (e.message !== 'PREMIUM_REQUIRED') showToast('Не удалось загрузить BodyMap');
+    } finally {
+      state.loadingBodyMap = false;
+      renderActiveTab();
+    }
+  }
+
+  async function loadToday(force) {
+    if (state.loadingToday && !force) return;
+    state.loadingToday = true;
+    renderActiveTab();
+    try {
+      const today = await api("./api/today");
+      state.today = today;
+    } catch (e) {
+      if (e.message !== "PREMIUM_REQUIRED") showToast("Не удалось загрузить Today");
+    } finally {
+      state.loadingToday = false;
+      renderActiveTab();
+    }
+  }
+
+  function renderToday() {
+    const slots = state.today?.slots || [];
+    if (!slots.length) {
+      return `<div class="card">На сегодня приёмов не найдено.</div>`;
+    }
+
+    return slots.map((slot) => {
+      const items = slot.items || [];
+      const taken = items.filter(i => i.status === "taken").length;
+      return `
+        <article class="card fade" data-slot="${slot.slot_id}">
+          <div class="row">
+            <div>
+              <strong>${slot.title || "Слот"} · ${slot.time_local || "--:--"}</strong>
+              <div class="muted">${slot.day || ""}</div>
+            </div>
+            <span class="chip green">✅ ${taken} / ${items.length}</span>
+          </div>
+
+          <div class="slot-actions">
+            <button class="btn secondary" data-slot-action="all-taken" data-slot-id="${slot.slot_id}">Выпил всё</button>
+            <button class="btn secondary" data-slot-action="all-none" data-slot-id="${slot.slot_id}">Сбросить</button>
+          </div>
+
+          <div>
+            ${items.map((item) => `
+              <button class="item-row" data-item="${item.supplement_id}" data-next="${item.status === "taken" ? "none" : "taken"}">
+                <span class="status-pill ${statusClass(item.status)}">${statusText(item.status)}</span>
+                <span>${item.name}</span>
+              </button>
+            `).join("")}
+          </div>
+        </article>
+      `;
+    }).join("");
+  }
+
+  function statusClass(status) {
+    if (status === "taken") return "status-taken";
+    if (status === "skipped") return "status-skipped";
+    return "status-none";
+  }
+
+  function statusText(status) {
+    if (status === "taken") return "✅ Принято";
+    if (status === "skipped") return "⛔ Пропуск";
+    return "◻ Не отмечено";
+  }
+
+  function bindTodayEvents() {
+    appEl.querySelectorAll("[data-item]").forEach((row) => {
+      row.addEventListener("click", () => {
+        const supplementId = row.dataset.item;
+        const next = row.dataset.next;
+        toggleOne(supplementId, next);
+      });
+    });
+
+    appEl.querySelectorAll("[data-slot-action]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const slotId = btn.dataset.slotId;
+        const action = btn.dataset.slotAction;
+        const status = action === "all-taken" ? "taken" : "none";
+        await setSlotStatus(slotId, status);
+      });
+    });
+  }
+
+  function findItemById(id) {
+    for (const slot of state.today?.slots || []) {
+      const item = (slot.items || []).find(i => String(i.supplement_id) === String(id));
+      if (item) return item;
+    }
+    return null;
+  }
+
+  async function toggleOne(supplementId, nextStatus) {
+    haptic();
+    const item = findItemById(supplementId);
+    if (!item) return;
+
+    const prev = item.status;
+    item.status = nextStatus;
+    renderActiveTab();
+
+    try {
+      await api("./api/today/toggle", {
+        method: "POST",
+        body: { supplement_id: Number(supplementId), status: nextStatus }
+      });
+    } catch (e) {
+      item.status = prev;
+      renderActiveTab();
+      showToast("Ошибка синхронизации, откат");
+    }
+  }
+
+  async function setSlotStatus(slotId, status) {
+    haptic();
+    const slot = (state.today?.slots || []).find(s => String(s.slot_id) === String(slotId));
+    if (!slot || !(slot.items || []).length) return;
+
+    const snapshot = slot.items.map(i => ({ id: i.supplement_id, status: i.status }));
+    slot.items.forEach(i => { i.status = status; });
+    renderActiveTab();
+
+    try {
+      const pending = slot.items.map((item) => () => api("./api/today/toggle", {
+        method: "POST",
+        body: { supplement_id: Number(item.supplement_id), status }
+      }));
+      await runBatched(pending, 3);
+      showToast(status === "taken" ? "Отметил всё как принято" : "Слот сброшен");
+    } catch (e) {
+      slot.items.forEach((item) => {
+        const old = snapshot.find(s => String(s.id) === String(item.supplement_id));
+        if (old) item.status = old.status;
+      });
+      renderActiveTab();
+      showToast("Не удалось применить к слоту");
+    }
+  }
+
+  async function runBatched(tasks, batchSize) {
+    for (let i = 0; i < tasks.length; i += batchSize) {
+      const chunk = tasks.slice(i, i + batchSize).map((fn) => fn());
+      await Promise.all(chunk);
+      await new Promise((resolve) => setTimeout(resolve, 80));
+    }
+  }
+
+  boot();
+})();
 </script>
 </body>
 </html>

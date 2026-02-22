@@ -2,98 +2,681 @@
 <html lang="ru">
 <head>
   <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
   <title>SupplyBot WebApp</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; padding: 16px; background:#fafafa; color:#111; }
-    .card { background:#fff; border:1px solid #e4e4e4; border-radius:14px; padding:14px; margin:10px 0; }
-    .tabs { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
-    .tab { padding:12px; border:1px dashed #ccc; border-radius:10px; opacity:.7; }
-    button { padding:10px 12px; border-radius:10px; border:1px solid #ccc; background:#fff; cursor:pointer; margin-right:8px; margin-top:8px; }
-    .muted { color:#666; font-size:13px; }
+    :root {
+      --bg-1: #0a1230;
+      --bg-2: #37245e;
+      --bg-3: #111a3f;
+      --card: rgba(255, 255, 255, 0.08);
+      --card-strong: rgba(255, 255, 255, 0.13);
+      --text: #eef2ff;
+      --muted: rgba(235, 240, 255, 0.72);
+      --accent: #82a7ff;
+      --green: #49d88d;
+      --red: #ff6b79;
+      --neutral: rgba(255,255,255,0.17);
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      height: 100%;
+      margin: 0;
+      font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(1200px 700px at 15% -10%, #3256d7 0%, transparent 60%),
+        radial-gradient(1000px 600px at 100% 0%, #7a39cf 0%, transparent 55%),
+        linear-gradient(160deg, var(--bg-1) 0%, var(--bg-2) 55%, var(--bg-3) 100%);
+      overflow: hidden;
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      opacity: 0.08;
+      background-image: radial-gradient(rgba(255,255,255,0.9) 0.5px, transparent 0.5px);
+      background-size: 3px 3px;
+      mix-blend-mode: screen;
+    }
+
+    #app {
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      position: relative;
+    }
+
+    .main-content {
+      flex: 1;
+      overflow-y: auto;
+      padding: 14px 14px calc(100px + env(safe-area-inset-bottom));
+      -webkit-overflow-scrolling: touch;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+
+    .headline { margin: 0; font-size: 20px; }
+    .subline { color: var(--muted); font-size: 13px; margin-top: 3px; }
+
+    .btn, .chip {
+      border: 0;
+      border-radius: 14px;
+      color: var(--text);
+      background: linear-gradient(170deg, rgba(255,255,255,0.2), rgba(255,255,255,0.08));
+      box-shadow:
+        0 9px 20px rgba(0,0,0,0.35),
+        0 2px 0 rgba(255,255,255,0.2) inset,
+        0 -2px 0 rgba(0,0,0,0.35) inset;
+      transition: transform .12s ease, box-shadow .12s ease, opacity .12s ease;
+    }
+
+    .btn {
+      cursor: pointer;
+      padding: 10px 14px;
+      font-size: 14px;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+
+    .btn:active, .pressed {
+      transform: translateY(1px);
+      box-shadow:
+        0 3px 8px rgba(0,0,0,0.35),
+        0 1px 0 rgba(255,255,255,0.08) inset,
+        0 -1px 0 rgba(0,0,0,0.55) inset;
+    }
+
+    .btn.secondary { opacity: 0.85; }
+    .btn[disabled] { opacity: .45; cursor: not-allowed; }
+
+    .card {
+      border-radius: 20px;
+      padding: 14px;
+      background: var(--card);
+      border: 1px solid rgba(255,255,255,0.16);
+      box-shadow:
+        0 16px 34px rgba(0,0,0,0.30),
+        0 1px 0 rgba(255,255,255,0.22) inset,
+        0 -2px 0 rgba(0,0,0,0.36) inset;
+      backdrop-filter: blur(8px);
+      margin-bottom: 12px;
+    }
+
+    .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .muted { color: var(--muted); }
+
+    .tabs {
+      position: fixed;
+      left: 10px;
+      right: 10px;
+      bottom: calc(10px + env(safe-area-inset-bottom));
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+      padding: 8px;
+      border-radius: 22px;
+      background: rgba(8, 13, 34, 0.85);
+      border: 1px solid rgba(255,255,255,0.16);
+      backdrop-filter: blur(10px);
+      box-shadow: 0 20px 40px rgba(0,0,0,0.45);
+      z-index: 20;
+    }
+
+    .tab {
+      border: 0;
+      border-radius: 14px;
+      min-height: 52px;
+      color: var(--muted);
+      background: transparent;
+      font-size: 11px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 3px;
+    }
+
+    .tab.active {
+      color: white;
+      background: rgba(126, 165, 255, 0.18);
+      box-shadow: 0 0 18px rgba(126, 165, 255, 0.45), 0 0 0 1px rgba(160, 195, 255, 0.45) inset;
+    }
+
+    .tab-emoji { font-size: 17px; line-height: 1; }
+
+    .slot-actions { display:flex; gap:8px; flex-wrap:wrap; margin-top: 8px; }
+    .chip { border-radius: 999px; padding: 5px 10px; font-size: 12px; font-weight: 700; }
+    .chip.green { background: rgba(72,216,141,0.2); color: #bbffd9; }
+
+    .item-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      width: 100%;
+      border: 0;
+      text-align: left;
+      padding: 10px;
+      border-radius: 13px;
+      margin-top: 8px;
+      background: rgba(255,255,255,0.06);
+      color: inherit;
+    }
+
+    .status-pill {
+      min-width: 72px;
+      text-align: center;
+      padding: 7px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+      border: 1px solid transparent;
+    }
+
+    .status-taken { background: rgba(73,216,141,0.24); border-color: rgba(158,255,205,0.72); box-shadow: 0 0 12px rgba(73,216,141,0.42); }
+    .status-skipped { background: rgba(255,107,121,0.24); border-color: rgba(255,167,177,0.65); box-shadow: 0 0 10px rgba(255,107,121,0.35); }
+    .status-none { background: var(--neutral); border-color: rgba(255,255,255,0.2); }
+
+    .fade { animation: fadeIn .22s ease; }
+    @keyframes fadeIn { from {opacity: 0; transform: translateY(6px);} to {opacity: 1; transform: translateY(0);} }
+
+    .preview-grid { display: grid; gap: 10px; }
+    .preview-card {
+      border-radius: 16px;
+      padding: 12px;
+      border: 1px solid rgba(255,255,255,0.18);
+      background: rgba(255,255,255,0.06);
+      filter: blur(2px);
+      opacity: 0.75;
+    }
+
+    .plans { display: grid; gap: 10px; }
+
+    .toast-wrap {
+      position: fixed;
+      left: 0; right: 0;
+      bottom: calc(80px + env(safe-area-inset-bottom));
+      display: flex;
+      justify-content: center;
+      pointer-events: none;
+      z-index: 25;
+    }
+
+    .toast {
+      background: rgba(10, 12, 28, 0.94);
+      border: 1px solid rgba(255,255,255,0.2);
+      border-radius: 999px;
+      padding: 10px 14px;
+      font-size: 13px;
+      box-shadow: 0 10px 24px rgba(0,0,0,0.4);
+    }
+
+    .devbox textarea {
+      width: 100%;
+      min-height: 80px;
+      margin-top: 8px;
+      border-radius: 12px;
+      padding: 10px;
+      border: 1px solid rgba(255,255,255,0.3);
+      color: #fff;
+      background: rgba(10, 13, 31, 0.85);
+    }
+
+    .cta-sticky {
+      position: sticky;
+      bottom: 10px;
+      padding-top: 8px;
+      background: linear-gradient(to top, rgba(10,13,33,0.96) 40%, transparent);
+    }
   </style>
 </head>
 <body>
-  <div id="app">Загрузка...</div>
+  <div id="app"></div>
+  <div id="toastWrap" class="toast-wrap"></div>
 <script>
-const tg = window.Telegram?.WebApp;
-if (tg) tg.ready();
+(function () {
+  const tg = window.Telegram?.WebApp;
+  tg?.ready();
+  tg?.expand();
 
-function h(headers={}) {
-  return {"Content-Type":"application/json", "X-Telegram-Init-Data": tg?.initData || "", ...headers};
-}
+  const state = {
+    initData: tg?.initData || "",
+    me: null,
+    activeTab: "today",
+    today: null,
+    loadingToday: false,
+    toastTimer: null
+  };
 
-async function apiMe(){
-  const r = await fetch('./api/me', {headers: h()});
-  return await r.json();
-}
+  const APP_NAME = "SupplyBot";
+  const appEl = document.getElementById("app");
+  const tabs = [
+    { id: "today", title: "Today", icon: "✅" },
+    { id: "catalog", title: "Catalog", icon: "📚" },
+    { id: "bodymap", title: "BodyMap", icon: "🧠" },
+    { id: "survey", title: "Survey", icon: "📝" }
+  ];
 
-async function buy(planId, method){
-  const r = await fetch('./api/billing/create_invoice_link', {
-    method:'POST', headers:h(), body:JSON.stringify({plan_id:planId, method})
-  });
-  const j = await r.json();
-  if(!j.ok){ alert('Не удалось создать счёт'); return; }
-  tg?.openInvoice(j.invoice_link, async (status)=>{
-    if (status === 'paid' || status === 'success') {
-      const me = await apiMe();
-      if (me.premium) location.reload();
-    }
-  });
-}
+  const themeText = tg?.themeParams?.text_color || "#eef2ff";
+  document.documentElement.style.setProperty("--text", themeText);
 
-function renderPaywall(me){
-  const plans = me.plans || [];
-  const plansHtml = plans.map(p => `
-    <div class="card">
-      <b>${p.plan_id}</b> · ${p.months} мес.
-      <div class="muted">${p.price_stars} ⭐ / ${Math.round((p.price_rub||0)/100)} ₽</div>
-      ${p.stars_enabled ? `<button onclick="buy('${p.plan_id}','stars')">Купить за ⭐</button>` : ''}
-      ${p.rub_enabled ? `<button onclick="buy('${p.plan_id}','yookassa')">Купить за ₽</button>` : ''}
-    </div>
-  `).join('');
-
-  document.getElementById('app').innerHTML = `
-    <div class="card">
-      <h2>🔒 Premium доступ</h2>
-      <div class="muted">Без подписки доступна только витрина.</div>
-    </div>
-    <div class="card tabs">
-      <div class="tab">Today (preview)</div>
-      <div class="tab">Catalog (preview)</div>
-      <div class="tab">BodyMap (preview)</div>
-      <div class="tab">Survey (preview)</div>
-    </div>
-    <div class="card"><b>Как это выглядит:</b><div class="muted">Персональный Today, трекинг и AI-инсайты в полной версии.</div></div>
-    ${plansHtml}
-  `;
-}
-
-function renderPremium(me){
-  document.getElementById('app').innerHTML = `
-    <div class="card">
-      <h2>✅ Premium активен</h2>
-      <div>До: ${me.premium_until_utc || '—'}</div>
-      <button onclick="openToday()">Открыть Today</button>
-    </div>
-  `;
-}
-
-async function openToday(){
-  const r = await fetch('./api/today', {headers:h()});
-  const j = await r.json();
-  alert(JSON.stringify(j, null, 2));
-}
-
-(async function init(){
-  try {
-    const me = await apiMe();
-    if (!me.premium) return renderPaywall(me);
-    return renderPremium(me);
-  } catch(e){
-    document.getElementById('app').textContent = String(e);
+  function haptic() {
+    tg?.HapticFeedback?.impactOccurred?.("light");
   }
+
+  function showToast(text) {
+    const wrap = document.getElementById("toastWrap");
+    wrap.innerHTML = `<div class="toast fade">${text}</div>`;
+    clearTimeout(state.toastTimer);
+    state.toastTimer = setTimeout(() => { wrap.innerHTML = ""; }, 2200);
+  }
+
+  function formatDate() {
+    return new Date().toLocaleDateString("ru-RU", { weekday: "short", day: "2-digit", month: "short" });
+  }
+
+  async function api(path, { method = "GET", body } = {}) {
+    const res = await fetch(path, {
+      method,
+      headers: {
+        "Content-Type": "application/json",
+        "X-Telegram-Init-Data": state.initData
+      },
+      body: body ? JSON.stringify(body) : undefined
+    });
+
+    if (res.status === 401) {
+      showToast("Открой WebApp внутри Telegram");
+      throw new Error("UNAUTHORIZED");
+    }
+
+    if (res.status === 402) {
+      state.me = { ...(state.me || {}), premium: false };
+      renderPaywall();
+      throw new Error("PREMIUM_REQUIRED");
+    }
+
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.ok === false) {
+      throw new Error(data.error || `HTTP_${res.status}`);
+    }
+    return data;
+  }
+
+  async function boot() {
+    try {
+      const me = await api("./api/me");
+      state.me = me;
+      if (!me.premium) {
+        renderPaywall();
+      } else {
+        renderMainApp();
+        await loadToday();
+      }
+    } catch (e) {
+      if (String(e.message).includes("UNAUTHORIZED") && !state.initData) {
+        renderInitDataFallback();
+      } else if (!state.me) {
+        renderInitDataFallback("Не удалось загрузить /api/me");
+      }
+    }
+  }
+
+  function renderInitDataFallback(errorText) {
+    appEl.innerHTML = `
+      <div class="main-content">
+        <div class="card devbox fade">
+          <h3 style="margin:0">Dev fallback</h3>
+          <p class="muted">Вставьте initData для теста в обычном браузере.</p>
+          ${errorText ? `<p class="muted">${errorText}</p>` : ""}
+          <textarea id="initDataInput" placeholder="query_id=...&user=...&hash=..."></textarea>
+          <div style="margin-top:8px">
+            <button class="btn" id="saveInitBtn">Применить</button>
+          </div>
+        </div>
+      </div>
+    `;
+    document.getElementById("saveInitBtn")?.addEventListener("click", async () => {
+      const value = document.getElementById("initDataInput").value.trim();
+      if (!value) return showToast("Нужно вставить initData");
+      state.initData = value;
+      showToast("initData сохранён");
+      await boot();
+    });
+  }
+
+  function renderPaywall() {
+    const plans = state.me?.plans || [];
+    const plansHtml = plans.map((p) => {
+      const rub = p.price_rub ? Math.round(p.price_rub / 100) : null;
+      return `
+        <div class="card fade">
+          <div class="row">
+            <strong>${p.months} мес.</strong>
+            <span class="muted">${p.plan_id}</span>
+          </div>
+          <div class="muted" style="margin-top:6px;">
+            ${p.price_stars || "—"} ⭐ ${rub !== null ? `• ${rub} ₽` : ""}
+          </div>
+          <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
+            ${p.stars_enabled ? `<button class="btn" data-plan="${p.plan_id}" data-method="stars">Купить за ⭐</button>` : ""}
+            ${p.rub_enabled ? `<button class="btn secondary" data-plan="${p.plan_id}" data-method="yookassa">Купить за ₽</button>` : ""}
+          </div>
+        </div>
+      `;
+    }).join("");
+
+    appEl.innerHTML = `
+      <div class="main-content">
+        <div class="card fade">
+          <h2 style="margin:0 0 4px">Премиум открывает WebApp</h2>
+          <div class="muted">Today • Каталог • Карта • Опрос</div>
+        </div>
+
+        <div class="preview-grid">
+          ${["Today: чекбоксы и прогресс", "Catalog: RU/EN каталог", "BodyMap: органы и протоколы", "Survey: умные карточки"].map(t => `<div class="preview-card">${t}<br><span class="muted">Контент скрыт до Premium</span></div>`).join("")}
+        </div>
+
+        <div class="cta-sticky">
+          <div class="card" style="margin-top:12px; margin-bottom:8px;"><b>Купить подписку</b><div class="muted">Выберите удобный план и оплату ⭐ или ₽</div></div>
+        </div>
+
+        <div class="plans">${plansHtml || '<div class="card">Планы пока недоступны.</div>'}</div>
+      </div>
+      ${renderTabs(true)}
+    `;
+
+    appEl.querySelectorAll("[data-plan]").forEach((el) => {
+      el.addEventListener("click", () => purchase(el.dataset.plan, el.dataset.method, el));
+    });
+  }
+
+  async function purchase(planId, method, btnEl) {
+    haptic();
+    if (!tg?.openInvoice) {
+      showToast("Оплата доступна только в Telegram");
+      return;
+    }
+    const prevText = btnEl.textContent;
+    btnEl.textContent = "Создаю счёт...";
+    btnEl.disabled = true;
+    try {
+      const data = await api("./api/billing/create_invoice_link", {
+        method: "POST",
+        body: { plan_id: planId, method }
+      });
+
+      tg.openInvoice(data.invoice_link, async (status) => {
+        if (["paid", "success"].includes(status)) {
+          showToast("Оплата успешна, обновляю доступ...");
+          try {
+            state.me = await api("./api/me");
+            if (state.me.premium) {
+              renderMainApp();
+              await loadToday();
+            } else {
+              showToast("Платёж обработан, ждём активацию");
+            }
+          } catch (_) {
+            showToast("Не удалось обновить доступ");
+          }
+        } else if (status === "cancelled") {
+          showToast("Платёж отменён");
+        } else {
+          showToast(`Статус оплаты: ${status}`);
+        }
+      });
+    } catch (e) {
+      showToast("Не удалось создать счёт");
+    } finally {
+      btnEl.textContent = prevText;
+      btnEl.disabled = false;
+    }
+  }
+
+  function renderTabs(isLocked) {
+    return `<nav class="tabs">
+      ${tabs.map(t => `<button class="tab ${state.activeTab === t.id ? "active" : ""}" data-tab="${t.id}" ${isLocked ? "disabled" : ""}>
+        <span class="tab-emoji">${t.icon}</span>
+        <span>${t.title}</span>
+      </button>`).join("")}
+    </nav>`;
+  }
+
+  function renderMainApp() {
+    appEl.innerHTML = `
+      <div class="main-content" id="mainContent">
+        <header class="topbar fade">
+          <div>
+            <h1 class="headline">${APP_NAME}</h1>
+            <div class="subline">${formatDate()}</div>
+          </div>
+          <button class="btn" id="refreshBtn" aria-label="Refresh">⟳</button>
+        </header>
+        <section id="tabContent" class="fade"></section>
+      </div>
+      ${renderTabs(false)}
+    `;
+
+    bindMainEvents();
+    renderActiveTab();
+  }
+
+  function bindMainEvents() {
+    appEl.querySelectorAll(".tab[data-tab]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const tab = btn.dataset.tab;
+        if (state.activeTab === tab) return;
+        haptic();
+        state.activeTab = tab;
+        renderMainApp();
+        if (tab === "today" && !state.today) {
+          await loadToday();
+        }
+      });
+    });
+
+    const refreshBtn = document.getElementById("refreshBtn");
+    refreshBtn?.addEventListener("click", async () => {
+      haptic();
+      if (state.activeTab === "today") {
+        await loadToday(true);
+      } else {
+        showToast("Раздел обновлён");
+      }
+    });
+  }
+
+  function renderActiveTab() {
+    const target = document.getElementById("tabContent");
+    if (!target) return;
+
+    if (state.activeTab === "today") {
+      if (state.loadingToday) {
+        target.innerHTML = `<div class="card">Загружаем Today...</div>`;
+      } else if (!state.today) {
+        target.innerHTML = `<div class="card">Нет данных Today. Нажмите refresh.</div>`;
+      } else {
+        target.innerHTML = renderToday();
+        bindTodayEvents();
+      }
+      return;
+    }
+
+    const map = {
+      catalog: "Скоро: поиск RU/EN + фильтры",
+      bodymap: "Скоро: карта организма",
+      survey: "Скоро: опрос карточками"
+    };
+    target.innerHTML = `
+      <div class="card fade">
+        <h3 style="margin-top:0">${tabs.find(t => t.id === state.activeTab)?.title}</h3>
+        <p class="muted" style="margin-bottom:0">${map[state.activeTab]}</p>
+      </div>
+      <div class="card fade">
+        <div class="muted">Раздел в разработке. Навигация и стили уже готовы.</div>
+      </div>
+    `;
+  }
+
+  async function loadToday(force) {
+    if (state.loadingToday && !force) return;
+    state.loadingToday = true;
+    renderActiveTab();
+    try {
+      const today = await api("./api/today");
+      state.today = today;
+    } catch (e) {
+      if (e.message !== "PREMIUM_REQUIRED") showToast("Не удалось загрузить Today");
+    } finally {
+      state.loadingToday = false;
+      renderActiveTab();
+    }
+  }
+
+  function renderToday() {
+    const slots = state.today?.slots || [];
+    if (!slots.length) {
+      return `<div class="card">На сегодня приёмов не найдено.</div>`;
+    }
+
+    return slots.map((slot) => {
+      const items = slot.items || [];
+      const taken = items.filter(i => i.status === "taken").length;
+      return `
+        <article class="card fade" data-slot="${slot.slot_id}">
+          <div class="row">
+            <div>
+              <strong>${slot.title || "Слот"} · ${slot.time_local || "--:--"}</strong>
+              <div class="muted">${slot.day || ""}</div>
+            </div>
+            <span class="chip green">✅ ${taken} / ${items.length}</span>
+          </div>
+
+          <div class="slot-actions">
+            <button class="btn secondary" data-slot-action="all-taken" data-slot-id="${slot.slot_id}">Выпил всё</button>
+            <button class="btn secondary" data-slot-action="all-none" data-slot-id="${slot.slot_id}">Сбросить</button>
+          </div>
+
+          <div>
+            ${items.map((item) => `
+              <button class="item-row" data-item="${item.supplement_id}" data-next="${item.status === "taken" ? "none" : "taken"}">
+                <span class="status-pill ${statusClass(item.status)}">${statusText(item.status)}</span>
+                <span>${item.name}</span>
+              </button>
+            `).join("")}
+          </div>
+        </article>
+      `;
+    }).join("");
+  }
+
+  function statusClass(status) {
+    if (status === "taken") return "status-taken";
+    if (status === "skipped") return "status-skipped";
+    return "status-none";
+  }
+
+  function statusText(status) {
+    if (status === "taken") return "✅ Принято";
+    if (status === "skipped") return "⛔ Пропуск";
+    return "◻ Не отмечено";
+  }
+
+  function bindTodayEvents() {
+    appEl.querySelectorAll("[data-item]").forEach((row) => {
+      row.addEventListener("click", () => {
+        const supplementId = row.dataset.item;
+        const next = row.dataset.next;
+        toggleOne(supplementId, next);
+      });
+    });
+
+    appEl.querySelectorAll("[data-slot-action]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const slotId = btn.dataset.slotId;
+        const action = btn.dataset.slotAction;
+        const status = action === "all-taken" ? "taken" : "none";
+        await setSlotStatus(slotId, status);
+      });
+    });
+  }
+
+  function findItemById(id) {
+    for (const slot of state.today?.slots || []) {
+      const item = (slot.items || []).find(i => String(i.supplement_id) === String(id));
+      if (item) return item;
+    }
+    return null;
+  }
+
+  async function toggleOne(supplementId, nextStatus) {
+    haptic();
+    const item = findItemById(supplementId);
+    if (!item) return;
+
+    const prev = item.status;
+    item.status = nextStatus;
+    renderActiveTab();
+
+    try {
+      await api("./api/today/toggle", {
+        method: "POST",
+        body: { supplement_id: Number(supplementId), status: nextStatus }
+      });
+    } catch (e) {
+      item.status = prev;
+      renderActiveTab();
+      showToast("Ошибка синхронизации, откат");
+    }
+  }
+
+  async function setSlotStatus(slotId, status) {
+    haptic();
+    const slot = (state.today?.slots || []).find(s => String(s.slot_id) === String(slotId));
+    if (!slot || !(slot.items || []).length) return;
+
+    const snapshot = slot.items.map(i => ({ id: i.supplement_id, status: i.status }));
+    slot.items.forEach(i => { i.status = status; });
+    renderActiveTab();
+
+    try {
+      const pending = slot.items.map((item) => () => api("./api/today/toggle", {
+        method: "POST",
+        body: { supplement_id: Number(item.supplement_id), status }
+      }));
+      await runBatched(pending, 3);
+      showToast(status === "taken" ? "Отметил всё как принято" : "Слот сброшен");
+    } catch (e) {
+      slot.items.forEach((item) => {
+        const old = snapshot.find(s => String(s.id) === String(item.supplement_id));
+        if (old) item.status = old.status;
+      });
+      renderActiveTab();
+      showToast("Не удалось применить к слоту");
+    }
+  }
+
+  async function runBatched(tasks, batchSize) {
+    for (let i = 0; i < tasks.length; i += batchSize) {
+      const chunk = tasks.slice(i, i + batchSize).map((fn) => fn());
+      await Promise.all(chunk);
+      await new Promise((resolve) => setTimeout(resolve, 80));
+    }
+  }
+
+  boot();
 })();
 </script>
 </body>

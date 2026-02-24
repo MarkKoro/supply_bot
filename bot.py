@@ -70,6 +70,8 @@ from keyboards import (
     admin_supp_edit_wait_kb,
     admin_supp_toggle_confirm_kb,
     admin_supp_audit_back_kb,
+    admin_diag_kb,
+    admin_diag_confirm_kb,
 )
 import tz
 from openai_client import (
@@ -2210,6 +2212,32 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await show(update, context, "Модерация пользователей доступна в WebApp разделе Admin.", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="admin:home")]]), route="admin:home")
             return
 
+        if data == "admin:diag":
+            if not await _require_admin(update, context, "system_diag"):
+                return
+            await show(update, context, "Запуск диагностики целостности данных.", admin_diag_kb(), route="admin:diag")
+            return
+
+        if data == "admin:diag:dry":
+            if not await _require_admin(update, context, "system_diag"):
+                return
+            diag = await db.run_diagnostics(conn, apply=False)
+            await show(update, context, _render_diag_summary(diag), admin_diag_kb(), route="admin:diag")
+            return
+
+        if data == "admin:diag:apply":
+            if not await _require_admin(update, context, "system_diag"):
+                return
+            await show(update, context, "Подтверди ремонт данных. Это безопасные правки без удаления пользовательских сущностей.", admin_diag_confirm_kb(), route="admin:diag:confirm")
+            return
+
+        if data == "admin:diag:apply:confirm":
+            if not await _require_admin(update, context, "system_diag"):
+                return
+            diag = await db.run_diagnostics(conn, apply=True)
+            await show(update, context, _render_diag_summary(diag), admin_diag_kb(), route="admin:diag")
+            return
+
         if data == "admin:roles":
             context.user_data[WAITING_KEY] = "owner_wait_target_tg_id"
             await show(update, context, "Введите tg_user_id пользователя для управления ролью.", InlineKeyboardMarkup([[InlineKeyboardButton("Отмена", callback_data="admin:home")]]), route="owner_wait_target_tg_id")
@@ -2251,6 +2279,8 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 required_perm = "roles_manage"
             elif data.startswith("admin:users"):
                 required_perm = "users_view"
+            elif data.startswith("admin:diag"):
+                required_perm = "system_diag"
             if required_perm and not perms.get(required_perm, False):
                 await show(update, context, "Нет доступа к разделу.", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="admin:home")]]), route="admin:home")
                 return
@@ -5598,13 +5628,15 @@ async def _require_admin(update: Update, context: ContextTypes.DEFAULT_TYPE, per
 
 
 async def _show_admin_home(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    tg_uid = update.effective_user.id if update.effective_user else 0
+    _, perms = await _get_role_perms_ctx(context, tg_uid)
     await show(
         update,
         context,
         "🛠 <b>Админ-хаб</b>\n"
         "- Управление ссылками на покупку\n"
         "(позже: правки карточек, доказательность, тексты и т.д.)",
-        admin_hub_kb(),
+        admin_hub_kb(perms=perms),
         route="admin:home",
     )
 
@@ -5793,6 +5825,16 @@ ADMIN_JSON_FIELDS = {"tags_json", "body_targets_json", "body_burdens_json"}
 def _admin_field_label(field: str) -> str:
     return ADMIN_FIELD_LABELS.get(field, field)
 
+
+
+
+def _render_diag_summary(payload: dict) -> str:
+    lines = [f"🧰 <b>Диагностика</b> ({'apply' if payload.get('apply') else 'dry-run'})"]
+    for issue in payload.get('issues', []):
+        lines.append(f"• <code>{issue.get('code')}</code>: найдено {int(issue.get('count') or 0)}, исправлено {int(issue.get('fixed') or 0)}")
+    if len(lines) == 1:
+        lines.append('Проблем не найдено.')
+    return "\n".join(lines)
 
 def _admin_preview(value: str, limit: int = 280) -> str:
     text = str(value or "").strip()

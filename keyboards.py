@@ -490,6 +490,8 @@ def admin_hub_kb(*, perms: dict[str, bool] | None = None) -> InlineKeyboardMarku
         rows.append([InlineKeyboardButton("👤 Пользователи", callback_data="admin:users_stub")])
     if perms.get("roles_manage", False):
         rows.append([InlineKeyboardButton("🛡 Роли", callback_data="admin:roles")])
+    if perms.get("system_diag", False):
+        rows.append([InlineKeyboardButton("🧰 Диагностика", callback_data="admin:diag")])
     rows.append([InlineKeyboardButton("↩️ Назад", callback_data="menu:home")])
     return InlineKeyboardMarkup(rows)
 
@@ -822,4 +824,19 @@ def premium_upsell_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("⭐ Купить Premium", callback_data="menu:premium")],
         [InlineKeyboardButton("🔓 Открыть WebApp", callback_data="menu:webapp")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")],
+    ])
+
+
+def admin_diag_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Проверить", callback_data="admin:diag:dry")],
+        [InlineKeyboardButton("Починить", callback_data="admin:diag:apply")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="admin:home")],
+    ])
+
+
+def admin_diag_confirm_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Да, починить", callback_data="admin:diag:apply:confirm")],
+        [InlineKeyboardButton("⬅️ Отмена", callback_data="admin:diag")],
     ])

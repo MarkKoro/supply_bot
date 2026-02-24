@@ -116,6 +116,15 @@ class ComplexScheduleRemoveBody(BaseModel):
     slot_id: str
 
 
+class DiagnosticsRunBody(BaseModel):
+    apply: bool = False
+
+
+class RecommendationsApplyBody(BaseModel):
+    local_date: str | None = None
+    recommendations: list[dict] = []
+
+
 async def _auth_user_id(init_data: str) -> int:
     ok, parsed = verify_init_data(init_data, BOT_TOKEN)
     if not ok:
@@ -1050,21 +1059,29 @@ async def api_checkin_apply(body: CheckinApplyBody, x_telegram_init_data: str = 
         else:
             selected = set(int(x) for x in (body.selected_ids or []))
             picked = [x for x in recs if int(x.get("supplement_id") or 0) in selected]
-        selected_items = [
-            {
-                "action": str(x.get("action") or "add"),
-                "slug": str(x.get("slug") or ""),
-                "supplement_id": int(x.get("supplement_id") or 0),
-                "reason": str(x.get("reason") or ""),
-                "suggested_time": x.get("suggested_time"),
-                "slot_id": x.get("suggested_slot_id"),
-            }
-            for x in picked
-        ]
-        await db.apply_ai_plan_items(conn, tg_user_id, local_date, selected_items)
+        summary = await db.apply_recommendations_to_today(conn, tg_user_id, local_date, picked, mode=(body.mode or "selected"))
     finally:
         await conn.close()
-    return JSONResponse({"ok": True})
+    return JSONResponse({"ok": True, "summary": summary})
+
+
+@app.post("/api/recommendations/apply_all")
+async def api_recommendations_apply_all(body: RecommendationsApplyBody, x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    if not await _premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
+    recs = list(body.recommendations or [])
+    if len(recs) > 60:
+        return JSONResponse({"ok": False, "error": "TOO_MANY_RECOMMENDATIONS"}, status_code=400)
+    conn = await db.connect(s.DB_PATH)
+    try:
+        tz_name = await db.get_user_tz(conn, tg_user_id)
+        local_date = str(body.local_date or "").strip() or db.get_user_local_date(tz_name or None)
+        summary = await db.apply_recommendations_to_today(conn, tg_user_id, local_date, recs, mode="apply_all")
+    finally:
+        await conn.close()
+    today = await _today_payload(tg_user_id)
+    return JSONResponse({"ok": True, "summary": summary, "today": today})
 
 
 @app.get("/api/checkin/today")
@@ -1093,3 +1110,20 @@ async def api_checkin_today(x_telegram_init_data: str = Header(default="", alias
     except Exception:
         pass
     return JSONResponse({"ok": True, "checkin": {"id": int(row.get("id") or 0), "answers": answers, "recommendations": recs}})
+
+
+@app.post("/api/admin/diagnostics/run")
+async def api_admin_diagnostics_run(
+    body: DiagnosticsRunBody,
+    x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
+):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    ok_perm, forbidden, _, _ = await _require_perm(tg_user_id, "system_diag")
+    if not ok_perm:
+        return forbidden
+    conn = await db.connect(s.DB_PATH)
+    try:
+        payload = await db.run_diagnostics(conn, apply=bool(body.apply))
+    finally:
+        await conn.close()
+    return JSONResponse(payload)

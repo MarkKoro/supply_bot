@@ -546,6 +546,7 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     await _ensure_curated_stacks(conn)
     await _ensure_curated_stack_items(conn)
     await _ensure_payments_table(conn)
+    await _ensure_integrity_unique_indexes(conn)
     await conn.execute(
         "UPDATE supplements SET interaction_classes='[]' WHERE interaction_classes IS NULL OR interaction_classes=''"
     )
@@ -1146,7 +1147,10 @@ async def _ensure_day_plan_items(conn: aiosqlite.Connection) -> None:
     await _ensure_column(conn, "day_plan_items", "action", "TEXT NOT NULL DEFAULT ''")
     await _ensure_column(conn, "day_plan_items", "dose_text", "TEXT")
     await _ensure_column(conn, "day_plan_items", "time_hint", "TEXT")
+    await _ensure_column(conn, "day_plan_items", "slot_id", "TEXT")
+    await _ensure_column(conn, "day_plan_items", "time_local", "TEXT")
     await _ensure_column(conn, "day_plan_items", "reason", "TEXT")
+    await _ensure_column(conn, "day_plan_items", "note", "TEXT")
     await _ensure_column(conn, "day_plan_items", "source", "TEXT NOT NULL DEFAULT ''")
     await _ensure_column(conn, "day_plan_items", "created_at_utc", "TEXT NOT NULL DEFAULT ''")
     await conn.execute(
@@ -1256,6 +1260,55 @@ async def _ensure_payments_table(conn: aiosqlite.Connection) -> None:
         """CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_tg_charge_unique
            ON payments(telegram_payment_charge_id)
            WHERE telegram_payment_charge_id IS NOT NULL AND telegram_payment_charge_id != ''"""
+    )
+
+
+async def _ensure_integrity_unique_indexes(conn: aiosqlite.Connection) -> None:
+    await _dedupe_keep_latest(conn, "supplement_day_state", ["user_id", "day", "supplement_id"], "created_at")
+    await conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_sds ON supplement_day_state(user_id, day, supplement_id)")
+
+    if await _table_exists(conn, "intake_log"):
+        await _dedupe_keep_latest(conn, "intake_log", ["user_id", "date_local", "slot_id"], "updated_at")
+        await conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_rlog ON intake_log(user_id, date_local, slot_id)")
+
+    if await _table_exists(conn, "user_complex_items"):
+        await _dedupe_keep_latest(conn, "user_complex_items", ["complex_id", "supplement_id"], None)
+        await conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_citems ON user_complex_items(complex_id, supplement_id)")
+
+    if await _table_exists(conn, "user_complex_schedules"):
+        await _dedupe_keep_latest(conn, "user_complex_schedules", ["user_id", "complex_id", "slot_id"], "created_at_utc")
+        await conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_csched ON user_complex_schedules(user_id, complex_id, slot_id)")
+
+    if await _table_exists(conn, "user_schedules"):
+        await _dedupe_keep_latest(conn, "user_schedules", ["user_id", "supplement_id"], "id")
+        await conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_usched ON user_schedules(user_id, supplement_id)")
+
+
+async def _dedupe_keep_latest(
+    conn: aiosqlite.Connection,
+    table: str,
+    keys: list[str],
+    order_col: str | None,
+) -> None:
+    cols = await _table_columns(conn, table)
+    if not all(k in cols for k in keys):
+        return
+    if order_col and order_col not in cols:
+        order_col = None
+    group_expr = ", ".join(keys)
+    if order_col:
+        order_expr = f"CASE WHEN {order_col} IS NULL OR {order_col}='' THEN 0 ELSE 1 END DESC, {order_col} DESC, rowid DESC"
+    else:
+        order_expr = "rowid DESC"
+    await conn.execute(
+        f"""DELETE FROM {table}
+           WHERE rowid IN (
+             SELECT rowid FROM (
+               SELECT rowid, ROW_NUMBER() OVER (PARTITION BY {group_expr} ORDER BY {order_expr}) AS rn
+               FROM {table}
+             ) t
+             WHERE rn > 1
+           )"""
     )
 
 
@@ -2022,6 +2075,33 @@ def _normalize_hhmm(value: str) -> str | None:
     if 0 <= hour <= 23 and 0 <= minute <= 59:
         return f"{hour:02d}:{minute:02d}"
     return None
+
+
+def _slot_id_from_time(time_local: str) -> str:
+    normalized = _normalize_hhmm(time_local) or "00:00"
+    return f"t_{normalized.replace(':', '')}"
+
+
+def _normalize_slot_id(slot_id: str | None, time_local: str | None = None) -> tuple[str | None, str | None]:
+    raw_slot = str(slot_id or "").strip()
+    raw_time = str(time_local or "").strip()
+    normalized_time = _normalize_hhmm(raw_time)
+    if raw_slot in {"morning", "noon", "evening"}:
+        return raw_slot, normalized_time
+    if re.fullmatch(r"t_\d{4}", raw_slot):
+        hhmm = f"{raw_slot[2:4]}:{raw_slot[4:6]}"
+        if _is_valid_hhmm(hhmm):
+            return raw_slot, normalized_time or hhmm
+        return None, normalized_time
+    if _is_valid_hhmm(raw_slot):
+        hhmm = _normalize_hhmm(raw_slot)
+        if not hhmm:
+            return None, normalized_time
+        return _slot_id_from_time(hhmm), normalized_time or hhmm
+    converted_time = _normalize_hhmm(raw_slot)
+    if converted_time:
+        return _slot_id_from_time(converted_time), normalized_time or converted_time
+    return None, normalized_time
 
 
 def _normalize_slots(slots_list: list[dict] | None) -> list[dict]:
@@ -4617,60 +4697,104 @@ async def save_ai_result(
     await conn.commit()
 
 
+async def apply_recommendations_to_today(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    local_date: str,
+    recs: list[dict],
+    mode: str = "apply_all",
+) -> dict:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    _ = mode
+    now = utc_now_iso()
+    existing_today = set(await get_today_supplement_ids(conn, tg_user_id, local_date))
+    details: list[dict] = []
+    applied = 0
+    skipped_existing = 0
+    unknown_slugs = 0
+
+    for raw in list(recs or []):
+        action = str(raw.get("action") or "add").strip().lower()
+        if action != "add":
+            continue
+        supplement_id = int(raw.get("supplement_id") or 0)
+        slug = str(raw.get("slug") or "").strip().lower()
+        if supplement_id <= 0 and slug:
+            row = await fetchone(conn, "SELECT id FROM supplements WHERE slug=?", (slug,))
+            supplement_id = int(row["id"]) if row else 0
+        if supplement_id <= 0:
+            unknown_slugs += 1
+            details.append({"slug": slug, "result": "unknown", "slot_id": None})
+            continue
+
+        time_local = _normalize_hhmm(str(raw.get("suggested_time") or raw.get("time_local") or "").strip())
+        slot_id, normalized_time = _normalize_slot_id(
+            raw.get("slot_id") or raw.get("suggested_slot_id"),
+            time_local,
+        )
+        if not slot_id and normalized_time:
+            slot_id = _slot_id_from_time(normalized_time)
+        if not slot_id:
+            slot_id = "morning"
+
+        if supplement_id in existing_today:
+            skipped_existing += 1
+            details.append({"slug": slug, "result": "skipped", "slot_id": slot_id})
+            continue
+
+        row_s = await fetchone(
+            conn,
+            "SELECT COALESCE(NULLIF(dose_text,''), '') AS dose_text FROM user_supp_settings WHERE user_id=? AND supplement_id=?",
+            (user_id, supplement_id),
+        )
+        dose_text = str((row_s["dose_text"] if row_s else "") or "").strip() or None
+
+        await conn.execute(
+            """INSERT INTO day_plan_items(
+                 user_id, date_local, supplement_id, action, dose_text, time_hint, slot_id, time_local, reason, source, created_at_utc
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(user_id, date_local, supplement_id, action) DO UPDATE SET
+                 dose_text=COALESCE(excluded.dose_text, day_plan_items.dose_text),
+                 time_hint=excluded.time_hint,
+                 slot_id=excluded.slot_id,
+                 time_local=excluded.time_local,
+                 reason=excluded.reason,
+                 source='ai',
+                 created_at_utc=excluded.created_at_utc""",
+            (
+                user_id,
+                local_date,
+                supplement_id,
+                "add",
+                dose_text,
+                normalized_time,
+                slot_id,
+                normalized_time,
+                str(raw.get("reason") or raw.get("reason_ru") or "").strip() or None,
+                "ai",
+                now,
+            ),
+        )
+        existing_today.add(supplement_id)
+        applied += 1
+        details.append({"slug": slug, "result": "added", "slot_id": slot_id})
+
+    await conn.commit()
+    return {
+        "applied": applied,
+        "skipped_existing": skipped_existing,
+        "unknown_slugs": unknown_slugs,
+        "details": details,
+    }
+
+
 async def apply_ai_plan_items(
     conn: aiosqlite.Connection,
     tg_user_id: int,
     local_date: str,
     selected: list[dict],
 ) -> None:
-    user_id = await get_or_create_user(conn, int(tg_user_id))
-    now = utc_now_iso()
-    applied_min: list[dict] = []
-    for item in list(selected or []):
-        supplement_id = int(item.get("supplement_id") or 0)
-        if supplement_id <= 0:
-            continue
-        action = str(item.get("action") or "add").strip().lower()
-        if action not in {"add", "remove", "adjust"}:
-            action = "add"
-        reason = str(item.get("reason") or "").strip()
-        await conn.execute(
-            """INSERT INTO day_plan_items(
-                 user_id, date_local, supplement_id, action, reason, source, created_at_utc
-               ) VALUES(?,?,?,?,?,?,?)
-               ON CONFLICT(user_id, date_local, supplement_id, action) DO UPDATE SET
-                 reason=excluded.reason,
-                 source='ai',
-                 created_at_utc=excluded.created_at_utc""",
-            (user_id, local_date, supplement_id, action, reason, "ai", now),
-        )
-        suggested_time = _normalize_hhmm(item.get("suggested_time")) if item.get("suggested_time") else None
-        slot_id = str(item.get("slot_id") or "").strip() or None
-        if action == "add":
-            if slot_id:
-                await set_schedule_slot(conn, user_id, supplement_id, slot_id)
-            if suggested_time:
-                await set_schedule_time_override(conn, user_id, supplement_id, suggested_time)
-        applied_min.append(
-            {
-                "supplement_id": supplement_id,
-                "action": action,
-                "slot_id": slot_id,
-                "suggested_time": suggested_time,
-            }
-        )
-
-    row = await fetchone(
-        conn,
-        "SELECT id FROM daily_checkins WHERE user_id=? AND date_local=? ORDER BY id DESC LIMIT 1",
-        (user_id, local_date),
-    )
-    if row:
-        await conn.execute(
-            "UPDATE daily_checkins SET applied_json=? WHERE id=?",
-            (json.dumps(applied_min, ensure_ascii=False), int(row["id"])),
-        )
-    await conn.commit()
+    await apply_recommendations_to_today(conn, tg_user_id, local_date, selected, mode="apply_all")
 
 
 async def build_ai_context_compact(conn: aiosqlite.Connection, tg_user_id: int, local_date: str) -> dict:
@@ -4895,7 +5019,7 @@ async def get_today_plan_groups(conn: aiosqlite.Connection, tg_user_id: int, loc
         group = by_time.setdefault(
             effective_time,
             {
-                "slot_id": str(slot_info.get("slot_id") or slot_id),
+                "slot_id": str(slot_id),
                 "title": slot_title_by_time.get(effective_time, str(slot_info.get("title_ru") or "Слот")),
                 "time": effective_time,
                 "items": [],
@@ -4968,6 +5092,55 @@ async def get_today_plan_groups(conn: aiosqlite.Connection, tg_user_id: int, loc
                 "dose_text": str(row["dose_text"] or "").strip(),
             }
         )
+
+    present_ids: set[int] = set()
+    for group in by_time.values():
+        for item in list(group.get("items") or []):
+            present_ids.add(int(item.get("supplement_id") or 0))
+        for cx in list(group.get("complexes") or []):
+            for ci in list(cx.get("items") or []):
+                present_ids.add(int(ci.get("supplement_id") or 0))
+
+    ai_rows = await fetchall(
+        conn,
+        """SELECT dpi.supplement_id,
+                  COALESCE(NULLIF(dpi.dose_text,''), '') AS dose_text,
+                  COALESCE(NULLIF(dpi.slot_id,''), NULLIF(dpi.time_local,''), NULLIF(dpi.time_hint,''), 'morning') AS slot_or_time,
+                  COALESCE(NULLIF(dpi.time_local,''), NULLIF(dpi.time_hint,''), '') AS time_local,
+                  s.slug,
+                  COALESCE(NULLIF(s.name_ru,''), NULLIF(s.name_en,''), s.name) AS name_ru
+           FROM day_plan_items dpi
+           JOIN supplements s ON s.id=dpi.supplement_id
+           WHERE dpi.user_id=? AND dpi.date_local=? AND dpi.action='add'""",
+        (user_id, local_date),
+    )
+    for row in ai_rows:
+        sid = int(row["supplement_id"] or 0)
+        if sid in present_ids:
+            continue
+        slot_id, from_time = _normalize_slot_id(str(row["slot_or_time"] or ""), str(row["time_local"] or ""))
+        slot_id = slot_id or "morning"
+        slot_info = slots_by_id.get(slot_id) or (slots[0] if slots else {"slot_id": "morning", "title_ru": "Утро", "time_local": "08:00"})
+        effective_time = _normalize_hhmm(str(row["time_local"] or "").strip() or str(from_time or "").strip() or str(slot_info.get("time_local") or "08:00")) or str(slot_info.get("time_local") or "08:00")
+        group = by_time.setdefault(
+            effective_time,
+            {
+                "slot_id": str(slot_id),
+                "title": slot_title_by_time.get(effective_time, str(slot_info.get("title_ru") or "Слот")),
+                "time": effective_time,
+                "items": [],
+                "complexes": [],
+            },
+        )
+        group["items"].append(
+            {
+                "supplement_id": sid,
+                "slug": str(row["slug"] or "").strip(),
+                "name_ru": str(row["name_ru"] or "").strip(),
+                "dose_text": str(row["dose_text"] or "").strip(),
+            }
+        )
+        present_ids.add(sid)
 
     out = sorted(by_time.values(), key=lambda g: str(g.get("time") or "99:99"))
     for group in out:
@@ -5880,3 +6053,131 @@ async def _apply_day_plan_actions(
         inserted += 1
     await conn.commit()
     return inserted
+
+async def run_diagnostics(conn: aiosqlite.Connection, apply: bool = False) -> dict:
+    issues: list[dict] = []
+    details: dict[str, list[dict]] = {}
+
+    async def push(code: str, rows: list[dict], fixed: int = 0, note: str = "") -> None:
+        issues.append({"code": code, "count": len(rows), "fixed": int(fixed), "note": note})
+        if rows:
+            details[code] = rows[:50]
+
+    async def duplicates(table: str, keys: list[str], order_col: str | None = None) -> tuple[list[dict], int]:
+        cols = await _table_columns(conn, table)
+        if not all(k in cols for k in keys):
+            return [], 0
+        g = ", ".join(keys)
+        rows = await fetchall(conn, f"SELECT {g}, COUNT(*) AS c FROM {table} GROUP BY {g} HAVING c>1")
+        report = []
+        fixed = 0
+        for r in rows:
+            where = " AND ".join([f"{k}=?" for k in keys])
+            params = tuple(r[k] for k in keys)
+            all_rows = await fetchall(conn, f"SELECT rowid, * FROM {table} WHERE {where} ORDER BY rowid DESC", params)
+            kept = int(all_rows[0]["rowid"]) if all_rows else 0
+            removed = max(0, len(all_rows) - 1)
+            rec = {k: r[k] for k in keys}
+            rec.update({"kept_rowid": kept, "removed": removed})
+            report.append(rec)
+            if apply and removed > 0:
+                drop_ids = [int(x["rowid"]) for x in all_rows[1:]]
+                qs = ",".join(["?"] * len(drop_ids))
+                await conn.execute(f"DELETE FROM {table} WHERE rowid IN ({qs})", tuple(drop_ids))
+                fixed += removed
+        return report, fixed
+
+    if apply:
+        await conn.execute("BEGIN")
+    try:
+        rows, fixed = await duplicates("supplement_day_state", ["user_id", "day", "supplement_id"], "created_at")
+        await push("DUP_SDS", rows, fixed, "Удалены дубли, сохранена последняя запись")
+
+        rows, fixed = await duplicates("intake_log", ["user_id", "date_local", "slot_id"], "updated_at")
+        await push("DUP_REMINDER_LOG", rows, fixed, "Дубли логов напоминаний удалены")
+
+        orphan_ci = await fetchall(conn, """SELECT i.rowid, i.complex_id, i.supplement_id FROM user_complex_items i
+            LEFT JOIN user_complexes c ON c.id=i.complex_id WHERE c.id IS NULL""")
+        if apply and orphan_ci:
+            await conn.execute("DELETE FROM user_complex_items WHERE rowid IN (%s)" % ",".join(["?"]*len(orphan_ci)), tuple(int(r["rowid"]) for r in orphan_ci))
+        await push("ORPHAN_COMPLEX_ITEMS", [dict(r) for r in orphan_ci], len(orphan_ci) if apply else 0, "Безопасно удалены сироты")
+
+        orphan_cs = await fetchall(conn, """SELECT s.rowid, s.user_id, s.complex_id, s.slot_id FROM user_complex_schedules s
+            LEFT JOIN user_complexes c ON c.id=s.complex_id WHERE c.id IS NULL""")
+        if apply and orphan_cs:
+            await conn.execute("DELETE FROM user_complex_schedules WHERE rowid IN (%s)" % ",".join(["?"]*len(orphan_cs)), tuple(int(r["rowid"]) for r in orphan_cs))
+        await push("ORPHAN_COMPLEX_SCHEDULES", [dict(r) for r in orphan_cs], len(orphan_cs) if apply else 0, "Безопасно удалены сироты")
+
+        orphan_sched = await fetchall(conn, """SELECT s.rowid, s.user_id, s.supplement_id, s.slot_id FROM user_schedules s
+            LEFT JOIN supplements x ON x.id=s.supplement_id WHERE x.id IS NULL""")
+        orphan_plan = await fetchall(conn, """SELECT p.rowid, p.user_id, p.date_local, p.supplement_id FROM day_plan_items p
+            LEFT JOIN supplements x ON x.id=p.supplement_id WHERE x.id IS NULL""")
+        if apply and orphan_sched:
+            await conn.execute("DELETE FROM user_schedules WHERE rowid IN (%s)" % ",".join(["?"]*len(orphan_sched)), tuple(int(r["rowid"]) for r in orphan_sched))
+        if apply and orphan_plan:
+            await conn.execute("DELETE FROM day_plan_items WHERE rowid IN (%s)" % ",".join(["?"]*len(orphan_plan)), tuple(int(r["rowid"]) for r in orphan_plan))
+        await push("ORPHAN_SUPP_SCHEDULES", [dict(r) for r in orphan_sched], len(orphan_sched) if apply else 0, "Удалены расписания с несуществующей добавкой")
+        await push("ORPHAN_PLAN_ITEMS", [dict(r) for r in orphan_plan], len(orphan_plan) if apply else 0, "Удалены план-строки с несуществующей добавкой")
+
+        disabled_rows = await fetchall(conn, """SELECT p.rowid, p.user_id, p.date_local, p.supplement_id FROM day_plan_items p
+            JOIN supplements s ON s.id=p.supplement_id WHERE COALESCE(s.is_active,1)=0""")
+        if apply and disabled_rows:
+            await conn.execute("DELETE FROM day_plan_items WHERE rowid IN (%s)" % ",".join(["?"]*len(disabled_rows)), tuple(int(r["rowid"]) for r in disabled_rows))
+        await push("DISABLED_SUPP_IN_PLAN", [dict(r) for r in disabled_rows], len(disabled_rows) if apply else 0, "Неактивные добавки убраны из day plan")
+
+        bad_time_rows = []
+        manual_rows = []
+        for table, time_col, slot_col in [("user_schedule_slots", "time_local", "slot_id"), ("user_complex_schedules", "time_local", "slot_id"), ("user_schedules", "time_hhmm", "slot_id")]:
+            if not await _table_exists(conn, table):
+                continue
+            rows = await fetchall(conn, f"SELECT rowid, {time_col} AS t, {slot_col} AS slot_id FROM {table}")
+            for r in rows:
+                norm = _normalize_hhmm(str(r["t"] or "").strip()) if r["t"] is not None else None
+                if r["t"] and norm:
+                    if str(r["t"]) != norm:
+                        bad_time_rows.append({"table": table, "rowid": int(r["rowid"]), "from": str(r["t"]), "to": norm})
+                        if apply:
+                            await conn.execute(f"UPDATE {table} SET {time_col}=? WHERE rowid=?", (norm, int(r["rowid"])))
+                elif r["t"]:
+                    manual_rows.append({"table": table, "rowid": int(r["rowid"]), "bad": str(r["t"])})
+                    if apply and table in {"user_complex_schedules", "user_schedules", "user_schedule_slots"}:
+                        await conn.execute(f"UPDATE {table} SET is_enabled=0 WHERE rowid=?", (int(r["rowid"]),))
+        await push("BAD_TIME_FORMAT", bad_time_rows, len(bad_time_rows) if apply else 0, "Время нормализовано до HH:MM")
+        await push("BAD_TIME_MANUAL", manual_rows, len(manual_rows) if apply else 0, "Неразбираемые значения отключены")
+
+        slot_norm_rows = []
+        for table, time_col in [("user_schedules", "time_hhmm"), ("user_complex_schedules", "time_local")]:
+            if not await _table_exists(conn, table):
+                continue
+            rows = await fetchall(conn, f"SELECT rowid, slot_id, {time_col} AS t FROM {table}")
+            for r in rows:
+                sid, t = _normalize_slot_id(str(r["slot_id"] or ""), str(r["t"] or ""))
+                if sid and sid != str(r["slot_id"] or ""):
+                    slot_norm_rows.append({"table": table, "rowid": int(r["rowid"]), "from": str(r["slot_id"] or ""), "to": sid})
+                    if apply:
+                        await conn.execute(f"UPDATE {table} SET slot_id=?, {time_col}=COALESCE({time_col}, ?) WHERE rowid=?", (sid, t or "", int(r["rowid"])))
+        await push("SLOT_ID_NORMALIZATION", slot_norm_rows, len(slot_norm_rows) if apply else 0, "Кастомные slot_id приведены к t_HHMM")
+
+        deleted_not_banned = await fetchall(conn, "SELECT tg_user_id, deleted_at_utc, is_banned FROM users WHERE COALESCE(deleted_at_utc,'')!='' AND COALESCE(is_banned,0)=0")
+        if apply and deleted_not_banned:
+            await conn.execute("UPDATE users SET is_banned=1 WHERE COALESCE(deleted_at_utc,'')!='' AND COALESCE(is_banned,0)=0")
+        await push("USER_DELETED_NOT_BANNED", [dict(r) for r in deleted_not_banned], len(deleted_not_banned) if apply else 0, "deleted user -> banned=1")
+
+        empty_complex = await fetchall(conn, """SELECT c.id AS complex_id, c.user_id FROM user_complexes c
+            LEFT JOIN user_complex_items i ON i.complex_id=c.id GROUP BY c.id HAVING COUNT(i.supplement_id)=0""")
+        fixed_empty = 0
+        if apply and empty_complex:
+            for r in empty_complex:
+                cur = await conn.execute("UPDATE user_complex_schedules SET is_enabled=0 WHERE complex_id=? AND is_enabled!=0", (int(r["complex_id"]),))
+                fixed_empty += int(cur.rowcount or 0)
+        await push("COMPLEX_EMPTY", [dict(r) for r in empty_complex], fixed_empty if apply else 0, "Пустые комплексы сохранены, их расписания отключены")
+
+        if apply:
+            await _ensure_integrity_unique_indexes(conn)
+            await conn.commit()
+    except Exception:
+        if apply:
+            await conn.rollback()
+        raise
+
+    return {"ok": True, "apply": bool(apply), "issues": issues, "details": details}

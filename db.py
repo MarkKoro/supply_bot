@@ -4767,7 +4767,8 @@ async def build_ai_context_compact(conn: aiosqlite.Connection, tg_user_id: int, 
         )
         complexes.append({"name": str(row["name"] or ""), "slugs": [str(x["slug"] or "") for x in items if str(x["slug"] or "").strip()]})
 
-    return {"date": local_date, "stack": stack, "last7": last7, "burdens": burden_out, "complexes": complexes}
+    stats = await build_stats_compact(conn, tg_user_id, local_date)
+    return {"date": local_date, "stack": stack, "last7": last7, "burdens": burden_out, "complexes": complexes, "stats": stats}
 
 
 async def get_daily_checkin_by_id(conn: aiosqlite.Connection, checkin_id: int, tg_user_id: int) -> dict | None:
@@ -5175,6 +5176,187 @@ async def get_today_supplement_ids(conn: aiosqlite.Connection, tg_user_id: int, 
             if sid > 0:
                 ids.add(sid)
     return sorted(ids)
+
+
+async def get_expected_supplement_ids(conn: aiosqlite.Connection, tg_user_id: int, local_date: str) -> set[int]:
+    ids = await get_today_supplement_ids(conn, tg_user_id, local_date)
+    return {int(sid) for sid in ids if int(sid) > 0}
+
+
+async def get_taken_supplement_ids(conn: aiosqlite.Connection, tg_user_id: int, local_date: str) -> set[int]:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    rows = await fetchall(
+        conn,
+        "SELECT supplement_id FROM supplement_day_state WHERE user_id=? AND day=? AND status='taken'",
+        (user_id, local_date),
+    )
+    return {int(r["supplement_id"] or 0) for r in rows if int(r["supplement_id"] or 0) > 0}
+
+
+async def get_daily_adherence(conn: aiosqlite.Connection, tg_user_id: int, local_date: str) -> dict:
+    expected_ids = await get_expected_supplement_ids(conn, tg_user_id, local_date)
+    taken_ids = await get_taken_supplement_ids(conn, tg_user_id, local_date)
+    expected = len(expected_ids)
+    taken = len(expected_ids & taken_ids)
+    adherence = int(round((100 * taken) / expected)) if expected > 0 else None
+    return {"expected": expected, "taken": taken, "adherence": adherence}
+
+
+async def get_range_adherence(conn: aiosqlite.Connection, tg_user_id: int, end_date: str, days: int) -> dict:
+    safe_days = max(1, min(int(days or 1), 30))
+    end = datetime.strptime(end_date, "%Y-%m-%d").date()
+    expected_total = 0
+    taken_total = 0
+    for offset in range(safe_days):
+        day = (end - timedelta(days=offset)).isoformat()
+        daily = await get_daily_adherence(conn, tg_user_id, day)
+        expected_total += int(daily.get("expected") or 0)
+        taken_total += int(daily.get("taken") or 0)
+    adherence = int(round((100 * taken_total) / expected_total)) if expected_total > 0 else None
+    return {"days": safe_days, "expected_total": expected_total, "taken_total": taken_total, "adherence": adherence}
+
+
+async def get_top_misses(conn: aiosqlite.Connection, tg_user_id: int, end_date: str, days: int, limit: int = 10) -> list[dict]:
+    safe_days = max(1, min(int(days or 1), 30))
+    end = datetime.strptime(end_date, "%Y-%m-%d").date()
+    misses: dict[int, int] = {}
+    for offset in range(safe_days):
+        day = (end - timedelta(days=offset)).isoformat()
+        expected_ids = await get_expected_supplement_ids(conn, tg_user_id, day)
+        taken_ids = await get_taken_supplement_ids(conn, tg_user_id, day)
+        for sid in (expected_ids - taken_ids):
+            misses[sid] = misses.get(sid, 0) + 1
+    if not misses:
+        return []
+    top_ids = [sid for sid, _ in sorted(misses.items(), key=lambda x: (-x[1], x[0]))[: max(1, int(limit or 10))]]
+    placeholders = ",".join("?" for _ in top_ids)
+    rows = await fetchall(
+        conn,
+        f"""SELECT id, slug, COALESCE(NULLIF(name_ru,''), NULLIF(name_en,''), name) AS name_ru
+            FROM supplements
+            WHERE id IN ({placeholders})""",
+        tuple(top_ids),
+    )
+    meta = {
+        int(r["id"]): {"slug": str(r["slug"] or ""), "name_ru": str(r["name_ru"] or "")}
+        for r in rows
+    }
+    out = []
+    for sid in top_ids:
+        row = meta.get(int(sid), {})
+        out.append(
+            {
+                "supplement_id": int(sid),
+                "slug": str(row.get("slug") or ""),
+                "name_ru": str(row.get("name_ru") or ""),
+                "missed": int(misses.get(int(sid), 0)),
+            }
+        )
+    return out
+
+
+async def get_user_stack_supplement_ids(conn: aiosqlite.Connection, tg_user_id: int) -> set[int]:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    base_rows = await fetchall(conn, "SELECT supplement_id FROM user_supplements WHERE user_id=? AND is_active=1", (user_id,))
+    complex_rows = await fetchall(
+        conn,
+        """SELECT DISTINCT ci.supplement_id
+           FROM user_complexes c
+           JOIN user_complex_items ci ON ci.complex_id=c.id
+           WHERE c.user_id=?""",
+        (user_id,),
+    )
+    ids = {int(r["supplement_id"] or 0) for r in base_rows}
+    ids.update(int(r["supplement_id"] or 0) for r in complex_rows)
+    return {sid for sid in ids if sid > 0}
+
+
+async def get_streaks(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    as_of_date: str,
+    supplement_ids: set[int],
+    max_back: int = 90,
+) -> list[dict]:
+    if not supplement_ids:
+        return []
+    max_days = max(1, int(max_back or 1))
+    end = datetime.strptime(as_of_date, "%Y-%m-%d").date()
+    expected_cache: dict[str, set[int]] = {}
+    taken_cache: dict[str, set[int]] = {}
+
+    async def _expected(day: str) -> set[int]:
+        if day not in expected_cache:
+            expected_cache[day] = await get_expected_supplement_ids(conn, tg_user_id, day)
+        return expected_cache[day]
+
+    async def _taken(day: str) -> set[int]:
+        if day not in taken_cache:
+            taken_cache[day] = await get_taken_supplement_ids(conn, tg_user_id, day)
+        return taken_cache[day]
+
+    streak_map: dict[int, int] = {}
+    for sid in sorted(supplement_ids):
+        streak = 0
+        for offset in range(max_days):
+            day = (end - timedelta(days=offset)).isoformat()
+            expected_ids = await _expected(day)
+            if sid not in expected_ids:
+                continue
+            if sid in await _taken(day):
+                streak += 1
+                continue
+            break
+        streak_map[sid] = streak
+
+    top_ids = [sid for sid, n in sorted(streak_map.items(), key=lambda x: (-x[1], x[0])) if n > 0][:20]
+    if not top_ids:
+        return []
+    placeholders = ",".join("?" for _ in top_ids)
+    rows = await fetchall(
+        conn,
+        f"""SELECT id, slug, COALESCE(NULLIF(name_ru,''), NULLIF(name_en,''), name) AS name_ru
+            FROM supplements
+            WHERE id IN ({placeholders})""",
+        tuple(top_ids),
+    )
+    meta = {int(r["id"]): {"slug": str(r["slug"] or ""), "name_ru": str(r["name_ru"] or "")} for r in rows}
+    out = []
+    for sid in top_ids:
+        row = meta.get(int(sid), {})
+        out.append(
+            {
+                "supplement_id": int(sid),
+                "slug": str(row.get("slug") or ""),
+                "name_ru": str(row.get("name_ru") or ""),
+                "streak_days": int(streak_map.get(int(sid), 0)),
+            }
+        )
+    return out
+
+
+async def build_stats_compact(conn: aiosqlite.Connection, tg_user_id: int, local_date: str) -> dict:
+    today = await get_daily_adherence(conn, tg_user_id, local_date)
+    last7 = await get_range_adherence(conn, tg_user_id, local_date, 7)
+    last30 = await get_range_adherence(conn, tg_user_id, local_date, 30)
+    misses7 = await get_top_misses(conn, tg_user_id, local_date, 7, limit=5)
+    stack_ids = await get_user_stack_supplement_ids(conn, tg_user_id)
+    streaks = await get_streaks(conn, tg_user_id, local_date, stack_ids, max_back=90)
+    return {
+        "today": today,
+        "last7": {
+            "expected": int(last7.get("expected_total") or 0),
+            "taken": int(last7.get("taken_total") or 0),
+            "adherence": last7.get("adherence"),
+        },
+        "last30": {
+            "expected": int(last30.get("expected_total") or 0),
+            "taken": int(last30.get("taken_total") or 0),
+            "adherence": last30.get("adherence"),
+        },
+        "top_misses_7": [{"slug": str(x.get("slug") or ""), "missed": int(x.get("missed") or 0)} for x in misses7[:5]],
+        "top_streaks": [{"slug": str(x.get("slug") or ""), "streak": int(x.get("streak_days") or 0)} for x in streaks[:5]],
+    }
 
 
 async def body_map_aggregate(conn: aiosqlite.Connection, tg_user_id: int, local_date: str) -> dict:

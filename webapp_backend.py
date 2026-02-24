@@ -747,6 +747,36 @@ async def api_complex_schedules_remove(body: ComplexScheduleRemoveBody, x_telegr
 
 
 
+
+@app.get("/api/stats/summary")
+async def api_stats_summary(x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    conn = await db.connect(s.DB_PATH)
+    try:
+        tz_name = await db.get_user_tz(conn, tg_user_id)
+        day = db.get_user_local_date(tz_name or None)
+        compact = await db.build_stats_compact(conn, tg_user_id, day)
+        misses_full = await db.get_top_misses(conn, tg_user_id, day, 7, limit=5)
+        stack_ids = await db.get_user_stack_supplement_ids(conn, tg_user_id)
+        streaks_full = await db.get_streaks(conn, tg_user_id, day, stack_ids, max_back=90)
+    finally:
+        await conn.close()
+
+    misses_map = {str(x.get("slug") or ""): str(x.get("name_ru") or "") for x in misses_full}
+    streaks_map = {str(x.get("slug") or ""): str(x.get("name_ru") or "") for x in streaks_full}
+
+    summary = dict(compact)
+    summary["top_misses_7"] = [
+        {"slug": str(x.get("slug") or ""), "name_ru": misses_map.get(str(x.get("slug") or ""), ""), "missed": int(x.get("missed") or 0)}
+        for x in list(compact.get("top_misses_7") or [])
+    ]
+    summary["top_streaks"] = [
+        {"slug": str(x.get("slug") or ""), "name_ru": streaks_map.get(str(x.get("slug") or ""), ""), "streak": int(x.get("streak") or 0)}
+        for x in list(compact.get("top_streaks") or [])
+    ]
+    return JSONResponse({"ok": True, "summary": summary})
+
+
 @app.get("/api/body_map")
 async def api_body_map(x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
     tg_user_id = await _auth_user_id(x_telegram_init_data)

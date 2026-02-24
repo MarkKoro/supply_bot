@@ -20,6 +20,16 @@ s = get_settings()
 BOT_TOKEN = s.TG_TOKEN
 
 
+def _is_admin(tg_user_id: int) -> bool:
+    return int(tg_user_id) in set(s.ADMIN_TG_IDS)
+
+
+def _admin_required_response(tg_user_id: int) -> JSONResponse | None:
+    if not _is_admin(tg_user_id):
+        return JSONResponse({"ok": False, "code": "ADMIN_REQUIRED"}, status_code=403)
+    return None
+
+
 class VerifyBody(BaseModel):
     init_data: str
 
@@ -81,7 +91,7 @@ async def _auth_user_id(init_data: str) -> int:
 
 
 async def _premium_guard(tg_user_id: int) -> bool:
-    if tg_user_id in s.ADMIN_IDS:
+    if _is_admin(tg_user_id):
         return True
     conn = await db.connect(s.DB_PATH)
     try:
@@ -126,13 +136,118 @@ def telegram_verify(body: VerifyBody):
 @app.get("/api/me")
 async def api_me(x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
     tg_user_id = await _auth_user_id(x_telegram_init_data)
+    is_admin = _is_admin(tg_user_id)
     conn = await db.connect(s.DB_PATH)
     try:
-        premium = tg_user_id in s.ADMIN_IDS or await db.is_premium_active(conn, tg_user_id)
-        premium_until = None if tg_user_id in s.ADMIN_IDS else await db.get_premium_until(conn, tg_user_id)
+        premium = is_admin or await db.is_premium_active(conn, tg_user_id)
+        premium_until = None if is_admin else await db.get_premium_until(conn, tg_user_id)
     finally:
         await conn.close()
-    return JSONResponse({"ok": True, "premium": premium, "premium_until_utc": premium_until, "plans": _plans_payload()})
+    return JSONResponse({"ok": True, "premium": premium, "premium_until_utc": premium_until, "plans": _plans_payload(), "is_admin": is_admin})
+
+
+@app.get("/api/admin/supplements")
+async def api_admin_supplements(
+    q: str = "",
+    is_active: str = "",
+    evidence: str = "",
+    page: int = 0,
+    page_size: int = 20,
+    x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
+):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    forbidden = _admin_required_response(tg_user_id)
+    if forbidden:
+        return forbidden
+    active_filter = None
+    if str(is_active).strip() in {"0", "1"}:
+        active_filter = int(is_active)
+    evidence_filter = str(evidence or "").strip().upper()
+    if evidence_filter not in {"", "A", "B", "C", "D"}:
+        evidence_filter = ""
+    conn = await db.connect(s.DB_PATH)
+    try:
+        payload = await db.admin_search_supplements(
+            conn,
+            q=str(q or ""),
+            is_active=active_filter,
+            evidence_grade=(evidence_filter or None),
+            page=max(0, int(page)),
+            page_size=max(1, min(int(page_size), 100)),
+        )
+    finally:
+        await conn.close()
+    return JSONResponse({"ok": True, **payload})
+
+
+@app.get("/api/admin/supplement/{supplement_id}")
+async def api_admin_supplement(
+    supplement_id: int,
+    x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
+):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    forbidden = _admin_required_response(tg_user_id)
+    if forbidden:
+        return forbidden
+    conn = await db.connect(s.DB_PATH)
+    try:
+        item = await db.get_supplement_admin(conn, int(supplement_id))
+        if not item:
+            return JSONResponse({"ok": False, "code": "NOT_FOUND"}, status_code=404)
+        audit = await db.get_admin_audit_for_supplement(conn, int(supplement_id), limit=10)
+    finally:
+        await conn.close()
+    return JSONResponse({"ok": True, "item": item, "audit": audit})
+
+
+class AdminSetFieldBody(BaseModel):
+    field: str
+    value: str | None = None
+
+
+@app.post("/api/admin/supplement/{supplement_id}/set_field")
+async def api_admin_supplement_set_field(
+    supplement_id: int,
+    body: AdminSetFieldBody,
+    x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
+):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    forbidden = _admin_required_response(tg_user_id)
+    if forbidden:
+        return forbidden
+    conn = await db.connect(s.DB_PATH)
+    try:
+        await db.admin_set_supplement_field(conn, int(tg_user_id), int(supplement_id), str(body.field or ""), body.value)
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "code": str(exc)}, status_code=400)
+    finally:
+        await conn.close()
+    return JSONResponse({"ok": True})
+
+
+class AdminToggleActiveBody(BaseModel):
+    is_active: int
+
+
+@app.post("/api/admin/supplement/{supplement_id}/toggle_active")
+async def api_admin_supplement_toggle_active(
+    supplement_id: int,
+    body: AdminToggleActiveBody,
+    x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
+):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    forbidden = _admin_required_response(tg_user_id)
+    if forbidden:
+        return forbidden
+    target = 1 if int(body.is_active) else 0
+    conn = await db.connect(s.DB_PATH)
+    try:
+        await db.admin_toggle_supplement_active(conn, int(tg_user_id), int(supplement_id), target)
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "code": str(exc)}, status_code=400)
+    finally:
+        await conn.close()
+    return JSONResponse({"ok": True})
 
 
 @app.post("/api/billing/create_invoice_link")

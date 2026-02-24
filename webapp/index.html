@@ -134,6 +134,8 @@
       z-index: 20;
     }
 
+    .tabs.admin-enabled { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+
     .tab {
       border: 0;
       border-radius: 14px;
@@ -173,6 +175,15 @@
       background: rgba(255,255,255,0.06);
       color: inherit;
     }
+
+    .input, .select, .textarea {
+      width: 100%; border: 1px solid rgba(255,255,255,0.24); border-radius: 12px;
+      background: rgba(255,255,255,0.08); color: var(--text); padding: 10px 12px;
+    }
+    .textarea { min-height: 88px; resize: vertical; }
+    .error-text { color: #ffb3bb; font-size: 12px; margin-top: 4px; }
+    .admin-grid { display:grid; gap:10px; }
+    .admin-card { cursor:pointer; }
 
     .status-pill {
       min-width: 72px;
@@ -300,6 +311,20 @@
       recommendations: [],
       selected: {},
       answers: { energy:"", sleep:"", stress:"", training:"", goals:[], note:"" }
+    },
+    admin: {
+      q: "",
+      page: 0,
+      pageSize: 20,
+      loading: false,
+      items: [],
+      total: 0,
+      filters: { is_active: "", evidence: "" },
+      detail: null,
+      auditOpen: false,
+      searchDebounce: null,
+      savingField: "",
+      errors: {}
     }
   };
 
@@ -311,6 +336,10 @@
     { id: "bodymap", title: "BodyMap", icon: "🧠" },
     { id: "survey", title: "Survey", icon: "📝" }
   ];
+
+  function activeTabs() {
+    return state.me?.is_admin ? tabs.concat([{ id: "admin", title: "Admin", icon: "🛠" }]) : tabs;
+  }
 
   const themeText = tg?.themeParams?.text_color || "#eef2ff";
   document.documentElement.style.setProperty("--text", themeText);
@@ -349,6 +378,12 @@
       state.me = { ...(state.me || {}), premium: false };
       renderPaywall();
       throw new Error("PREMIUM_REQUIRED");
+    }
+
+    if (res.status === 403) {
+      const data403 = await res.json().catch(() => ({}));
+      if (data403?.code === "ADMIN_REQUIRED") throw new Error("ADMIN_REQUIRED");
+      throw new Error("FORBIDDEN");
     }
 
     const data = await res.json().catch(() => ({}));
@@ -491,8 +526,9 @@
   }
 
   function renderTabs(isLocked) {
-    return `<nav class="tabs">
-      ${tabs.map(t => `<button class="tab ${state.activeTab === t.id ? "active" : ""}" data-tab="${t.id}" ${isLocked ? "disabled" : ""}>
+    const list = activeTabs();
+    return `<nav class="tabs ${state.me?.is_admin ? "admin-enabled" : ""}">
+      ${list.map(t => `<button class="tab ${state.activeTab === t.id ? "active" : ""}" data-tab="${t.id}" ${isLocked ? "disabled" : ""}>
         <span class="tab-emoji">${t.icon}</span>
         <span>${t.title}</span>
       </button>`).join("")}
@@ -535,6 +571,9 @@
         if (tab === "bodymap" && !state.bodyMap) {
           await loadBodyMap();
         }
+        if (tab === "admin" && !state.admin.items.length) {
+          await loadAdminSupplements(true);
+        }
       });
     });
 
@@ -547,6 +586,8 @@
         await loadCatalog(true);
       } else if (state.activeTab === "bodymap") {
         await loadBodyMap(true);
+      } else if (state.activeTab === "admin") {
+        await loadAdminSupplements(true);
       } else {
         showToast("Раздел обновлён");
       }
@@ -578,6 +619,12 @@
     if (state.activeTab === "bodymap") {
       target.innerHTML = renderBodyMap();
       bindBodyMapEvents();
+      return;
+    }
+
+    if (state.activeTab === "admin") {
+      target.innerHTML = renderAdmin();
+      bindAdminEvents();
       return;
     }
 
@@ -758,6 +805,154 @@
     }));
     document.getElementById('applyFilters')?.addEventListener('click', async ()=>{ const s=document.getElementById('sortSelect'); if(s) state.catalog.filters.sort=s.value; state.catalog.filtersOpen=false; state.catalog.page=0; await loadCatalog(true); });
     document.getElementById('resetFilters')?.addEventListener('click', async ()=>{ state.catalog.filters={evidence:[],targets:[],burdens:[],sort:'alpha'}; state.catalog.filtersOpen=false; state.catalog.page=0; await loadCatalog(true); });
+  }
+
+  function renderAdmin() {
+    if (!state.me?.is_admin) {
+      return `<div class="card">Нет доступа к разделу Admin.</div>`;
+    }
+    const a = state.admin;
+    return `
+      <div class="card fade">
+        <div class="row"><strong>Admin Panel</strong><span class="muted">${a.total} найдено</span></div>
+        <div style="display:flex; gap:8px; margin-top:8px;">
+          <input id="adminSearch" class="input" placeholder="Поиск по slug / названию" value="${esc(a.q)}" />
+        </div>
+        <div style="display:flex; gap:8px; margin-top:8px;">
+          <select id="adminActive" class="select">
+            <option value="" ${a.filters.is_active===''?'selected':''}>Все</option>
+            <option value="1" ${a.filters.is_active==='1'?'selected':''}>Только активные</option>
+            <option value="0" ${a.filters.is_active==='0'?'selected':''}>Только скрытые</option>
+          </select>
+          <select id="adminEvidence" class="select">
+            <option value="" ${a.filters.evidence===''?'selected':''}>Evidence: все</option>
+            ${['A','B','C','D'].map(v=>`<option value="${v}" ${a.filters.evidence===v?'selected':''}>${v}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+      <div class="admin-grid">
+        ${(a.items || []).map((it)=>`
+          <button class="card admin-card" data-admin-open="${it.id}">
+            <div class="row"><strong>${esc(it.name_ru || it.slug)}</strong><span class="muted">${it.is_active ? '🟢' : '⚪'}</span></div>
+            <div class="muted" style="margin-top:6px">${esc(it.slug)} • ${esc(it.evidence_grade || '—')} / ${esc(it.confidence || '—')} • ${it.has_link ? '🔗' : '—'}</div>
+          </button>
+        `).join('') || '<div class="card">Ничего не найдено.</div>'}
+      </div>
+      ${a.items.length < a.total ? '<div class="card"><button class="btn" style="width:100%" id="adminMore">Загрузить ещё</button></div>' : ''}
+      ${a.detail ? renderAdminModal(a.detail.item || {}, a.detail.audit || []) : ''}
+    `;
+  }
+
+  function adminField(label, field, value, kind='input') {
+    const err = state.admin.errors[field] || '';
+    const input = kind === 'textarea'
+      ? `<textarea class="textarea" data-admin-field="${field}">${esc(value || '')}</textarea>`
+      : `<input class="input" data-admin-field="${field}" value="${esc(value || '')}" />`;
+    return `<div class="card" style="margin-bottom:8px"><div class="row"><strong>${label}</strong><button class="btn" data-admin-save="${field}">Сохранить</button></div>${input}${err ? `<div class="error-text">${esc(err)}</div>` : ''}</div>`;
+  }
+
+  function renderAdminModal(item, audit) {
+    return `<div class="sheet-backdrop" data-admin-close></div>
+      <aside class="sheet fade">
+        <div class="row"><strong>✏️ ${esc(item.slug)}</strong><button class="btn secondary" data-admin-close>Закрыть</button></div>
+        <div class="row" style="margin-top:8px"><span class="muted">Статус: ${item.is_active ? '🟢 В каталоге' : '⚪ Скрыт'}</span><button class="btn" data-admin-toggle="${item.is_active ? 0 : 1}">${item.is_active ? 'Скрыть' : 'Показать'}</button></div>
+        ${adminField('Название RU','name_ru',item.name_ru)}
+        ${adminField('Название EN','name_en',item.name_en)}
+        ${adminField('Evidence grade','evidence_grade',item.evidence_grade)}
+        ${adminField('Confidence','confidence',item.confidence)}
+        ${adminField('Summary verified','summary_ru_verified',item.summary_ru_verified,'textarea')}
+        ${adminField('Summary theoretical','summary_ru_theoretical',item.summary_ru_theoretical,'textarea')}
+        ${adminField('Dose','dose_ru',item.dose_ru,'textarea')}
+        ${adminField('Timing','timing_ru',item.timing_ru,'textarea')}
+        ${adminField('Safety','safety_ru',item.safety_ru,'textarea')}
+        ${adminField('Tags JSON','tags_json',item.tags_json,'textarea')}
+        ${adminField('Targets JSON','body_targets_json',item.body_targets_json,'textarea')}
+        ${adminField('Burdens JSON','body_burdens_json',item.body_burdens_json,'textarea')}
+        ${adminField('Purchase URL','purchase_url',item.purchase_url)}
+        ${item.purchase_url ? `<div class="card"><button class="btn secondary" data-admin-open-link="1">Открыть ссылку</button></div>` : ''}
+        <details ${state.admin.auditOpen ? 'open':''}><summary>🧾 История правок</summary>
+          <div class="muted" style="margin-top:8px">${audit.map((a)=>`[${esc(a.created_at_utc)}] ${esc(a.field)}: ${esc(a.old_value || '—')} → ${esc(a.new_value || '—')} (admin ${a.admin_tg_id})`).join('<br/>') || 'Нет записей'}</div>
+        </details>
+      </aside>`;
+  }
+
+  async function loadAdminSupplements(force) {
+    if (state.admin.loading && !force) return;
+    state.admin.loading = true;
+    renderActiveTab();
+    try {
+      const a = state.admin;
+      const qp = new URLSearchParams({ q: a.q || '', page: String(a.page), page_size: String(a.pageSize) });
+      if (a.filters.is_active !== '') qp.set('is_active', a.filters.is_active);
+      if (a.filters.evidence) qp.set('evidence', a.filters.evidence);
+      const res = await api(`./api/admin/supplements?${qp.toString()}`);
+      a.items = a.page === 0 ? (res.items || []) : a.items.concat(res.items || []);
+      a.total = res.total || 0;
+    } catch (e) {
+      if (e.message === 'ADMIN_REQUIRED') showToast('Только для админов');
+      else showToast('Ошибка загрузки admin-списка');
+    } finally {
+      state.admin.loading = false;
+      renderActiveTab();
+    }
+  }
+
+  async function loadAdminSupplement(id) {
+    try {
+      const res = await api(`./api/admin/supplement/${id}`);
+      state.admin.detail = res;
+      state.admin.errors = {};
+      renderActiveTab();
+    } catch (e) {
+      showToast('Не удалось открыть запись');
+    }
+  }
+
+  async function saveAdminField(field) {
+    const detail = state.admin.detail?.item;
+    if (!detail) return;
+    const value = detail[field] ?? '';
+    try {
+      await api(`./api/admin/supplement/${detail.id}/set_field`, { method:'POST', body:{ field, value } });
+      state.admin.errors[field] = '';
+      await loadAdminSupplement(detail.id);
+      showToast('Сохранено');
+    } catch (e) {
+      state.admin.errors[field] = `Ошибка: ${e.message}`;
+      renderActiveTab();
+    }
+  }
+
+  function bindAdminEvents() {
+    document.getElementById('adminSearch')?.addEventListener('input', (e)=>{
+      state.admin.q = e.target.value;
+      clearTimeout(state.admin.searchDebounce);
+      state.admin.searchDebounce = setTimeout(async ()=>{ state.admin.page = 0; await loadAdminSupplements(true); }, 250);
+    });
+    document.getElementById('adminActive')?.addEventListener('change', async (e)=>{ state.admin.filters.is_active = e.target.value; state.admin.page=0; await loadAdminSupplements(true); });
+    document.getElementById('adminEvidence')?.addEventListener('change', async (e)=>{ state.admin.filters.evidence = e.target.value; state.admin.page=0; await loadAdminSupplements(true); });
+    document.getElementById('adminMore')?.addEventListener('click', async ()=>{ state.admin.page += 1; await loadAdminSupplements(true); });
+    appEl.querySelectorAll('[data-admin-open]').forEach((el)=>el.addEventListener('click', ()=>loadAdminSupplement(el.dataset.adminOpen)));
+    appEl.querySelectorAll('[data-admin-close]').forEach((el)=>el.addEventListener('click', ()=>{ state.admin.detail = null; renderActiveTab(); }));
+    appEl.querySelectorAll('[data-admin-field]').forEach((el)=>el.addEventListener('input', (e)=>{
+      if (!state.admin.detail?.item) return;
+      state.admin.detail.item[e.target.dataset.adminField] = e.target.value;
+    }));
+    appEl.querySelectorAll('[data-admin-save]').forEach((el)=>el.addEventListener('click', ()=>saveAdminField(el.dataset.adminSave)));
+    appEl.querySelector('[data-admin-open-link]')?.addEventListener('click', ()=>{ const u=state.admin.detail?.item?.purchase_url; if (u) tg?.openLink?.(u); });
+    appEl.querySelector('[data-admin-toggle]')?.addEventListener('click', async (e)=>{
+      const detail = state.admin.detail?.item;
+      if (!detail) return;
+      const to = Number(e.currentTarget.dataset.adminToggle || 0);
+      try {
+        await api(`./api/admin/supplement/${detail.id}/toggle_active`, { method:'POST', body:{ is_active: to } });
+        await loadAdminSupplement(detail.id);
+        state.admin.page = 0;
+        await loadAdminSupplements(true);
+      } catch {
+        showToast('Не удалось сменить статус');
+      }
+    });
   }
 
 

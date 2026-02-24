@@ -265,6 +265,59 @@ async def _today_slots_payload(conn, tg_uid: int) -> tuple[str, list[dict]]:
     return date_local, slots_payload
 
 
+
+
+def _fmt_adherence_block(label: str, block: dict) -> str:
+    expected = int((block or {}).get("expected") or 0)
+    taken = int((block or {}).get("taken") or 0)
+    adherence = (block or {}).get("adherence")
+    if expected <= 0 or adherence is None:
+        return f"{label}: нет плана"
+    return f"{label}: {taken}/{expected} ({int(adherence)}%)"
+
+
+async def _show_stats_screen(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, tg_uid: int) -> None:
+    tz_name = await db.get_user_tz(conn, tg_uid)
+    date_local = _today_date_for_user(tz_name)
+    summary = await db.build_stats_compact(conn, tg_uid, date_local)
+    misses = await db.get_top_misses(conn, tg_uid, date_local, 7, limit=5)
+    stack_ids = await db.get_user_stack_supplement_ids(conn, tg_uid)
+    streaks = await db.get_streaks(conn, tg_uid, date_local, stack_ids, max_back=90)
+
+    miss_lines = []
+    for idx, row in enumerate(misses[:5], start=1):
+        name = str(row.get("name_ru") or row.get("slug") or f"ID {row.get('supplement_id')}")
+        miss_lines.append(f"{idx}) {name} — {int(row.get('missed') or 0)}")
+    if not miss_lines:
+        miss_lines = ["нет пропусков 🎯"]
+
+    streak_lines = []
+    for idx, row in enumerate(streaks[:5], start=1):
+        name = str(row.get("name_ru") or row.get("slug") or f"ID {row.get('supplement_id')}")
+        streak_lines.append(f"{idx}) {name} — {int(row.get('streak_days') or 0)} дн")
+    if not streak_lines:
+        streak_lines = ["пока нет активных стриков"]
+
+    text = "\n".join([
+        "📈 <b>Статистика</b>",
+        "",
+        _fmt_adherence_block("Сегодня", summary.get("today") or {}),
+        _fmt_adherence_block("7 дней", summary.get("last7") or {}),
+        _fmt_adherence_block("30 дней", summary.get("last30") or {}),
+        "",
+        "<b>Топ пропусков (7д)</b>",
+        *miss_lines,
+        "",
+        "<b>Топ стриков</b>",
+        *streak_lines,
+    ])
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 Обновить", callback_data="menu:stats")],
+        [InlineKeyboardButton("↩️ Назад", callback_data="menu:home")],
+    ])
+    await show(update, context, text, kb, route="menu:stats")
+
+
 async def _show_today_home(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, tg_uid: int) -> None:
     user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
     slots = await db.get_user_slots(conn, user_id)
@@ -2032,6 +2085,9 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
         if data == "menu:complexes":
             await _show_complexes_hub(update, context, conn, tg_uid)
+            return
+        if data == "menu:stats":
+            await _show_stats_screen(update, context, conn, tg_uid)
             return
         if data == "menu:webapp":
             ok = await require_premium_or_upsell(update, context, "WebApp")

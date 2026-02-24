@@ -300,6 +300,8 @@
     today: null,
     complexes: [],
     loadingToday: false,
+    loadingStats: false,
+    stats: null,
     toastTimer: null,
     catalog: {
       q: "", page: 0, items: [], total: 0, loading: false,
@@ -1312,25 +1314,46 @@ function adminField(label, field, value, kind='input') {
   async function loadToday(force) {
     if (state.loadingToday && !force) return;
     state.loadingToday = true;
+    state.loadingStats = true;
     renderActiveTab();
     try {
-      const today = await api("./api/today");
+      const [today, statsRes] = await Promise.all([
+        api("./api/today"),
+        api("./api/stats/summary").catch(()=>null),
+      ]);
       state.today = today;
+      state.stats = statsRes?.summary || null;
     } catch (e) {
       if (e.message !== "PREMIUM_REQUIRED") showToast("Не удалось загрузить Today");
     } finally {
       state.loadingToday = false;
+      state.loadingStats = false;
       renderActiveTab();
     }
   }
 
+  function renderStatsBlock() {
+    const st = state.stats;
+    if (!st) return '';
+    const today = st.today || {};
+    const d7 = st.last7 || {};
+    const tLine = (today.expected > 0 && today.adherence !== null && today.adherence !== undefined)
+      ? `${today.taken}/${today.expected} (${today.adherence}%)`
+      : 'нет плана';
+    const d7Line = (d7.expected > 0 && d7.adherence !== null && d7.adherence !== undefined)
+      ? `${d7.taken}/${d7.expected} (${d7.adherence}%)`
+      : 'нет плана';
+    return `<section class="card fade"><div class="row"><strong>📈 Статистика</strong><span class="muted">Сегодня и 7 дней</span></div><div class="muted" style="margin-top:8px">Сегодня: ${tLine}</div><div class="muted">7 дней: ${d7Line}</div><div style="margin-top:10px"><button class="btn secondary" data-stats-refresh>Подробнее</button></div></section>`;
+  }
+
   function renderToday() {
     const slots = state.today?.slots || [];
+    const statsBlock = renderStatsBlock();
     if (!slots.length) {
-      return `<div class="card">На сегодня приёмов не найдено.</div>`;
+      return `${statsBlock}<div class="card">На сегодня приёмов не найдено.</div>`;
     }
 
-    return slots.map((slot) => {
+    return `${statsBlock}${slots.map((slot) => {
       const items = slot.items || [];
       const complexes = slot.complexes || [];
       const totalTaken = items.filter(i => i.status === "taken").length + complexes.reduce((acc,c)=>acc + (c.taken_count||0),0);
@@ -1362,7 +1385,7 @@ function adminField(label, field, value, kind='input') {
           </div>
         </article>
       `;
-    }).join("");
+    }).join("")}`;
   }
 
   function statusClass(status) {
@@ -1395,6 +1418,14 @@ function adminField(label, field, value, kind='input') {
           await api("./api/today/toggle_complex", { method:"POST", body:{ complex_id: complexId, status: next } });
           await loadToday(true);
         } catch { showToast("Не удалось отметить комплекс"); }
+      });
+    });
+
+    appEl.querySelectorAll("[data-stats-refresh]").forEach((btn)=>{
+      btn.addEventListener("click", async ()=>{
+        haptic();
+        await loadToday(true);
+        showToast("Статистика обновлена");
       });
     });
 

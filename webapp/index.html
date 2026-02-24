@@ -319,6 +319,7 @@
       checkinId: null,
       recommendations: [],
       selected: {},
+      applying: false,
       answers: { energy:"", sleep:"", stress:"", training:"", goals:[], note:"" }
     },
     admin: {
@@ -343,7 +344,10 @@
       userDetail: null,
       userBanReason: "",
       userDeleteConfirm: "",
-      roleTargetId: ""
+      roleTargetId: "",
+      diagnostics: null,
+      diagConfirmText: "",
+      diagLoading: false
     }
   };
 
@@ -714,8 +718,16 @@
     const sv = state.survey;
     if (sv.loading) return `<div class="card">⏳ анализ…</div>`;
     if (sv.view === 'review') {
-      const rows = (sv.recommendations || []).map((r) => `<div class="rec-card"><div class="row"><label><input type="checkbox" data-rec-toggle="${r.supplement_id}" ${sv.selected[r.supplement_id] !== false ? 'checked' : ''}/> <strong>${esc(r.name_ru || r.slug)}</strong></label><span class="badge ${r.action==='remove'?'minus':(r.action==='adjust'?'':'plus')}">${r.action==='add'?'+':(r.action==='remove'?'−':'≈')}</span></div><div class="muted" style="margin-top:6px">${esc(r.reason || '')}</div></div>`).join('');
-      return `<div class="card fade"><h3 style="margin-top:0">Рекомендации</h3>${rows || '<div class="muted">Нет рекомендаций</div>'}<div class="row" style="margin-top:10px"><button class="btn" id="applyAll">Применить всё</button><button class="btn secondary" id="applySelected">Применить выбранное</button></div><div class="row" style="margin-top:8px"><button class="btn secondary" id="cancelSurvey">Отмена</button></div></div>`;
+      const todaySet = new Set();
+      for (const slot of (state.today?.slots || [])) {
+        for (const item of (slot.items || [])) todaySet.add(Number(item.supplement_id || 0));
+        for (const c of (slot.complexes || [])) for (const ci of (c.items || [])) todaySet.add(Number(ci.supplement_id || 0));
+      }
+      const rows = (sv.recommendations || []).map((r) => {
+        const already = todaySet.has(Number(r.supplement_id || 0));
+        return `<div class="rec-card"><div class="row"><label><input type="checkbox" data-rec-toggle="${r.supplement_id}" ${sv.selected[r.supplement_id] !== false ? 'checked' : ''}/> <strong>${esc(r.name_ru || r.slug)}</strong></label><span class="badge ${r.action==='remove'?'minus':(r.action==='adjust'?'':'plus')}">${r.action==='add'?'+':(r.action==='remove'?'−':'≈')}</span></div><div class="muted" style="margin-top:6px">${esc(r.reason || '')}${already ? ' • уже в плане' : ''}</div></div>`;
+      }).join('');
+      return `<div class="card fade"><h3 style="margin-top:0">Рекомендации на сегодня</h3>${rows || '<div class="muted">Нет рекомендаций</div>'}<div style="margin-top:10px"><button class="btn" id="applyAll" style="width:100%; font-weight:800" ${sv.applying ? 'disabled' : ''}>✅ Применить всё</button></div><div class="row" style="margin-top:10px"><button class="btn secondary" id="applySelected" ${sv.applying ? 'disabled' : ''}>Выбрать вручную</button><button class="btn secondary" id="cancelSurvey" ${sv.applying ? 'disabled' : ''}>Отмена</button></div></div>`;
     }
     const step = SURVEY_STEPS[sv.step];
     const p = Math.round(((sv.step+1)/SURVEY_STEPS.length)*100);
@@ -737,8 +749,40 @@
     document.getElementById('surveyBack')?.addEventListener('click', ()=>{ haptic(); state.survey.step=Math.max(0,state.survey.step-1); renderActiveTab(); });
     document.getElementById('surveyNext')?.addEventListener('click', async ()=>{ haptic(); if (state.survey.step < SURVEY_STEPS.length-1) { state.survey.step += 1; renderActiveTab(); return; } state.survey.loading=true; renderActiveTab(); try { const res=await api('./api/checkin',{method:'POST', body:{answers: state.survey.answers}}); state.survey.loading=false; state.survey.checkinId=res.checkin_id; state.survey.recommendations=res.recommendations||[]; state.survey.selected=Object.fromEntries((state.survey.recommendations||[]).map((x)=>[x.supplement_id,true])); state.survey.view='review'; renderActiveTab(); } catch(e){ state.survey.loading=false; showToast('AI временно недоступен, попробуйте ещё раз'); renderActiveTab(); } });
     appEl.querySelectorAll('[data-rec-toggle]').forEach((el)=>el.addEventListener('change',(e)=>{ state.survey.selected[Number(el.dataset.recToggle)] = !!e.target.checked; }));
-    document.getElementById('applyAll')?.addEventListener('click', async ()=>{ haptic(); try { await api('./api/checkin/apply',{method:'POST', body:{checkin_id: state.survey.checkinId, selected_ids:[], mode:'all'}}); showToast('Применено'); await loadToday(true); state.activeTab='today'; renderMainApp(); renderActiveTab(); } catch { showToast('Не удалось применить'); } });
-    document.getElementById('applySelected')?.addEventListener('click', async ()=>{ haptic(); const ids=Object.keys(state.survey.selected).filter((k)=>state.survey.selected[k]).map(Number); try { await api('./api/checkin/apply',{method:'POST', body:{checkin_id: state.survey.checkinId, selected_ids:ids, mode:'selected'}}); showToast('Применено'); await loadToday(true); state.activeTab='today'; renderMainApp(); renderActiveTab(); } catch { showToast('Не удалось применить'); } });
+    document.getElementById('applyAll')?.addEventListener('click', async ()=>{
+      haptic();
+      state.survey.applying = true;
+      renderActiveTab();
+      try {
+        const res = await api('./api/recommendations/apply_all', { method:'POST', body:{ recommendations: state.survey.recommendations || [] } });
+        if (res.today) state.today = res.today;
+        else await loadToday(true);
+        const sum = res.summary || {};
+        showToast(`✅ Добавлено: ${Number(sum.applied||0)}, уже было: ${Number(sum.skipped_existing||0)}`);
+        state.activeTab='today';
+        renderMainApp();
+        renderActiveTab();
+      } catch {
+        showToast('Не удалось применить рекомендации');
+      } finally {
+        state.survey.applying = false;
+      }
+    });
+    document.getElementById('applySelected')?.addEventListener('click', async ()=>{
+      haptic();
+      const ids=Object.keys(state.survey.selected).filter((k)=>state.survey.selected[k]).map(Number);
+      try {
+        const out = await api('./api/checkin/apply',{method:'POST', body:{checkin_id: state.survey.checkinId, selected_ids:ids, mode:'selected'}});
+        await loadToday(true);
+        const sum = out.summary || {};
+        showToast(`✅ Добавлено: ${Number(sum.applied||0)}, уже было: ${Number(sum.skipped_existing||0)}`);
+        state.activeTab='today';
+        renderMainApp();
+        renderActiveTab();
+      } catch {
+        showToast('Не удалось применить выбранные');
+      }
+    });
     document.getElementById('cancelSurvey')?.addEventListener('click', ()=>{ haptic(); state.survey.view='wizard'; renderActiveTab(); });
   }
 
@@ -945,6 +989,21 @@
         </div>
       </div>` : ''}
 
+
+      ${perms.system_diag ? `<div class="card fade">
+        <div class="row"><strong>Диагностика</strong><span class="muted">целостность данных</span></div>
+        <div style="display:flex; gap:8px; margin-top:8px;">
+          <button class="btn" id="diagDryBtn">Проверить</button>
+          <button class="btn secondary" id="diagApplyBtn">Починить</button>
+        </div>
+        <div style="display:flex; gap:8px; margin-top:8px;">
+          <input id="diagConfirmInput" class="input" placeholder="Введите FIX для ремонта" value="${esc(a.diagConfirmText || '')}" />
+        </div>
+        ${a.diagLoading ? `<div class="muted" style="margin-top:8px">Выполняем...</div>` : ''}
+        ${a.diagnostics ? `<div class="card" style="margin-top:8px">${(a.diagnostics.issues || []).map((i)=>`<div><code>${esc(i.code)}</code>: найдено ${Number(i.count||0)}, исправлено ${Number(i.fixed||0)}</div>`).join('') || 'Проблем не найдено.'}</div>
+          <details style="margin-top:8px"><summary>Детали (до 20)</summary><pre style="white-space:pre-wrap">${esc(JSON.stringify(Object.fromEntries(Object.entries(a.diagnostics.details || {}).map(([k,v])=>[k,(v||[]).slice(0,20)])), null, 2))}</pre></details>` : ''}
+      </div>` : ''}
+
       ${perms.content_edit ? `<div class="admin-grid">
         ${(a.items || []).map((it)=> a.selectionMode && perms.content_bulk ? `<label class="card admin-card selecting"><input type="checkbox" data-admin-select="${it.id}" ${a.selectedIds[it.id] ? 'checked' : ''}/><div style="flex:1"><div class="row"><strong>${esc(it.name_ru || it.slug)}</strong><span class="muted">${it.is_active ? '🟢' : '⚪'}</span></div></div></label>` : `<button class="card admin-card" data-admin-open="${it.id}"><div class="row"><strong>${esc(it.name_ru || it.slug)}</strong><span class="muted">${it.is_active ? '🟢' : '⚪'}</span></div></button>`).join('') || '<div class="card">Ничего не найдено.</div>'}
       </div>` : ''}
@@ -1032,6 +1091,22 @@ function adminField(label, field, value, kind='input') {
       showToast('Сохранено');
     } catch (e) {
       state.admin.errors[field] = `Ошибка: ${e.message}`;
+      renderActiveTab();
+    }
+  }
+
+  async function runDiagnostics(applyMode) {
+    state.admin.diagLoading = true;
+    renderActiveTab();
+    try {
+      const res = await api('./api/admin/diagnostics/run', { method:'POST', body:{ apply: !!applyMode } });
+      state.admin.diagnostics = res;
+      showToast(applyMode ? 'Ремонт завершён' : 'Проверка завершена');
+    } catch (e) {
+      if (e.message === "PERMISSION_DENIED") { showToast('Нет прав'); }
+      else showToast('Не удалось выполнить диагностику');
+    } finally {
+      state.admin.diagLoading = false;
       renderActiveTab();
     }
   }
@@ -1158,6 +1233,13 @@ function adminField(label, field, value, kind='input') {
       } catch {
         showToast('Не удалось загрузить роль');
       }
+    });
+
+    document.getElementById('diagConfirmInput')?.addEventListener('input', (e)=>{ state.admin.diagConfirmText = e.target.value; });
+    document.getElementById('diagDryBtn')?.addEventListener('click', async ()=>{ await runDiagnostics(false); });
+    document.getElementById('diagApplyBtn')?.addEventListener('click', async ()=>{
+      if (String(state.admin.diagConfirmText || '').trim() !== 'FIX') return showToast('Введите FIX для подтверждения');
+      await runDiagnostics(true);
     });
     document.getElementById('roleSaveBtn')?.addEventListener('click', async ()=>{
       const tgId = Number(state.admin.roleTargetId || document.getElementById('roleTgId')?.value || 0);

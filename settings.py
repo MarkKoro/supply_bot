@@ -21,6 +21,7 @@ class Settings:
     AI_MAX_PER_DAY: int
     DEBUG: bool
     ADMIN_IDS: list[int]
+    ADMIN_TG_IDS: set[int]
     WEBAPP_URL: str
     YOOKASSA_PROVIDER_TOKEN: str
     BILLING_ENABLED_RUB: bool
@@ -40,6 +41,14 @@ def _parse_admin_ids(value: str) -> list[int]:
         except ValueError:
             continue
     return ids
+
+
+def get_admin_ids() -> set[int]:
+    return set(_parse_admin_ids(os.getenv("ADMIN_TG_IDS", "")))
+
+
+def is_admin(tg_user_id: int) -> bool:
+    return tg_user_id in get_admin_ids()
 
 def _parse_bool(value: str) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
@@ -93,6 +102,9 @@ def get_settings() -> Settings:
     }
     yookassa_provider_token = os.getenv("YOOKASSA_PROVIDER_TOKEN", "").strip()
 
+    admin_ids = _parse_admin_ids(os.getenv("ADMIN_IDS", ""))
+    admin_tg_ids = get_admin_ids() or set(admin_ids)
+
     return Settings(
         TG_TOKEN=tg,
         APP_TZ=os.getenv("APP_TZ", "UTC").strip(),
@@ -115,7 +127,8 @@ def get_settings() -> Settings:
         ),
         AI_MAX_PER_DAY=int(os.getenv("AI_MAX_PER_DAY", "1").strip()),
         DEBUG=_parse_bool(os.getenv("DEBUG", "")),
-        ADMIN_IDS=_parse_admin_ids(os.getenv("ADMIN_IDS", "")),
+        ADMIN_IDS=admin_ids,
+        ADMIN_TG_IDS=admin_tg_ids,
         WEBAPP_URL=os.getenv("WEBAPP_URL", "").strip(),
         YOOKASSA_PROVIDER_TOKEN=yookassa_provider_token,
         BILLING_ENABLED_RUB=_parse_bool(os.getenv("BILLING_ENABLED_RUB", "1" if yookassa_provider_token else "0")),

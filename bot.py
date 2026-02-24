@@ -13,7 +13,7 @@ from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, MessageHandler, PreCheckoutQueryHandler, ContextTypes, filters
 )
 
-from settings import get_settings
+from settings import get_settings, is_admin as settings_is_admin
 import db
 import engine
 import seed_import
@@ -63,6 +63,9 @@ from keyboards import (
     admin_stack_items_kb,
     admin_stack_item_editor_kb,
     admin_stack_search_kb,
+    admin_hub_kb,
+    admin_supp_results_kb,
+    admin_supp_card_kb,
 )
 import tz
 from openai_client import (
@@ -121,12 +124,12 @@ def _is_admin(tg_user_id: int) -> bool:
     global _settings_cache
     if _settings_cache is None:
         _settings_cache = get_settings()
-    return tg_user_id in _settings_cache.ADMIN_IDS
+    return settings_is_admin(tg_user_id) or tg_user_id in _settings_cache.ADMIN_IDS or tg_user_id in getattr(_settings_cache, "ADMIN_TG_IDS", set())
 
 
 def _is_admin_ctx(context: ContextTypes.DEFAULT_TYPE, tg_user_id: int) -> bool:
     settings = context.application.bot_data["settings"]
-    return tg_user_id in settings.ADMIN_IDS
+    return tg_user_id in settings.ADMIN_IDS or tg_user_id in getattr(settings, "ADMIN_TG_IDS", set())
 
 
 def _slugify_ascii(value: str) -> str:
@@ -2018,8 +2021,8 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await _show_curated_page(update, context, conn, 0)
             return
 
-        if data == "admin:stats":
-            await _show_admin_stats(update, context, conn)
+        if data == "admin:home":
+            await _show_admin_home(update, context)
             return
 
         if data.startswith("admin:") and not _is_admin_ctx(context, tg_uid):
@@ -2030,6 +2033,89 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")]]),
                 route="menu:home",
             )
+            return
+
+        if data == "admin:supp_search":
+            await show(
+                update,
+                context,
+                "Введи название/часть названия (RU/EN) или slug:",
+                InlineKeyboardMarkup([[InlineKeyboardButton("↩️ В админ-хаб", callback_data="admin:home")]]),
+                route="admin_wait_query",
+                payload={"admin_query": "", "offset": 0},
+            )
+            return
+
+        if data.startswith("admin:supp_list:"):
+            offset = int(data.split(":")[-1]) if data.split(":")[-1].isdigit() else 0
+            _, _, ui_payload = await db.get_ui_state(conn, tg_uid)
+            payload_data = {}
+            try:
+                payload_data = json.loads(ui_payload) if ui_payload else {}
+            except json.JSONDecodeError:
+                payload_data = {}
+            query = str(payload_data.get("admin_query") or "").strip()
+            await _show_admin_supp_results(update, context, conn, query, offset=offset)
+            return
+
+        if data.startswith("admin:supp_open:"):
+            supplement_id = int(data.split(":")[-1])
+            _, _, ui_payload = await db.get_ui_state(conn, tg_uid)
+            payload_data = {}
+            try:
+                payload_data = json.loads(ui_payload) if ui_payload else {}
+            except json.JSONDecodeError:
+                payload_data = {}
+            await _show_admin_supp_card(
+                update,
+                context,
+                conn,
+                supplement_id,
+                admin_query=str(payload_data.get("admin_query") or ""),
+                offset=int(payload_data.get("offset") or 0),
+            )
+            return
+
+        if data.startswith("admin:supp_set_link:"):
+            supplement_id = int(data.split(":")[-1])
+            _, _, ui_payload = await db.get_ui_state(conn, tg_uid)
+            payload_data = {}
+            try:
+                payload_data = json.loads(ui_payload) if ui_payload else {}
+            except json.JSONDecodeError:
+                payload_data = {}
+            await show(
+                update,
+                context,
+                "Отправь URL (https://...)",
+                InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Назад", callback_data=f"admin:supp_open:{supplement_id}")]]),
+                route="admin_wait_link",
+                payload={"supplement_id": supplement_id, "admin_query": str(payload_data.get("admin_query") or ""), "offset": int(payload_data.get("offset") or 0)},
+            )
+            return
+
+        if data.startswith("admin:supp_clear_link:"):
+            supplement_id = int(data.split(":")[-1])
+            await db.clear_purchase_url(conn, supplement_id)
+            _, _, ui_payload = await db.get_ui_state(conn, tg_uid)
+            payload_data = {}
+            try:
+                payload_data = json.loads(ui_payload) if ui_payload else {}
+            except json.JSONDecodeError:
+                payload_data = {}
+            await _show_admin_supp_card(update, context, conn, supplement_id, admin_query=str(payload_data.get("admin_query") or ""), offset=int(payload_data.get("offset") or 0))
+            return
+
+        if data == "admin:back":
+            _, _, ui_payload = await db.get_ui_state(conn, tg_uid)
+            payload_data = {}
+            try:
+                payload_data = json.loads(ui_payload) if ui_payload else {}
+            except json.JSONDecodeError:
+                payload_data = {}
+            query = str(payload_data.get("admin_query") or "").strip()
+            offset = int(payload_data.get("offset") or 0)
+            await _show_admin_supp_results(update, context, conn, query, offset=offset)
             return
 
         if data == "admin:stacks":
@@ -4015,8 +4101,8 @@ async def _render_route(
             target_message_id=target_message_id,
         )
         return
-    if route == "admin:stats":
-        await _show_admin_stats(update, context, conn)
+    if route == "admin:home":
+        await _show_admin_home(update, context)
         return
     if route == "admin:stacks":
         page = 0
@@ -4300,6 +4386,45 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 pass
             return
+        if ui_screen == "admin_wait_query":
+            if not _is_admin_ctx(context, tg_uid):
+                await _require_admin(update, context)
+                return
+            await _show_admin_supp_results(update, context, conn, txt, offset=0)
+            try:
+                await update.message.delete()
+            except Exception:
+                pass
+            return
+
+        if ui_screen == "admin_wait_link":
+            if not _is_admin_ctx(context, tg_uid):
+                await _require_admin(update, context)
+                return
+            try:
+                payload_data = json.loads(ui_payload) if ui_payload else {}
+            except json.JSONDecodeError:
+                payload_data = {}
+            supplement_id = int(payload_data.get("supplement_id") or 0)
+            url = txt.strip()
+            if len(url) > 500 or not (url.startswith("http://") or url.startswith("https://")):
+                await show(
+                    update,
+                    context,
+                    "Некорректный URL. Отправь ссылку, начинающуюся с http:// или https://",
+                    InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Назад", callback_data=f"admin:supp_open:{supplement_id}")]]),
+                    route="admin_wait_link",
+                    payload={"supplement_id": supplement_id, "admin_query": str(payload_data.get("admin_query") or ""), "offset": int(payload_data.get("offset") or 0)},
+                )
+                return
+            await db.set_purchase_url(conn, supplement_id, url)
+            await _show_admin_supp_card(update, context, conn, supplement_id, admin_query=str(payload_data.get("admin_query") or ""), offset=int(payload_data.get("offset") or 0))
+            try:
+                await update.message.delete()
+            except Exception:
+                pass
+            return
+
         if ui_screen == "admin:stack:new_wait":
             if not _is_admin_ctx(context, tg_uid):
                 await show(update, context, "Нет доступа.", back(), route="menu:home")
@@ -5076,6 +5201,96 @@ async def _show_catalog_home(
         payload={"mode": "home"},
         target_chat_id=target_chat_id,
         target_message_id=target_message_id,
+    )
+
+
+async def _require_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    tg_uid = update.effective_user.id if update.effective_user else 0
+    if _is_admin_ctx(context, tg_uid):
+        return True
+    await show(
+        update,
+        context,
+        "Недостаточно прав",
+        InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")]]),
+        route="menu:home",
+    )
+    return False
+
+
+async def _show_admin_home(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await show(
+        update,
+        context,
+        "🛠 <b>Админ-хаб</b>\n"
+        "- Управление ссылками на покупку\n"
+        "(позже: правки карточек, доказательность, тексты и т.д.)",
+        admin_hub_kb(),
+        route="admin:home",
+    )
+
+
+async def _show_admin_supp_results(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, q: str, offset: int = 0) -> None:
+    query = (q or "").strip()
+    if len(query) < 2:
+        await show(
+            update,
+            context,
+            "Запрос слишком короткий. Напиши минимум 2 символа.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("↩️ В админ-хаб", callback_data="admin:home")]]),
+            route="admin_wait_query",
+            payload={"admin_query": "", "offset": 0},
+        )
+        return
+    offset = max(0, int(offset))
+    rows = await db.search_supplements(conn, query, limit=10, offset=offset)
+    has_next = len(rows) == 10
+    lines = [f"🔎 <b>Результаты поиска</b>: <code>{query}</code>"]
+    if not rows:
+        lines.append("\nНичего не найдено.")
+    else:
+        for idx, item in enumerate(rows, start=offset + 1):
+            title = (item.get("name_ru") or item.get("name_en") or item.get("slug") or "Без названия").strip()
+            grade = (item.get("evidence_grade") or "?").strip() or "?"
+            mark = "🔗" if item.get("has_link") else "—"
+            lines.append(f"{idx}) {title} ({grade}) {mark}")
+    await show(
+        update,
+        context,
+        "\n".join(lines),
+        admin_supp_results_kb(rows, offset=offset, has_prev=offset > 0, has_next=has_next),
+        route="admin:supp_list",
+        payload={"admin_query": query, "offset": offset},
+    )
+
+
+async def _show_admin_supp_card(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    conn,
+    supplement_id: int,
+    *,
+    admin_query: str = "",
+    offset: int = 0,
+) -> None:
+    row = await db.get_supplement_admin(conn, supplement_id)
+    if not row:
+        await show(update, context, "Добавка не найдена.", admin_hub_kb(), route="admin:home")
+        return
+    name = (row.get("name_ru") or row.get("name_en") or row.get("slug") or "Без названия").strip()
+    purchase_url = str(row.get("purchase_url") or "").strip()
+    await show(
+        update,
+        context,
+        "\n".join([
+            f"🧾 <b>{name}</b>",
+            f"EN: {row.get('name_en') or '—'}",
+            f"slug: <code>{row.get('slug') or ''}</code>",
+            f"Ссылка покупки: {purchase_url if purchase_url else 'нет'}",
+        ]),
+        admin_supp_card_kb(int(row["id"]), purchase_url),
+        route=f"admin:supp_open:{int(row['id'])}",
+        payload={"supplement_id": int(row["id"]), "admin_query": admin_query, "offset": int(offset)},
     )
 
 
@@ -5953,6 +6168,7 @@ async def render_supplement_card(
         pages=pages,
         has_links=has_links,
         linked_items=linked_items,
+        purchase_url=str(row.get("purchase_url") or "").strip() or None,
     )
     msg = await show(
         update,

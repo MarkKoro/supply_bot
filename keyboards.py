@@ -13,7 +13,7 @@ def main_menu(*, is_admin: bool = False) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("⭐ Премиум", callback_data="menu:premium")],
     ]
     if is_admin:
-        rows.append([InlineKeyboardButton("📊 Статистика", callback_data="admin:stats")])
+        rows.append([InlineKeyboardButton("🛠 Админ-хаб", callback_data="admin:home")])
     rows.append([InlineKeyboardButton("⚙️ Настройки", callback_data="menu:settings")])
     return InlineKeyboardMarkup(rows)
 
@@ -470,6 +470,50 @@ def admin_stack_search_kb(stack_id: int, rows_data, page: int, has_prev: bool, h
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"admin:stack:items:{stack_id}")])
     return InlineKeyboardMarkup(rows)
 
+
+
+def shop_url_button(url: str) -> InlineKeyboardButton:
+    return InlineKeyboardButton("🛒 Перейти в магазин", url=url)
+
+
+def admin_hub_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔎 Найти БАД", callback_data="admin:supp_search")],
+        [InlineKeyboardButton("↩️ Назад", callback_data="menu:home")],
+    ])
+
+
+def admin_supp_results_kb(rows: list[dict], *, offset: int, has_prev: bool, has_next: bool) -> InlineKeyboardMarkup:
+    btns: list[list[InlineKeyboardButton]] = []
+    for item in rows:
+        title = (item.get("name_ru") or item.get("name_en") or item.get("slug") or "Без названия").strip()
+        grade = (item.get("evidence_grade") or "?").strip() or "?"
+        mark = "🔗" if item.get("has_link") else "—"
+        btns.append([InlineKeyboardButton(f"{title} ({grade}) {mark}", callback_data=f"admin:supp_open:{int(item['id'])}")])
+    nav: list[InlineKeyboardButton] = []
+    if has_prev:
+        nav.append(InlineKeyboardButton("⬅️", callback_data=f"admin:supp_list:{max(0, offset - 10)}"))
+    if has_next:
+        nav.append(InlineKeyboardButton("➡️", callback_data=f"admin:supp_list:{offset + 10}"))
+    if nav:
+        btns.append(nav)
+    btns.append([InlineKeyboardButton("🔎 Новый поиск", callback_data="admin:supp_search")])
+    btns.append([InlineKeyboardButton("↩️ В админ-хаб", callback_data="admin:home")])
+    return InlineKeyboardMarkup(btns)
+
+
+def admin_supp_card_kb(supplement_id: int, purchase_url: str) -> InlineKeyboardMarkup:
+    has_link = bool((purchase_url or "").strip())
+    rows: list[list[InlineKeyboardButton]] = []
+    if has_link:
+        rows.append([InlineKeyboardButton("✏️ Изменить ссылку", callback_data=f"admin:supp_set_link:{supplement_id}")])
+        rows.append([InlineKeyboardButton("🗑 Удалить ссылку", callback_data=f"admin:supp_clear_link:{supplement_id}")])
+        rows.append([InlineKeyboardButton("🛒 Открыть ссылку", url=purchase_url)])
+    else:
+        rows.append([InlineKeyboardButton("➕ Добавить ссылку", callback_data=f"admin:supp_set_link:{supplement_id}")])
+    rows.append([InlineKeyboardButton("↩️ Назад к списку", callback_data="admin:back")])
+    return InlineKeyboardMarkup(rows)
+
 def curated_stack_card(slug: str, *, source_url: str | None, back_page: int) -> InlineKeyboardMarkup:
     btns = []
     if source_url:
@@ -495,7 +539,7 @@ def supplement_page(
     ])
     btns.append([InlineKeyboardButton("⚠️ Осторожно", callback_data=f"supp:compat:{supplement_id}:caution:0")])
     if show_buy:
-        btns.append([InlineKeyboardButton("🛒 Купить", url=show_buy)])
+        btns.append([shop_url_button(show_buy)])
     btns.append([InlineKeyboardButton("⬅️ Назад", callback_data=back_route)])
     return InlineKeyboardMarkup(btns)
 
@@ -538,6 +582,7 @@ def supp_tabs_kb(
     pages: int = 1,
     has_links: bool = False,
     linked_items: list[dict] | None = None,
+    purchase_url: str | None = None,
 ) -> InlineKeyboardMarkup:
     btns: list[list[InlineKeyboardButton]] = [
         [
@@ -584,6 +629,8 @@ def supp_tabs_kb(
             InlineKeyboardButton("🏠 Меню", callback_data="menu:home"),
         ]
     )
+    if purchase_url:
+        btns.append([shop_url_button(purchase_url)])
     return InlineKeyboardMarkup(btns)
 
 def my_supplement_hub(

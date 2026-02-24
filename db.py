@@ -374,7 +374,7 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     await _ensure_column(conn, "supplements", "dose_ru", "TEXT")
     await _ensure_column(conn, "supplements", "timing_ru", "TEXT")
     await _ensure_column(conn, "supplements", "safety_ru", "TEXT")
-    await _ensure_column(conn, "supplements", "purchase_url", "TEXT")
+    await _ensure_column(conn, "supplements", "purchase_url", "TEXT DEFAULT ''")
     await _ensure_column(conn, "supplements", "tags_json", "TEXT")
     await _ensure_column(conn, "supplements", "mechanisms", "TEXT")
     await _ensure_column(conn, "supplements", "supplement_type", "TEXT DEFAULT ''")
@@ -1983,9 +1983,51 @@ async def get_interactions_for_supplement(conn: aiosqlite.Connection, sid: int) 
 async def search_supplements(
     conn: aiosqlite.Connection,
     query: str,
-    page: int,
+    page: int | None = None,
     page_size: int = 10,
-) -> tuple[list[dict], int]:
+    *,
+    limit: int | None = None,
+    offset: int = 0,
+) -> tuple[list[dict], int] | list[dict]:
+    if page is None:
+        qn = normalize_text(query)
+        if not qn:
+            return []
+        safe_limit = max(1, min(int(limit or 20), 100))
+        safe_offset = max(0, int(offset))
+        q_like = f"%{qn}%"
+        rows = await fetchall(
+            conn,
+            """SELECT id,
+                      slug,
+                      COALESCE(name_ru, '') AS name_ru,
+                      COALESCE(name_en, '') AS name_en,
+                      COALESCE(evidence_grade, '') AS evidence_grade,
+                      CASE WHEN COALESCE(TRIM(purchase_url), '') <> '' THEN 1 ELSE 0 END AS has_link
+               FROM supplements
+               WHERE is_active=1
+                 AND (
+                    LOWER(COALESCE(name_ru, '')) LIKE ?
+                    OR LOWER(COALESCE(name_en, '')) LIKE ?
+                    OR LOWER(COALESCE(slug, '')) LIKE ?
+                    OR LOWER(COALESCE(search_blob, '')) LIKE ?
+                 )
+               ORDER BY name_ru COLLATE NOCASE
+               LIMIT ? OFFSET ?""",
+            (q_like, q_like, q_like, q_like, safe_limit, safe_offset),
+        )
+        return [
+            {
+                "id": int(row["id"]),
+                "slug": str(row["slug"] or ""),
+                "name_ru": str(row["name_ru"] or ""),
+                "name_en": str(row["name_en"] or ""),
+                "evidence_grade": str(row["evidence_grade"] or ""),
+                "has_link": bool(int(row["has_link"] or 0)),
+            }
+            for row in rows
+        ]
+
     qn = normalize_text(query)
     if not qn:
         return ([], 0)
@@ -2010,6 +2052,42 @@ async def search_supplements(
         (q_like, f"{qn}%", page_size, offset),
     )
     return ([dict(row) for row in rows], total_count)
+
+
+async def get_supplement_admin(conn: aiosqlite.Connection, supplement_id: int) -> dict | None:
+    row = await fetchone(
+        conn,
+        """SELECT id, slug, name_ru, name_en, purchase_url, evidence_grade, confidence
+           FROM supplements
+           WHERE id=?
+           LIMIT 1""",
+        (int(supplement_id),),
+    )
+    if not row:
+        return None
+    return {
+        "id": int(row["id"]),
+        "slug": str(row["slug"] or ""),
+        "name_ru": str(row["name_ru"] or ""),
+        "name_en": str(row["name_en"] or ""),
+        "purchase_url": str(row["purchase_url"] or ""),
+        "evidence_grade": str(row["evidence_grade"] or ""),
+        "confidence": str(row["confidence"] or ""),
+    }
+
+
+async def set_purchase_url(conn: aiosqlite.Connection, supplement_id: int, url: str) -> None:
+    await conn.execute(
+        "UPDATE supplements SET purchase_url=? WHERE id=?",
+        (str(url or "").strip()[:500], int(supplement_id)),
+    )
+
+
+async def clear_purchase_url(conn: aiosqlite.Connection, supplement_id: int) -> None:
+    await conn.execute(
+        "UPDATE supplements SET purchase_url='' WHERE id=?",
+        (int(supplement_id),),
+    )
 
 async def count_search_supplements(conn: aiosqlite.Connection, q: str) -> int:
     qn = normalize_text(q)

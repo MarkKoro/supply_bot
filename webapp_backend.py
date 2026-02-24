@@ -81,6 +81,40 @@ class CheckinApplyBody(BaseModel):
     selected_ids: list[int] = []
     mode: str
 
+class TodayToggleComplexBody(BaseModel):
+    complex_id: int
+    status: str
+
+
+class ComplexCreateBody(BaseModel):
+    name: str
+    note: str | None = ""
+
+
+class ComplexRenameBody(BaseModel):
+    complex_id: int
+    new_name: str
+
+
+class ComplexDeleteBody(BaseModel):
+    complex_id: int
+
+
+class ComplexItemBody(BaseModel):
+    supplement_id: int
+    dose_override: str | None = ""
+
+
+class ComplexScheduleSetBody(BaseModel):
+    complex_id: int
+    slot_id: str
+    time_local: str | None = None
+
+
+class ComplexScheduleRemoveBody(BaseModel):
+    complex_id: int
+    slot_id: str
+
 
 async def _auth_user_id(init_data: str) -> int:
     ok, parsed = verify_init_data(init_data, BOT_TOKEN)
@@ -400,7 +434,24 @@ async def _today_payload(tg_user_id: int) -> dict:
             for item in list(group.get("items") or []):
                 sid = int(item.get("supplement_id") or 0)
                 items.append({"supplement_id": sid, "name": str(item.get("name_ru") or item.get("slug") or ""), "slug": str(item.get("slug") or ""), "status": status_map.get(sid, "none")})
-            data_slots.append({"slot_id": str(group.get("slot_id") or ""), "title": str(group.get("title") or "Слот"), "time_local": str(group.get("time") or "--:--"), "items": items})
+            complexes = []
+            for c in list(group.get("complexes") or []):
+                c_items = []
+                for ci in list(c.get("items") or []):
+                    sid = int(ci.get("supplement_id") or 0)
+                    c_items.append({"supplement_id": sid, "name": str(ci.get("name_ru") or ci.get("slug") or ""), "slug": str(ci.get("slug") or ""), "status": status_map.get(sid, "none")})
+                taken = sum(1 for ci in c_items if ci.get("status") == "taken")
+                total = len(c_items)
+                c_status = "none" if taken == 0 else ("taken" if taken == total and total > 0 else "partial")
+                complexes.append({
+                    "complex_id": int(c.get("complex_id") or 0),
+                    "name": str(c.get("name") or ""),
+                    "status": c_status,
+                    "taken_count": taken,
+                    "total_count": total,
+                    "items": c_items,
+                })
+            data_slots.append({"slot_id": str(group.get("slot_id") or ""), "title": str(group.get("title") or "Слот"), "time_local": str(group.get("time") or "--:--"), "complexes": complexes, "items": items})
         return {"day": day, "slots": data_slots}
     finally:
         await conn.close()
@@ -546,6 +597,153 @@ async def api_today_toggle(body: TodayToggleBody, x_telegram_init_data: str = He
 
 
 
+
+
+@app.post("/api/today/toggle_complex")
+async def api_today_toggle_complex(body: TodayToggleComplexBody, x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    if not await _premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
+    if body.status not in {"taken", "none"}:
+        raise HTTPException(status_code=400, detail="status must be taken/none")
+    conn = await db.connect(s.DB_PATH)
+    try:
+        tz_name = await db.get_user_tz(conn, tg_user_id)
+        day = db.get_user_local_date(tz_name or None)
+        await db.toggle_complex_for_day(conn, tg_user_id, day, int(body.complex_id), body.status)
+    finally:
+        await conn.close()
+    return JSONResponse({"ok": True})
+
+
+@app.get("/api/complexes")
+async def api_complexes(x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    if not await _premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
+    conn = await db.connect(s.DB_PATH)
+    try:
+        items = await db.list_complexes(conn, tg_user_id)
+    finally:
+        await conn.close()
+    return JSONResponse({"ok": True, "items": items})
+
+
+@app.post("/api/complexes/create")
+async def api_complexes_create(body: ComplexCreateBody, x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    if not await _premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
+    conn = await db.connect(s.DB_PATH)
+    try:
+        item = await db.create_complex(conn, tg_user_id, body.name, body.note or "")
+    finally:
+        await conn.close()
+    return JSONResponse({"ok": True, "item": item})
+
+
+@app.post("/api/complexes/rename")
+async def api_complexes_rename(body: ComplexRenameBody, x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    if not await _premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
+    conn = await db.connect(s.DB_PATH)
+    try:
+        await db.rename_complex(conn, tg_user_id, int(body.complex_id), body.new_name)
+    finally:
+        await conn.close()
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/complexes/delete")
+async def api_complexes_delete(body: ComplexDeleteBody, x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    if not await _premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
+    conn = await db.connect(s.DB_PATH)
+    try:
+        await db.delete_complex(conn, tg_user_id, int(body.complex_id))
+    finally:
+        await conn.close()
+    return JSONResponse({"ok": True})
+
+
+@app.get("/api/complexes/{complex_id}/items")
+async def api_complex_items(complex_id: int, x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    if not await _premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
+    conn = await db.connect(s.DB_PATH)
+    try:
+        items = await db.list_complex_items(conn, tg_user_id, int(complex_id))
+    finally:
+        await conn.close()
+    return JSONResponse({"ok": True, "items": items})
+
+
+@app.post("/api/complexes/{complex_id}/items/add")
+async def api_complex_items_add(complex_id: int, body: ComplexItemBody, x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    if not await _premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
+    conn = await db.connect(s.DB_PATH)
+    try:
+        await db.add_item_to_complex(conn, tg_user_id, int(complex_id), int(body.supplement_id), body.dose_override or "")
+    finally:
+        await conn.close()
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/complexes/{complex_id}/items/remove")
+async def api_complex_items_remove(complex_id: int, body: ComplexItemBody, x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    if not await _premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
+    conn = await db.connect(s.DB_PATH)
+    try:
+        await db.remove_item_from_complex(conn, tg_user_id, int(complex_id), int(body.supplement_id))
+    finally:
+        await conn.close()
+    return JSONResponse({"ok": True})
+
+
+@app.get("/api/complex_schedules")
+async def api_complex_schedules(x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    if not await _premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
+    conn = await db.connect(s.DB_PATH)
+    try:
+        items = await db.list_complex_schedules(conn, tg_user_id)
+    finally:
+        await conn.close()
+    return JSONResponse({"ok": True, "items": items})
+
+
+@app.post("/api/complex_schedules/set")
+async def api_complex_schedules_set(body: ComplexScheduleSetBody, x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    if not await _premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
+    conn = await db.connect(s.DB_PATH)
+    try:
+        await db.set_complex_schedule(conn, tg_user_id, int(body.complex_id), body.slot_id, body.time_local)
+    finally:
+        await conn.close()
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/complex_schedules/remove")
+async def api_complex_schedules_remove(body: ComplexScheduleRemoveBody, x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    if not await _premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
+    conn = await db.connect(s.DB_PATH)
+    try:
+        await db.remove_complex_schedule(conn, tg_user_id, int(body.complex_id), body.slot_id)
+    finally:
+        await conn.close()
+    return JSONResponse({"ok": True})
 
 
 

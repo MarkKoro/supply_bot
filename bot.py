@@ -232,6 +232,7 @@ async def _today_slots_payload(conn, tg_uid: int) -> tuple[str, list[dict]]:
     slots_payload: list[dict] = []
     for group in groups:
         items = list(group.get("items") or [])
+        complexes = list(group.get("complexes") or [])
         taken = 0
         skipped = 0
         for item in items:
@@ -241,13 +242,22 @@ async def _today_slots_payload(conn, tg_uid: int) -> tuple[str, list[dict]]:
                 taken += 1
             elif st == "skipped":
                 skipped += 1
+        for complex_row in complexes:
+            for item in list(complex_row.get("items") or []):
+                sid = int(item.get("supplement_id") or 0)
+                st = status_map.get(sid, "none")
+                if st == "taken":
+                    taken += 1
+                elif st == "skipped":
+                    skipped += 1
         slots_payload.append(
             {
                 "slot_id": str(group.get("slot_id") or ""),
                 "title": str(group.get("title") or "Слот"),
                 "time": str(group.get("time") or "--:--"),
                 "items": items,
-                "total": len(items),
+                "complexes": complexes,
+                "total": len(items) + sum(len(list(c.get("items") or [])) for c in complexes),
                 "taken": taken,
                 "skipped": skipped,
             }
@@ -290,9 +300,14 @@ async def _show_slot_screen(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     taken = int(slot.get("taken") or 0)
     total = int(slot.get("total") or 0)
     skipped = int(slot.get("skipped") or 0)
-    text = f"🕒 <b>{title} · {time_local}</b>\n📅 {date_local}\n\n✅ Принято: {taken}/{total}\n⛔ Пропущено: {skipped}"
+    complexes = list(slot.get("complexes") or [])
+    cx_line = ""
+    if complexes:
+        cx_line = "\n🧩 Комплексы:\n" + "\n".join(
+            [f"• {str(c.get('name') or '')}: {int(c.get('taken_count') or 0)}/{int(c.get('total_count') or 0)}" for c in complexes]
+        )
+    text = f"🕒 <b>{title} · {time_local}</b>\n📅 {date_local}\n\n✅ Принято: {taken}/{total}\n⛔ Пропущено: {skipped}{cx_line}"
     await show(update, context, text, slot_intake_kb(slot_id, taken, total), route=f"today:slot:{slot_id}")
-
 
 
 async def _show_intake_picker(
@@ -1481,10 +1496,22 @@ async def home(
     target_message_id: int | None = None,
 ) -> None:
     user_id = update.effective_user.id if update.effective_user else 0
+    is_admin = (await _get_role_perms_ctx(context, user_id))[0] != db.ROLE_NONE
+    show_complexes = False
+    if user_id:
+        settings = context.application.bot_data["settings"]
+        if user_id in settings.ADMIN_IDS:
+            show_complexes = True
+        else:
+            conn = await db.connect(settings.DB_PATH)
+            try:
+                show_complexes = await db.is_premium_active(conn, user_id)
+            finally:
+                await conn.close()
     await show(
         update, context,
         _home_text(),
-        main_menu(is_admin=(await _get_role_perms_ctx(context, user_id))[0] != db.ROLE_NONE),
+        main_menu(is_admin=is_admin, show_complexes=show_complexes),
         route="menu:home",
         target_chat_id=target_chat_id,
         target_message_id=target_message_id,
@@ -1503,6 +1530,41 @@ def _premium_plans_payload(s) -> list[dict]:
             title += f" / {stars}⭐"
         plans.append({"plan_id": plan_id, "months": int(months), "title": title})
     return plans
+
+
+
+
+async def _show_complexes_hub(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, tg_uid: int) -> None:
+    active = tg_uid in context.application.bot_data["settings"].ADMIN_IDS or await db.is_premium_active(conn, tg_uid)
+    if not active:
+        await show(update, context, "Комплексы доступны в Premium.", premium_upsell_kb(), route="menu:premium")
+        return
+    items = await db.list_complexes(conn, tg_uid)
+    if not items:
+        await show(
+            update,
+            context,
+            "🧩 <b>Комплексы</b>\n\nПока пусто. Создай первый комплекс в WebApp.",
+            InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔓 Открыть WebApp", callback_data="menu:webapp")],
+                [InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")],
+            ]),
+            route="menu:complexes",
+        )
+        return
+    lines = ["🧩 <b>Комплексы</b>"]
+    for c in items[:20]:
+        lines.append(f"• {c['name']} ({c['items_count']})")
+    await show(
+        update,
+        context,
+        "\n".join(lines),
+        InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔓 Управлять в WebApp", callback_data="menu:webapp")],
+            [InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")],
+        ]),
+        route="menu:complexes",
+    )
 
 
 async def _show_premium_hub(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1967,6 +2029,9 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if data.startswith("premium:buy:"):
             _, _, plan_id, method = data.split(":", 3)
             await _send_subscription_invoice(update, context, plan_id, method)
+            return
+        if data == "menu:complexes":
+            await _show_complexes_hub(update, context, conn, tg_uid)
             return
         if data == "menu:webapp":
             ok = await require_premium_or_upsell(update, context, "WebApp")

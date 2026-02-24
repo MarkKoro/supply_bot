@@ -298,6 +298,7 @@
     me: null,
     activeTab: "today",
     today: null,
+    complexes: [],
     loadingToday: false,
     toastTimer: null,
     catalog: {
@@ -619,6 +620,7 @@
     refreshBtn?.addEventListener("click", async () => {
       haptic();
       if (state.activeTab === "today") {
+        await loadComplexes(true);
         await loadToday(true);
       } else if (state.activeTab === "catalog") {
         await loadCatalog(true);
@@ -788,7 +790,7 @@
       <details><summary>Дозировка / Тайминг / Безопасность</summary><div class="muted">${esc(item.dose_ru)}<br/>${esc(item.timing_ru)}<br/>${esc(item.safety_ru)}</div></details>
       ${item.molecular_mechanisms ? `<details><summary>Механизмы</summary><div class="muted">${esc(item.molecular_mechanisms)}</div></details>` : ''}
       <div style="margin-top:8px">${arr.map(t=>`<span class="chip" style="margin:2px">${esc(t)}</span>`).join('')}</div>
-      <div class="row" style="margin-top:10px"><button class="btn" data-stack-toggle data-id="${item.id}" data-in="${item.in_stack ? '1':'0'}">${item.in_stack ? 'Убрать из стека' : 'Добавить в мой стек'}</button>${item.purchase_url ? '<button class="btn secondary" data-open-shop>Перейти в магазин</button>' : ''}</div>
+      <div class="row" style="margin-top:10px"><button class="btn" data-stack-toggle data-id="${item.id}" data-in="${item.in_stack ? '1':'0'}">${item.in_stack ? 'Убрать из стека' : 'Добавить в мой стек'}</button><button class="btn secondary" data-add-complex data-id="${item.id}">Добавить в комплекс...</button>${item.purchase_url ? '<button class="btn secondary" data-open-shop>Перейти в магазин</button>' : ''}</div>
     </div>`;
   }
 
@@ -813,6 +815,29 @@
   function bindDetailModalEvents() {
     appEl.querySelector('[data-detail-close]')?.addEventListener('click', ()=>{ state.catalog.detail=null; renderActiveTab(); });
     appEl.querySelector('[data-open-shop]')?.addEventListener('click', ()=>{ const u=state.catalog.detail?.purchase_url; if(u) tg?.openLink?.(u); });
+    appEl.querySelector('[data-add-complex]')?.addEventListener('click', async (e)=>{
+      haptic();
+      const id=Number(e.currentTarget.dataset.id);
+      try {
+        if (!state.complexes.length) {
+          const name = prompt('Название нового комплекса');
+          if (!name) return;
+          await api('./api/complexes/create',{method:'POST',body:{name}});
+          await loadComplexes(true);
+        }
+        const names=state.complexes.map((c)=>c.name).join('\n');
+        const pick=prompt('В какой комплекс добавить?\n'+names);
+        if (!pick) return;
+        let target=state.complexes.find((c)=>c.name===pick);
+        if (!target) {
+          const r=await api('./api/complexes/create',{method:'POST',body:{name:pick}});
+          target=r.item;
+          await loadComplexes(true);
+        }
+        await api(`./api/complexes/${target.id}/items/add`,{method:'POST',body:{supplement_id:id}});
+        showToast(`Добавлено в комплекс ${target.name}`);
+      } catch { showToast('Не удалось добавить в комплекс'); }
+    });
     appEl.querySelector('[data-stack-toggle]')?.addEventListener('click', async (e)=>{
       const b=e.currentTarget; const id=Number(b.dataset.id); const inStack=b.dataset.in==='1';
       const action=inStack?'remove':'add'; haptic();
@@ -1276,6 +1301,14 @@ function adminField(label, field, value, kind='input') {
     }
   }
 
+
+  async function loadComplexes(force) {
+    try {
+      const res = await api('./api/complexes');
+      state.complexes = res.items || [];
+    } catch {}
+  }
+
   async function loadToday(force) {
     if (state.loadingToday && !force) return;
     state.loadingToday = true;
@@ -1299,23 +1332,27 @@ function adminField(label, field, value, kind='input') {
 
     return slots.map((slot) => {
       const items = slot.items || [];
-      const taken = items.filter(i => i.status === "taken").length;
+      const complexes = slot.complexes || [];
+      const totalTaken = items.filter(i => i.status === "taken").length + complexes.reduce((acc,c)=>acc + (c.taken_count||0),0);
+      const totalAll = items.length + complexes.reduce((acc,c)=>acc + (c.total_count||0),0);
       return `
         <article class="card fade" data-slot="${slot.slot_id}">
           <div class="row">
-            <div>
-              <strong>${slot.title || "Слот"} · ${slot.time_local || "--:--"}</strong>
-              <div class="muted">${slot.day || ""}</div>
-            </div>
-            <span class="chip green">✅ ${taken} / ${items.length}</span>
+            <div><strong>${slot.title || "Слот"} · ${slot.time_local || "--:--"}</strong></div>
+            <span class="chip green">✅ ${totalTaken} / ${totalAll}</span>
           </div>
-
-          <div class="slot-actions">
-            <button class="btn secondary" data-slot-action="all-taken" data-slot-id="${slot.slot_id}">Выпил всё</button>
-            <button class="btn secondary" data-slot-action="all-none" data-slot-id="${slot.slot_id}">Сбросить</button>
-          </div>
-
           <div>
+            ${complexes.map((c) => `
+              <div class="item-row" style="display:block" data-complex="${c.complex_id}">
+                <div class="row">
+                  <span><strong>🧩 ${c.name}</strong> <span class="muted">✅ ${c.taken_count}/${c.total_count}</span></span>
+                  <button class="btn secondary" data-complex-toggle="${c.complex_id}" data-next="${c.status==='taken'?'none':'taken'}">${c.status==='taken'?'Снять':'Выпил комплекс'}</button>
+                </div>
+                <details><summary>Состав</summary>
+                  ${(c.items||[]).map((item)=>`<button class="item-row" data-item="${item.supplement_id}" data-next="${item.status === "taken" ? "none" : "taken"}"><span class="status-pill ${statusClass(item.status)}">${statusText(item.status)}</span><span>${item.name}</span></button>`).join('')}
+                </details>
+              </div>
+            `).join('')}
             ${items.map((item) => `
               <button class="item-row" data-item="${item.supplement_id}" data-next="${item.status === "taken" ? "none" : "taken"}">
                 <span class="status-pill ${statusClass(item.status)}">${statusText(item.status)}</span>
@@ -1346,6 +1383,18 @@ function adminField(label, field, value, kind='input') {
         const supplementId = row.dataset.item;
         const next = row.dataset.next;
         toggleOne(supplementId, next);
+      });
+    });
+
+    appEl.querySelectorAll("[data-complex-toggle]").forEach((btn)=>{
+      btn.addEventListener("click", async ()=>{
+        const complexId = Number(btn.dataset.complexToggle);
+        const next = btn.dataset.next;
+        haptic();
+        try {
+          await api("./api/today/toggle_complex", { method:"POST", body:{ complex_id: complexId, status: next } });
+          await loadToday(true);
+        } catch { showToast("Не удалось отметить комплекс"); }
       });
     });
 

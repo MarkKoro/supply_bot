@@ -3,7 +3,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 import tz
 
-def main_menu(*, is_admin: bool = False) -> InlineKeyboardMarkup:
+def main_menu(*, is_admin: bool = False, show_complexes: bool = False) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton("📅 Сегодня", callback_data="menu:today")],
         [InlineKeyboardButton("💊 Мои БАДы", callback_data="menu:my")],
@@ -12,6 +12,8 @@ def main_menu(*, is_admin: bool = False) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🔓 Открыть WebApp", callback_data="menu:webapp")],
         [InlineKeyboardButton("⭐ Премиум", callback_data="menu:premium")],
     ]
+    if show_complexes:
+        rows.insert(4, [InlineKeyboardButton("🧩 Комплексы", callback_data="menu:complexes")])
     if is_admin:
         rows.append([InlineKeyboardButton("🛠 Админ-хаб", callback_data="admin:home")])
     rows.append([InlineKeyboardButton("⚙️ Настройки", callback_data="menu:settings")])

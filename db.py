@@ -69,6 +69,15 @@ CREATE TABLE IF NOT EXISTS users (
   tg_user_id    INTEGER UNIQUE NOT NULL,
   tz_name       TEXT NOT NULL DEFAULT 'UTC',
   created_at    TEXT NOT NULL,
+  created_at_utc TEXT DEFAULT '',
+  last_seen_utc TEXT DEFAULT '',
+  tg_username   TEXT DEFAULT '',
+  tg_first_name TEXT DEFAULT '',
+  tg_last_name  TEXT DEFAULT '',
+  is_banned     INTEGER DEFAULT 0,
+  banned_reason TEXT DEFAULT '',
+  banned_at_utc TEXT DEFAULT '',
+  deleted_at_utc TEXT DEFAULT '',
   last_local_date TEXT NOT NULL DEFAULT '',
   last_view     TEXT NOT NULL DEFAULT 'menu',
   last_view_payload TEXT NOT NULL DEFAULT '',
@@ -367,6 +376,15 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     await _ensure_column(conn, "users", "premium_plan", "TEXT")
     await _ensure_column(conn, "users", "premium_source", "TEXT")
     await _ensure_column(conn, "users", "premium_updated_at_utc", "TEXT")
+    await _ensure_column(conn, "users", "created_at_utc", "TEXT DEFAULT ''")
+    await _ensure_column(conn, "users", "last_seen_utc", "TEXT DEFAULT ''")
+    await _ensure_column(conn, "users", "tg_username", "TEXT DEFAULT ''")
+    await _ensure_column(conn, "users", "tg_first_name", "TEXT DEFAULT ''")
+    await _ensure_column(conn, "users", "tg_last_name", "TEXT DEFAULT ''")
+    await _ensure_column(conn, "users", "is_banned", "INTEGER DEFAULT 0")
+    await _ensure_column(conn, "users", "banned_reason", "TEXT DEFAULT ''")
+    await _ensure_column(conn, "users", "banned_at_utc", "TEXT DEFAULT ''")
+    await _ensure_column(conn, "users", "deleted_at_utc", "TEXT DEFAULT ''")
     await _ensure_column(conn, "supplements", "name_ru", "TEXT")
     await _ensure_column(conn, "supplements", "name_en", "TEXT")
     await _ensure_column(conn, "supplements", "aliases", "TEXT DEFAULT ''")
@@ -489,6 +507,33 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     )
     await conn.execute(
         "UPDATE users SET last_view_payload='' WHERE last_view_payload IS NULL"
+    )
+    await conn.execute(
+        "UPDATE users SET created_at_utc=COALESCE(created_at,'') WHERE created_at_utc IS NULL OR created_at_utc=''"
+    )
+    await conn.execute(
+        "UPDATE users SET last_seen_utc='' WHERE last_seen_utc IS NULL"
+    )
+    await conn.execute(
+        "UPDATE users SET tg_username='' WHERE tg_username IS NULL"
+    )
+    await conn.execute(
+        "UPDATE users SET tg_first_name='' WHERE tg_first_name IS NULL"
+    )
+    await conn.execute(
+        "UPDATE users SET tg_last_name='' WHERE tg_last_name IS NULL"
+    )
+    await conn.execute(
+        "UPDATE users SET is_banned=0 WHERE is_banned IS NULL"
+    )
+    await conn.execute(
+        "UPDATE users SET banned_reason='' WHERE banned_reason IS NULL"
+    )
+    await conn.execute(
+        "UPDATE users SET banned_at_utc='' WHERE banned_at_utc IS NULL"
+    )
+    await conn.execute(
+        "UPDATE users SET deleted_at_utc='' WHERE deleted_at_utc IS NULL"
     )
     await conn.execute(
         "UPDATE users SET last_chat_id=0 WHERE last_chat_id IS NULL"
@@ -1331,6 +1376,178 @@ async def get_or_create_user(conn: aiosqlite.Connection, tg_user_id: int, tz_nam
     await conn.commit()
     row2 = await fetchone(conn, "SELECT id FROM users WHERE tg_user_id=?", (tg_user_id,))
     return int(row2["id"])
+
+async def touch_user(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    username: str | None,
+    first: str | None,
+    last: str | None,
+) -> int:
+    user_id = await get_or_create_user(conn, int(tg_user_id), tz_name="")
+    now = utc_now_iso()
+    row = await fetchone(
+        conn,
+        "SELECT created_at_utc, tg_username, tg_first_name, tg_last_name FROM users WHERE tg_user_id=?",
+        (int(tg_user_id),),
+    )
+    created_at_utc = str((row["created_at_utc"] if row else "") or "").strip()
+    if not created_at_utc:
+        await conn.execute(
+            "UPDATE users SET created_at_utc=COALESCE(NULLIF(created_at_utc,''), NULLIF(created_at,''), ?), last_seen_utc=? WHERE tg_user_id=?",
+            (now, now, int(tg_user_id)),
+        )
+    else:
+        await conn.execute(
+            "UPDATE users SET last_seen_utc=? WHERE tg_user_id=?",
+            (now, int(tg_user_id)),
+        )
+
+    updates: list[str] = []
+    params: list[object] = []
+    if username is not None:
+        safe_username = str(username).strip()
+        if row is None or safe_username != str(row["tg_username"] or ""):
+            updates.append("tg_username=?")
+            params.append(safe_username)
+    if first is not None:
+        safe_first = str(first).strip()
+        if row is None or safe_first != str(row["tg_first_name"] or ""):
+            updates.append("tg_first_name=?")
+            params.append(safe_first)
+    if last is not None:
+        safe_last = str(last).strip()
+        if row is None or safe_last != str(row["tg_last_name"] or ""):
+            updates.append("tg_last_name=?")
+            params.append(safe_last)
+
+    if updates:
+        params.append(int(tg_user_id))
+        await conn.execute(f"UPDATE users SET {', '.join(updates)} WHERE tg_user_id=?", tuple(params))
+
+    await conn.commit()
+    return int(user_id)
+
+
+async def get_user_status(conn: aiosqlite.Connection, tg_user_id: int) -> dict:
+    row = await fetchone(
+        conn,
+        """SELECT is_banned, deleted_at_utc, banned_reason, premium_until_utc, created_at_utc, last_seen_utc
+           FROM users
+           WHERE tg_user_id=?""",
+        (int(tg_user_id),),
+    )
+    if not row:
+        return {
+            "is_banned": 0,
+            "deleted_at_utc": "",
+            "banned_reason": "",
+            "premium_until_utc": None,
+            "created_at_utc": "",
+            "last_seen_utc": "",
+        }
+    return {
+        "is_banned": int(row["is_banned"] or 0),
+        "deleted_at_utc": str(row["deleted_at_utc"] or ""),
+        "banned_reason": str(row["banned_reason"] or ""),
+        "premium_until_utc": row["premium_until_utc"],
+        "created_at_utc": str(row["created_at_utc"] or ""),
+        "last_seen_utc": str(row["last_seen_utc"] or ""),
+    }
+
+
+async def admin_get_user(conn: aiosqlite.Connection, tg_user_id: int) -> dict | None:
+    row = await fetchone(
+        conn,
+        """SELECT id, tg_user_id, tg_username, tg_first_name, created_at_utc, last_seen_utc,
+                  is_banned, banned_reason, banned_at_utc, deleted_at_utc, premium_until_utc
+           FROM users WHERE tg_user_id=?""",
+        (int(tg_user_id),),
+    )
+    if not row:
+        return None
+    paid_row = await fetchone(
+        conn,
+        "SELECT COUNT(*) AS cnt FROM payments WHERE user_id=? AND status='paid'",
+        (int(row["id"]),),
+    )
+    return {
+        "tg_user_id": int(row["tg_user_id"]),
+        "tg_username": str(row["tg_username"] or ""),
+        "tg_first_name": str(row["tg_first_name"] or ""),
+        "created_at_utc": str(row["created_at_utc"] or ""),
+        "last_seen_utc": str(row["last_seen_utc"] or ""),
+        "is_banned": int(row["is_banned"] or 0),
+        "banned_reason": str(row["banned_reason"] or ""),
+        "banned_at_utc": str(row["banned_at_utc"] or ""),
+        "deleted_at_utc": str(row["deleted_at_utc"] or ""),
+        "premium_until_utc": row["premium_until_utc"],
+        "payments_paid_count": int((paid_row["cnt"] if paid_row else 0) or 0),
+    }
+
+
+async def admin_set_ban(
+    conn: aiosqlite.Connection,
+    admin_tg_id: int,
+    tg_user_id: int,
+    is_banned: int,
+    reason: str = "",
+) -> None:
+    row = await fetchone(
+        conn,
+        "SELECT is_banned, banned_reason FROM users WHERE tg_user_id=?",
+        (int(tg_user_id),),
+    )
+    if not row:
+        raise ValueError("USER_NOT_FOUND")
+    prev = int(row["is_banned"] or 0)
+    next_value = 1 if int(is_banned) else 0
+    safe_reason = str(reason or "").strip()
+    banned_at = utc_now_iso() if next_value else ""
+    await conn.execute(
+        "UPDATE users SET is_banned=?, banned_reason=?, banned_at_utc=? WHERE tg_user_id=?",
+        (next_value, safe_reason if next_value else "", banned_at, int(tg_user_id)),
+    )
+    await conn.execute(
+        """INSERT INTO admin_audit(admin_tg_id, entity_type, entity_id, field, old_value, new_value, action, created_at_utc)
+           VALUES(?,?,?,?,?,?,?,?)""",
+        (int(admin_tg_id), "user", int(tg_user_id), "is_banned", str(prev), str(next_value), "set", utc_now_iso()),
+    )
+    await conn.commit()
+
+
+async def admin_delete_user(conn: aiosqlite.Connection, admin_tg_id: int, tg_user_id: int) -> None:
+    row = await fetchone(conn, "SELECT id, deleted_at_utc FROM users WHERE tg_user_id=?", (int(tg_user_id),))
+    if not row:
+        raise ValueError("USER_NOT_FOUND")
+    user_id = int(row["id"])
+    now = utc_now_iso()
+    await conn.execute(
+        "UPDATE users SET deleted_at_utc=?, is_banned=1, banned_reason=COALESCE(NULLIF(banned_reason,''),'deleted'), banned_at_utc=COALESCE(NULLIF(banned_at_utc,''),?) WHERE tg_user_id=?",
+        (now, now, int(tg_user_id)),
+    )
+    for table in (
+        "supplement_day_state",
+        "day_plan_items",
+        "daily_checkins",
+        "user_schedules",
+        "user_supplements",
+        "user_schedule_slots",
+        "user_intake_log",
+        "user_supp_settings",
+        "reminders",
+        "reminder_fires",
+        "intake_log",
+        "ui_state",
+    ):
+        await conn.execute(f"DELETE FROM {table} WHERE user_id=?", (user_id,))
+    await conn.execute(
+        """INSERT INTO admin_audit(admin_tg_id, entity_type, entity_id, field, old_value, new_value, action, created_at_utc)
+           VALUES(?,?,?,?,?,?,?,?)""",
+        (int(admin_tg_id), "user", int(tg_user_id), "deleted_at_utc", str(row["deleted_at_utc"] or ""), now, "delete", now),
+    )
+    await conn.commit()
+
 
 async def get_user_tz(conn: aiosqlite.Connection, tg_user_id: int) -> str | None:
     row = await fetchone(conn, "SELECT tz_name FROM users WHERE tg_user_id=?", (tg_user_id,))

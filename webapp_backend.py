@@ -4,6 +4,7 @@ from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException
+from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
@@ -87,6 +88,20 @@ async def _auth_user_id(init_data: str) -> int:
         tg_user_id = int(user_obj.get("id"))
     except Exception as exc:
         raise HTTPException(status_code=401, detail="Invalid user payload") from exc
+    conn = await db.connect(s.DB_PATH)
+    try:
+        await db.touch_user(
+            conn,
+            tg_user_id,
+            user_obj.get("username"),
+            user_obj.get("first_name"),
+            user_obj.get("last_name"),
+        )
+        status = await db.get_user_status(conn, tg_user_id)
+    finally:
+        await conn.close()
+    if int(status.get("is_banned") or 0) or str(status.get("deleted_at_utc") or "").strip():
+        raise HTTPException(status_code=403, detail={"ok": False, "code": "BANNED", "reason": str(status.get("banned_reason") or "")})
     return tg_user_id
 
 
@@ -98,6 +113,14 @@ async def _premium_guard(tg_user_id: int) -> bool:
         return await db.is_premium_active(conn, tg_user_id)
     finally:
         await conn.close()
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(_, exc: HTTPException):
+    if exc.status_code == 403 and isinstance(exc.detail, dict) and exc.detail.get("code") == "BANNED":
+        payload = {"ok": False, "code": "BANNED", "reason": str(exc.detail.get("reason") or "")}
+        return JSONResponse(payload, status_code=403)
+    return await http_exception_handler(_, exc)
 
 
 def _plans_payload() -> list[dict]:
@@ -141,9 +164,18 @@ async def api_me(x_telegram_init_data: str = Header(default="", alias="X-Telegra
     try:
         premium = is_admin or await db.is_premium_active(conn, tg_user_id)
         premium_until = None if is_admin else await db.get_premium_until(conn, tg_user_id)
+        status = await db.get_user_status(conn, tg_user_id)
     finally:
         await conn.close()
-    return JSONResponse({"ok": True, "premium": premium, "premium_until_utc": premium_until, "plans": _plans_payload(), "is_admin": is_admin})
+    return JSONResponse({
+        "ok": True,
+        "premium": premium,
+        "premium_until_utc": premium_until,
+        "plans": _plans_payload(),
+        "is_admin": is_admin,
+        "banned": bool(int(status.get("is_banned") or 0) or str(status.get("deleted_at_utc") or "").strip()),
+        "banned_reason": str(status.get("banned_reason") or ""),
+    })
 
 
 @app.get("/api/admin/supplements")
@@ -359,6 +391,70 @@ async def _today_payload(tg_user_id: int) -> dict:
     finally:
         await conn.close()
 
+
+
+
+class AdminUserBanBody(BaseModel):
+    is_banned: int
+    reason: str = ""
+
+
+@app.get("/api/admin/user/{tg_user_id}")
+async def api_admin_user_get(
+    tg_user_id: int,
+    x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
+):
+    admin_tg_id = await _auth_user_id(x_telegram_init_data)
+    forbidden = _admin_required_response(admin_tg_id)
+    if forbidden:
+        return forbidden
+    conn = await db.connect(s.DB_PATH)
+    try:
+        item = await db.admin_get_user(conn, int(tg_user_id))
+    finally:
+        await conn.close()
+    if not item:
+        return JSONResponse({"ok": False, "code": "NOT_FOUND"}, status_code=404)
+    return JSONResponse({"ok": True, "item": item})
+
+
+@app.post("/api/admin/user/{tg_user_id}/ban")
+async def api_admin_user_ban(
+    tg_user_id: int,
+    body: AdminUserBanBody,
+    x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
+):
+    admin_tg_id = await _auth_user_id(x_telegram_init_data)
+    forbidden = _admin_required_response(admin_tg_id)
+    if forbidden:
+        return forbidden
+    conn = await db.connect(s.DB_PATH)
+    try:
+        await db.admin_set_ban(conn, int(admin_tg_id), int(tg_user_id), int(body.is_banned), str(body.reason or ""))
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "code": str(exc)}, status_code=404)
+    finally:
+        await conn.close()
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/admin/user/{tg_user_id}/delete")
+async def api_admin_user_delete(
+    tg_user_id: int,
+    x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
+):
+    admin_tg_id = await _auth_user_id(x_telegram_init_data)
+    forbidden = _admin_required_response(admin_tg_id)
+    if forbidden:
+        return forbidden
+    conn = await db.connect(s.DB_PATH)
+    try:
+        await db.admin_delete_user(conn, int(admin_tg_id), int(tg_user_id))
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "code": str(exc)}, status_code=404)
+    finally:
+        await conn.close()
+    return JSONResponse({"ok": True})
 
 @app.get("/api/today")
 async def api_today(x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):

@@ -21,14 +21,20 @@ s = get_settings()
 BOT_TOKEN = s.TG_TOKEN
 
 
-def _is_admin(tg_user_id: int) -> bool:
-    return int(tg_user_id) in set(s.ADMIN_TG_IDS)
+async def _get_role_and_perms(tg_user_id: int) -> tuple[str, dict[str, bool]]:
+    conn = await db.connect(s.DB_PATH)
+    try:
+        role = await db.get_role(conn, int(tg_user_id))
+    finally:
+        await conn.close()
+    return role, db.role_perms(role)
 
 
-def _admin_required_response(tg_user_id: int) -> JSONResponse | None:
-    if not _is_admin(tg_user_id):
-        return JSONResponse({"ok": False, "code": "ADMIN_REQUIRED"}, status_code=403)
-    return None
+async def _require_perm(tg_user_id: int, perm: str) -> tuple[bool, JSONResponse | None, str, dict[str, bool]]:
+    role, perms = await _get_role_and_perms(tg_user_id)
+    if not perms.get(perm, False):
+        return False, JSONResponse({"ok": False, "code": "PERMISSION_DENIED"}, status_code=403), role, perms
+    return True, None, role, perms
 
 
 class VerifyBody(BaseModel):
@@ -106,7 +112,8 @@ async def _auth_user_id(init_data: str) -> int:
 
 
 async def _premium_guard(tg_user_id: int) -> bool:
-    if _is_admin(tg_user_id):
+    role, _ = await _get_role_and_perms(tg_user_id)
+    if role in {db.ROLE_OWNER, db.ROLE_ADMIN}:
         return True
     conn = await db.connect(s.DB_PATH)
     try:
@@ -159,9 +166,11 @@ def telegram_verify(body: VerifyBody):
 @app.get("/api/me")
 async def api_me(x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
     tg_user_id = await _auth_user_id(x_telegram_init_data)
-    is_admin = _is_admin(tg_user_id)
     conn = await db.connect(s.DB_PATH)
     try:
+        role = await db.get_role(conn, tg_user_id)
+        perms = db.role_perms(role)
+        is_admin = role != db.ROLE_NONE
         premium = is_admin or await db.is_premium_active(conn, tg_user_id)
         premium_until = None if is_admin else await db.get_premium_until(conn, tg_user_id)
         status = await db.get_user_status(conn, tg_user_id)
@@ -173,6 +182,8 @@ async def api_me(x_telegram_init_data: str = Header(default="", alias="X-Telegra
         "premium_until_utc": premium_until,
         "plans": _plans_payload(),
         "is_admin": is_admin,
+        "role": role,
+        "perms": perms,
         "banned": bool(int(status.get("is_banned") or 0) or str(status.get("deleted_at_utc") or "").strip()),
         "banned_reason": str(status.get("banned_reason") or ""),
     })
@@ -188,8 +199,8 @@ async def api_admin_supplements(
     x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
 ):
     tg_user_id = await _auth_user_id(x_telegram_init_data)
-    forbidden = _admin_required_response(tg_user_id)
-    if forbidden:
+    ok_perm, forbidden, _, _ = await _require_perm(tg_user_id, "content_edit")
+    if not ok_perm:
         return forbidden
     active_filter = None
     if str(is_active).strip() in {"0", "1"}:
@@ -218,8 +229,8 @@ async def api_admin_supplement(
     x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
 ):
     tg_user_id = await _auth_user_id(x_telegram_init_data)
-    forbidden = _admin_required_response(tg_user_id)
-    if forbidden:
+    ok_perm, forbidden, _, _ = await _require_perm(tg_user_id, "content_edit")
+    if not ok_perm:
         return forbidden
     conn = await db.connect(s.DB_PATH)
     try:
@@ -244,12 +255,15 @@ async def api_admin_supplement_set_field(
     x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
 ):
     tg_user_id = await _auth_user_id(x_telegram_init_data)
-    forbidden = _admin_required_response(tg_user_id)
-    if forbidden:
+    ok_perm, forbidden, role, _ = await _require_perm(tg_user_id, "content_edit")
+    if not ok_perm:
         return forbidden
+    safe_field = str(body.field or "")
+    if role == db.ROLE_EDITOR and safe_field in {"evidence_grade", "confidence"}:
+        return JSONResponse({"ok": False, "code": "PERMISSION_DENIED"}, status_code=403)
     conn = await db.connect(s.DB_PATH)
     try:
-        await db.admin_set_supplement_field(conn, int(tg_user_id), int(supplement_id), str(body.field or ""), body.value)
+        await db.admin_set_supplement_field(conn, int(tg_user_id), int(supplement_id), safe_field, body.value)
     except ValueError as exc:
         return JSONResponse({"ok": False, "code": str(exc)}, status_code=400)
     finally:
@@ -274,8 +288,8 @@ async def api_admin_supplement_toggle_active(
     x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
 ):
     tg_user_id = await _auth_user_id(x_telegram_init_data)
-    forbidden = _admin_required_response(tg_user_id)
-    if forbidden:
+    ok_perm, forbidden, _, _ = await _require_perm(tg_user_id, "content_edit")
+    if not ok_perm:
         return forbidden
     target = 1 if int(body.is_active) else 0
     conn = await db.connect(s.DB_PATH)
@@ -294,8 +308,8 @@ async def api_admin_bulk_preview(
     x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
 ):
     tg_user_id = await _auth_user_id(x_telegram_init_data)
-    forbidden = _admin_required_response(tg_user_id)
-    if forbidden:
+    ok_perm, forbidden, _, _ = await _require_perm(tg_user_id, "content_bulk")
+    if not ok_perm:
         return forbidden
     if not body.ids:
         return JSONResponse({"ok": False, "error": "VALIDATION"}, status_code=400)
@@ -315,8 +329,8 @@ async def api_admin_bulk_apply(
     x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
 ):
     tg_user_id = await _auth_user_id(x_telegram_init_data)
-    forbidden = _admin_required_response(tg_user_id)
-    if forbidden:
+    ok_perm, forbidden, _, _ = await _require_perm(tg_user_id, "content_bulk")
+    if not ok_perm:
         return forbidden
     if not body.ids:
         return JSONResponse({"ok": False, "error": "VALIDATION"}, status_code=400)
@@ -405,8 +419,8 @@ async def api_admin_user_get(
     x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
 ):
     admin_tg_id = await _auth_user_id(x_telegram_init_data)
-    forbidden = _admin_required_response(admin_tg_id)
-    if forbidden:
+    ok_perm, forbidden, _, _ = await _require_perm(admin_tg_id, "users_view")
+    if not ok_perm:
         return forbidden
     conn = await db.connect(s.DB_PATH)
     try:
@@ -425,8 +439,8 @@ async def api_admin_user_ban(
     x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
 ):
     admin_tg_id = await _auth_user_id(x_telegram_init_data)
-    forbidden = _admin_required_response(admin_tg_id)
-    if forbidden:
+    ok_perm, forbidden, _, _ = await _require_perm(admin_tg_id, "users_ban")
+    if not ok_perm:
         return forbidden
     conn = await db.connect(s.DB_PATH)
     try:
@@ -444,8 +458,8 @@ async def api_admin_user_delete(
     x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
 ):
     admin_tg_id = await _auth_user_id(x_telegram_init_data)
-    forbidden = _admin_required_response(admin_tg_id)
-    if forbidden:
+    ok_perm, forbidden, _, _ = await _require_perm(admin_tg_id, "users_delete")
+    if not ok_perm:
         return forbidden
     conn = await db.connect(s.DB_PATH)
     try:
@@ -455,6 +469,55 @@ async def api_admin_user_delete(
     finally:
         await conn.close()
     return JSONResponse({"ok": True})
+
+
+class AdminRoleSetBody(BaseModel):
+    tg_user_id: int
+    role: str
+    note: str = ""
+
+
+@app.get("/api/admin/roles/get")
+async def api_admin_roles_get(
+    tg_user_id: int,
+    x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
+):
+    actor_tg_id = await _auth_user_id(x_telegram_init_data)
+    ok_perm, forbidden, _, _ = await _require_perm(actor_tg_id, "roles_manage")
+    if not ok_perm:
+        return forbidden
+    conn = await db.connect(s.DB_PATH)
+    try:
+        role = await db.get_role(conn, int(tg_user_id))
+    finally:
+        await conn.close()
+    return JSONResponse({"ok": True, "tg_user_id": int(tg_user_id), "role": role})
+
+
+@app.post("/api/admin/roles/set")
+async def api_admin_roles_set(
+    body: AdminRoleSetBody,
+    x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
+):
+    actor_tg_id = await _auth_user_id(x_telegram_init_data)
+    ok_perm, forbidden, _, _ = await _require_perm(actor_tg_id, "roles_manage")
+    if not ok_perm:
+        return forbidden
+    target_id = int(body.tg_user_id)
+    role = str(body.role or "").strip().lower()
+    conn = await db.connect(s.DB_PATH)
+    try:
+        if role == db.ROLE_NONE:
+            await db.remove_role(conn, int(actor_tg_id), target_id)
+        else:
+            await db.set_role(conn, int(actor_tg_id), target_id, role, str(body.note or ""))
+        await conn.commit()
+        current_role = await db.get_role(conn, target_id)
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "code": str(exc)}, status_code=400)
+    finally:
+        await conn.close()
+    return JSONResponse({"ok": True, "tg_user_id": target_id, "role": current_role})
 
 @app.get("/api/today")
 async def api_today(x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):

@@ -339,7 +339,8 @@
       userLookupId: "",
       userDetail: null,
       userBanReason: "",
-      userDeleteConfirm: ""
+      userDeleteConfirm: "",
+      roleTargetId: ""
     }
   };
 
@@ -353,7 +354,7 @@
   ];
 
   function activeTabs() {
-    return state.me?.is_admin ? tabs.concat([{ id: "admin", title: "Admin", icon: "🛠" }]) : tabs;
+    return state.me?.role && state.me.role !== "none" ? tabs.concat([{ id: "admin", title: "Админ", icon: "🛠" }]) : tabs;
   }
 
   const themeText = tg?.themeParams?.text_color || "#eef2ff";
@@ -411,7 +412,7 @@
 
     if (res.status === 403) {
       const data403 = await res.json().catch(() => ({}));
-      if (data403?.code === "ADMIN_REQUIRED") throw new Error("ADMIN_REQUIRED");
+      if (data403?.code === "ADMIN_REQUIRED" || data403?.code === "PERMISSION_DENIED") throw new Error("PERMISSION_DENIED");
       if (data403?.code === "BANNED") {
         showBannedScreen(data403?.reason || "");
         throw new Error("BANNED");
@@ -564,7 +565,7 @@
 
   function renderTabs(isLocked) {
     const list = activeTabs();
-    return `<nav class="tabs ${state.me?.is_admin ? "admin-enabled" : ""}">
+    return `<nav class="tabs ${(state.me?.role && state.me.role !== "none") ? "admin-enabled" : ""}">
       ${list.map(t => `<button class="tab ${state.activeTab === t.id ? "active" : ""}" data-tab="${t.id}" ${isLocked ? "disabled" : ""}>
         <span class="tab-emoji">${t.icon}</span>
         <span>${t.title}</span>
@@ -882,99 +883,53 @@
   }
 
   function renderAdmin() {
-    if (!state.me?.is_admin) {
-      return `<div class="card">Нет доступа к разделу Admin.</div>`;
+    if (!state.me?.role || state.me.role === "none") {
+      return `<div class="card">Нет доступа к разделу администрирования.</div>`;
     }
     const a = state.admin;
+    const perms = state.me?.perms || {};
     const selected = selectedAdminIds();
     return `
-      <div class="card fade">
-        <div class="row"><strong>Admin Panel</strong><span class="muted">${a.total} найдено</span></div>
+      ${perms.content_edit ? `<div class="card fade">
+        <div class="row"><strong>Редактор добавок</strong><span class="muted">${a.total} найдено</span></div>
         <div style="display:flex; gap:8px; margin-top:8px;">
           <input id="adminSearch" class="input" placeholder="Поиск по slug / названию" value="${esc(a.q)}" />
-          <button class="btn secondary" id="adminSelectionToggle">${a.selectionMode ? 'Готово' : 'Выбор'}</button>
+          ${perms.content_bulk ? `<button class="btn secondary" id="adminSelectionToggle">${a.selectionMode ? 'Готово' : 'Выбор'}</button>` : ''}
         </div>
-        <div style="display:flex; gap:8px; margin-top:8px;">
-          <select id="adminActive" class="select">
-            <option value="" ${a.filters.is_active===''?'selected':''}>Все</option>
-            <option value="1" ${a.filters.is_active==='1'?'selected':''}>Только активные</option>
-            <option value="0" ${a.filters.is_active==='0'?'selected':''}>Только скрытые</option>
-          </select>
-          <select id="adminEvidence" class="select">
-            <option value="" ${a.filters.evidence===''?'selected':''}>Evidence: все</option>
-            ${['A','B','C','D'].map(v=>`<option value="${v}" ${a.filters.evidence===v?'selected':''}>${v}</option>`).join('')}
-          </select>
-        </div>
-        ${a.selectionMode ? `<div class="admin-select-count">Выбрано: ${selected.length}</div>` : ''}
-      </div>
-      <div class="card fade">
+      </div>` : ''}
+
+      ${(perms.users_view || perms.users_ban || perms.users_delete) ? `<div class="card fade">
         <div class="row"><strong>Пользователи</strong><span class="muted">модерация</span></div>
         <div style="display:flex; gap:8px; margin-top:8px;">
           <input id="adminUserTgId" class="input" placeholder="tg_id" value="${esc(a.userLookupId || '')}" />
           <button class="btn" id="adminUserFind">Найти</button>
         </div>
-        ${a.userDetail ? `
-          <div class="card" style="margin-top:8px;">
-            <div><b>ID:</b> ${a.userDetail.tg_user_id}</div>
-            <div><b>Username:</b> ${esc(a.userDetail.tg_username || '—')}</div>
-            <div><b>Создан:</b> ${esc(a.userDetail.created_at_utc || '—')}</div>
-            <div><b>Последняя активность:</b> ${esc(a.userDetail.last_seen_utc || '—')}</div>
-            <div><b>Premium until:</b> ${esc(a.userDetail.premium_until_utc || '—')}</div>
-            <div><b>Оплат paid:</b> ${Number(a.userDetail.payments_paid_count || 0)}</div>
-            <div><b>Статус:</b> ${a.userDetail.deleted_at_utc ? 'deleted' : (a.userDetail.is_banned ? 'banned' : 'active')}</div>
-            ${a.userDetail.banned_reason ? `<div><b>Причина:</b> ${esc(a.userDetail.banned_reason)}</div>` : ''}
-            <div style="display:flex; gap:8px; margin-top:8px; flex-wrap:wrap;">
-              <input id="adminUserBanReason" class="input" placeholder="Причина бана (опционально)" value="${esc(a.userBanReason || '')}" />
-              <button class="btn" data-admin-user-ban="1">Забанить</button>
-              <button class="btn secondary" data-admin-user-ban="0">Разбанить</button>
-            </div>
-            <div style="margin-top:8px;">
-              <div class="muted">Для удаления введите DELETE</div>
-              <div style="display:flex; gap:8px; margin-top:6px;">
-                <input id="adminUserDeleteConfirm" class="input" placeholder="DELETE" value="${esc(a.userDeleteConfirm || '')}" />
-                <button class="btn secondary" id="adminUserDeleteBtn">Удалить</button>
-              </div>
-            </div>
-          </div>
-        ` : ''}
-      </div>
-      <div class="admin-grid">
-        ${(a.items || []).map((it)=> a.selectionMode ? `
-          <label class="card admin-card selecting">
-            <input type="checkbox" data-admin-select="${it.id}" ${a.selectedIds[it.id] ? 'checked' : ''}/>
-            <div style="flex:1">
-              <div class="row"><strong>${esc(it.name_ru || it.slug)}</strong><span class="muted">${it.is_active ? '🟢' : '⚪'}</span></div>
-              <div class="muted" style="margin-top:6px">${esc(it.slug)} • ${esc(it.evidence_grade || '—')} / ${esc(it.confidence || '—')} • ${it.has_link ? '🔗' : '—'}</div>
-            </div>
-          </label>` : `
-          <button class="card admin-card" data-admin-open="${it.id}">
-            <div class="row"><strong>${esc(it.name_ru || it.slug)}</strong><span class="muted">${it.is_active ? '🟢' : '⚪'}</span></div>
-            <div class="muted" style="margin-top:6px">${esc(it.slug)} • ${esc(it.evidence_grade || '—')} / ${esc(it.confidence || '—')} • ${it.has_link ? '🔗' : '—'}</div>
-          </button>`).join('') || '<div class="card">Ничего не найдено.</div>'}
-      </div>
-      ${a.items.length < a.total ? '<div class="card"><button class="btn" style="width:100%" id="adminMore">Загрузить ещё</button></div>' : ''}
-      ${a.selectionMode ? `<div class="bulk-bar">
-        <div class="bulk-quick">
-          <button class="btn" data-bulk-quick="hide">Скрыть</button>
-          <button class="btn" data-bulk-quick="show">Показать</button>
-          <button class="btn secondary" data-bulk-modal="token">Теги/Таргеты/Бурдены</button>
-          <button class="btn secondary" data-bulk-modal="purchase">Ссылки</button>
+      </div>` : ''}
+
+      ${perms.roles_manage ? `<div class="card fade">
+        <div class="row"><strong>Роли доступа</strong></div>
+        <div style="display:flex; gap:8px; margin-top:8px;">
+          <input id="roleTgId" class="input" placeholder="tg_user_id" value="" />
+          <button class="btn" id="roleLoadBtn">Загрузить</button>
         </div>
-        <div class="bulk-more">
-          <button class="btn secondary" id="bulkMoreBtn">⋯</button>
-          ${a.bulkMenuOpen ? `<div class="bulk-menu">
-            <button class="btn secondary" data-bulk-modal="evidence">Evidence</button>
-            <button class="btn secondary" data-bulk-modal="confidence">Confidence</button>
-          </div>` : ''}
+        <div style="display:flex; gap:8px; margin-top:8px;">
+          <select id="roleSelect" class="select">${['owner','admin','editor','support','none'].map((r)=>`<option value="${r}">${r}</option>`).join('')}</select>
+          <button class="btn" id="roleSaveBtn">Сохранить</button>
         </div>
+      </div>` : ''}
+
+      ${perms.content_edit ? `<div class="admin-grid">
+        ${(a.items || []).map((it)=> a.selectionMode && perms.content_bulk ? `<label class="card admin-card selecting"><input type="checkbox" data-admin-select="${it.id}" ${a.selectedIds[it.id] ? 'checked' : ''}/><div style="flex:1"><div class="row"><strong>${esc(it.name_ru || it.slug)}</strong><span class="muted">${it.is_active ? '🟢' : '⚪'}</span></div></div></label>` : `<button class="card admin-card" data-admin-open="${it.id}"><div class="row"><strong>${esc(it.name_ru || it.slug)}</strong><span class="muted">${it.is_active ? '🟢' : '⚪'}</span></div></button>`).join('') || '<div class="card">Ничего не найдено.</div>'}
       </div>` : ''}
       ${a.detail ? renderAdminModal(a.detail.item || {}, a.detail.audit || []) : ''}
       ${a.bulkPrompt ? renderBulkPrompt(a.bulkPrompt) : ''}
       ${a.bulkConfirm ? renderBulkConfirm(a.bulkConfirm.preview, a.bulkConfirm.op, a.bulkConfirm.params) : ''}
+      ${(a.selectionMode && perms.content_bulk) ? `<div class="bulk-bar"><button class="btn" data-bulk-quick="hide">Скрыть</button><button class="btn" data-bulk-quick="show">Показать</button></div>` : ''}
+      ${perms.content_bulk && a.selectionMode ? `<div class="admin-select-count">Выбрано: ${selected.length}</div>` : ''}
     `;
   }
 
-  function adminField(label, field, value, kind='input') {
+function adminField(label, field, value, kind='input') {
     const err = state.admin.errors[field] || '';
     const input = kind === 'textarea'
       ? `<textarea class="textarea" data-admin-field="${field}">${esc(value || '')}</textarea>`
@@ -1020,7 +975,7 @@
       a.items = a.page === 0 ? (res.items || []) : a.items.concat(res.items || []);
       a.total = res.total || 0;
     } catch (e) {
-      if (e.message === 'ADMIN_REQUIRED') showToast('Только для админов');
+      if (e.message === 'PERMISSION_DENIED') showToast('Только для админов');
       else showToast('Ошибка загрузки admin-списка');
     } finally {
       state.admin.loading = false;
@@ -1062,7 +1017,7 @@
       state.admin.bulkConfirm = { preview, op, params };
       renderActiveTab();
     } catch (e) {
-      if (e.message === 'ADMIN_REQUIRED') { state.me.is_admin = false; state.activeTab = 'today'; renderMainApp(); renderActiveTab(); showToast('нет прав'); return; }
+      if (e.message === 'PERMISSION_DENIED') { state.me.role = "none"; state.me.perms = {}; state.activeTab = 'today'; renderMainApp(); renderActiveTab(); showToast('нет прав'); return; }
       showToast('Ошибка preview');
     }
   }
@@ -1166,6 +1121,29 @@
       if (action === 'purchase_template') await runBulk(action, { template: document.getElementById('bulkTemplate')?.value || '' });
       if (action === 'purchase_clear') await runBulk(action, {});
     }));
+    document.getElementById('roleLoadBtn')?.addEventListener('click', async ()=>{
+      const tgId = Number(document.getElementById('roleTgId')?.value || 0);
+      if (!tgId) return showToast('Введите tg_id');
+      try {
+        const res = await api(`./api/admin/roles/get?tg_user_id=${tgId}`);
+        document.getElementById('roleSelect').value = res.role || 'none';
+        state.admin.roleTargetId = tgId;
+      } catch {
+        showToast('Не удалось загрузить роль');
+      }
+    });
+    document.getElementById('roleSaveBtn')?.addEventListener('click', async ()=>{
+      const tgId = Number(state.admin.roleTargetId || document.getElementById('roleTgId')?.value || 0);
+      const role = document.getElementById('roleSelect')?.value || 'none';
+      if (!tgId) return showToast('Введите tg_id');
+      try {
+        await api('./api/admin/roles/set', { method:'POST', body:{ tg_user_id: tgId, role, note: '' } });
+        showToast('Роль сохранена');
+      } catch {
+        showToast('Не удалось сохранить роль');
+      }
+    });
+
     appEl.querySelector('[data-bulk-apply-confirm]')?.addEventListener('click', async ()=>{
       const conf = state.admin.bulkConfirm;
       if (!conf) return;
@@ -1179,7 +1157,7 @@
         state.admin.page = 0;
         await loadAdminSupplements(true);
       } catch (e) {
-        if (e.message === 'ADMIN_REQUIRED') { state.me.is_admin = false; state.activeTab = 'today'; renderMainApp(); renderActiveTab(); showToast('нет прав'); return; }
+        if (e.message === 'PERMISSION_DENIED') { state.me.role = "none"; state.me.perms = {}; state.activeTab = 'today'; renderMainApp(); renderActiveTab(); showToast('нет прав'); return; }
         showToast('Не удалось применить');
       }
     });

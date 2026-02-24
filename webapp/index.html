@@ -184,6 +184,12 @@
     .error-text { color: #ffb3bb; font-size: 12px; margin-top: 4px; }
     .admin-grid { display:grid; gap:10px; }
     .admin-card { cursor:pointer; }
+    .admin-card.selecting { display:flex; align-items:flex-start; gap:10px; }
+    .admin-select-count { margin-top:8px; font-size:12px; color: var(--muted); }
+    .bulk-bar { position: fixed; left:10px; right:10px; bottom: calc(80px + env(safe-area-inset-bottom)); z-index: 29; display:flex; gap:8px; overflow-x:auto; padding:10px; border-radius:16px; background: rgba(8,13,34,0.92); border:1px solid rgba(255,255,255,0.2); }
+    .bulk-quick { display:flex; gap:8px; }
+    .bulk-more { position: relative; }
+    .bulk-menu { position:absolute; right:0; bottom:42px; display:grid; gap:6px; min-width:180px; padding:8px; border-radius:12px; background: rgba(8,13,34,0.96); border:1px solid rgba(255,255,255,0.2); }
 
     .status-pill {
       min-width: 72px;
@@ -324,7 +330,12 @@
       auditOpen: false,
       searchDebounce: null,
       savingField: "",
-      errors: {}
+      errors: {},
+      selectionMode: false,
+      selectedIds: {},
+      bulkMenuOpen: false,
+      bulkPrompt: "",
+      bulkConfirm: null
     }
   };
 
@@ -807,16 +818,55 @@
     document.getElementById('resetFilters')?.addEventListener('click', async ()=>{ state.catalog.filters={evidence:[],targets:[],burdens:[],sort:'alpha'}; state.catalog.filtersOpen=false; state.catalog.page=0; await loadCatalog(true); });
   }
 
+
+  function selectedAdminIds() {
+    return Object.keys(state.admin.selectedIds || {}).filter((k)=>state.admin.selectedIds[k]).map((k)=>Number(k)).filter((x)=>Number.isFinite(x) && x>0);
+  }
+
+  function clearAdminSelection() {
+    state.admin.selectedIds = {};
+    state.admin.bulkMenuOpen = false;
+  }
+
+  function renderBulkPrompt(kind) {
+    const titles = { token: 'Токен', evidence: 'Evidence', confidence: 'Confidence', purchase: 'Шаблон ссылки' };
+    const tokenFields = [
+      {key:'tags_json',label:'tags_json'},
+      {key:'body_targets_json',label:'body_targets_json'},
+      {key:'body_burdens_json',label:'body_burdens_json'},
+    ];
+    if (!kind) return '';
+    return `<div class="sheet-backdrop" data-bulk-close></div><aside class="sheet fade">
+      <div class="row"><strong>${titles[kind] || 'Bulk'}</strong><button class="btn secondary" data-bulk-close>Закрыть</button></div>
+      ${kind==='token' ? `<div style="margin-top:10px"><select id="bulkTokenField" class="select">${tokenFields.map((f)=>`<option value="${f.key}">${f.label}</option>`).join('')}</select></div><div style="margin-top:8px"><input id="bulkTokenValue" class="input" placeholder="Например: brain"/></div><div class="row" style="margin-top:8px"><button class="btn" data-bulk-action="token_add">Добавить</button><button class="btn secondary" data-bulk-action="token_remove">Удалить</button></div>` : ''}
+      ${kind==='evidence' ? `<div style="margin-top:10px"><select id="bulkEvidence" class="select">${['A','B','C','D'].map((v)=>`<option value="${v}">${v}</option>`).join('')}</select></div><div class="row" style="margin-top:8px"><button class="btn" data-bulk-action="set_evidence">Preview</button></div>` : ''}
+      ${kind==='confidence' ? `<div style="margin-top:10px"><select id="bulkConfidence" class="select">${['High','Medium','Low','Unknown'].map((v)=>`<option value="${v}">${v}</option>`).join('')}</select></div><div class="row" style="margin-top:8px"><button class="btn" data-bulk-action="set_confidence">Preview</button></div>` : ''}
+      ${kind==='purchase' ? `<div style="margin-top:10px"><input id="bulkTemplate" class="input" value="https://shop.example.com/search?q={slug}"/></div><div class="row" style="margin-top:8px"><button class="btn" data-bulk-action="purchase_template">Preview</button><button class="btn secondary" data-bulk-action="purchase_clear">Очистить ссылки</button></div>` : ''}
+    </aside>`;
+  }
+
+  function renderBulkConfirm(preview, op, params) {
+    const examples = (preview.examples || []).slice(0,8);
+    return `<div class="sheet-backdrop" data-bulk-close></div><aside class="sheet fade">
+      <div class="row"><strong>Предпросмотр</strong><button class="btn secondary" data-bulk-close>Отмена</button></div>
+      <div class="card" style="margin-top:8px">Изменится: <b>${preview.changed || 0}</b>, без изменений: <b>${preview.skipped || 0}</b></div>
+      <div class="card" style="margin-top:8px">${examples.map((x)=>`#${x.id} ${esc(x.slug)} · ${esc(x.field)}<br><span class="muted">${esc(String(x.old||'—'))} → ${esc(String(x.new||'—'))}</span>`).join('<hr style="border-color:rgba(255,255,255,.12)">') || 'Нет примеров'}</div>
+      <div class="row" style="margin-top:10px"><button class="btn" data-bulk-apply-confirm="1">Применить</button></div>
+    </aside>`;
+  }
+
   function renderAdmin() {
     if (!state.me?.is_admin) {
       return `<div class="card">Нет доступа к разделу Admin.</div>`;
     }
     const a = state.admin;
+    const selected = selectedAdminIds();
     return `
       <div class="card fade">
         <div class="row"><strong>Admin Panel</strong><span class="muted">${a.total} найдено</span></div>
         <div style="display:flex; gap:8px; margin-top:8px;">
           <input id="adminSearch" class="input" placeholder="Поиск по slug / названию" value="${esc(a.q)}" />
+          <button class="btn secondary" id="adminSelectionToggle">${a.selectionMode ? 'Готово' : 'Выбор'}</button>
         </div>
         <div style="display:flex; gap:8px; margin-top:8px;">
           <select id="adminActive" class="select">
@@ -829,17 +879,41 @@
             ${['A','B','C','D'].map(v=>`<option value="${v}" ${a.filters.evidence===v?'selected':''}>${v}</option>`).join('')}
           </select>
         </div>
+        ${a.selectionMode ? `<div class="admin-select-count">Выбрано: ${selected.length}</div>` : ''}
       </div>
       <div class="admin-grid">
-        ${(a.items || []).map((it)=>`
+        ${(a.items || []).map((it)=> a.selectionMode ? `
+          <label class="card admin-card selecting">
+            <input type="checkbox" data-admin-select="${it.id}" ${a.selectedIds[it.id] ? 'checked' : ''}/>
+            <div style="flex:1">
+              <div class="row"><strong>${esc(it.name_ru || it.slug)}</strong><span class="muted">${it.is_active ? '🟢' : '⚪'}</span></div>
+              <div class="muted" style="margin-top:6px">${esc(it.slug)} • ${esc(it.evidence_grade || '—')} / ${esc(it.confidence || '—')} • ${it.has_link ? '🔗' : '—'}</div>
+            </div>
+          </label>` : `
           <button class="card admin-card" data-admin-open="${it.id}">
             <div class="row"><strong>${esc(it.name_ru || it.slug)}</strong><span class="muted">${it.is_active ? '🟢' : '⚪'}</span></div>
             <div class="muted" style="margin-top:6px">${esc(it.slug)} • ${esc(it.evidence_grade || '—')} / ${esc(it.confidence || '—')} • ${it.has_link ? '🔗' : '—'}</div>
-          </button>
-        `).join('') || '<div class="card">Ничего не найдено.</div>'}
+          </button>`).join('') || '<div class="card">Ничего не найдено.</div>'}
       </div>
       ${a.items.length < a.total ? '<div class="card"><button class="btn" style="width:100%" id="adminMore">Загрузить ещё</button></div>' : ''}
+      ${a.selectionMode ? `<div class="bulk-bar">
+        <div class="bulk-quick">
+          <button class="btn" data-bulk-quick="hide">Скрыть</button>
+          <button class="btn" data-bulk-quick="show">Показать</button>
+          <button class="btn secondary" data-bulk-modal="token">Теги/Таргеты/Бурдены</button>
+          <button class="btn secondary" data-bulk-modal="purchase">Ссылки</button>
+        </div>
+        <div class="bulk-more">
+          <button class="btn secondary" id="bulkMoreBtn">⋯</button>
+          ${a.bulkMenuOpen ? `<div class="bulk-menu">
+            <button class="btn secondary" data-bulk-modal="evidence">Evidence</button>
+            <button class="btn secondary" data-bulk-modal="confidence">Confidence</button>
+          </div>` : ''}
+        </div>
+      </div>` : ''}
       ${a.detail ? renderAdminModal(a.detail.item || {}, a.detail.audit || []) : ''}
+      ${a.bulkPrompt ? renderBulkPrompt(a.bulkPrompt) : ''}
+      ${a.bulkConfirm ? renderBulkConfirm(a.bulkConfirm.preview, a.bulkConfirm.op, a.bulkConfirm.params) : ''}
     `;
   }
 
@@ -923,16 +997,38 @@
     }
   }
 
+  async function runBulk(op, params) {
+    const ids = selectedAdminIds();
+    if (!ids.length) { showToast('Выберите элементы'); return; }
+    try {
+      const preview = await api('./api/admin/bulk/preview', { method:'POST', body:{ ids, op, params } });
+      state.admin.bulkConfirm = { preview, op, params };
+      renderActiveTab();
+    } catch (e) {
+      if (e.message === 'ADMIN_REQUIRED') { state.me.is_admin = false; state.activeTab = 'today'; renderMainApp(); renderActiveTab(); showToast('нет прав'); return; }
+      showToast('Ошибка preview');
+    }
+  }
+
   function bindAdminEvents() {
     document.getElementById('adminSearch')?.addEventListener('input', (e)=>{
       state.admin.q = e.target.value;
       clearTimeout(state.admin.searchDebounce);
       state.admin.searchDebounce = setTimeout(async ()=>{ state.admin.page = 0; await loadAdminSupplements(true); }, 250);
     });
+    document.getElementById('adminSelectionToggle')?.addEventListener('click', ()=>{
+      state.admin.selectionMode = !state.admin.selectionMode;
+      state.admin.bulkPrompt = '';
+      state.admin.bulkConfirm = null;
+      state.admin.bulkMenuOpen = false;
+      if (!state.admin.selectionMode) clearAdminSelection();
+      renderActiveTab();
+    });
     document.getElementById('adminActive')?.addEventListener('change', async (e)=>{ state.admin.filters.is_active = e.target.value; state.admin.page=0; await loadAdminSupplements(true); });
     document.getElementById('adminEvidence')?.addEventListener('change', async (e)=>{ state.admin.filters.evidence = e.target.value; state.admin.page=0; await loadAdminSupplements(true); });
     document.getElementById('adminMore')?.addEventListener('click', async ()=>{ state.admin.page += 1; await loadAdminSupplements(true); });
     appEl.querySelectorAll('[data-admin-open]').forEach((el)=>el.addEventListener('click', ()=>loadAdminSupplement(el.dataset.adminOpen)));
+    appEl.querySelectorAll('[data-admin-select]').forEach((el)=>el.addEventListener('change', (e)=>{ state.admin.selectedIds[Number(e.target.dataset.adminSelect)] = !!e.target.checked; renderActiveTab(); }));
     appEl.querySelectorAll('[data-admin-close]').forEach((el)=>el.addEventListener('click', ()=>{ state.admin.detail = null; renderActiveTab(); }));
     appEl.querySelectorAll('[data-admin-field]').forEach((el)=>el.addEventListener('input', (e)=>{
       if (!state.admin.detail?.item) return;
@@ -951,6 +1047,42 @@
         await loadAdminSupplements(true);
       } catch {
         showToast('Не удалось сменить статус');
+      }
+    });
+
+    document.getElementById('bulkMoreBtn')?.addEventListener('click', ()=>{ state.admin.bulkMenuOpen = !state.admin.bulkMenuOpen; renderActiveTab(); });
+    appEl.querySelectorAll('[data-bulk-quick]').forEach((el)=>el.addEventListener('click', async ()=>{
+      const kind = el.dataset.bulkQuick;
+      if (kind === 'hide') await runBulk('set_active', { is_active: 0 });
+      if (kind === 'show') await runBulk('set_active', { is_active: 1 });
+    }));
+    appEl.querySelectorAll('[data-bulk-modal]').forEach((el)=>el.addEventListener('click', ()=>{ state.admin.bulkPrompt = el.dataset.bulkModal; state.admin.bulkMenuOpen = false; renderActiveTab(); }));
+    appEl.querySelectorAll('[data-bulk-close]').forEach((el)=>el.addEventListener('click', ()=>{ state.admin.bulkPrompt=''; state.admin.bulkConfirm=null; renderActiveTab(); }));
+    appEl.querySelectorAll('[data-bulk-action]').forEach((el)=>el.addEventListener('click', async ()=>{
+      const action = el.dataset.bulkAction;
+      if (action === 'token_add' || action === 'token_remove') {
+        await runBulk(action, { field: document.getElementById('bulkTokenField')?.value || 'tags_json', token: document.getElementById('bulkTokenValue')?.value || '' });
+      }
+      if (action === 'set_evidence') await runBulk(action, { evidence_grade: document.getElementById('bulkEvidence')?.value || '' });
+      if (action === 'set_confidence') await runBulk(action, { confidence: document.getElementById('bulkConfidence')?.value || '' });
+      if (action === 'purchase_template') await runBulk(action, { template: document.getElementById('bulkTemplate')?.value || '' });
+      if (action === 'purchase_clear') await runBulk(action, {});
+    }));
+    appEl.querySelector('[data-bulk-apply-confirm]')?.addEventListener('click', async ()=>{
+      const conf = state.admin.bulkConfirm;
+      if (!conf) return;
+      try {
+        const ids = selectedAdminIds();
+        const res = await api('./api/admin/bulk/apply', { method:'POST', body:{ ids, op: conf.op, params: conf.params } });
+        haptic();
+        showToast(`✅ Готово: ${res.changed || 0} изменений`);
+        state.admin.bulkPrompt='';
+        state.admin.bulkConfirm=null;
+        state.admin.page = 0;
+        await loadAdminSupplements(true);
+      } catch (e) {
+        if (e.message === 'ADMIN_REQUIRED') { state.me.is_admin = false; state.activeTab = 'today'; renderMainApp(); renderActiveTab(); showToast('нет прав'); return; }
+        showToast('Не удалось применить');
       }
     });
   }

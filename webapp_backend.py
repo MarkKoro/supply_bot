@@ -229,6 +229,12 @@ class AdminToggleActiveBody(BaseModel):
     is_active: int
 
 
+class AdminBulkBody(BaseModel):
+    ids: list[int]
+    op: str
+    params: dict = {}
+
+
 @app.post("/api/admin/supplement/{supplement_id}/toggle_active")
 async def api_admin_supplement_toggle_active(
     supplement_id: int,
@@ -248,6 +254,48 @@ async def api_admin_supplement_toggle_active(
     finally:
         await conn.close()
     return JSONResponse({"ok": True})
+
+
+@app.post("/api/admin/bulk/preview")
+async def api_admin_bulk_preview(
+    body: AdminBulkBody,
+    x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
+):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    forbidden = _admin_required_response(tg_user_id)
+    if forbidden:
+        return forbidden
+    if not body.ids:
+        return JSONResponse({"ok": False, "error": "VALIDATION"}, status_code=400)
+    conn = await db.connect(s.DB_PATH)
+    try:
+        summary = await db.admin_bulk_apply(conn, int(tg_user_id), list(body.ids), str(body.op or ""), dict(body.params or {}), dry_run=True)
+    except ValueError:
+        return JSONResponse({"ok": False, "error": "VALIDATION"}, status_code=400)
+    finally:
+        await conn.close()
+    return JSONResponse({"ok": True, **summary})
+
+
+@app.post("/api/admin/bulk/apply")
+async def api_admin_bulk_apply(
+    body: AdminBulkBody,
+    x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
+):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    forbidden = _admin_required_response(tg_user_id)
+    if forbidden:
+        return forbidden
+    if not body.ids:
+        return JSONResponse({"ok": False, "error": "VALIDATION"}, status_code=400)
+    conn = await db.connect(s.DB_PATH)
+    try:
+        summary = await db.admin_bulk_apply(conn, int(tg_user_id), list(body.ids), str(body.op or ""), dict(body.params or {}), dry_run=False)
+    except ValueError:
+        return JSONResponse({"ok": False, "error": "VALIDATION"}, status_code=400)
+    finally:
+        await conn.close()
+    return JSONResponse({"ok": True, **summary})
 
 
 @app.post("/api/billing/create_invoice_link")

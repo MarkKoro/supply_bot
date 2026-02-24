@@ -2247,6 +2247,8 @@ async def admin_set_supplement_field(
     supplement_id: int,
     field: str,
     value: str | None,
+    *,
+    commit: bool = True,
 ) -> None:
     safe_field = str(field or "").strip()
     column = _supp_col(safe_field)
@@ -2276,7 +2278,8 @@ async def admin_set_supplement_field(
         normalized,
         action,
     )
-    await conn.commit()
+    if commit:
+        await conn.commit()
 
 
 async def admin_toggle_supplement_active(
@@ -2284,6 +2287,8 @@ async def admin_toggle_supplement_active(
     admin_tg_id: int,
     supplement_id: int,
     is_active: int,
+    *,
+    commit: bool = True,
 ) -> None:
     row = await fetchone(
         conn,
@@ -2307,7 +2312,180 @@ async def admin_toggle_supplement_active(
         new_value,
         "toggle_active",
     )
-    await conn.commit()
+    if commit:
+        await conn.commit()
+
+
+def _json_list_load(s: str) -> list[str]:
+    raw = str(s or "").strip()
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return []
+    if not isinstance(data, list):
+        return []
+    out: list[str] = []
+    for item in data:
+        if not isinstance(item, str):
+            continue
+        token = _token_norm(item)
+        if token:
+            out.append(token)
+    return sorted(set(out))
+
+
+def _json_list_dump(lst: list[str]) -> str:
+    cleaned = sorted({_token_norm(item) for item in list(lst or []) if _token_norm(item)})
+    return json.dumps(cleaned, ensure_ascii=False)
+
+
+def _token_norm(t: str) -> str:
+    return str(t or "").strip().lower().replace(" ", "_")
+
+
+async def admin_bulk_apply(
+    conn,
+    admin_tg_id: int,
+    ids: list[int],
+    op: str,
+    params: dict,
+    dry_run: bool = True,
+) -> dict:
+    target_ids = sorted({int(item) for item in list(ids or []) if int(item) > 0})
+    if not target_ids:
+        raise ValueError("validation")
+
+    op_name = str(op or "").strip()
+    payload = dict(params or {})
+    fields = ["id", "slug", "is_active", "evidence_grade", "confidence", "tags_json", "body_targets_json", "body_burdens_json", "purchase_url"]
+    placeholders = ",".join("?" for _ in target_ids)
+    rows = await fetchall(
+        conn,
+        f"""SELECT {', '.join(fields)}
+              FROM supplements
+              WHERE id IN ({placeholders})""",
+        tuple(target_ids),
+    )
+    by_id = {int(row["id"]): row for row in rows}
+
+    actions: list[dict] = []
+    examples: list[dict] = []
+    changed = 0
+    skipped = 0
+
+    for supplement_id in target_ids:
+        row = by_id.get(supplement_id)
+        if not row:
+            skipped += 1
+            continue
+        slug = str(row["slug"] or "")
+        field = ""
+        old_value = ""
+        new_value = ""
+
+        if op_name == "set_active":
+            if "is_active" not in payload:
+                raise ValueError("validation")
+            target_active = 1 if int(payload.get("is_active") or 0) else 0
+            old_active = int(row["is_active"] or 0)
+            if old_active == target_active:
+                skipped += 1
+                continue
+            field = "is_active"
+            old_value = str(old_active)
+            new_value = str(target_active)
+        elif op_name == "set_evidence":
+            evidence = str(payload.get("evidence_grade") or "").strip().upper()
+            if evidence not in {"A", "B", "C", "D"}:
+                raise ValueError("validation")
+            old_text = str(row["evidence_grade"] or "")
+            if old_text == evidence:
+                skipped += 1
+                continue
+            field = "evidence_grade"
+            old_value = old_text
+            new_value = evidence
+        elif op_name == "set_confidence":
+            confidence = str(payload.get("confidence") or "").strip()
+            if confidence not in {"High", "Medium", "Low", "Unknown"}:
+                raise ValueError("validation")
+            old_text = str(row["confidence"] or "")
+            if old_text == confidence:
+                skipped += 1
+                continue
+            field = "confidence"
+            old_value = old_text
+            new_value = confidence
+        elif op_name in {"token_add", "token_remove"}:
+            field_name = str(payload.get("field") or "").strip()
+            if field_name not in {"tags_json", "body_targets_json", "body_burdens_json"}:
+                raise ValueError("validation")
+            token = _token_norm(str(payload.get("token") or ""))
+            if not token:
+                raise ValueError("validation")
+            current_tokens = set(_json_list_load(str(row[field_name] or "[]")))
+            before = sorted(current_tokens)
+            if op_name == "token_add":
+                current_tokens.add(token)
+            else:
+                current_tokens.discard(token)
+            after = sorted(current_tokens)
+            if before == after:
+                skipped += 1
+                continue
+            field = field_name
+            old_value = _json_list_dump(before)
+            new_value = _json_list_dump(after)
+        elif op_name == "purchase_template":
+            template = str(payload.get("template") or "").strip()
+            if not template or "{slug}" not in template or not (template.startswith("http://") or template.startswith("https://")):
+                raise ValueError("validation")
+            old_text = str(row["purchase_url"] or "")
+            next_url = template.replace("{slug}", slug)
+            if old_text == next_url:
+                skipped += 1
+                continue
+            field = "purchase_url"
+            old_value = old_text
+            new_value = next_url
+        elif op_name == "purchase_clear":
+            old_text = str(row["purchase_url"] or "")
+            if not old_text:
+                skipped += 1
+                continue
+            field = "purchase_url"
+            old_value = old_text
+            new_value = ""
+        else:
+            raise ValueError("validation")
+
+        changed += 1
+        actions.append({"id": supplement_id, "field": field, "value": new_value, "is_active": (int(new_value) if field == "is_active" else None)})
+        if len(examples) < 8:
+            examples.append({"id": supplement_id, "slug": slug, "field": field, "old": old_value, "new": new_value})
+
+    if not dry_run and actions:
+        await conn.execute("BEGIN")
+        try:
+            for action in actions:
+                if action["field"] == "is_active":
+                    await admin_toggle_supplement_active(conn, int(admin_tg_id), int(action["id"]), int(action["is_active"]), commit=False)
+                else:
+                    await admin_set_supplement_field(conn, int(admin_tg_id), int(action["id"]), str(action["field"]), action["value"], commit=False)
+            await conn.commit()
+        except Exception:
+            await conn.rollback()
+            raise
+
+    return {
+        "dry_run": bool(dry_run),
+        "requested": len(ids or []),
+        "changed": changed,
+        "skipped": skipped,
+        "examples": examples,
+    }
 
 
 async def admin_delete_supplement_hard(conn: aiosqlite.Connection, admin_tg_id: int, supplement_id: int) -> None:

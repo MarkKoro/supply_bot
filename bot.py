@@ -131,9 +131,19 @@ def _is_admin(tg_user_id: int) -> bool:
     return settings_is_admin(tg_user_id) or tg_user_id in _settings_cache.ADMIN_IDS or tg_user_id in getattr(_settings_cache, "ADMIN_TG_IDS", set())
 
 
-def _is_admin_ctx(context: ContextTypes.DEFAULT_TYPE, tg_user_id: int) -> bool:
+async def _get_role_perms_ctx(context: ContextTypes.DEFAULT_TYPE, tg_user_id: int) -> tuple[str, dict[str, bool]]:
     settings = context.application.bot_data["settings"]
-    return tg_user_id in settings.ADMIN_IDS or tg_user_id in getattr(settings, "ADMIN_TG_IDS", set())
+    conn = await db.connect(settings.DB_PATH)
+    try:
+        role = await db.get_role(conn, int(tg_user_id))
+    finally:
+        await conn.close()
+    return role, db.role_perms(role)
+
+
+async def _has_perm_ctx(context: ContextTypes.DEFAULT_TYPE, tg_user_id: int, perm: str) -> bool:
+    role, perms = await _get_role_perms_ctx(context, tg_user_id)
+    return bool(perms.get(perm, False))
 
 
 def _slugify_ascii(value: str) -> str:
@@ -1474,7 +1484,7 @@ async def home(
     await show(
         update, context,
         _home_text(),
-        main_menu(is_admin=_is_admin(user_id)),
+        main_menu(is_admin=(await _get_role_perms_ctx(context, user_id))[0] != db.ROLE_NONE),
         route="menu:home",
         target_chat_id=target_chat_id,
         target_message_id=target_message_id,
@@ -2071,15 +2081,58 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await _show_admin_home(update, context)
             return
 
-        if data.startswith("admin:") and not _is_admin_ctx(context, tg_uid):
-            await show(
-                update,
-                context,
-                "Нет доступа.",
-                InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")]]),
-                route="menu:home",
-            )
+        if data == "admin:bulk_stub":
+            await show(update, context, "Bulk-операции доступны в WebApp разделе Admin.", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="admin:home")]]), route="admin:home")
             return
+
+        if data == "admin:users_stub":
+            await show(update, context, "Модерация пользователей доступна в WebApp разделе Admin.", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="admin:home")]]), route="admin:home")
+            return
+
+        if data == "admin:roles":
+            context.user_data[WAITING_KEY] = "owner_wait_target_tg_id"
+            await show(update, context, "Введите tg_user_id пользователя для управления ролью.", InlineKeyboardMarkup([[InlineKeyboardButton("Отмена", callback_data="admin:home")]]), route="owner_wait_target_tg_id")
+            return
+
+        if data.startswith("admin:roles:set:"):
+            parts = data.split(":")
+            role_to_set = parts[3] if len(parts) > 3 else "none"
+            target_id = int(context.user_data.get("owner_target_tg_id") or 0)
+            if target_id <= 0:
+                await show(update, context, "Сначала укажите tg_user_id.", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="admin:roles")]]), route="admin:roles")
+                return
+            if role_to_set == "none":
+                await db.remove_role(conn, tg_uid, target_id)
+            else:
+                await db.set_role(conn, tg_uid, target_id, role_to_set, "bot owner panel")
+            await conn.commit()
+            role_now = await db.get_role(conn, target_id)
+            await show(update, context, f"Роль пользователя {target_id}: {role_now}", InlineKeyboardMarkup([[InlineKeyboardButton("Сделать админом", callback_data="admin:roles:set:admin")],[InlineKeyboardButton("Сделать редактором", callback_data="admin:roles:set:editor")],[InlineKeyboardButton("Сделать саппортом", callback_data="admin:roles:set:support")],[InlineKeyboardButton("Снять роль", callback_data="admin:roles:set:none")],[InlineKeyboardButton("⬅️ Назад", callback_data="admin:home")]]), route="admin:roles")
+            return
+
+        if data.startswith("admin:"):
+            role, perms = await _get_role_perms_ctx(context, tg_uid)
+            if role == db.ROLE_NONE:
+                await show(
+                    update,
+                    context,
+                    "Нет доступа.",
+                    InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")]]),
+                    route="menu:home",
+                )
+                return
+            required_perm = None
+            if data.startswith("admin:supp"):
+                required_perm = "content_edit"
+            elif data.startswith("admin:stack") or data == "admin:stacks":
+                required_perm = "content_bulk"
+            elif data.startswith("admin:roles"):
+                required_perm = "roles_manage"
+            elif data.startswith("admin:users"):
+                required_perm = "users_view"
+            if required_perm and not perms.get(required_perm, False):
+                await show(update, context, "Нет доступа к разделу.", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="admin:home")]]), route="admin:home")
+                return
 
         if data == "admin:supp_search":
             await show(
@@ -3808,7 +3861,7 @@ async def on_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     "✅ Часовой пояс сохранён: "
                     f"{label}\n"
                     f"Текущее время у тебя: {local_now}",
-                    main_menu(is_admin=_is_admin(update.effective_user.id if update.effective_user else 0)),
+                    main_menu(is_admin=(await _get_role_perms_ctx(context, update.effective_user.id if update.effective_user else 0))[0] != db.ROLE_NONE),
                     route="menu:home",
                 )
         finally:
@@ -4535,9 +4588,24 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 pass
             return
+        if ui_screen == "owner_wait_target_tg_id":
+            if not await _require_admin(update, context, "roles_manage"):
+                return
+            if not txt.isdigit():
+                await show(update, context, "Нужен числовой tg_user_id.", InlineKeyboardMarkup([[InlineKeyboardButton("Отмена", callback_data="admin:home")]]), route="owner_wait_target_tg_id")
+                return
+            target_id = int(txt)
+            context.user_data["owner_target_tg_id"] = target_id
+            role_now = await db.get_role(conn, target_id)
+            await show(update, context, f"Текущая роль {target_id}: {role_now}", InlineKeyboardMarkup([[InlineKeyboardButton("Сделать админом", callback_data="admin:roles:set:admin")],[InlineKeyboardButton("Сделать редактором", callback_data="admin:roles:set:editor")],[InlineKeyboardButton("Сделать саппортом", callback_data="admin:roles:set:support")],[InlineKeyboardButton("Снять роль", callback_data="admin:roles:set:none")],[InlineKeyboardButton("Отмена", callback_data="admin:home")]]), route="admin:roles")
+            try:
+                await update.message.delete()
+            except Exception:
+                pass
+            return
+
         if ui_screen == "admin_wait_query":
-            if not _is_admin_ctx(context, tg_uid):
-                await _require_admin(update, context)
+            if not await _require_admin(update, context, "content_edit"):
                 return
             await _show_admin_supp_results(update, context, conn, txt, offset=0)
             try:
@@ -4547,8 +4615,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
 
         if ui_screen == "admin_wait_link":
-            if not _is_admin_ctx(context, tg_uid):
-                await _require_admin(update, context)
+            if not await _require_admin(update, context, "content_edit"):
                 return
             try:
                 payload_data = json.loads(ui_payload) if ui_payload else {}
@@ -4575,8 +4642,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
 
         if ui_screen == "admin_edit_field":
-            if not _is_admin_ctx(context, tg_uid):
-                await _require_admin(update, context)
+            if not await _require_admin(update, context, "content_edit"):
                 return
             try:
                 payload_data = json.loads(ui_payload) if ui_payload else {}
@@ -4617,8 +4683,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
 
         if ui_screen == "admin:stack:new_wait":
-            if not _is_admin_ctx(context, tg_uid):
-                await show(update, context, "Нет доступа.", back(), route="menu:home")
+            if not await _require_admin(update, context, "content_bulk"):
                 return
             title = txt[:120].strip()
             if not title:
@@ -4655,8 +4720,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 pass
             return
         if ui_screen == "admin:stack:edit_wait":
-            if not _is_admin_ctx(context, tg_uid):
-                await show(update, context, "Нет доступа.", back(), route="menu:home")
+            if not await _require_admin(update, context, "content_bulk"):
                 return
             try:
                 payload_data = json.loads(ui_payload) if ui_payload else {}
@@ -5389,7 +5453,7 @@ async def _show_catalog_home(
             "Выбери, как искать: по названию, по доказательности, "
             "по целям/влиянию или через готовые стеки."
         ),
-        catalog_home(is_admin=_is_admin(tg_uid)),
+        catalog_home(is_admin=(await _get_role_perms_ctx(context, tg_uid))[0] != db.ROLE_NONE),
         route="cat:home",
         payload={"mode": "home"},
         target_chat_id=target_chat_id,
@@ -5397,9 +5461,10 @@ async def _show_catalog_home(
     )
 
 
-async def _require_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+async def _require_admin(update: Update, context: ContextTypes.DEFAULT_TYPE, perm: str | None = None) -> bool:
     tg_uid = update.effective_user.id if update.effective_user else 0
-    if _is_admin_ctx(context, tg_uid):
+    role, perms = await _get_role_perms_ctx(context, tg_uid)
+    if role != db.ROLE_NONE and (perm is None or perms.get(perm, False)):
         return True
     await show(
         update,
@@ -5884,7 +5949,7 @@ async def _show_catalog_list(
                 update,
                 context,
                 "Каталог пуст. Похоже, сиды ещё не импортированы…",
-                catalog_home(is_admin=_is_admin(tg_uid)),
+                catalog_home(is_admin=(await _get_role_perms_ctx(context, tg_uid))[0] != db.ROLE_NONE),
                 route="cat:home",
                 payload={"mode": "home"},
                 target_chat_id=target_chat_id,
@@ -5895,7 +5960,7 @@ async def _show_catalog_list(
             update,
             context,
             "Ничего не найдено.",
-            catalog_home(is_admin=_is_admin(tg_uid)),
+            catalog_home(is_admin=(await _get_role_perms_ctx(context, tg_uid))[0] != db.ROLE_NONE),
             route="cat:home",
             payload={"mode": "home"},
             target_chat_id=target_chat_id,

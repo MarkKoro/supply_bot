@@ -61,6 +61,35 @@ async def _get_date_col(conn: aiosqlite.Connection, table: str) -> str | None:
             return candidate
     return None
 
+
+ROLE_OWNER = "owner"
+ROLE_ADMIN = "admin"
+ROLE_EDITOR = "editor"
+ROLE_SUPPORT = "support"
+ROLE_NONE = "none"
+
+ALL_ROLES = {ROLE_OWNER, ROLE_ADMIN, ROLE_EDITOR, ROLE_SUPPORT, ROLE_NONE}
+
+ROLE_PERMISSIONS: dict[str, set[str]] = {
+    "content_edit": {ROLE_OWNER, ROLE_ADMIN, ROLE_EDITOR},
+    "content_bulk": {ROLE_OWNER, ROLE_ADMIN},
+    "users_view": {ROLE_OWNER, ROLE_ADMIN, ROLE_SUPPORT},
+    "users_ban": {ROLE_OWNER, ROLE_ADMIN, ROLE_SUPPORT},
+    "users_delete": {ROLE_OWNER, ROLE_ADMIN},
+    "roles_manage": {ROLE_OWNER},
+    "payments_view": {ROLE_OWNER, ROLE_ADMIN},
+    "system_diag": {ROLE_OWNER, ROLE_ADMIN},
+}
+
+
+def role_has(role: str, perm: str) -> bool:
+    return str(role or ROLE_NONE) in ROLE_PERMISSIONS.get(str(perm or ""), set())
+
+
+def role_perms(role: str) -> dict[str, bool]:
+    safe_role = str(role or ROLE_NONE)
+    return {perm: role_has(safe_role, perm) for perm in ROLE_PERMISSIONS}
+
 SCHEMA_SQL = """PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
 
@@ -144,6 +173,14 @@ CREATE TABLE IF NOT EXISTS admin_audit (
 );
 CREATE INDEX IF NOT EXISTS idx_admin_audit_entity_created
   ON admin_audit(entity_type, entity_id, created_at_utc DESC);
+
+CREATE TABLE IF NOT EXISTS user_roles (
+  tg_user_id INTEGER PRIMARY KEY,
+  role TEXT NOT NULL,
+  granted_by_tg_id INTEGER NOT NULL,
+  granted_at_utc TEXT NOT NULL,
+  note TEXT DEFAULT ''
+);
 
 CREATE INDEX IF NOT EXISTS idx_supplements_name ON supplements(name);
 CREATE INDEX IF NOT EXISTS idx_supplements_slug ON supplements(slug);
@@ -359,6 +396,11 @@ async def init_db(db_path: str) -> None:
     try:
         await conn.executescript(SCHEMA_SQL)
         await _apply_migrations(conn)
+        try:
+            from settings import get_settings
+            await bootstrap_roles_from_settings(conn, get_settings())
+        except Exception:
+            pass
         await conn.commit()
     finally:
         await conn.close()
@@ -426,6 +468,7 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     await _ensure_column(conn, "supplements", "is_active", "INTEGER NOT NULL DEFAULT 1")
     await _ensure_column(conn, "supplements", "updated_at_utc", "TEXT NOT NULL DEFAULT ''")
     await _ensure_admin_audit(conn)
+    await _ensure_user_roles(conn)
     await _ensure_aliases_table(conn)
     await _ensure_user_supplements(conn)
     await _ensure_user_schedules(conn)
@@ -1153,6 +1196,80 @@ async def _ensure_payments_table(conn: aiosqlite.Connection) -> None:
            ON payments(telegram_payment_charge_id)
            WHERE telegram_payment_charge_id IS NOT NULL AND telegram_payment_charge_id != ''"""
     )
+
+
+async def _ensure_user_roles(conn: aiosqlite.Connection) -> None:
+    if not await _table_exists(conn, "user_roles"):
+        await conn.execute(
+            """CREATE TABLE IF NOT EXISTS user_roles (
+  tg_user_id INTEGER PRIMARY KEY,
+  role TEXT NOT NULL,
+  granted_by_tg_id INTEGER NOT NULL,
+  granted_at_utc TEXT NOT NULL,
+  note TEXT DEFAULT ''
+)"""
+        )
+    await _ensure_column(conn, "user_roles", "tg_user_id", "INTEGER")
+    await _ensure_column(conn, "user_roles", "role", "TEXT NOT NULL DEFAULT 'none'")
+    await _ensure_column(conn, "user_roles", "granted_by_tg_id", "INTEGER NOT NULL DEFAULT 0")
+    await _ensure_column(conn, "user_roles", "granted_at_utc", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "user_roles", "note", "TEXT DEFAULT ''")
+
+
+async def get_role(conn: aiosqlite.Connection, tg_user_id: int) -> str:
+    row = await fetchone(conn, "SELECT role FROM user_roles WHERE tg_user_id=? LIMIT 1", (int(tg_user_id),))
+    if not row:
+        return ROLE_NONE
+    role = str(row["role"] or ROLE_NONE).strip().lower()
+    return role if role in ALL_ROLES else ROLE_NONE
+
+
+async def set_role(conn: aiosqlite.Connection, owner_tg_id: int, target_tg_id: int, role: str, note: str = "") -> None:
+    safe_role = str(role or "").strip().lower()
+    if safe_role not in ALL_ROLES or safe_role == ROLE_NONE:
+        raise ValueError("invalid_role")
+    now = utc_now_iso()
+    await conn.execute(
+        """INSERT INTO user_roles(tg_user_id, role, granted_by_tg_id, granted_at_utc, note)
+           VALUES(?,?,?,?,?)
+           ON CONFLICT(tg_user_id) DO UPDATE SET
+             role=excluded.role,
+             granted_by_tg_id=excluded.granted_by_tg_id,
+             granted_at_utc=excluded.granted_at_utc,
+             note=excluded.note""",
+        (int(target_tg_id), safe_role, int(owner_tg_id), now, str(note or "")[:500]),
+    )
+    await conn.execute(
+        """INSERT INTO admin_audit(admin_tg_id, entity_type, entity_id, field, old_value, new_value, action, created_at_utc)
+           VALUES(?,?,?,?,?,?,?,?)""",
+        (int(owner_tg_id), "user", int(target_tg_id), "role", None, safe_role, "set", now),
+    )
+
+
+async def remove_role(conn: aiosqlite.Connection, owner_tg_id: int, target_tg_id: int) -> None:
+    prev = await get_role(conn, int(target_tg_id))
+    await conn.execute("DELETE FROM user_roles WHERE tg_user_id=?", (int(target_tg_id),))
+    now = utc_now_iso()
+    await conn.execute(
+        """INSERT INTO admin_audit(admin_tg_id, entity_type, entity_id, field, old_value, new_value, action, created_at_utc)
+           VALUES(?,?,?,?,?,?,?,?)""",
+        (int(owner_tg_id), "user", int(target_tg_id), "role", prev, ROLE_NONE, "clear", now),
+    )
+
+
+async def bootstrap_roles_from_settings(conn: aiosqlite.Connection, settings) -> None:
+    owner_tg_id = int(getattr(settings, "OWNER_TG_ID", 0) or 0)
+    admin_tg_ids = set(getattr(settings, "ADMIN_TG_IDS", set()) or set())
+    if owner_tg_id > 0:
+        await set_role(conn, owner_tg_id, owner_tg_id, ROLE_OWNER, "bootstrap owner")
+    for admin_tg_id in admin_tg_ids:
+        aid = int(admin_tg_id or 0)
+        if aid <= 0:
+            continue
+        existing_role = await get_role(conn, aid)
+        if existing_role == ROLE_NONE:
+            actor = owner_tg_id if owner_tg_id > 0 else aid
+            await set_role(conn, actor, aid, ROLE_ADMIN, "bootstrap admin")
 
 
 async def _ensure_admin_audit(conn: aiosqlite.Connection) -> None:
@@ -2471,6 +2588,9 @@ async def admin_set_supplement_field(
     column = _supp_col(safe_field)
     if safe_field not in ADMIN_EDITABLE_SUPPLEMENT_FIELDS:
         raise ValueError("unsupported field")
+    actor_role = await get_role(conn, int(admin_tg_id))
+    if actor_role == ROLE_EDITOR and safe_field in {"evidence_grade", "confidence"}:
+        raise ValueError("permission_denied")
     normalized = _validate_admin_supplement_value(safe_field, value)
     row = await fetchone(
         conn,

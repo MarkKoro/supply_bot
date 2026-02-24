@@ -22,6 +22,7 @@ class Settings:
     DEBUG: bool
     ADMIN_IDS: list[int]
     ADMIN_TG_IDS: set[int]
+    OWNER_TG_ID: int
     WEBAPP_URL: str
     YOOKASSA_PROVIDER_TOKEN: str
     BILLING_ENABLED_RUB: bool
@@ -104,6 +105,7 @@ def get_settings() -> Settings:
 
     admin_ids = _parse_admin_ids(os.getenv("ADMIN_IDS", ""))
     admin_tg_ids = get_admin_ids() or set(admin_ids)
+    owner_tg_id = int(os.getenv("OWNER_TG_ID", "0").strip() or "0")
 
     return Settings(
         TG_TOKEN=tg,
@@ -129,6 +131,7 @@ def get_settings() -> Settings:
         DEBUG=_parse_bool(os.getenv("DEBUG", "")),
         ADMIN_IDS=admin_ids,
         ADMIN_TG_IDS=admin_tg_ids,
+        OWNER_TG_ID=owner_tg_id,
         WEBAPP_URL=os.getenv("WEBAPP_URL", "").strip(),
         YOOKASSA_PROVIDER_TOKEN=yookassa_provider_token,
         BILLING_ENABLED_RUB=_parse_bool(os.getenv("BILLING_ENABLED_RUB", "1" if yookassa_provider_token else "0")),

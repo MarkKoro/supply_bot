@@ -476,11 +476,19 @@ def shop_url_button(url: str) -> InlineKeyboardButton:
     return InlineKeyboardButton("🛒 Перейти в магазин", url=url)
 
 
-def admin_hub_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔎 Найти БАД", callback_data="admin:supp_search")],
-        [InlineKeyboardButton("↩️ Назад", callback_data="menu:home")],
-    ])
+def admin_hub_kb(*, perms: dict[str, bool] | None = None) -> InlineKeyboardMarkup:
+    perms = perms or {}
+    rows: list[list[InlineKeyboardButton]] = []
+    if perms.get("content_edit", False):
+        rows.append([InlineKeyboardButton("🔎 Контент: найти БАД", callback_data="admin:supp_search")])
+    if perms.get("content_bulk", False):
+        rows.append([InlineKeyboardButton("📦 Bulk операции", callback_data="admin:bulk_stub")])
+    if perms.get("users_view", False) or perms.get("users_ban", False):
+        rows.append([InlineKeyboardButton("👤 Пользователи", callback_data="admin:users_stub")])
+    if perms.get("roles_manage", False):
+        rows.append([InlineKeyboardButton("🛡 Роли", callback_data="admin:roles")])
+    rows.append([InlineKeyboardButton("↩️ Назад", callback_data="menu:home")])
+    return InlineKeyboardMarkup(rows)
 
 
 def admin_supp_results_kb(rows: list[dict], *, offset: int, has_prev: bool, has_next: bool) -> InlineKeyboardMarkup:

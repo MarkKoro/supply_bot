@@ -511,8 +511,49 @@ def admin_supp_card_kb(supplement_id: int, purchase_url: str) -> InlineKeyboardM
         rows.append([InlineKeyboardButton("🛒 Открыть ссылку", url=purchase_url)])
     else:
         rows.append([InlineKeyboardButton("➕ Добавить ссылку", callback_data=f"admin:supp_set_link:{supplement_id}")])
+    rows.append([InlineKeyboardButton("✏️ Редактировать поля", callback_data=f"admin:supp_edit:{supplement_id}")])
+    rows.append([InlineKeyboardButton("🧾 История правок", callback_data=f"admin:supp_audit:{supplement_id}")])
+    rows.append([InlineKeyboardButton("🚫 Скрыть/Показать в каталоге", callback_data=f"admin:supp_toggle:{supplement_id}")])
     rows.append([InlineKeyboardButton("↩️ Назад к списку", callback_data="admin:back")])
     return InlineKeyboardMarkup(rows)
+
+
+def admin_supp_field_picker_kb(supplement_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Название RU", callback_data=f"admin:supp_edit_field:{supplement_id}:name_ru")],
+        [InlineKeyboardButton("Название EN", callback_data=f"admin:supp_edit_field:{supplement_id}:name_en")],
+        [InlineKeyboardButton("Summary (verified)", callback_data=f"admin:supp_edit_field:{supplement_id}:summary_ru_verified")],
+        [InlineKeyboardButton("Summary (theoretical)", callback_data=f"admin:supp_edit_field:{supplement_id}:summary_ru_theoretical")],
+        [InlineKeyboardButton("Dose", callback_data=f"admin:supp_edit_field:{supplement_id}:dose_ru")],
+        [InlineKeyboardButton("Timing", callback_data=f"admin:supp_edit_field:{supplement_id}:timing_ru")],
+        [InlineKeyboardButton("Safety", callback_data=f"admin:supp_edit_field:{supplement_id}:safety_ru")],
+        [InlineKeyboardButton("Evidence grade", callback_data=f"admin:supp_edit_field:{supplement_id}:evidence_grade")],
+        [InlineKeyboardButton("Confidence", callback_data=f"admin:supp_edit_field:{supplement_id}:confidence")],
+        [InlineKeyboardButton("Tags", callback_data=f"admin:supp_edit_field:{supplement_id}:tags_json")],
+        [InlineKeyboardButton("Targets", callback_data=f"admin:supp_edit_field:{supplement_id}:body_targets_json")],
+        [InlineKeyboardButton("Burdens", callback_data=f"admin:supp_edit_field:{supplement_id}:body_burdens_json")],
+        [InlineKeyboardButton("Purchase URL", callback_data=f"admin:supp_edit_field:{supplement_id}:purchase_url")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data=f"admin:supp_open:{supplement_id}")],
+    ])
+
+
+def admin_supp_edit_wait_kb(supplement_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🧹 Очистить поле", callback_data=f"admin:supp_edit_clear:{supplement_id}")],
+        [InlineKeyboardButton("✖️ Отмена", callback_data=f"admin:supp_open:{supplement_id}")],
+    ])
+
+
+def admin_supp_toggle_confirm_kb(supplement_id: int, to_active: int) -> InlineKeyboardMarkup:
+    action = "Показать" if int(to_active) else "Скрыть"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"✅ {action}", callback_data=f"admin:supp_toggle_confirm:{supplement_id}:{int(to_active)}")],
+        [InlineKeyboardButton("✖️ Отмена", callback_data=f"admin:supp_open:{supplement_id}")],
+    ])
+
+
+def admin_supp_audit_back_kb(supplement_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"admin:supp_open:{supplement_id}")]])
 
 def curated_stack_card(slug: str, *, source_url: str | None, back_page: int) -> InlineKeyboardMarkup:
     btns = []

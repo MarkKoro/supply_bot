@@ -66,6 +66,10 @@ from keyboards import (
     admin_hub_kb,
     admin_supp_results_kb,
     admin_supp_card_kb,
+    admin_supp_field_picker_kb,
+    admin_supp_edit_wait_kb,
+    admin_supp_toggle_confirm_kb,
+    admin_supp_audit_back_kb,
 )
 import tz
 from openai_client import (
@@ -2094,9 +2098,102 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             return
 
+        if data.startswith("admin:supp_edit:"):
+            supplement_id = int(data.split(":")[-1])
+            await _show_admin_supp_edit_picker(update, context, conn, supplement_id)
+            return
+
+        if data.startswith("admin:supp_edit_field:"):
+            parts = data.split(":", 3)
+            if len(parts) != 4:
+                await show(update, context, "Некорректная команда.", admin_hub_kb(), route="admin:home")
+                return
+            supplement_id = int(parts[2])
+            field = parts[3]
+            await _show_admin_supp_field_input(update, context, conn, supplement_id, field)
+            return
+
+        if data.startswith("admin:supp_edit_clear:"):
+            supplement_id = int(data.split(":")[-1])
+            _, ui_screen, ui_payload = await db.get_ui_state(conn, tg_uid)
+            if ui_screen != "admin_edit_field":
+                await _show_admin_supp_card(update, context, conn, supplement_id)
+                return
+            try:
+                payload_data = json.loads(ui_payload) if ui_payload else {}
+            except json.JSONDecodeError:
+                payload_data = {}
+            field_name = str(payload_data.get("field_name") or "")
+            try:
+                await db.admin_set_supplement_field(conn, tg_uid, supplement_id, field_name, "")
+            except ValueError:
+                await show(update, context, "Не удалось очистить поле.", admin_supp_edit_wait_kb(supplement_id), route="admin_edit_field", payload=payload_data)
+                return
+            await show(
+                update,
+                context,
+                "✅ Поле очищено",
+                InlineKeyboardMarkup([[InlineKeyboardButton("Продолжить", callback_data=f"admin:supp_open:{supplement_id}")]]),
+                route=f"admin:supp_open:{supplement_id}",
+                payload={"supplement_id": supplement_id},
+            )
+            await _show_admin_supp_card(update, context, conn, supplement_id)
+            return
+
+        if data.startswith("admin:supp_audit:"):
+            supplement_id = int(data.split(":")[-1])
+            audit_rows = await db.get_admin_audit_for_supplement(conn, supplement_id, limit=10)
+            lines = ["🧾 <b>История правок</b>"]
+            if not audit_rows:
+                lines.append("Пока нет записей.")
+            else:
+                for item in audit_rows:
+                    lines.append(
+                        f"[{item['created_at_utc']}] {item['field']}: {item['old_value'] or '—'} → {item['new_value'] or '—'} ({item['action']}, admin {item['admin_tg_id']})"
+                    )
+            await show(
+                update,
+                context,
+                "\n".join(lines),
+                admin_supp_audit_back_kb(supplement_id),
+                route=f"admin:supp_audit:{supplement_id}",
+                payload={"supplement_id": supplement_id},
+            )
+            return
+
+        if data.startswith("admin:supp_toggle:"):
+            supplement_id = int(data.split(":")[-1])
+            row = await db.get_supplement_admin(conn, supplement_id)
+            if not row:
+                await show(update, context, "Добавка не найдена.", admin_hub_kb(), route="admin:home")
+                return
+            current_active = int(row.get("is_active") or 0)
+            to_active = 0 if current_active else 1
+            question = "Скрыть из каталога? Пользователи не увидят БАД." if to_active == 0 else "Показать в каталоге для пользователей?"
+            await show(
+                update,
+                context,
+                question,
+                admin_supp_toggle_confirm_kb(supplement_id, to_active),
+                route=f"admin:supp_toggle_confirm:{supplement_id}",
+                payload={"supplement_id": supplement_id, "to_active": to_active},
+            )
+            return
+
+        if data.startswith("admin:supp_toggle_confirm:"):
+            parts = data.split(":")
+            if len(parts) < 5:
+                await show(update, context, "Некорректная команда.", admin_hub_kb(), route="admin:home")
+                return
+            supplement_id = int(parts[3])
+            to_active = int(parts[4])
+            await db.admin_toggle_supplement_active(conn, tg_uid, supplement_id, to_active)
+            await _show_admin_supp_card(update, context, conn, supplement_id)
+            return
+
         if data.startswith("admin:supp_clear_link:"):
             supplement_id = int(data.split(":")[-1])
-            await db.clear_purchase_url(conn, supplement_id)
+            await db.admin_set_supplement_field(conn, tg_uid, supplement_id, "purchase_url", "")
             _, _, ui_payload = await db.get_ui_state(conn, tg_uid)
             payload_data = {}
             try:
@@ -4417,8 +4514,50 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     payload={"supplement_id": supplement_id, "admin_query": str(payload_data.get("admin_query") or ""), "offset": int(payload_data.get("offset") or 0)},
                 )
                 return
-            await db.set_purchase_url(conn, supplement_id, url)
+            await db.admin_set_supplement_field(conn, tg_uid, supplement_id, "purchase_url", url)
             await _show_admin_supp_card(update, context, conn, supplement_id, admin_query=str(payload_data.get("admin_query") or ""), offset=int(payload_data.get("offset") or 0))
+            try:
+                await update.message.delete()
+            except Exception:
+                pass
+            return
+
+        if ui_screen == "admin_edit_field":
+            if not _is_admin_ctx(context, tg_uid):
+                await _require_admin(update, context)
+                return
+            try:
+                payload_data = json.loads(ui_payload) if ui_payload else {}
+            except json.JSONDecodeError:
+                payload_data = {}
+            supplement_id = int(payload_data.get("supplement_id") or 0)
+            field_name = str(payload_data.get("field_name") or "")
+            if supplement_id <= 0 or not field_name:
+                await show(update, context, "Сессия редактирования устарела.", admin_hub_kb(), route="admin:home")
+                return
+            try:
+                await db.admin_set_supplement_field(conn, tg_uid, supplement_id, field_name, txt)
+            except ValueError as exc:
+                err = str(exc)
+                hint = "Некорректное значение."
+                if err.startswith("max_len_"):
+                    hint = f"Слишком длинное значение ({err.replace('max_len_', 'максимум ')})"
+                elif err == "invalid_choice":
+                    hint = "Недопустимое значение для поля."
+                elif err in {"invalid_json", "json_array_required", "json_strings_required"}:
+                    hint = "Ожидается JSON-массив строк, например [\"brain\",\"gut\"]."
+                elif err == "invalid_url":
+                    hint = "URL должен начинаться с http:// или https://"
+                await show(
+                    update,
+                    context,
+                    f"{hint}\nТекущее поле: {_admin_field_label(field_name)}",
+                    admin_supp_edit_wait_kb(supplement_id),
+                    route="admin_edit_field",
+                    payload=payload_data,
+                )
+                return
+            await _show_admin_supp_card(update, context, conn, supplement_id)
             try:
                 await update.message.delete()
             except Exception:
@@ -5279,6 +5418,8 @@ async def _show_admin_supp_card(
         return
     name = (row.get("name_ru") or row.get("name_en") or row.get("slug") or "Без названия").strip()
     purchase_url = str(row.get("purchase_url") or "").strip()
+    active = int(row.get("is_active") or 0)
+    active_label = "🟢 В каталоге" if active else "⚪ Скрыт"
     await show(
         update,
         context,
@@ -5286,11 +5427,61 @@ async def _show_admin_supp_card(
             f"🧾 <b>{name}</b>",
             f"EN: {row.get('name_en') or '—'}",
             f"slug: <code>{row.get('slug') or ''}</code>",
+            f"Статус: {active_label}",
+            f"Evidence / Confidence: {(row.get('evidence_grade') or '—')} / {(row.get('confidence') or '—')}",
             f"Ссылка покупки: {purchase_url if purchase_url else 'нет'}",
         ]),
         admin_supp_card_kb(int(row["id"]), purchase_url),
         route=f"admin:supp_open:{int(row['id'])}",
         payload={"supplement_id": int(row["id"]), "admin_query": admin_query, "offset": int(offset)},
+    )
+
+
+async def _show_admin_supp_edit_picker(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, supplement_id: int) -> None:
+    row = await db.get_supplement_admin(conn, int(supplement_id))
+    if not row:
+        await show(update, context, "Добавка не найдена.", admin_hub_kb(), route="admin:home")
+        return
+    name = (row.get("name_ru") or row.get("name_en") or row.get("slug") or "Без названия").strip()
+    await show(
+        update,
+        context,
+        f"✏️ <b>Редактирование полей</b>\n{name}\nВыбери поле для изменения.",
+        admin_supp_field_picker_kb(int(supplement_id)),
+        route=f"admin:supp_edit:{int(supplement_id)}",
+        payload={"supplement_id": int(supplement_id)},
+    )
+
+
+async def _show_admin_supp_field_input(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    conn,
+    supplement_id: int,
+    field: str,
+) -> None:
+    row = await db.get_supplement_admin(conn, int(supplement_id))
+    if not row:
+        await show(update, context, "Добавка не найдена.", admin_hub_kb(), route="admin:home")
+        return
+    if field not in db.ADMIN_EDITABLE_SUPPLEMENT_FIELDS:
+        await show(update, context, "Поле недоступно.", admin_supp_field_picker_kb(int(supplement_id)), route=f"admin:supp_edit:{int(supplement_id)}")
+        return
+    current_value = str(row.get(field) or "")
+    lines = [
+        f"✍️ <b>{_admin_field_label(field)}</b>",
+        f"Текущее значение: <code>{_admin_preview(current_value)}</code>",
+        "Пришли новое значение сообщением.",
+    ]
+    if field in ADMIN_JSON_FIELDS:
+        lines.append("Пример JSON: <code>[\"brain\",\"gut\"]</code>")
+    await show(
+        update,
+        context,
+        "\n".join(lines),
+        admin_supp_edit_wait_kb(int(supplement_id)),
+        route="admin_edit_field",
+        payload={"supplement_id": int(supplement_id), "field_name": field},
     )
 
 
@@ -5338,6 +5529,39 @@ def _short_line(value: str, limit: int = 90) -> str:
     if len(clean) <= limit:
         return clean
     return clean[: limit - 1].rstrip() + "…"
+
+
+ADMIN_FIELD_LABELS = {
+    "name_ru": "Название RU",
+    "name_en": "Название EN",
+    "summary_ru_verified": "Summary (verified)",
+    "summary_ru_theoretical": "Summary (theoretical)",
+    "dose_ru": "Dose",
+    "timing_ru": "Timing",
+    "safety_ru": "Safety",
+    "evidence_grade": "Evidence grade",
+    "confidence": "Confidence",
+    "tags_json": "Tags",
+    "body_targets_json": "Targets",
+    "body_burdens_json": "Burdens",
+    "purchase_url": "Purchase URL",
+}
+
+ADMIN_JSON_FIELDS = {"tags_json", "body_targets_json", "body_burdens_json"}
+
+
+def _admin_field_label(field: str) -> str:
+    return ADMIN_FIELD_LABELS.get(field, field)
+
+
+def _admin_preview(value: str, limit: int = 280) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "—"
+    text = re.sub(r"\s+", " ", text)
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
 
 
 async def _show_admin_stack_editor(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, stack_id: int) -> None:

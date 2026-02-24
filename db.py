@@ -118,8 +118,23 @@ CREATE TABLE IF NOT EXISTS supplements (
   interaction_classes TEXT DEFAULT '[]',
   interaction_classes_json TEXT DEFAULT '[]',
   payload_json TEXT,
-  is_active INTEGER NOT NULL DEFAULT 1
+  is_active INTEGER NOT NULL DEFAULT 1,
+  updated_at_utc TEXT NOT NULL DEFAULT ''
 );
+
+CREATE TABLE IF NOT EXISTS admin_audit (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  admin_tg_id INTEGER NOT NULL,
+  entity_type TEXT NOT NULL,
+  entity_id INTEGER NOT NULL,
+  field TEXT NOT NULL,
+  old_value TEXT,
+  new_value TEXT,
+  action TEXT NOT NULL,
+  created_at_utc TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_admin_audit_entity_created
+  ON admin_audit(entity_type, entity_id, created_at_utc DESC);
 
 CREATE INDEX IF NOT EXISTS idx_supplements_name ON supplements(name);
 CREATE INDEX IF NOT EXISTS idx_supplements_slug ON supplements(slug);
@@ -391,6 +406,8 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     await _ensure_column(conn, "supplements", "interaction_classes_json", "TEXT DEFAULT '[]'")
     await _ensure_column(conn, "supplements", "payload_json", "TEXT")
     await _ensure_column(conn, "supplements", "is_active", "INTEGER NOT NULL DEFAULT 1")
+    await _ensure_column(conn, "supplements", "updated_at_utc", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_admin_audit(conn)
     await _ensure_aliases_table(conn)
     await _ensure_user_supplements(conn)
     await _ensure_user_schedules(conn)
@@ -460,6 +477,9 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     )
     await conn.execute(
         "UPDATE supplements SET body_burdens='' WHERE body_burdens IS NULL"
+    )
+    await conn.execute(
+        "UPDATE supplements SET updated_at_utc='' WHERE updated_at_utc IS NULL"
     )
     await conn.execute(
         "UPDATE users SET last_view='menu' WHERE last_view IS NULL OR last_view=''"
@@ -1087,6 +1107,43 @@ async def _ensure_payments_table(conn: aiosqlite.Connection) -> None:
         """CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_tg_charge_unique
            ON payments(telegram_payment_charge_id)
            WHERE telegram_payment_charge_id IS NOT NULL AND telegram_payment_charge_id != ''"""
+    )
+
+
+async def _ensure_admin_audit(conn: aiosqlite.Connection) -> None:
+    table = await fetchone(
+        conn,
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='admin_audit'",
+    )
+    if not table:
+        await conn.execute(
+            """CREATE TABLE IF NOT EXISTS admin_audit (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              admin_tg_id INTEGER NOT NULL,
+              entity_type TEXT NOT NULL,
+              entity_id INTEGER NOT NULL,
+              field TEXT NOT NULL,
+              old_value TEXT,
+              new_value TEXT,
+              action TEXT NOT NULL,
+              created_at_utc TEXT NOT NULL
+            )"""
+        )
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_admin_audit_entity_created ON admin_audit(entity_type, entity_id, created_at_utc DESC)"
+        )
+        return
+
+    await _ensure_column(conn, "admin_audit", "admin_tg_id", "INTEGER NOT NULL DEFAULT 0")
+    await _ensure_column(conn, "admin_audit", "entity_type", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "admin_audit", "entity_id", "INTEGER NOT NULL DEFAULT 0")
+    await _ensure_column(conn, "admin_audit", "field", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "admin_audit", "old_value", "TEXT")
+    await _ensure_column(conn, "admin_audit", "new_value", "TEXT")
+    await _ensure_column(conn, "admin_audit", "action", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "admin_audit", "created_at_utc", "TEXT NOT NULL DEFAULT ''")
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_admin_audit_entity_created ON admin_audit(entity_type, entity_id, created_at_utc DESC)"
     )
 
 async def _backfill_user_supplements(conn: aiosqlite.Connection) -> None:
@@ -2057,7 +2114,9 @@ async def search_supplements(
 async def get_supplement_admin(conn: aiosqlite.Connection, supplement_id: int) -> dict | None:
     row = await fetchone(
         conn,
-        """SELECT id, slug, name_ru, name_en, purchase_url, evidence_grade, confidence
+        """SELECT id, slug, name_ru, name_en, purchase_url, evidence_grade, confidence,
+                  summary_verified, summary_theoretical, dose_ru, timing_ru, safety_ru,
+                  tags_json, body_targets_json, body_burdens_json, is_active, updated_at_utc
            FROM supplements
            WHERE id=?
            LIMIT 1""",
@@ -2073,6 +2132,16 @@ async def get_supplement_admin(conn: aiosqlite.Connection, supplement_id: int) -
         "purchase_url": str(row["purchase_url"] or ""),
         "evidence_grade": str(row["evidence_grade"] or ""),
         "confidence": str(row["confidence"] or ""),
+        "summary_ru_verified": str(row["summary_verified"] or ""),
+        "summary_ru_theoretical": str(row["summary_theoretical"] or ""),
+        "dose_ru": str(row["dose_ru"] or ""),
+        "timing_ru": str(row["timing_ru"] or ""),
+        "safety_ru": str(row["safety_ru"] or ""),
+        "tags_json": str(row["tags_json"] or ""),
+        "body_targets_json": str(row["body_targets_json"] or ""),
+        "body_burdens_json": str(row["body_burdens_json"] or ""),
+        "is_active": int(row["is_active"] or 0),
+        "updated_at_utc": str(row["updated_at_utc"] or ""),
     }
 
 
@@ -2088,6 +2157,256 @@ async def clear_purchase_url(conn: aiosqlite.Connection, supplement_id: int) -> 
         "UPDATE supplements SET purchase_url='' WHERE id=?",
         (int(supplement_id),),
     )
+
+
+ADMIN_EDITABLE_SUPPLEMENT_FIELDS: dict[str, dict] = {
+    "name_ru": {"kind": "short_text", "max_len": 120},
+    "name_en": {"kind": "short_text", "max_len": 120},
+    "summary_ru_verified": {"kind": "long_text", "max_len": 8000},
+    "summary_ru_theoretical": {"kind": "long_text", "max_len": 8000},
+    "dose_ru": {"kind": "long_text", "max_len": 8000},
+    "timing_ru": {"kind": "long_text", "max_len": 8000},
+    "safety_ru": {"kind": "long_text", "max_len": 8000},
+    "evidence_grade": {"kind": "enum", "values": {"A", "B", "C", "D"}},
+    "confidence": {"kind": "enum", "values": {"High", "Medium", "Low", "Unknown"}},
+    "tags_json": {"kind": "json_string_array"},
+    "body_targets_json": {"kind": "json_string_array"},
+    "body_burdens_json": {"kind": "json_string_array"},
+    "purchase_url": {"kind": "url", "max_len": 500},
+}
+
+SUPPLEMENT_FIELD_COLUMN_MAP: dict[str, str] = {
+    "summary_ru_verified": "summary_verified",
+    "summary_ru_theoretical": "summary_theoretical",
+}
+
+
+def _supp_col(field: str) -> str:
+    return SUPPLEMENT_FIELD_COLUMN_MAP.get(field, field)
+
+
+def _validate_admin_supplement_value(field: str, value: str | None) -> str | None:
+    cfg = ADMIN_EDITABLE_SUPPLEMENT_FIELDS.get(field)
+    if not cfg:
+        raise ValueError("unsupported field")
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return ""
+    kind = str(cfg.get("kind") or "")
+    if kind in {"short_text", "long_text", "url"}:
+        max_len = int(cfg.get("max_len") or 8000)
+        if len(text) > max_len:
+            raise ValueError(f"max_len_{max_len}")
+        if kind == "url" and not (text.startswith("http://") or text.startswith("https://")):
+            raise ValueError("invalid_url")
+        return text
+    if kind == "enum":
+        values = {str(v) for v in (cfg.get("values") or set())}
+        if text not in values:
+            raise ValueError("invalid_choice")
+        return text
+    if kind == "json_string_array":
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise ValueError("invalid_json") from exc
+        if not isinstance(data, list):
+            raise ValueError("json_array_required")
+        cleaned = []
+        for item in data:
+            if not isinstance(item, str):
+                raise ValueError("json_strings_required")
+            val = item.strip()
+            if val:
+                cleaned.append(val)
+        return json.dumps(cleaned, ensure_ascii=False)
+    return text
+
+
+async def _admin_insert_audit(
+    conn: aiosqlite.Connection,
+    admin_tg_id: int,
+    entity_id: int,
+    field: str,
+    old_value: str | None,
+    new_value: str | None,
+    action: str,
+) -> None:
+    await conn.execute(
+        """INSERT INTO admin_audit(admin_tg_id, entity_type, entity_id, field, old_value, new_value, action, created_at_utc)
+           VALUES(?,?,?,?,?,?,?,?)""",
+        (int(admin_tg_id), "supplement", int(entity_id), str(field), old_value, new_value, str(action), utc_now_iso()),
+    )
+
+
+async def admin_set_supplement_field(
+    conn: aiosqlite.Connection,
+    admin_tg_id: int,
+    supplement_id: int,
+    field: str,
+    value: str | None,
+) -> None:
+    safe_field = str(field or "").strip()
+    column = _supp_col(safe_field)
+    if safe_field not in ADMIN_EDITABLE_SUPPLEMENT_FIELDS:
+        raise ValueError("unsupported field")
+    normalized = _validate_admin_supplement_value(safe_field, value)
+    row = await fetchone(
+        conn,
+        f"SELECT {column} AS current_value FROM supplements WHERE id=? LIMIT 1",
+        (int(supplement_id),),
+    )
+    if not row:
+        raise ValueError("supplement_not_found")
+    old_value = row["current_value"]
+    old_text = None if old_value is None else str(old_value)
+    action = "clear" if (normalized is None or normalized == "") else "set"
+    await conn.execute(
+        f"UPDATE supplements SET {column}=?, updated_at_utc=? WHERE id=?",
+        (normalized if normalized is not None else "", utc_now_iso(), int(supplement_id)),
+    )
+    await _admin_insert_audit(
+        conn,
+        int(admin_tg_id),
+        int(supplement_id),
+        safe_field,
+        old_text,
+        normalized,
+        action,
+    )
+    await conn.commit()
+
+
+async def admin_toggle_supplement_active(
+    conn: aiosqlite.Connection,
+    admin_tg_id: int,
+    supplement_id: int,
+    is_active: int,
+) -> None:
+    row = await fetchone(
+        conn,
+        "SELECT is_active FROM supplements WHERE id=? LIMIT 1",
+        (int(supplement_id),),
+    )
+    if not row:
+        raise ValueError("supplement_not_found")
+    old_value = str(int(row["is_active"] or 0))
+    new_value = str(1 if int(is_active) else 0)
+    await conn.execute(
+        "UPDATE supplements SET is_active=?, updated_at_utc=? WHERE id=?",
+        (int(new_value), utc_now_iso(), int(supplement_id)),
+    )
+    await _admin_insert_audit(
+        conn,
+        int(admin_tg_id),
+        int(supplement_id),
+        "is_active",
+        old_value,
+        new_value,
+        "toggle_active",
+    )
+    await conn.commit()
+
+
+async def admin_delete_supplement_hard(conn: aiosqlite.Connection, admin_tg_id: int, supplement_id: int) -> None:
+    row = await fetchone(conn, "SELECT id FROM supplements WHERE id=? LIMIT 1", (int(supplement_id),))
+    if not row:
+        raise ValueError("supplement_not_found")
+    await _admin_insert_audit(
+        conn,
+        int(admin_tg_id),
+        int(supplement_id),
+        "supplement",
+        str(int(supplement_id)),
+        None,
+        "delete",
+    )
+    await conn.execute("DELETE FROM supplements WHERE id=?", (int(supplement_id),))
+    await conn.commit()
+
+
+async def get_admin_audit_for_supplement(conn: aiosqlite.Connection, supplement_id: int, limit: int = 20) -> list[dict]:
+    rows = await fetchall(
+        conn,
+        """SELECT field, old_value, new_value, action, admin_tg_id, created_at_utc
+           FROM admin_audit
+           WHERE entity_type='supplement' AND entity_id=?
+           ORDER BY id DESC
+           LIMIT ?""",
+        (int(supplement_id), max(1, int(limit))),
+    )
+    return [
+        {
+            "field": str(r["field"] or ""),
+            "old_value": None if r["old_value"] is None else str(r["old_value"]),
+            "new_value": None if r["new_value"] is None else str(r["new_value"]),
+            "action": str(r["action"] or ""),
+            "admin_tg_id": int(r["admin_tg_id"] or 0),
+            "created_at_utc": str(r["created_at_utc"] or ""),
+        }
+        for r in rows
+    ]
+
+
+async def admin_search_supplements(
+    conn: aiosqlite.Connection,
+    q: str,
+    is_active: int | None,
+    evidence_grade: str | None,
+    page: int,
+    page_size: int,
+) -> dict:
+    page = max(0, int(page))
+    page_size = max(1, min(int(page_size), 100))
+    offset = page * page_size
+    clauses: list[str] = ["1=1"]
+    params: list = []
+    qn = normalize_text(q)
+    if qn:
+        clauses.append("(s.search_blob LIKE ? OR LOWER(COALESCE(s.slug,'')) LIKE ?)")
+        params.extend([f"%{qn}%", f"%{qn}%"])
+    if is_active in {0, 1}:
+        clauses.append("s.is_active=?")
+        params.append(int(is_active))
+    ev = str(evidence_grade or "").strip().upper()
+    if ev in {"A", "B", "C", "D"}:
+        clauses.append("UPPER(COALESCE(s.evidence_grade,''))=?")
+        params.append(ev)
+    where_sql = " AND ".join(clauses)
+
+    total_row = await fetchone(conn, f"SELECT COUNT(*) AS total FROM supplements s WHERE {where_sql}", tuple(params))
+    total = int(total_row["total"] or 0) if total_row else 0
+    rows = await fetchall(
+        conn,
+        f"""SELECT s.id, s.slug,
+                   COALESCE(NULLIF(s.name_ru,''), NULLIF(s.name_en,''), s.name) AS name_ru,
+                   COALESCE(s.evidence_grade, '') AS evidence_grade,
+                   COALESCE(s.confidence, '') AS confidence,
+                   COALESCE(s.is_active, 1) AS is_active,
+                   CASE WHEN COALESCE(TRIM(s.purchase_url), '') <> '' THEN 1 ELSE 0 END AS has_link,
+                   COALESCE(s.updated_at_utc, '') AS updated_at_utc
+            FROM supplements s
+            WHERE {where_sql}
+            ORDER BY COALESCE(NULLIF(s.name_ru,''), NULLIF(s.name_en,''), s.name) COLLATE NOCASE
+            LIMIT ? OFFSET ?""",
+        (*params, page_size, offset),
+    )
+    items = [
+        {
+            "id": int(r["id"]),
+            "slug": str(r["slug"] or ""),
+            "name_ru": str(r["name_ru"] or ""),
+            "evidence_grade": str(r["evidence_grade"] or ""),
+            "confidence": str(r["confidence"] or ""),
+            "is_active": int(r["is_active"] or 0),
+            "has_link": bool(int(r["has_link"] or 0)),
+            "updated_at_utc": str(r["updated_at_utc"] or ""),
+        }
+        for r in rows
+    ]
+    return {"items": items, "total": total, "page": page, "page_size": page_size}
 
 async def count_search_supplements(conn: aiosqlite.Connection, q: str) -> int:
     qn = normalize_text(q)

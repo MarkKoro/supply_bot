@@ -182,6 +182,38 @@ def _today_date_for_user(tz_name: str | None) -> str:
     return db.get_user_local_date(tz_name or None)
 
 
+def _extract_profile(update: Update) -> tuple[str | None, str | None, str | None]:
+    user = update.effective_user
+    if not user:
+        return None, None, None
+    return user.username, user.first_name, user.last_name
+
+
+async def guard_not_banned(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    user = update.effective_user
+    if not user:
+        return True
+    conn = await db.connect(context.application.bot_data["settings"].DB_PATH)
+    try:
+        username, first_name, last_name = _extract_profile(update)
+        await db.touch_user(conn, int(user.id), username, first_name, last_name)
+        status = await db.get_user_status(conn, int(user.id))
+    finally:
+        await conn.close()
+    if int(status.get("is_banned") or 0) or str(status.get("deleted_at_utc") or "").strip():
+        text = "Доступ ограничен. Если это ошибка — напишите в поддержку."
+        if update.message:
+            await update.message.reply_text(text)
+        elif update.callback_query:
+            try:
+                await update.callback_query.answer("Доступ ограничен", show_alert=True)
+            except Exception:
+                pass
+            await update.callback_query.message.reply_text(text)
+        return False
+    return True
+
+
 async def _today_slots_payload(conn, tg_uid: int) -> tuple[str, list[dict]]:
     tz_name = await db.get_user_tz(conn, tg_uid)
     date_local = _today_date_for_user(tz_name)
@@ -1542,10 +1574,14 @@ async def _send_subscription_invoice(update: Update, context: ContextTypes.DEFAU
 
 
 async def premium_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard_not_banned(update, context):
+        return
     await _show_premium_hub(update, context)
 
 
 async def on_precheckout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard_not_banned(update, context):
+        return
     query = update.pre_checkout_query
     if not query:
         return
@@ -1557,6 +1593,8 @@ async def on_precheckout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def on_success_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard_not_banned(update, context):
+        return
     msg = update.effective_message
     if not msg or not msg.successful_payment or not update.effective_user:
         return
@@ -1646,6 +1684,8 @@ async def _start_initial_pick(
     )
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard_not_banned(update, context):
+        return
     s = context.application.bot_data["settings"]
     conn = await db.connect(s.DB_PATH)
     try:
@@ -1852,6 +1892,8 @@ async def reminder_fire_batch(
         await conn.close()
 
 async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard_not_banned(update, context):
+        return
     q = update.callback_query
     if not q:
         return
@@ -3364,6 +3406,8 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await home(update, context)
 
 async def on_ai_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard_not_banned(update, context):
+        return
     q = update.callback_query
     if not q:
         return
@@ -3405,6 +3449,8 @@ async def on_noop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await _safe_answer_callback(update)
 
 async def on_ai_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard_not_banned(update, context):
+        return
     allowed = await require_premium_or_upsell(update, context, "AI check-in")
     if not allowed:
         return
@@ -3678,6 +3724,8 @@ async def on_ai_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await show(update, context, "Ок, не применяю.", kb, route=AI_CHECKIN_ROUTE)
 
 async def on_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard_not_banned(update, context):
+        return
     q = update.callback_query
     if not q:
         return
@@ -3767,6 +3815,8 @@ async def on_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await conn.close()
 
 async def on_reminder_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard_not_banned(update, context):
+        return
     q = update.callback_query
     if not q:
         return
@@ -4425,6 +4475,8 @@ async def _render_route(
     await home(update, context, target_chat_id=target_chat_id, target_message_id=target_message_id)
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard_not_banned(update, context):
+        return
     if not update.message or not update.message.text:
         return
     if context.user_data.get("onboarding") == "tz":
@@ -4978,6 +5030,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         pass
 
 async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard_not_banned(update, context):
+        return
     if not update.message or not update.message.voice:
         return
     s = context.application.bot_data["settings"]

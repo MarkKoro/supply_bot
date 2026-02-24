@@ -335,7 +335,11 @@
       selectedIds: {},
       bulkMenuOpen: false,
       bulkPrompt: "",
-      bulkConfirm: null
+      bulkConfirm: null,
+      userLookupId: "",
+      userDetail: null,
+      userBanReason: "",
+      userDeleteConfirm: ""
     }
   };
 
@@ -366,6 +370,20 @@
     state.toastTimer = setTimeout(() => { wrap.innerHTML = ""; }, 2200);
   }
 
+
+  function showBannedScreen(reason) {
+    appEl.innerHTML = `
+      <div class="main-content">
+        <div class="card fade" style="margin-top:24px; text-align:center;">
+          <h3 style="margin:0">Доступ ограничен</h3>
+          <p class="muted">${reason ? esc(reason) : 'Если это ошибка — напишите в поддержку.'}</p>
+          <button class="btn" id="closeBannedBtn">Закрыть</button>
+        </div>
+      </div>
+    `;
+    document.getElementById('closeBannedBtn')?.addEventListener('click', ()=> tg?.close?.());
+  }
+
   function formatDate() {
     return new Date().toLocaleDateString("ru-RU", { weekday: "short", day: "2-digit", month: "short" });
   }
@@ -394,6 +412,10 @@
     if (res.status === 403) {
       const data403 = await res.json().catch(() => ({}));
       if (data403?.code === "ADMIN_REQUIRED") throw new Error("ADMIN_REQUIRED");
+      if (data403?.code === "BANNED") {
+        showBannedScreen(data403?.reason || "");
+        throw new Error("BANNED");
+      }
       throw new Error("FORBIDDEN");
     }
 
@@ -408,6 +430,10 @@
     try {
       const me = await api("./api/me");
       state.me = me;
+      if (me.banned) {
+        showBannedScreen(me.banned_reason || "");
+        return;
+      }
       if (!me.premium) {
         renderPaywall();
       } else {
@@ -881,6 +907,37 @@
         </div>
         ${a.selectionMode ? `<div class="admin-select-count">Выбрано: ${selected.length}</div>` : ''}
       </div>
+      <div class="card fade">
+        <div class="row"><strong>Пользователи</strong><span class="muted">модерация</span></div>
+        <div style="display:flex; gap:8px; margin-top:8px;">
+          <input id="adminUserTgId" class="input" placeholder="tg_id" value="${esc(a.userLookupId || '')}" />
+          <button class="btn" id="adminUserFind">Найти</button>
+        </div>
+        ${a.userDetail ? `
+          <div class="card" style="margin-top:8px;">
+            <div><b>ID:</b> ${a.userDetail.tg_user_id}</div>
+            <div><b>Username:</b> ${esc(a.userDetail.tg_username || '—')}</div>
+            <div><b>Создан:</b> ${esc(a.userDetail.created_at_utc || '—')}</div>
+            <div><b>Последняя активность:</b> ${esc(a.userDetail.last_seen_utc || '—')}</div>
+            <div><b>Premium until:</b> ${esc(a.userDetail.premium_until_utc || '—')}</div>
+            <div><b>Оплат paid:</b> ${Number(a.userDetail.payments_paid_count || 0)}</div>
+            <div><b>Статус:</b> ${a.userDetail.deleted_at_utc ? 'deleted' : (a.userDetail.is_banned ? 'banned' : 'active')}</div>
+            ${a.userDetail.banned_reason ? `<div><b>Причина:</b> ${esc(a.userDetail.banned_reason)}</div>` : ''}
+            <div style="display:flex; gap:8px; margin-top:8px; flex-wrap:wrap;">
+              <input id="adminUserBanReason" class="input" placeholder="Причина бана (опционально)" value="${esc(a.userBanReason || '')}" />
+              <button class="btn" data-admin-user-ban="1">Забанить</button>
+              <button class="btn secondary" data-admin-user-ban="0">Разбанить</button>
+            </div>
+            <div style="margin-top:8px;">
+              <div class="muted">Для удаления введите DELETE</div>
+              <div style="display:flex; gap:8px; margin-top:6px;">
+                <input id="adminUserDeleteConfirm" class="input" placeholder="DELETE" value="${esc(a.userDeleteConfirm || '')}" />
+                <button class="btn secondary" id="adminUserDeleteBtn">Удалить</button>
+              </div>
+            </div>
+          </div>
+        ` : ''}
+      </div>
       <div class="admin-grid">
         ${(a.items || []).map((it)=> a.selectionMode ? `
           <label class="card admin-card selecting">
@@ -1011,6 +1068,47 @@
   }
 
   function bindAdminEvents() {
+    document.getElementById('adminUserTgId')?.addEventListener('input', (e)=>{ state.admin.userLookupId = e.target.value; });
+    document.getElementById('adminUserBanReason')?.addEventListener('input', (e)=>{ state.admin.userBanReason = e.target.value; });
+    document.getElementById('adminUserDeleteConfirm')?.addEventListener('input', (e)=>{ state.admin.userDeleteConfirm = e.target.value; });
+    document.getElementById('adminUserFind')?.addEventListener('click', async ()=>{
+      const raw = String(state.admin.userLookupId || '').trim();
+      if (!/^\d+$/.test(raw)) return showToast('Введите numeric tg_id');
+      try {
+        const res = await api(`./api/admin/user/${raw}`);
+        state.admin.userDetail = res.item;
+        state.admin.userBanReason = res.item?.banned_reason || '';
+        state.admin.userDeleteConfirm = '';
+        renderActiveTab();
+      } catch { showToast('Пользователь не найден'); }
+    });
+    appEl.querySelectorAll('[data-admin-user-ban]').forEach((el)=>el.addEventListener('click', async (e)=>{
+      const target = state.admin.userDetail;
+      if (!target) return;
+      const to = Number(e.currentTarget.dataset.adminUserBan || 0);
+      if (to === 1 && !confirm('Подтвердить бан пользователя?')) return;
+      if (to === 0 && !confirm('Подтвердить разбан пользователя?')) return;
+      try {
+        await api(`./api/admin/user/${target.tg_user_id}/ban`, { method:'POST', body:{ is_banned: to, reason: state.admin.userBanReason || '' } });
+        const fresh = await api(`./api/admin/user/${target.tg_user_id}`);
+        state.admin.userDetail = fresh.item;
+        showToast(to ? 'Пользователь забанен' : 'Пользователь разбанен');
+        renderActiveTab();
+      } catch { showToast('Не удалось выполнить действие'); }
+    }));
+    document.getElementById('adminUserDeleteBtn')?.addEventListener('click', async ()=>{
+      const target = state.admin.userDetail;
+      if (!target) return;
+      if (String(state.admin.userDeleteConfirm || '').trim() !== 'DELETE') return showToast('Введите DELETE для подтверждения');
+      if (!confirm('Удалить пользователя? Данные будут очищены, доступ заблокирован.')) return;
+      try {
+        await api(`./api/admin/user/${target.tg_user_id}/delete`, { method:'POST' });
+        const fresh = await api(`./api/admin/user/${target.tg_user_id}`);
+        state.admin.userDetail = fresh.item;
+        showToast('Пользователь удалён');
+        renderActiveTab();
+      } catch { showToast('Ошибка удаления'); }
+    });
     document.getElementById('adminSearch')?.addEventListener('input', (e)=>{
       state.admin.q = e.target.value;
       clearTimeout(state.admin.searchDebounce);

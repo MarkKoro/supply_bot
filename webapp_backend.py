@@ -4,7 +4,7 @@ from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException
-from fastapi.exception_handlers import http_exception_handler
+from fastapi.exception_handlers import http_exception_handler as fastapi_http_exception_handler
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
@@ -165,12 +165,16 @@ async def _premium_guard(tg_user_id: int) -> bool:
         await conn.close()
 
 
-@app.exception_handler(HTTPException)
-async def http_exception_handler(_, exc: HTTPException):
-    if exc.status_code == 403 and isinstance(exc.detail, dict) and exc.detail.get("code") == "BANNED":
-        payload = {"ok": False, "code": "BANNED", "reason": str(exc.detail.get("reason") or "")}
-        return JSONResponse(payload, status_code=403)
-    return await http_exception_handler(_, exc)
+async def supply_http_exception_handler(request, exc: HTTPException):
+    if request.url.path.startswith("/api/"):
+        return JSONResponse(
+            {"ok": False, "error": str(exc.detail), "code": "HTTP_ERROR"},
+            status_code=exc.status_code,
+        )
+    return await fastapi_http_exception_handler(request, exc)
+
+
+app.add_exception_handler(HTTPException, supply_http_exception_handler)
 
 
 def _plans_payload() -> list[dict]:

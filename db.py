@@ -3843,17 +3843,24 @@ def _catalog_where_clause(
     if targets_clean:
         target_parts: list[str] = []
         for token in targets_clean:
-            target_parts.append("(LOWER(COALESCE(s.body_targets_json, '')) LIKE ? OR LOWER(COALESCE(s.tags_json, '')) LIKE ? OR LOWER(COALESCE(s.goals, '')) LIKE ? OR LOWER(COALESCE(s.rules_tags, '')) LIKE ?)")
-            params.extend([f'%"{token}"%', f'%"{token}"%', f"%{token}%", f"%{token}%"])
-        clauses.append(f"({' OR '.join(target_parts)})")
+            target_parts.append(
+                "(LOWER(COALESCE(s.body_targets_json, '')) LIKE ? OR LOWER(COALESCE(s.body_targets_json, '')) LIKE ? "
+                "OR LOWER(COALESCE(s.tags_json, '')) LIKE ? OR LOWER(COALESCE(s.tags_json, '')) LIKE ?)"
+            )
+            exact = f'%"{token}"%'
+            prefix = f'%"{token}_%'
+            params.extend([exact, prefix, exact, prefix])
+        clauses.append(f"({' AND '.join(target_parts)})")
 
     burdens_clean = [normalize_text(item) for item in (burdens or []) if str(item or "").strip()]
     if burdens_clean:
         burden_parts: list[str] = []
         for token in burdens_clean:
-            burden_parts.append("LOWER(COALESCE(s.body_burdens_json, '')) LIKE ?")
-            params.append(f'%"{token}"%')
-        clauses.append(f"({' OR '.join(burden_parts)})")
+            burden_parts.append("(LOWER(COALESCE(s.body_burdens_json, '')) LIKE ? OR LOWER(COALESCE(s.body_burdens_json, '')) LIKE ?)")
+            exact = f'%"{token}"%'
+            prefix = f'%"{token}_%'
+            params.extend([exact, prefix])
+        clauses.append(f"({' AND '.join(burden_parts)})")
 
     return " AND ".join(clauses), params
 

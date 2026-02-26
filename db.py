@@ -546,6 +546,7 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     await _ensure_curated_stacks(conn)
     await _ensure_curated_stack_items(conn)
     await _ensure_payments_table(conn)
+    await _ensure_achievements_tables(conn)
     await _ensure_integrity_unique_indexes(conn)
     await conn.execute(
         "UPDATE supplements SET interaction_classes='[]' WHERE interaction_classes IS NULL OR interaction_classes=''"
@@ -651,6 +652,71 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     await _backfill_aliases_json(conn)
     await _backfill_search_blob(conn)
     await _backfill_supplement_evidence(conn)
+    await bootstrap_achievements(conn)
+
+async def _ensure_achievements_tables(conn: aiosqlite.Connection) -> None:
+    await conn.execute(
+        """CREATE TABLE IF NOT EXISTS achievements (
+          key TEXT PRIMARY KEY,
+          title_ru TEXT NOT NULL,
+          desc_ru TEXT NOT NULL,
+          category TEXT NOT NULL,
+          rarity TEXT NOT NULL,
+          points INTEGER NOT NULL DEFAULT 0,
+          reward_json TEXT NOT NULL DEFAULT '{}',
+          updated_at_utc TEXT NOT NULL DEFAULT ''
+        )"""
+    )
+    await conn.execute(
+        """CREATE TABLE IF NOT EXISTS user_achievements (
+          user_id INTEGER NOT NULL,
+          achievement_key TEXT NOT NULL,
+          unlocked_at_utc TEXT NOT NULL,
+          meta_json TEXT NOT NULL DEFAULT '{}',
+          PRIMARY KEY(user_id, achievement_key)
+        )"""
+    )
+    await conn.execute(
+        """CREATE TABLE IF NOT EXISTS user_cosmetics (
+          user_id INTEGER PRIMARY KEY,
+          theme_id TEXT NOT NULL DEFAULT 'base',
+          tab_skin_id TEXT NOT NULL DEFAULT 'classic',
+          badge_id TEXT NOT NULL DEFAULT 'none',
+          updated_at_utc TEXT NOT NULL DEFAULT ''
+        )"""
+    )
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_user_achievements_user ON user_achievements(user_id)")
+
+
+async def bootstrap_achievements(conn: aiosqlite.Connection) -> None:
+    from achievements import ACHIEVEMENTS
+
+    now = utc_now_iso()
+    for ach in ACHIEVEMENTS:
+        reward_json = json.dumps(ach.get("reward") or {}, ensure_ascii=False)
+        await conn.execute(
+            """INSERT INTO achievements(key, title_ru, desc_ru, category, rarity, points, reward_json, updated_at_utc)
+               VALUES(?,?,?,?,?,?,?,?)
+               ON CONFLICT(key) DO UPDATE SET
+                 title_ru=excluded.title_ru,
+                 desc_ru=excluded.desc_ru,
+                 category=excluded.category,
+                 rarity=excluded.rarity,
+                 points=excluded.points,
+                 reward_json=excluded.reward_json,
+                 updated_at_utc=excluded.updated_at_utc""",
+            (
+                str(ach.get("key") or "").strip(),
+                str(ach.get("title_ru") or ""),
+                str(ach.get("desc_ru") or ""),
+                str(ach.get("category") or ""),
+                str(ach.get("rarity") or "common"),
+                int(ach.get("points") or 0),
+                reward_json,
+                now,
+            ),
+        )
+
 
 async def _ensure_aliases_table(conn: aiosqlite.Connection) -> None:
     table = await fetchone(
@@ -5530,6 +5596,254 @@ async def build_stats_compact(conn: aiosqlite.Connection, tg_user_id: int, local
         "top_misses_7": [{"slug": str(x.get("slug") or ""), "missed": int(x.get("missed") or 0)} for x in misses7[:5]],
         "top_streaks": [{"slug": str(x.get("slug") or ""), "streak": int(x.get("streak_days") or 0)} for x in streaks[:5]],
     }
+
+
+def _hhmm_to_int(value: str | None) -> int:
+    hhmm = _normalize_hhmm(str(value or ""))
+    if not hhmm:
+        return 0
+    h, m = hhmm.split(":")
+    return int(h) * 100 + int(m)
+
+
+async def get_user_metrics(conn: aiosqlite.Connection, tg_user_id: int, local_date: str) -> dict:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    stats = await build_stats_compact(conn, tg_user_id, local_date)
+
+    metrics = {
+        "today_adherence": int(stats.get("today", {}).get("adherence") or 0),
+        "today_expected": int(stats.get("today", {}).get("expected") or 0),
+        "last7_adherence": int(stats.get("last7", {}).get("adherence") or 0),
+        "last7_expected": int(stats.get("last7", {}).get("expected") or 0),
+        "last30_adherence": int(stats.get("last30", {}).get("adherence") or 0),
+        "last30_expected": int(stats.get("last30", {}).get("expected") or 0),
+        "perfect_streak_days": 0,
+    }
+
+    cursor = date.fromisoformat(local_date)
+    perfect_streak = 0
+    for _ in range(30):
+        daily = await get_daily_adherence(conn, tg_user_id, cursor.isoformat())
+        expected = int(daily.get("expected") or 0)
+        adherence = daily.get("adherence")
+        if expected >= 3 and adherence == 100:
+            perfect_streak += 1
+            cursor = cursor - timedelta(days=1)
+            continue
+        break
+    metrics["perfect_streak_days"] = perfect_streak
+
+    row = await fetchone(conn, "SELECT COUNT(*) AS c FROM daily_checkins WHERE user_id=?", (user_id,))
+    metrics["checkin_total"] = int((row["c"] if row else 0) or 0)
+    row = await fetchone(conn, "SELECT COUNT(*) AS c FROM daily_checkins WHERE user_id=? AND applied_json IS NOT NULL AND TRIM(applied_json)!='' AND TRIM(applied_json)!='null'", (user_id,))
+    metrics["apply_total"] = int((row["c"] if row else 0) or 0)
+    checkin_rows = await fetchall(conn, "SELECT DISTINCT date_local FROM daily_checkins WHERE user_id=? ORDER BY date_local DESC", (user_id,))
+    checkin_set = {str(r["date_local"]) for r in checkin_rows}
+    streak = 0
+    cur = date.fromisoformat(local_date)
+    for _ in range(365):
+        if cur.isoformat() in checkin_set:
+            streak += 1
+            cur -= timedelta(days=1)
+        else:
+            break
+    metrics["checkin_streak_days"] = streak
+
+    stack_ids = await get_user_stack_supplement_ids(conn, tg_user_id)
+    metrics["stack_size"] = len(stack_ids)
+    row = await fetchone(conn, "SELECT COUNT(*) AS c FROM user_complexes WHERE user_id=?", (user_id,))
+    metrics["complex_count"] = int((row["c"] if row else 0) or 0)
+
+    row = await fetchone(conn, "SELECT COUNT(*) AS c FROM user_supp_settings WHERE user_id=? AND reminder_enabled=1", (user_id,))
+    metrics["reminders_enabled_count"] = int((row["c"] if row else 0) or 0)
+
+    rows = await fetchall(conn, "SELECT slot_id, time_local FROM user_schedule_slots WHERE user_id=?", (user_id,))
+    default_ids = {str(item.get("slot_id") or "") for item in default_user_slots()}
+    custom_count = 0
+    slot_times: list[int] = []
+    for r in rows:
+        slot_id = str(r["slot_id"] or "").strip()
+        if slot_id.startswith("t_") or slot_id not in default_ids:
+            custom_count += 1
+        slot_int = _hhmm_to_int(str(r["time_local"] or ""))
+        if slot_int > 0:
+            slot_times.append(slot_int)
+    metrics["custom_slot_count"] = custom_count
+    row = await fetchone(conn, "SELECT COUNT(DISTINCT time_hhmm) AS c FROM user_schedules WHERE user_id=? AND is_enabled=1 AND time_hhmm IS NOT NULL AND TRIM(time_hhmm)!=''", (user_id,))
+    metrics["distinct_schedule_times"] = int((row["c"] if row else 0) or 0)
+    metrics["earliest_slot_hhmm"] = min(slot_times) if slot_times else 0
+    metrics["latest_slot_hhmm"] = max(slot_times) if slot_times else 0
+
+    benefit_count_by_system = {k: 0 for k in BODY_MAP_SYSTEM_KEYS}
+    burden_count_by_system = {k: 0 for k in BODY_MAP_SYSTEM_KEYS}
+    benefit_strength_sum_all = 0
+    burden_strength_sum_core = 0
+    evidence_ab_count = 0
+
+    if stack_ids:
+        placeholders = ",".join("?" for _ in stack_ids)
+        supp_rows = await fetchall(conn, f"SELECT id, evidence_grade, body_effects_json FROM supplements WHERE id IN ({placeholders})", tuple(sorted(stack_ids)))
+        for r in supp_rows:
+            if str(r["evidence_grade"] or "").strip().upper() in {"A", "B"}:
+                evidence_ab_count += 1
+            try:
+                effects = json.loads(r["body_effects_json"] or "[]")
+                if not isinstance(effects, list):
+                    effects = []
+            except Exception:
+                effects = []
+            for effect in effects:
+                if not isinstance(effect, dict):
+                    continue
+                system_key = _body_map_system_key(effect.get("system"))
+                if not system_key:
+                    continue
+                direction = str(effect.get("direction") or "").strip().lower()
+                try:
+                    strength = int(effect.get("strength") or 0)
+                except Exception:
+                    strength = 0
+                if strength < 0:
+                    strength = 0
+                if direction in {"benefit", "mixed"}:
+                    benefit_count_by_system[system_key] += 1
+                    benefit_strength_sum_all += strength
+                if direction in {"burden", "mixed"}:
+                    burden_count_by_system[system_key] += 1
+                    if system_key in {"liver", "kidney", "gut"}:
+                        burden_strength_sum_core += strength
+
+    metrics.update({
+        "systems_supported": sum(1 for key in BODY_MAP_SYSTEM_KEYS if int(benefit_count_by_system.get(key) or 0) > 0),
+        "burden_strength_total_core": burden_strength_sum_core,
+        "benefit_strength_total_all": benefit_strength_sum_all,
+        "liver_burden_count": int(burden_count_by_system.get("liver") or 0),
+        "kidney_burden_count": int(burden_count_by_system.get("kidney") or 0),
+        "gut_burden_count": int(burden_count_by_system.get("gut") or 0),
+        "brain_benefit_count": int(benefit_count_by_system.get("brain") or 0),
+        "heart_benefit_count": int(benefit_count_by_system.get("heart") or 0),
+        "gut_benefit_count": int(benefit_count_by_system.get("gut") or 0),
+        "skin_benefit_count": int(benefit_count_by_system.get("skin") or 0),
+        "immune_benefit_count": int(benefit_count_by_system.get("immune") or 0),
+        "thyroid_benefit_count": int(benefit_count_by_system.get("thyroid") or 0),
+        "joints_benefit_count": int(benefit_count_by_system.get("joints") or 0),
+        "blood_benefit_count": int(benefit_count_by_system.get("blood") or 0),
+        "lungs_benefit_count": int(benefit_count_by_system.get("lungs") or 0),
+        "endocrine_benefit_count": int(benefit_count_by_system.get("endocrine") or 0),
+        "muscle_benefit_count": int(benefit_count_by_system.get("muscle") or 0),
+        "bone_benefit_count": int(benefit_count_by_system.get("bone") or 0),
+        "pancreas_benefit_count": int(benefit_count_by_system.get("pancreas") or 0),
+        "evidence_ab_count": evidence_ab_count,
+    })
+
+    row = await fetchone(conn, "SELECT 1 AS x FROM supplement_day_state WHERE user_id=? AND status='taken' LIMIT 1", (user_id,))
+    metrics["has_any_taken"] = 1 if row else 0
+
+    streaks = await get_streaks(conn, tg_user_id, local_date, stack_ids, max_back=90)
+    metrics["max_single_supp_streak"] = max([int(item.get("streak_days") or 0) for item in streaks], default=0)
+    return metrics
+
+
+def _compare_values(left: float, op: str, right: float) -> bool:
+    if op == ">=":
+        return left >= right
+    if op == "<=":
+        return left <= right
+    if op == "==":
+        return left == right
+    if op == ">":
+        return left > right
+    if op == "<":
+        return left < right
+    return False
+
+
+def _eval_rule(rule: dict, metrics: dict) -> bool:
+    if not isinstance(rule, dict):
+        return False
+    if isinstance(rule.get("all"), list):
+        return all(_eval_rule(item, metrics) for item in rule.get("all", []))
+    if isinstance(rule.get("any"), list):
+        return any(_eval_rule(item, metrics) for item in rule.get("any", []))
+    metric = str(rule.get("metric") or "").strip()
+    op = str(rule.get("op") or "").strip()
+    if not metric or not op:
+        return False
+    left = float(metrics.get(metric) or 0)
+    if "value_metric" in rule:
+        right = float(metrics.get(str(rule.get("value_metric") or "").strip()) or 0)
+    else:
+        right = float(rule.get("value") or 0)
+    return _compare_values(left, op, right)
+
+
+def compute_allowed_cosmetics(unlocked_rewards: list[dict]) -> dict:
+    themes = {"base"}
+    tab_skins = {"classic"}
+    badges = {"none"}
+    for reward in unlocked_rewards:
+        unlock = dict((reward or {}).get("unlock") or {})
+        themes.update([str(x) for x in list(unlock.get("themes") or []) if str(x).strip()])
+        tab_skins.update([str(x) for x in list(unlock.get("tab_skins") or []) if str(x).strip()])
+        badges.update([str(x) for x in list(unlock.get("badges") or []) if str(x).strip()])
+    return {"themes": sorted(themes), "tab_skins": sorted(tab_skins), "badges": sorted(badges)}
+
+
+async def evaluate_and_unlock_achievements(conn, tg_user_id: int, local_date: str) -> list[str]:
+    from achievements import ACHIEVEMENTS
+
+    await bootstrap_achievements(conn)
+    metrics = await get_user_metrics(conn, tg_user_id, local_date)
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    now = utc_now_iso()
+    newly: list[str] = []
+    for ach in ACHIEVEMENTS:
+        key = str(ach.get("key") or "").strip()
+        if not key:
+            continue
+        if not _eval_rule(ach.get("rule") or {}, metrics):
+            continue
+        before = conn.total_changes
+        await conn.execute(
+            "INSERT OR IGNORE INTO user_achievements(user_id, achievement_key, unlocked_at_utc, meta_json) VALUES(?,?,?,?)",
+            (user_id, key, now, "{}"),
+        )
+        if conn.total_changes > before:
+            newly.append(key)
+    await conn.commit()
+    return newly
+
+
+async def get_user_cosmetics(conn, tg_user_id:int) -> dict:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    await conn.execute("INSERT OR IGNORE INTO user_cosmetics(user_id, updated_at_utc) VALUES(?,?)", (user_id, utc_now_iso()))
+    row = await fetchone(conn, "SELECT theme_id, tab_skin_id, badge_id FROM user_cosmetics WHERE user_id=?", (user_id,))
+    return {
+        "theme_id": str((row["theme_id"] if row else "base") or "base"),
+        "tab_skin_id": str((row["tab_skin_id"] if row else "classic") or "classic"),
+        "badge_id": str((row["badge_id"] if row else "none") or "none"),
+    }
+
+
+async def set_user_cosmetics(conn, tg_user_id:int, patch:dict, allowed:dict) -> dict:
+    current = await get_user_cosmetics(conn, tg_user_id)
+    updated = dict(current)
+    for key, allow_key in (("theme_id", "themes"), ("tab_skin_id", "tab_skins"), ("badge_id", "badges")):
+        if key not in patch or patch.get(key) is None:
+            continue
+        value = str(patch.get(key) or "").strip()
+        if value not in set(allowed.get(allow_key) or []):
+            raise ValueError("cosmetic_locked")
+        updated[key] = value
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    await conn.execute(
+        "UPDATE user_cosmetics SET theme_id=?, tab_skin_id=?, badge_id=?, updated_at_utc=? WHERE user_id=?",
+        (updated["theme_id"], updated["tab_skin_id"], updated["badge_id"], utc_now_iso(), user_id),
+    )
+    await conn.commit()
+    return updated
+
+
 
 
 async def body_map_aggregate(conn: aiosqlite.Connection, tg_user_id: int, local_date: str) -> dict:

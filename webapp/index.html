@@ -7,18 +7,27 @@
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
     :root {
-      --bg-1: #0a1230;
-      --bg-2: #37245e;
-      --bg-3: #111a3f;
-      --card: rgba(255, 255, 255, 0.08);
-      --card-strong: rgba(255, 255, 255, 0.13);
+      --bg-1: #070b1a;
+      --bg-2: #101a44;
+      --bg-3: #1b0f3a;
+      --card: rgba(16, 24, 52, 0.68);
+      --card-strong: rgba(24, 36, 74, 0.82);
       --text: #eef2ff;
-      --muted: rgba(235, 240, 255, 0.72);
-      --accent: #82a7ff;
+      --muted: rgba(218, 228, 248, 0.8);
+      --accent: #7db7ff;
       --green: #49d88d;
-      --red: #ff6b79;
+      --red: #ff5a6f;
       --neutral: rgba(255,255,255,0.17);
     }
+
+    html[data-theme="nebula"] { --bg-1:#0c0a23; --bg-2:#25125d; --bg-3:#130b2d; --accent:#b48bff; }
+    html[data-theme="aurora"] { --bg-1:#041a18; --bg-2:#0f3c3e; --bg-3:#12252f; --accent:#7df0c2; }
+    html[data-theme="noir"] { --bg-1:#090909; --bg-2:#171717; --bg-3:#101010; --accent:#bbbbbb; }
+    html[data-theme="solar"] { --bg-1:#2a1d08; --bg-2:#4e3310; --bg-3:#2b1a0b; --accent:#ffd36d; }
+    html[data-theme="emerald"] { --bg-1:#062015; --bg-2:#0c4630; --bg-3:#0a2c1f; --accent:#6ff0b8; }
+    html[data-theme="bloodline"] { --bg-1:#28050d; --bg-2:#4a0d1d; --bg-3:#25050f; --accent:#ff6a86; }
+    html[data-theme="glitch"] { --bg-1:#0b1129; --bg-2:#1e255f; --bg-3:#13223e; --accent:#68e4ff; }
+    html[data-theme="ivory"] { --bg-1:#1a1b20; --bg-2:#2a2d36; --bg-3:#1f2229; --accent:#f0e6ce; }
 
     * { box-sizing: border-box; }
 
@@ -28,9 +37,9 @@
       font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
       color: var(--text);
       background:
-        radial-gradient(1200px 700px at 15% -10%, #3256d7 0%, transparent 60%),
-        radial-gradient(1000px 600px at 100% 0%, #7a39cf 0%, transparent 55%),
-        linear-gradient(160deg, var(--bg-1) 0%, var(--bg-2) 55%, var(--bg-3) 100%);
+        radial-gradient(1100px 640px at 12% -8%, rgba(67, 132, 255, 0.42) 0%, transparent 62%),
+        radial-gradient(980px 580px at 92% 2%, rgba(66, 48, 143, 0.42) 0%, transparent 58%),
+        linear-gradient(160deg, var(--bg-1) 0%, var(--bg-2) 54%, var(--bg-3) 100%);
       overflow: hidden;
     }
 
@@ -39,10 +48,20 @@
       position: fixed;
       inset: 0;
       pointer-events: none;
-      opacity: 0.08;
+      opacity: 0.05;
       background-image: radial-gradient(rgba(255,255,255,0.9) 0.5px, transparent 0.5px);
       background-size: 3px 3px;
       mix-blend-mode: screen;
+    }
+
+    body::after {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background: radial-gradient(900px 520px at 50% 10%, rgba(255,255,255,0.06), transparent 55%),
+                  radial-gradient(1200px 900px at 50% 120%, rgba(0,0,0,0.65), transparent 55%);
+      mix-blend-mode: soft-light;
     }
 
     #app {
@@ -71,15 +90,14 @@
     .subline { color: var(--muted); font-size: 13px; margin-top: 3px; }
 
     .btn, .chip {
-      border: 0;
+      border: 1px solid rgba(255,255,255,0.18);
       border-radius: 14px;
       color: var(--text);
-      background: linear-gradient(170deg, rgba(255,255,255,0.2), rgba(255,255,255,0.08));
+      background: linear-gradient(170deg, rgba(255,255,255,0.16), rgba(255,255,255,0.05));
       box-shadow:
-        0 9px 20px rgba(0,0,0,0.35),
-        0 2px 0 rgba(255,255,255,0.2) inset,
-        0 -2px 0 rgba(0,0,0,0.35) inset;
-      transition: transform .12s ease, box-shadow .12s ease, opacity .12s ease;
+        0 12px 24px rgba(0,0,0,0.34),
+        0 2px 0 rgba(255,255,255,0.18) inset,
+        0 -2px 0 rgba(0,0,0,0.4) inset;
     }
 
     .btn {
@@ -98,19 +116,20 @@
         0 -1px 0 rgba(0,0,0,0.55) inset;
     }
 
-    .btn.secondary { opacity: 0.85; }
+    .btn.secondary { opacity: 0.88; }
     .btn[disabled] { opacity: .45; cursor: not-allowed; }
 
     .card {
       border-radius: 20px;
       padding: 14px;
-      background: var(--card);
-      border: 1px solid rgba(255,255,255,0.16);
+      background: linear-gradient(180deg, rgba(255,255,255,0.12), rgba(255,255,255,0.06));
+      border: 1px solid rgba(255,255,255,0.18);
       box-shadow:
-        0 16px 34px rgba(0,0,0,0.30),
-        0 1px 0 rgba(255,255,255,0.22) inset,
-        0 -2px 0 rgba(0,0,0,0.36) inset;
-      backdrop-filter: blur(8px);
+        0 22px 42px rgba(3,7,20,0.44),
+        0 7px 14px rgba(2,6,18,0.4),
+        0 1px 0 rgba(255,255,255,0.25) inset,
+        0 -2px 0 rgba(0,0,0,0.35) inset;
+      backdrop-filter: blur(10px);
       margin-bottom: 12px;
     }
 
@@ -123,25 +142,25 @@
       right: 10px;
       bottom: calc(10px + env(safe-area-inset-bottom));
       display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
+      grid-template-columns: repeat(5, minmax(0, 1fr));
       gap: 8px;
       padding: 8px;
       border-radius: 22px;
-      background: rgba(8, 13, 34, 0.85);
-      border: 1px solid rgba(255,255,255,0.16);
-      backdrop-filter: blur(10px);
-      box-shadow: 0 20px 40px rgba(0,0,0,0.45);
+      background: rgba(6, 10, 24, 0.78);
+      border: 1px solid rgba(255,255,255,0.22);
+      backdrop-filter: blur(14px);
+      box-shadow: 0 24px 44px rgba(0,0,0,0.55), 0 1px 0 rgba(255,255,255,0.12) inset;
       z-index: 20;
     }
 
-    .tabs.admin-enabled { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+    .tabs.admin-enabled { grid-template-columns: repeat(6, minmax(0, 1fr)); }
 
     .tab {
       border: 0;
       border-radius: 14px;
       min-height: 52px;
-      color: var(--muted);
-      background: transparent;
+      color: rgba(210, 222, 246, 0.8);
+      background: rgba(255,255,255,0.03);
       font-size: 11px;
       display: flex;
       flex-direction: column;
@@ -152,35 +171,136 @@
 
     .tab.active {
       color: white;
-      background: rgba(126, 165, 255, 0.18);
-      box-shadow: 0 0 18px rgba(126, 165, 255, 0.45), 0 0 0 1px rgba(160, 195, 255, 0.45) inset;
+      background: linear-gradient(180deg, rgba(125,183,255,0.34), rgba(73,109,198,0.24));
+      box-shadow:
+        0 10px 16px rgba(6,13,34,0.42),
+        0 0 0 1px rgba(182, 213, 255, 0.35) inset,
+        0 1px 0 rgba(255,255,255,0.2) inset;
     }
 
     .tab-emoji { font-size: 17px; line-height: 1; }
+    .tabs[data-skin="neon"] .tab.active { box-shadow: 0 0 0 1px rgba(125,210,255,.65) inset, 0 0 18px rgba(96,190,255,.55); }
+    .tabs[data-skin="neon"] .tab.active::after { content:""; position:absolute; inset:-3px; border-radius:16px; border:1px solid rgba(117,226,255,.65); }
+    .tabs[data-skin="thumbs"] .tab.active::after { content:"👍"; position:absolute; top:-10px; right:6px; font-size:12px; }
+    .tabs[data-skin="gold"] .tab.active { box-shadow:0 0 0 1px rgba(255,211,122,.9) inset,0 8px 20px rgba(165,118,36,.45); }
+    .tabs[data-skin="plasma"] .tab.active::after { content:""; position:absolute; inset:-2px; border-radius:15px; background:linear-gradient(120deg, rgba(96,163,255,.2), rgba(249,112,255,.2)); z-index:-1; filter:blur(1px);}
+    .tabs[data-skin="frost"] .tab.active { box-shadow:0 0 0 1px rgba(172,236,255,.7) inset,0 0 16px rgba(141,218,255,.4);}
+    .tabs[data-skin="minimal"] .tab.active { background:rgba(255,255,255,.08); box-shadow: inset 0 -2px 0 var(--accent);}
+    .tabs[data-skin="glitch"] .tab.active { text-shadow: 1px 0 rgba(255,80,80,.5), -1px 0 rgba(80,220,255,.5); box-shadow:0 0 0 1px rgba(121,200,255,.35) inset, 2px 0 10px rgba(255,88,122,.2), -2px 0 10px rgba(88,195,255,.2);}
+    .tab { position: relative; }
+    .badge-pill { font-size:12px; padding:4px 9px; border-radius:999px; border:1px solid rgba(255,255,255,.28); background:rgba(255,255,255,.12); }
+    .ach-grid{display:grid;gap:8px;margin-top:8px;}
+    .ach-item{border:1px solid rgba(255,255,255,.14);border-radius:12px;padding:8px;background:rgba(255,255,255,.05);}
+    .ach-item.locked{opacity:.72;}
 
     .slot-actions { display:flex; gap:8px; flex-wrap:wrap; margin-top: 8px; }
     .chip { border-radius: 999px; padding: 5px 10px; font-size: 12px; font-weight: 700; }
     .chip.green { background: rgba(72,216,141,0.2); color: #bbffd9; }
+
+    .segmented {
+      display: inline-flex;
+      gap: 4px;
+      padding: 4px;
+      border-radius: 999px;
+      border: 1px solid rgba(255,255,255,0.2);
+      background: rgba(255,255,255,0.06);
+      box-shadow: 0 8px 18px rgba(0,0,0,0.28), 0 1px 0 rgba(255,255,255,0.14) inset;
+    }
+
+    .seg-btn {
+      border: 0;
+      border-radius: 999px;
+      padding: 6px 10px;
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--muted);
+      background: transparent;
+      min-width: 84px;
+    }
+
+    .seg-btn.active {
+      color: #fff;
+      background: linear-gradient(180deg, rgba(125,183,255,0.32), rgba(73,109,198,0.22));
+      box-shadow: 0 1px 0 rgba(255,255,255,0.18) inset, 0 8px 14px rgba(7,15,38,0.42);
+    }
 
     .item-row {
       display: flex;
       align-items: center;
       gap: 10px;
       width: 100%;
-      border: 0;
+      border: 1px solid rgba(255,255,255,0.14);
       text-align: left;
       padding: 10px;
       border-radius: 13px;
       margin-top: 8px;
-      background: rgba(255,255,255,0.06);
+      background: rgba(255,255,255,0.05);
       color: inherit;
     }
 
+    .catalog-toolbar,
+    .catalog-row,
+    .catalog-list,
+    .catalog-meta,
+    .catalog-active-filters,
+    .catalog-item-head {
+      min-width: 0;
+    }
+
+    .catalog-toolbar { display: grid; gap: 8px; }
+    .catalog-row { display: flex; align-items: center; gap: 8px; }
+    .catalog-row > * { min-width: 0; }
+    .catalog-meta { display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap; }
+    .catalog-active-filters { display:flex; flex-wrap:wrap; gap:8px; }
+    .catalog-list { display:grid; gap:10px; }
+    .catalog-status { text-align:center; font-size:12px; color: var(--muted); padding: 6px 0; }
+    .catalog-skeleton { height: 72px; border-radius: 14px; border: 1px solid rgba(255,255,255,0.12); background: linear-gradient(110deg, rgba(255,255,255,0.05) 8%, rgba(255,255,255,0.12) 18%, rgba(255,255,255,0.05) 33%); background-size: 180% 100%; animation: shimmer 1.4s linear infinite; }
+    .supp-name { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+
     .input, .select, .textarea {
-      width: 100%; border: 1px solid rgba(255,255,255,0.24); border-radius: 12px;
-      background: rgba(255,255,255,0.08); color: var(--text); padding: 10px 12px;
+      width: 100%;
+      border: 1px solid rgba(255,255,255,0.28);
+      border-radius: 12px;
+      background: rgba(255,255,255,0.11);
+      color: var(--text);
+      padding: 10px 12px;
+      transition: transform .08s ease, box-shadow .12s ease, border-color .12s ease;
+      box-shadow: 0 10px 22px rgba(0,0,0,0.25), 0 1px 0 rgba(255,255,255,0.12) inset;
     }
     .textarea { min-height: 88px; resize: vertical; }
+
+    .btn, .chip, .card, .tab, .input, .select, .textarea, .search-input {
+      transition: transform .08s ease, box-shadow .12s ease, border-color .12s ease;
+    }
+
+    .search-input {
+      width: 100%;
+      flex: 1;
+      border: 1px solid rgba(255,255,255,0.24);
+      border-radius: 999px;
+      padding: 10px 12px;
+      color: var(--text);
+      background: rgba(255,255,255,0.10);
+      box-shadow: 0 10px 22px rgba(0,0,0,0.25), 0 1px 0 rgba(255,255,255,0.14) inset;
+    }
+
+    .search-input:focus,
+    .input:focus,
+    .select:focus,
+    .textarea:focus {
+      outline: none;
+      border-color: rgba(125,183,255,0.75);
+      box-shadow: 0 0 0 3px rgba(125,183,255,0.18), 0 10px 24px rgba(0,0,0,0.28), 0 1px 0 rgba(255,255,255,0.18) inset;
+    }
+
+    .card.item-row:active,
+    button.item-row:active,
+    .tab:active,
+    .chip:active {
+      transform: translateY(1px);
+      box-shadow: 0 8px 14px rgba(0,0,0,0.3), 0 1px 0 rgba(255,255,255,0.12) inset;
+    }
     .error-text { color: #ffb3bb; font-size: 12px; margin-top: 4px; }
     .admin-grid { display:grid; gap:10px; }
     .admin-card { cursor:pointer; }
@@ -207,6 +327,7 @@
 
     .fade { animation: fadeIn .22s ease; }
     @keyframes fadeIn { from {opacity: 0; transform: translateY(6px);} to {opacity: 1; transform: translateY(0);} }
+    @keyframes shimmer { 0% { background-position: 180% 0; } 100% { background-position: -20% 0; } }
 
     .preview-grid { display: grid; gap: 10px; }
     .preview-card {
@@ -296,15 +417,20 @@
   const state = {
     initData: tg?.initData || "",
     me: null,
+    userId: null,
     activeTab: "today",
     today: null,
     complexes: [],
     loadingToday: false,
     loadingStats: false,
     stats: null,
+    ach: null,
     toastTimer: null,
     catalog: {
       q: "", page: 0, items: [], total: 0, loading: false,
+      loadingMore: false,
+      hasMore: true,
+      error: false,
       filters: { evidence: [], targets: [], burdens: [], sort: "alpha" },
       detail: null, detailLoading: false, filtersOpen: false
     },
@@ -316,6 +442,8 @@
       step: 0,
       loading: false,
       view: "wizard",
+      target: null,
+      loadedKey: "",
       checkinId: null,
       recommendations: [],
       selected: {},
@@ -353,12 +481,32 @@
 
   const APP_NAME = "SupplyBot";
   const appEl = document.getElementById("app");
+  const TARGET_LABELS_RU = {
+    brain: "Мозг",
+    heart: "Сердце",
+    gut: "ЖКТ",
+    liver: "Печень",
+    kidney: "Почки",
+    joints: "Суставы",
+    muscle: "Мышцы",
+    skin: "Кожа",
+    immune: "Иммунитет",
+    sleep: "Сон",
+    mood: "Настроение"
+  };
+  const BURDEN_LABELS_RU = {
+    liver: "Печень",
+    kidney: "Почки",
+    gut: "ЖКТ"
+  };
   const tabs = [
-    { id: "today", title: "Today", icon: "✅" },
-    { id: "catalog", title: "Catalog", icon: "📚" },
-    { id: "bodymap", title: "BodyMap", icon: "🧠" },
-    { id: "survey", title: "Survey", icon: "📝" }
+    { id: "today", title: "Сегодня", icon: "✅" },
+    { id: "catalog", title: "Каталог", icon: "📚" },
+    { id: "bodymap", title: "Карта", icon: "🧠" },
+    { id: "survey", title: "Опрос", icon: "📝" },
+    { id: "settings", title: "Настройки", icon: "⚙️" }
   ];
+  let catalogObserver = null;
 
   function activeTabs() {
     return state.me?.role && state.me.role !== "none" ? tabs.concat([{ id: "admin", title: "Админ", icon: "🛠" }]) : tabs;
@@ -378,6 +526,27 @@
     state.toastTimer = setTimeout(() => { wrap.innerHTML = ""; }, 2200);
   }
 
+
+
+  function applyCosmetics(c) {
+    const cosmetics = c || {};
+    document.documentElement.dataset.theme = cosmetics.theme_id || "base";
+    document.documentElement.dataset.tabSkin = cosmetics.tab_skin_id || "classic";
+    document.documentElement.dataset.badge = cosmetics.badge_id || "none";
+  }
+
+  function getBadgeMeta(id) {
+    const badges = state.ach?.catalogs?.badges || [];
+    return badges.find((b) => b.id === id) || { id: "none", emoji: "", title_ru: "" };
+  }
+
+  async function loadAchievements(force = false) {
+    if (state.ach && !force) return state.ach;
+    const data = await api("./api/achievements/summary");
+    state.ach = data;
+    applyCosmetics(data.cosmetics || {});
+    return data;
+  }
 
   function showBannedScreen(reason) {
     appEl.innerHTML = `
@@ -438,6 +607,8 @@
     try {
       const me = await api("./api/me");
       state.me = me;
+      applyCosmetics(me.cosmetics || {});
+      state.userId = tg?.initDataUnsafe?.user?.id || me?.tg_user_id || me?.id || "anon";
       if (me.banned) {
         showBannedScreen(me.banned_reason || "");
         return;
@@ -447,7 +618,7 @@
       } else {
         renderMainApp();
         await loadToday();
-        await loadSurveyToday();
+        await loadSurveyForTarget();
       }
     } catch (e) {
       if (String(e.message).includes("UNAUTHORIZED") && !state.initData) {
@@ -572,7 +743,7 @@
 
   function renderTabs(isLocked) {
     const list = activeTabs();
-    return `<nav class="tabs ${(state.me?.role && state.me.role !== "none") ? "admin-enabled" : ""}">
+    return `<nav class="tabs ${(state.me?.role && state.me.role !== "none") ? "admin-enabled" : ""}" data-skin="${document.documentElement.dataset.tabSkin || "classic"}">
       ${list.map(t => `<button class="tab ${state.activeTab === t.id ? "active" : ""}" data-tab="${t.id}" ${isLocked ? "disabled" : ""}>
         <span class="tab-emoji">${t.icon}</span>
         <span>${t.title}</span>
@@ -587,8 +758,9 @@
           <div>
             <h1 class="headline">${APP_NAME}</h1>
             <div class="subline">${formatDate()}</div>
+            ${(() => { const bid = document.documentElement.dataset.badge || "none"; const b = getBadgeMeta(bid); return bid !== "none" ? `<span class="badge-pill">${esc(b.emoji || "")} ${esc(b.title_ru || bid)}</span>` : ""; })()}
           </div>
-          <button class="btn" id="refreshBtn" aria-label="Refresh">⟳</button>
+          <button class="btn" id="refreshBtn" aria-label="Обновить">⟳</button>
         </header>
         <section id="tabContent" class="fade"></section>
       </div>
@@ -619,6 +791,12 @@
         if (tab === "admin" && !state.admin.items.length) {
           await loadAdminSupplements(true);
         }
+        if (tab === "survey") {
+          await loadSurveyForTarget();
+        }
+        if (tab === "settings") {
+          try { await loadAchievements(); } catch {}
+        }
       });
     });
 
@@ -634,6 +812,10 @@
         await loadBodyMap(true);
       } else if (state.activeTab === "admin") {
         await loadAdminSupplements(true);
+      } else if (state.activeTab === "settings") {
+        await loadStatsOnly();
+        try { await loadAchievements(true); } catch {}
+        showToast("Статистика обновлена");
       } else {
         showToast("Раздел обновлён");
       }
@@ -646,9 +828,9 @@
 
     if (state.activeTab === "today") {
       if (state.loadingToday) {
-        target.innerHTML = `<div class="card">Загружаем Today...</div>`;
+        target.innerHTML = `<div class="card">Загружаем план...</div>`;
       } else if (!state.today) {
-        target.innerHTML = `<div class="card">Нет данных Today. Нажмите refresh.</div>`;
+        target.innerHTML = `<div class="card">Нет данных по плану. Нажмите refresh.</div>`;
       } else {
         target.innerHTML = renderToday();
         bindTodayEvents();
@@ -674,6 +856,13 @@
       return;
     }
 
+    if (state.activeTab === "settings") {
+      target.innerHTML = renderSettings();
+      bindSettingsEvents();
+      return;
+    }
+
+    if (!state.survey.target) initSurveyTarget();
     target.innerHTML = renderSurvey();
     bindSurveyEvents();
   }
@@ -684,6 +873,17 @@
   }
 
 
+  const GOAL_LABELS_RU = {
+    brain: "Мозг",
+    mood: "Настроение",
+    sleep: "Сон",
+    recovery: "Восстановление",
+    gut: "ЖКТ",
+    immune: "Иммунитет",
+    joints: "Суставы",
+    performance: "Результативность"
+  };
+
   const SURVEY_STEPS = [
     { key: "energy", title: "Энергия", options: [["low","Низкая"],["ok","Нормальная"],["high","Высокая"]] },
     { key: "sleep", title: "Сон", options: [["poor","Плохой"],["ok","Ок"],["great","Отличный"]] },
@@ -693,15 +893,54 @@
     { key: "note", title: "Заметка", note: true }
   ];
 
-  function surveyStorageKey() {
-    const uid = tg?.initDataUnsafe?.user?.id || "anon";
-    const d = new Date().toISOString().slice(0,10);
-    return `survey:${uid}:${d}`;
+  function localDateISO(d = new Date()) {
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}`;
   }
 
-  async function loadSurveyToday() {
+  function defaultSurveyTarget() {
+    return new Date().getHours() >= 18 ? 'tomorrow' : 'today';
+  }
+
+  function surveyTargetDateISO(target) {
+    const d = new Date();
+    if (target === 'tomorrow') d.setDate(d.getDate() + 1);
+    return localDateISO(d);
+  }
+
+  function surveyTargetKey() {
+    const uid = state.userId || tg?.initDataUnsafe?.user?.id || 'anon';
+    return `supply:survey_target:${uid}:${localDateISO()}`;
+  }
+
+  function initSurveyTarget() {
+    if (state.survey.target) return;
+    const saved = localStorage.getItem(surveyTargetKey());
+    state.survey.target = (saved === 'today' || saved === 'tomorrow') ? saved : defaultSurveyTarget();
+    localStorage.setItem(surveyTargetKey(), state.survey.target);
+  }
+
+  function surveyStorageKey() {
+    initSurveyTarget();
+    const uid = state.userId || tg?.initDataUnsafe?.user?.id || "anon";
+    const target = state.survey.target || 'today';
+    return `survey:${uid}:${surveyTargetDateISO(target)}:${target}`;
+  }
+
+  async function loadSurveyForTarget(force=false) {
+    initSurveyTarget();
+    const key = `${state.survey.target}:${surveyTargetDateISO(state.survey.target)}`;
+    if (state.survey.loadedKey === key && !force) return;
+    state.survey.step = 0;
+    state.survey.view = 'wizard';
+    state.survey.checkinId = null;
+    state.survey.recommendations = [];
+    state.survey.selected = {};
+    state.survey.answers = { energy:"", sleep:"", stress:"", training:"", goals:[], note:"" };
     try {
-      const data = await api('./api/checkin/today');
+      const data = await api(`./api/checkin/today?target=${state.survey.target}`);
       const saved = localStorage.getItem(surveyStorageKey());
       if (saved) state.survey.answers = { ...state.survey.answers, ...JSON.parse(saved) };
       if (data?.checkin) {
@@ -711,10 +950,12 @@
         state.survey.selected = Object.fromEntries((state.survey.recommendations || []).map((x) => [x.supplement_id, true]));
         if (state.survey.recommendations.length) state.survey.view = 'review';
       }
+      state.survey.loadedKey = key;
     } catch {}
   }
 
   function renderSurvey() {
+    initSurveyTarget();
     const sv = state.survey;
     if (sv.loading) return `<div class="card">⏳ анализ…</div>`;
     if (sv.view === 'review') {
@@ -727,7 +968,7 @@
         const already = todaySet.has(Number(r.supplement_id || 0));
         return `<div class="rec-card"><div class="row"><label><input type="checkbox" data-rec-toggle="${r.supplement_id}" ${sv.selected[r.supplement_id] !== false ? 'checked' : ''}/> <strong>${esc(r.name_ru || r.slug)}</strong></label><span class="badge ${r.action==='remove'?'minus':(r.action==='adjust'?'':'plus')}">${r.action==='add'?'+':(r.action==='remove'?'−':'≈')}</span></div><div class="muted" style="margin-top:6px">${esc(r.reason || '')}${already ? ' • уже в плане' : ''}</div></div>`;
       }).join('');
-      return `<div class="card fade"><h3 style="margin-top:0">Рекомендации на сегодня</h3>${rows || '<div class="muted">Нет рекомендаций</div>'}<div style="margin-top:10px"><button class="btn" id="applyAll" style="width:100%; font-weight:800" ${sv.applying ? 'disabled' : ''}>✅ Применить всё</button></div><div class="row" style="margin-top:10px"><button class="btn secondary" id="applySelected" ${sv.applying ? 'disabled' : ''}>Выбрать вручную</button><button class="btn secondary" id="cancelSurvey" ${sv.applying ? 'disabled' : ''}>Отмена</button></div></div>`;
+      return `<div class="card fade"><div class="row"><h3 style="margin:0">Рекомендации</h3><div class="segmented" data-survey-target><button class="seg-btn ${sv.target==='today'?'active':''}" data-set-target="today">Сегодня</button><button class="seg-btn ${sv.target==='tomorrow'?'active':''}" data-set-target="tomorrow">Завтра</button></div></div>${rows || '<div class="muted">Нет рекомендаций</div>'}<div style="margin-top:10px"><button class="btn" id="applyAll" style="width:100%; font-weight:800" ${sv.applying ? 'disabled' : ''}>✅ Применить всё</button></div><div class="row" style="margin-top:10px"><button class="btn secondary" id="applySelected" ${sv.applying ? 'disabled' : ''}>Применить выбранное</button><button class="btn secondary" id="cancelSurvey" ${sv.applying ? 'disabled' : ''}>Отмена</button></div></div>`;
     }
     const step = SURVEY_STEPS[sv.step];
     const p = Math.round(((sv.step+1)/SURVEY_STEPS.length)*100);
@@ -735,77 +976,151 @@
     if (step.options) {
       body = step.options.map(([v,t]) => `<button class="survey-option ${sv.answers[step.key]===v?'active':''}" data-survey-pick="${step.key}:${v}">${t}</button>`).join('');
     } else if (step.goals) {
-      body = `<div class="survey-goals">${step.goals.map((g)=>`<button class="chip ${sv.answers.goals.includes(g)?'green':''}" data-goal-toggle="${g}">${g}</button>`).join('')}</div>`;
+      body = `<div class="survey-goals">${step.goals.map((g)=>`<button class="chip ${sv.answers.goals.includes(g)?'green':''}" data-goal-toggle="${g}">${GOAL_LABELS_RU[g] || g}</button>`).join('')}</div>`;
     } else {
       body = `<textarea id="surveyNote" maxlength="280" class="survey-note" placeholder="Короткая заметка">${esc(sv.answers.note || '')}</textarea><div class="muted" style="margin-top:6px">${(sv.answers.note||'').length}/280</div>`;
     }
-    return `<div class="card fade"><div class="row"><strong>${step.title}</strong><span class="muted">${sv.step+1}/${SURVEY_STEPS.length}</span></div><div class="progress"><i style="width:${p}%"></i></div>${body}<div class="row" style="margin-top:12px"><button class="btn secondary" id="surveyBack" ${sv.step===0?'disabled':''}>Назад</button><button class="btn" id="surveyNext">${sv.step===SURVEY_STEPS.length-1?'Получить рекомендации':'Далее'}</button></div></div>`;
+    return `<div class="card fade"><div class="row"><strong>${step.title}</strong><div class="row" style="gap:6px"><div class="segmented" data-survey-target><button class="seg-btn ${sv.target==='today'?'active':''}" data-set-target="today">Сегодня</button><button class="seg-btn ${sv.target==='tomorrow'?'active':''}" data-set-target="tomorrow">Завтра</button></div><span class="muted">${sv.step+1}/${SURVEY_STEPS.length}</span></div></div><div class="progress"><i style="width:${p}%"></i></div>${body}<div class="row" style="margin-top:12px"><button class="btn secondary" id="surveyBack" ${sv.step===0?'disabled':''}>Назад</button><button class="btn" id="surveyNext">${sv.step===SURVEY_STEPS.length-1?'Получить рекомендации':'Далее'}</button></div></div>`;
   }
 
   function bindSurveyEvents() {
+    appEl.querySelectorAll('[data-set-target]').forEach((el)=>el.addEventListener('click', async ()=>{
+      const next = el.dataset.setTarget;
+      if (next === state.survey.target) return;
+      haptic();
+      state.survey.target = next;
+      localStorage.setItem(surveyTargetKey(), next);
+      state.survey.loadedKey = '';
+      await loadSurveyForTarget(true);
+      renderActiveTab();
+    }));
+
     appEl.querySelectorAll('[data-survey-pick]').forEach((el)=>el.addEventListener('click', ()=>{ haptic(); const [k,v]=el.dataset.surveyPick.split(':'); state.survey.answers[k]=v; localStorage.setItem(surveyStorageKey(), JSON.stringify(state.survey.answers)); renderActiveTab(); }));
     appEl.querySelectorAll('[data-goal-toggle]').forEach((el)=>el.addEventListener('click', ()=>{ haptic(); const g=el.dataset.goalToggle; const set=new Set(state.survey.answers.goals||[]); if (set.has(g)) set.delete(g); else set.add(g); state.survey.answers.goals=[...set]; localStorage.setItem(surveyStorageKey(), JSON.stringify(state.survey.answers)); renderActiveTab(); }));
     document.getElementById('surveyNote')?.addEventListener('input', (e)=>{ state.survey.answers.note=String(e.target.value||'').slice(0,280); localStorage.setItem(surveyStorageKey(), JSON.stringify(state.survey.answers)); renderActiveTab(); });
     document.getElementById('surveyBack')?.addEventListener('click', ()=>{ haptic(); state.survey.step=Math.max(0,state.survey.step-1); renderActiveTab(); });
-    document.getElementById('surveyNext')?.addEventListener('click', async ()=>{ haptic(); if (state.survey.step < SURVEY_STEPS.length-1) { state.survey.step += 1; renderActiveTab(); return; } state.survey.loading=true; renderActiveTab(); try { const res=await api('./api/checkin',{method:'POST', body:{answers: state.survey.answers}}); state.survey.loading=false; state.survey.checkinId=res.checkin_id; state.survey.recommendations=res.recommendations||[]; state.survey.selected=Object.fromEntries((state.survey.recommendations||[]).map((x)=>[x.supplement_id,true])); state.survey.view='review'; renderActiveTab(); } catch(e){ state.survey.loading=false; showToast('AI временно недоступен, попробуйте ещё раз'); renderActiveTab(); } });
+
+    document.getElementById('surveyNext')?.addEventListener('click', async ()=>{
+      haptic();
+      if (state.survey.step < SURVEY_STEPS.length-1) {
+        state.survey.step += 1;
+        renderActiveTab();
+        return;
+      }
+      state.survey.loading=true;
+      renderActiveTab();
+      try {
+        const res=await api('./api/checkin',{method:'POST', body:{answers: state.survey.answers, target: state.survey.target, client_local_iso: new Date().toISOString()}});
+        state.survey.loading=false;
+        state.survey.checkinId=res.checkin_id;
+        state.survey.recommendations=res.recommendations||[];
+        state.survey.selected=Object.fromEntries((state.survey.recommendations||[]).map((x)=>[x.supplement_id,true]));
+        state.survey.view='review';
+        renderActiveTab();
+      } catch(e){
+        state.survey.loading=false;
+        showToast('AI временно недоступен, попробуйте ещё раз');
+        renderActiveTab();
+      }
+    });
+
     appEl.querySelectorAll('[data-rec-toggle]').forEach((el)=>el.addEventListener('change',(e)=>{ state.survey.selected[Number(el.dataset.recToggle)] = !!e.target.checked; }));
+
     document.getElementById('applyAll')?.addEventListener('click', async ()=>{
       haptic();
       state.survey.applying = true;
       renderActiveTab();
       try {
-        const res = await api('./api/recommendations/apply_all', { method:'POST', body:{ recommendations: state.survey.recommendations || [] } });
-        if (res.today) state.today = res.today;
-        else await loadToday(true);
-        const sum = res.summary || {};
-        showToast(`✅ Добавлено: ${Number(sum.applied||0)}, уже было: ${Number(sum.skipped_existing||0)}`);
-        state.activeTab='today';
-        renderMainApp();
-        renderActiveTab();
+        const out = await api('./api/checkin/apply',{method:'POST', body:{checkin_id: state.survey.checkinId, selected_ids:[], mode:'all'}});
+        if (out.date_local === localDateISO()) showToast('✅ Применено к плану: сегодня');
+        else showToast('✅ Применено на завтра');
+        if (out.date_local === localDateISO()) {
+          await loadToday(true);
+          state.activeTab='today';
+          renderMainApp();
+          renderActiveTab();
+        } else {
+          await loadSurveyForTarget(true);
+          renderActiveTab();
+        }
       } catch {
         showToast('Не удалось применить рекомендации');
       } finally {
         state.survey.applying = false;
       }
     });
+
     document.getElementById('applySelected')?.addEventListener('click', async ()=>{
       haptic();
+      state.survey.applying = true;
       const ids=Object.keys(state.survey.selected).filter((k)=>state.survey.selected[k]).map(Number);
       try {
         const out = await api('./api/checkin/apply',{method:'POST', body:{checkin_id: state.survey.checkinId, selected_ids:ids, mode:'selected'}});
-        await loadToday(true);
-        const sum = out.summary || {};
-        showToast(`✅ Добавлено: ${Number(sum.applied||0)}, уже было: ${Number(sum.skipped_existing||0)}`);
-        state.activeTab='today';
-        renderMainApp();
-        renderActiveTab();
+        if (out.date_local === localDateISO()) showToast('✅ Применено к плану: сегодня');
+        else showToast('✅ Применено на завтра');
+        if (out.date_local === localDateISO()) {
+          await loadToday(true);
+          state.activeTab='today';
+          renderMainApp();
+          renderActiveTab();
+        } else {
+          await loadSurveyForTarget(true);
+          renderActiveTab();
+        }
       } catch {
         showToast('Не удалось применить выбранные');
+      } finally {
+        state.survey.applying = false;
       }
     });
+
     document.getElementById('cancelSurvey')?.addEventListener('click', ()=>{ haptic(); state.survey.view='wizard'; renderActiveTab(); });
   }
+
 
   function renderCatalog() {
     const c = state.catalog;
     const filters = c.filters;
-    const subtitle = `Найдено: ${c.total}`;
+    const sortLabels = { alpha: 'По алфавиту', evidence: 'По доказательности', trials: 'По исследованиям', effect: 'По эффекту' };
+    const skeletons = Array.from({ length: 8 }, () => '<div class="catalog-skeleton"></div>').join('');
+    const activeFilterChips = [
+      ...filters.evidence.map((v) => ({ key: 'evidence', value: v, label: `Доказательность: ${v}` })),
+      ...filters.targets.map((v) => ({ key: 'targets', value: v, label: `Куда/зачем: ${TARGET_LABELS_RU[v] || v}` })),
+      ...filters.burdens.map((v) => ({ key: 'burdens', value: v, label: `Нагрузка: ${BURDEN_LABELS_RU[v] || v}` }))
+    ];
     const itemsHtml = c.items.map((item) => `
       <button class="card item-row" data-catalog-open="${item.slug}" style="display:block; width:100%; margin-top:0;">
-        <div class="row"><strong>${esc(item.name_ru || item.name_en)}</strong><span>${item.has_purchase ? '🛒' : ''}</span></div>
+        <div class="row catalog-item-head"><strong class="supp-name">${esc(item.name_ru || item.name_en)}</strong><span>${item.has_purchase ? '🛒' : ''}</span></div>
         <div class="muted" style="margin-top:6px">${esc(item.evidence_grade || '—')} • ${esc(item.confidence || '—')} ${item.in_stack ? '• ✅ в стеке' : ''}</div>
       </button>`).join('');
+
+    const listHtml = c.loading && !c.items.length
+      ? skeletons
+      : (itemsHtml || (!c.error ? '<div class="card">Ничего не найдено.</div>' : ''));
+
     return `
-      <div class="card fade">
-        <div class="row" style="gap:8px; align-items:stretch;">
-          <input id="catalogSearch" placeholder="Поиск RU/EN..." value="${esc(c.q)}" style="flex:1; border:0; border-radius:999px; padding:10px 12px; color:var(--text); background:rgba(255,255,255,0.12)"/>
-          <button class="btn secondary" id="catalogClear">✕</button>
+      <div class="card fade catalog-toolbar">
+        <div class="catalog-row">
+          <input id="catalogSearch" class="search-input" placeholder="Поиск RU/EN..." value="${esc(c.q)}"/>
           <button class="btn" id="catalogFilters">Фильтры</button>
         </div>
-        <div class="muted" style="margin-top:8px">${subtitle}</div>
+        <div class="catalog-meta">
+          <select id="catalogSortInline" class="select" style="max-width:220px;">
+            <option value="alpha" ${filters.sort==='alpha'?'selected':''}>${sortLabels.alpha}</option>
+            <option value="evidence" ${filters.sort==='evidence'?'selected':''}>${sortLabels.evidence}</option>
+            <option value="trials" ${filters.sort==='trials'?'selected':''}>${sortLabels.trials}</option>
+            <option value="effect" ${filters.sort==='effect'?'selected':''}>${sortLabels.effect}</option>
+          </select>
+          <span class="muted">Найдено: ${c.total}</span>
+        </div>
+        <div class="catalog-active-filters">
+          ${activeFilterChips.length ? activeFilterChips.map((f)=>`<button class="chip" data-filter-remove="${f.key}:${f.value}">${esc(f.label)} ✕</button>`).join('') : '<span class="muted">Фильтры не выбраны</span>'}
+        </div>
       </div>
-      ${c.loading ? '<div class="card">Загружаем каталог...</div>' : (itemsHtml || '<div class="card">Ничего не найдено.</div>')}
-      ${c.items.length < c.total ? '<div class="card cta-sticky"><button class="btn" id="catalogMore" style="width:100%">Загрузить ещё</button></div>' : ''}
+      ${c.error ? '<div class="card"><div style="font-weight:700">Не удалось загрузить каталог</div><div style="margin-top:10px"><button class="btn" id="catalogRetry">Повторить</button></div></div>' : ''}
+      <div class="catalog-list">${listHtml}</div>
+      <div id="catalogSentinel" style="height:1px"></div>
+      ${c.loadingMore ? '<div class="catalog-status">Загружаем ещё...</div>' : (!c.hasMore && c.items.length ? '<div class="catalog-status">Конец списка</div>' : '')}
       ${c.filtersOpen ? renderFilterSheet(filters) : ''}
       ${c.detail ? renderDetailModal(c.detail) : ''}
     `;
@@ -815,13 +1130,13 @@
     const ev = ['A','B','C','D'];
     const tgts = ['brain','heart','gut','liver','kidney','sleep','mood','joints','muscle','skin','immune'];
     const br = ['liver','kidney','gut'];
-    const chip=(v,arr,key)=>`<button class="chip ${arr.includes(v)?'green':''}" data-filter-toggle="${key}:${v}">${v}</button>`;
+    const chip=(v,arr,key,labels)=>`<button class="chip ${arr.includes(v)?'green':''}" data-filter-toggle="${key}:${v}">${labels?.[v] || v}</button>`;
     return `<div class="card" style="position:fixed;left:10px;right:10px;bottom:90px;z-index:30;max-height:60vh;overflow:auto">
       <div class="row"><strong>Фильтры</strong><button class="btn secondary" data-filter-close>Закрыть</button></div>
-      <div style="margin-top:8px">Evidence: ${ev.map(v=>chip(v,filters.evidence,'evidence')).join(' ')}</div>
-      <div style="margin-top:8px">Targets: ${tgts.map(v=>chip(v,filters.targets,'targets')).join(' ')}</div>
-      <div style="margin-top:8px">Burdens: ${br.map(v=>chip(v,filters.burdens,'burdens')).join(' ')}</div>
-      <div style="margin-top:8px"><select id="sortSelect" style="width:100%;padding:8px;border-radius:10px"><option value="alpha">alpha</option><option value="evidence">evidence</option><option value="trials">trials</option><option value="effect">effect</option></select></div>
+      <div style="margin-top:8px">Доказательность: ${ev.map(v=>chip(v,filters.evidence,'evidence')).join(' ')}</div>
+      <div style="margin-top:8px">Куда/зачем: ${tgts.map(v=>chip(v,filters.targets,'targets',TARGET_LABELS_RU)).join(' ')}</div>
+      <div style="margin-top:8px">Нагрузка: ${br.map(v=>chip(v,filters.burdens,'burdens',BURDEN_LABELS_RU)).join(' ')}</div>
+      <div style="margin-top:8px"><select id="sortSelect" style="width:100%;padding:8px;border-radius:10px"><option value="alpha" ${filters.sort==='alpha'?'selected':''}>По алфавиту</option><option value="evidence" ${filters.sort==='evidence'?'selected':''}>По доказательности</option><option value="trials" ${filters.sort==='trials'?'selected':''}>По исследованиям</option><option value="effect" ${filters.sort==='effect'?'selected':''}>По эффекту</option></select></div>
       <div class="row" style="margin-top:10px"><button class="btn" id="applyFilters">Применить</button><button class="btn secondary" id="resetFilters">Сбросить</button></div>
     </div>`;
   }
@@ -841,10 +1156,12 @@
   }
 
   async function loadCatalog(force) {
-    if (state.catalog.loading && !force) return;
-    state.catalog.loading = true;
-    renderActiveTab();
     const c = state.catalog;
+    if ((c.loading || c.loadingMore) && !force) return;
+    if (c.page > 0) c.loadingMore = true;
+    else c.loading = true;
+    renderActiveTab();
+
     const f = c.filters;
     const qp = new URLSearchParams({ q: c.q || '', page: String(c.page), page_size: '20', sort: f.sort || 'alpha' });
     if (f.evidence.length) qp.set('evidence', f.evidence.join(','));
@@ -852,10 +1169,39 @@
     if (f.burdens.length) qp.set('burdens', f.burdens.join(','));
     try {
       const res = await api(`./api/catalog?${qp.toString()}`);
-      state.catalog.items = c.page === 0 ? res.items : c.items.concat(res.items);
+      const nextItems = res.items || [];
+      state.catalog.items = c.page === 0 ? nextItems : c.items.concat(nextItems);
       state.catalog.total = res.total || 0;
-    } catch (e) { if (e.message !== 'PREMIUM_REQUIRED') showToast('Ошибка загрузки каталога'); }
-    finally { state.catalog.loading = false; renderActiveTab(); }
+      state.catalog.hasMore = state.catalog.items.length < state.catalog.total;
+      state.catalog.error = false;
+    } catch (e) {
+      state.catalog.error = e.message !== 'PREMIUM_REQUIRED';
+      if (c.page > 0) state.catalog.page = Math.max(0, c.page - 1);
+    } finally {
+      state.catalog.loading = false;
+      state.catalog.loadingMore = false;
+      renderActiveTab();
+    }
+  }
+
+  async function loadCatalogMore() {
+    const c = state.catalog;
+    if (c.loading || c.loadingMore || !c.hasMore || c.filtersOpen || c.error) return;
+    state.catalog.page += 1;
+    await loadCatalog(true);
+  }
+
+  function setupCatalogInfiniteScroll() {
+    catalogObserver?.disconnect?.();
+    catalogObserver = null;
+    const sentinel = document.getElementById('catalogSentinel');
+    if (!sentinel || state.activeTab !== 'catalog') return;
+    catalogObserver = new IntersectionObserver((entries) => {
+      const hit = entries.some((entry) => entry.isIntersecting);
+      if (!hit) return;
+      loadCatalogMore();
+    }, { root: null, rootMargin: '600px 0px', threshold: 0 });
+    catalogObserver.observe(sentinel);
   }
 
   function bindDetailModalEvents() {
@@ -898,22 +1244,81 @@
     document.getElementById('catalogSearch')?.addEventListener('input', (e) => {
       state.catalog.q = e.target.value;
       clearTimeout(state.searchDebounce);
-      state.searchDebounce = setTimeout(async () => { state.catalog.page = 0; await loadCatalog(true); }, 300);
+      state.searchDebounce = setTimeout(async () => {
+        state.catalog.page = 0;
+        state.catalog.hasMore = true;
+        await loadCatalog(true);
+      }, 300);
     });
-    document.getElementById('catalogClear')?.addEventListener('click', async () => { state.catalog.q=''; state.catalog.page=0; haptic(); await loadCatalog(true); });
-    document.getElementById('catalogFilters')?.addEventListener('click', () => { state.catalog.filtersOpen = true; haptic(); renderActiveTab(); const s=document.getElementById('sortSelect'); if(s) s.value=state.catalog.filters.sort || 'alpha'; });
-    document.getElementById('catalogMore')?.addEventListener('click', async () => { state.catalog.page += 1; await loadCatalog(true); });
+
+    document.getElementById('catalogSortInline')?.addEventListener('change', async (e) => {
+      state.catalog.filters.sort = e.target.value;
+      state.catalog.page = 0;
+      state.catalog.hasMore = true;
+      await loadCatalog(true);
+    });
+
+    document.getElementById('catalogRetry')?.addEventListener('click', async () => {
+      haptic();
+      state.catalog.page = 0;
+      state.catalog.hasMore = true;
+      await loadCatalog(true);
+    });
+
+    document.getElementById('catalogFilters')?.addEventListener('click', () => {
+      state.catalog.filtersOpen = true;
+      haptic();
+      renderActiveTab();
+      const s=document.getElementById('sortSelect');
+      if(s) s.value=state.catalog.filters.sort || 'alpha';
+    });
+
+    appEl.querySelectorAll('[data-filter-remove]').forEach((el)=>el.addEventListener('click', async ()=>{
+      const [k,v]=el.dataset.filterRemove.split(':');
+      const arr=state.catalog.filters[k] || [];
+      const idx=arr.indexOf(v);
+      if (idx>=0) arr.splice(idx,1);
+      state.catalog.page = 0;
+      state.catalog.hasMore = true;
+      await loadCatalog(true);
+    }));
+
     appEl.querySelectorAll('[data-catalog-open]').forEach((el)=>el.addEventListener('click', async ()=>{
       haptic();
       try { const d=await api(`./api/supplement/${el.dataset.catalogOpen}`); state.catalog.detail=d.item; renderActiveTab(); } catch { showToast('Не удалось открыть карточку'); }
     }));
+
     bindDetailModalEvents();
+
     appEl.querySelectorAll('[data-filter-close]').forEach((el)=>el.addEventListener('click',()=>{ state.catalog.filtersOpen=false; renderActiveTab(); }));
     appEl.querySelectorAll('[data-filter-toggle]').forEach((el)=>el.addEventListener('click',()=>{
-      const [k,v]=el.dataset.filterToggle.split(':'); const arr=state.catalog.filters[k]; const idx=arr.indexOf(v); if(idx>=0) arr.splice(idx,1); else arr.push(v); renderActiveTab(); const s=document.getElementById('sortSelect'); if(s) s.value=state.catalog.filters.sort;
+      const [k,v]=el.dataset.filterToggle.split(':');
+      const arr=state.catalog.filters[k];
+      const idx=arr.indexOf(v);
+      if(idx>=0) arr.splice(idx,1); else arr.push(v);
+      renderActiveTab();
+      const s=document.getElementById('sortSelect');
+      if(s) s.value=state.catalog.filters.sort;
     }));
-    document.getElementById('applyFilters')?.addEventListener('click', async ()=>{ const s=document.getElementById('sortSelect'); if(s) state.catalog.filters.sort=s.value; state.catalog.filtersOpen=false; state.catalog.page=0; await loadCatalog(true); });
-    document.getElementById('resetFilters')?.addEventListener('click', async ()=>{ state.catalog.filters={evidence:[],targets:[],burdens:[],sort:'alpha'}; state.catalog.filtersOpen=false; state.catalog.page=0; await loadCatalog(true); });
+
+    document.getElementById('applyFilters')?.addEventListener('click', async ()=>{
+      const s=document.getElementById('sortSelect');
+      if(s) state.catalog.filters.sort=s.value;
+      state.catalog.filtersOpen=false;
+      state.catalog.page=0;
+      state.catalog.hasMore = true;
+      await loadCatalog(true);
+    });
+
+    document.getElementById('resetFilters')?.addEventListener('click', async ()=>{
+      state.catalog.filters={evidence:[],targets:[],burdens:[],sort:'alpha'};
+      state.catalog.filtersOpen=false;
+      state.catalog.page=0;
+      state.catalog.hasMore = true;
+      await loadCatalog(true);
+    });
+
+    setupCatalogInfiniteScroll();
   }
 
 
@@ -1406,9 +1811,24 @@ function adminField(label, field, value, kind='input') {
       state.today = today;
       state.stats = statsRes?.summary || null;
     } catch (e) {
-      if (e.message !== "PREMIUM_REQUIRED") showToast("Не удалось загрузить Today");
+      if (e.message !== "PREMIUM_REQUIRED") showToast("Не удалось загрузить план");
     } finally {
       state.loadingToday = false;
+      state.loadingStats = false;
+      renderActiveTab();
+    }
+  }
+
+  async function loadStatsOnly() {
+    state.loadingStats = true;
+    renderActiveTab();
+    try {
+      const statsRes = await api("./api/stats/summary");
+      state.stats = statsRes?.summary || null;
+    } catch (e) {
+      if (e.message !== "PREMIUM_REQUIRED") showToast("Не удалось обновить статистику");
+      throw e;
+    } finally {
       state.loadingStats = false;
       renderActiveTab();
     }
@@ -1425,17 +1845,16 @@ function adminField(label, field, value, kind='input') {
     const d7Line = (d7.expected > 0 && d7.adherence !== null && d7.adherence !== undefined)
       ? `${d7.taken}/${d7.expected} (${d7.adherence}%)`
       : 'нет плана';
-    return `<section class="card fade"><div class="row"><strong>📈 Статистика</strong><span class="muted">Сегодня и 7 дней</span></div><div class="muted" style="margin-top:8px">Сегодня: ${tLine}</div><div class="muted">7 дней: ${d7Line}</div><div style="margin-top:10px"><button class="btn secondary" data-stats-refresh>Подробнее</button></div></section>`;
+    return `<section class="card fade"><div class="row"><strong>📈 Статистика</strong><span class="muted">Сегодня и 7 дней</span></div><div class="muted" style="margin-top:8px">Сегодня: ${tLine}</div><div class="muted">7 дней: ${d7Line}</div><div style="margin-top:10px"><button class="btn secondary" data-stats-refresh>${state.loadingStats ? 'Обновляем…' : 'Обновить'}</button></div></section>`;
   }
 
   function renderToday() {
     const slots = state.today?.slots || [];
-    const statsBlock = renderStatsBlock();
     if (!slots.length) {
-      return `${statsBlock}<div class="card">На сегодня приёмов не найдено.</div>`;
+      return `<div class="card">На сегодня приёмов не найдено.</div>`;
     }
 
-    return `${statsBlock}${slots.map((slot) => {
+    return `${slots.map((slot) => {
       const items = slot.items || [];
       const complexes = slot.complexes || [];
       const totalTaken = items.filter(i => i.status === "taken").length + complexes.reduce((acc,c)=>acc + (c.taken_count||0),0);
@@ -1470,6 +1889,104 @@ function adminField(label, field, value, kind='input') {
     }).join("")}`;
   }
 
+  function renderSettings() {
+    const adminHint = state.me?.role && state.me.role !== "none" ? '<li>Админ-панель в отдельной вкладке</li>' : '';
+    const ach = state.ach || {};
+    const items = Array.isArray(ach.achievements) ? ach.achievements : [];
+    const unlocked = items.filter((x) => x.unlocked);
+    const locked = items.filter((x) => !x.unlocked);
+    const allowed = ach.allowed_cosmetics || { themes:["base"], tab_skins:["classic"], badges:["none"] };
+    const catalogs = ach.catalogs || { themes:[], tab_skins:[], badges:[] };
+    const cosmetics = ach.cosmetics || state.me?.cosmetics || { theme_id:"base", tab_skin_id:"classic", badge_id:"none" };
+    const rarityIcon = { common:"⚪", rare:"🔵", epic:"🟣", legendary:"🟡" };
+    const rewardChips = (reward) => {
+      const unlock = reward?.unlock || {};
+      const chips = [];
+      (unlock.themes||[]).forEach((x)=> chips.push(`Тема: ${x}`));
+      (unlock.tab_skins||[]).forEach((x)=> chips.push(`Скин: ${x}`));
+      (unlock.badges||[]).forEach((x)=> chips.push(`Бейдж: ${x}`));
+      return chips.map((c)=>`<span class="chip">${esc(c)}</span>`).join(' ');
+    };
+    const options = (items, allowedIds, current) => (items||[]).filter((x)=>allowedIds.includes(x.id)).map((x)=>`<option value="${esc(x.id)}" ${x.id===current?'selected':''}>${esc(x.emoji||'')} ${esc(x.title_ru||x.id)}</option>`).join('');
+    return `
+      ${renderStatsBlock() || '<section class="card fade"><div class="row"><strong>📈 Статистика</strong></div><div class="muted" style="margin-top:8px">Пока нет данных для отображения.</div><div style="margin-top:10px"><button class="btn secondary" data-stats-refresh>Обновить</button></div></section>'}
+      <section class="card fade">
+        <div class="row"><strong>🏆 Достижения</strong><button class="btn secondary" data-ach-refresh>Обновить достижения</button></div>
+        <div class="muted" style="margin-top:8px">Открытые: ${unlocked.length} · Закрытые: ${locked.length}</div>
+        <div class="ach-grid">
+          ${unlocked.map((a)=>`<div class="ach-item"><div><strong>${rarityIcon[a.rarity]||'⚪'} ${esc(a.title_ru)}</strong></div><div class="muted">${esc(a.desc_ru)}</div><div class="muted">${a.unlocked_at_utc ? 'Открыто: '+esc(a.unlocked_at_utc) : ''}</div><div style="margin-top:6px">${rewardChips(a.reward)}</div></div>`).join('') || '<div class="muted">Пока ничего не открыто.</div>'}
+          ${locked.map((a)=>`<div class="ach-item locked"><div><strong>🔒 ${esc(a.title_ru)}</strong></div><div class="muted">${esc(a.desc_ru)}</div><div style="margin-top:6px">${rewardChips(a.reward)}</div></div>`).join('')}
+        </div>
+      </section>
+      <section class="card fade">
+        <div class="row"><strong>🎨 Косметика</strong></div>
+        <div style="margin-top:8px">
+          <label class="muted">Тема</label>
+          <select class="select" id="cosTheme">${options(catalogs.themes, allowed.themes || ["base"], cosmetics.theme_id || "base")}</select>
+        </div>
+        <div style="margin-top:8px">
+          <label class="muted">Таб-меню</label>
+          <select class="select" id="cosTab">${options(catalogs.tab_skins, allowed.tab_skins || ["classic"], cosmetics.tab_skin_id || "classic")}</select>
+        </div>
+        <div style="margin-top:8px">
+          <label class="muted">Бейдж</label>
+          <select class="select" id="cosBadge">${options(catalogs.badges, allowed.badges || ["none"], cosmetics.badge_id || "none")}</select>
+        </div>
+      </section>
+      <section class="card fade">
+        <div class="row"><strong>⚙️ Настройки</strong></div>
+        <ul class="muted" style="margin:10px 0 0; padding-left:20px; line-height:1.6"><li>Таймзона</li><li>Слоты и расписание</li><li>Уведомления</li><li>Достижения</li>${adminHint}</ul>
+      </section>
+    `;
+  }
+
+  function bindSettingsEvents() {
+    document.querySelectorAll('[data-stats-refresh]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        if (state.loadingStats) return;
+        haptic();
+        try {
+          await loadStatsOnly();
+          showToast('Статистика обновлена');
+        } catch {}
+      });
+    });
+    document.querySelectorAll("[data-ach-refresh]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        haptic();
+        try {
+          await loadAchievements(true);
+          renderActiveTab();
+          showToast("Достижения обновлены");
+        } catch {
+          showToast("Не удалось обновить достижения");
+        }
+      });
+    });
+    const applyPatch = async () => {
+      const patch = {
+        theme_id: document.getElementById("cosTheme")?.value || "base",
+        tab_skin_id: document.getElementById("cosTab")?.value || "classic",
+        badge_id: document.getElementById("cosBadge")?.value || "none",
+      };
+      try {
+        const res = await api("./api/cosmetics/set", { method: "POST", body: patch });
+        state.ach = state.ach || {};
+        state.ach.cosmetics = res.cosmetics;
+        state.me = { ...(state.me || {}), cosmetics: res.cosmetics };
+        applyCosmetics(res.cosmetics);
+        renderMainApp();
+        if (state.activeTab === "settings") renderActiveTab();
+      } catch {
+        showToast("Косметика пока не доступна");
+      }
+    };
+    ["cosTheme", "cosTab", "cosBadge"].forEach((id) => {
+      const el = document.getElementById(id);
+      el?.addEventListener("change", applyPatch);
+    });
+  }
+
   function statusClass(status) {
     if (status === "taken") return "status-taken";
     if (status === "skipped") return "status-skipped";
@@ -1500,14 +2017,6 @@ function adminField(label, field, value, kind='input') {
           await api("./api/today/toggle_complex", { method:"POST", body:{ complex_id: complexId, status: next } });
           await loadToday(true);
         } catch { showToast("Не удалось отметить комплекс"); }
-      });
-    });
-
-    appEl.querySelectorAll("[data-stats-refresh]").forEach((btn)=>{
-      btn.addEventListener("click", async ()=>{
-        haptic();
-        await loadToday(true);
-        showToast("Статистика обновлена");
       });
     });
 

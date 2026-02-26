@@ -1,10 +1,11 @@
 import hashlib
 import json
+from datetime import timedelta
 from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException
-from fastapi.exception_handlers import http_exception_handler
+from fastapi.exception_handlers import http_exception_handler as fastapi_http_exception_handler
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
@@ -12,6 +13,7 @@ from telegram_webapp_auth import verify_init_data
 import db
 from settings import get_settings
 from openai_client import OpenAIConfig, _sync_call
+from achievements import THEMES, TAB_SKINS, BADGES
 
 BASE_DIR = Path(__file__).resolve().parent
 WEBAPP_DIR = BASE_DIR / "webapp"
@@ -74,6 +76,8 @@ class CatalogToggleBody(BaseModel):
 
 class CheckinBody(BaseModel):
     answers: dict
+    target: str | None = None
+    client_local_iso: str | None = None
 
 
 class CheckinApplyBody(BaseModel):
@@ -125,6 +129,12 @@ class RecommendationsApplyBody(BaseModel):
     recommendations: list[dict] = []
 
 
+class CosmeticsSetBody(BaseModel):
+    theme_id: str | None = None
+    tab_skin_id: str | None = None
+    badge_id: str | None = None
+
+
 async def _auth_user_id(init_data: str) -> int:
     ok, parsed = verify_init_data(init_data, BOT_TOKEN)
     if not ok:
@@ -165,12 +175,16 @@ async def _premium_guard(tg_user_id: int) -> bool:
         await conn.close()
 
 
-@app.exception_handler(HTTPException)
-async def http_exception_handler(_, exc: HTTPException):
-    if exc.status_code == 403 and isinstance(exc.detail, dict) and exc.detail.get("code") == "BANNED":
-        payload = {"ok": False, "code": "BANNED", "reason": str(exc.detail.get("reason") or "")}
-        return JSONResponse(payload, status_code=403)
-    return await http_exception_handler(_, exc)
+async def supply_http_exception_handler(request, exc: HTTPException):
+    if request.url.path.startswith("/api/"):
+        return JSONResponse(
+            {"ok": False, "error": str(exc.detail), "code": "HTTP_ERROR"},
+            status_code=exc.status_code,
+        )
+    return await fastapi_http_exception_handler(request, exc)
+
+
+app.add_exception_handler(HTTPException, supply_http_exception_handler)
 
 
 def _plans_payload() -> list[dict]:
@@ -217,6 +231,7 @@ async def api_me(x_telegram_init_data: str = Header(default="", alias="X-Telegra
         premium = is_admin or await db.is_premium_active(conn, tg_user_id)
         premium_until = None if is_admin else await db.get_premium_until(conn, tg_user_id)
         status = await db.get_user_status(conn, tg_user_id)
+        cosmetics = await db.get_user_cosmetics(conn, tg_user_id)
     finally:
         await conn.close()
     return JSONResponse({
@@ -229,7 +244,91 @@ async def api_me(x_telegram_init_data: str = Header(default="", alias="X-Telegra
         "perms": perms,
         "banned": bool(int(status.get("is_banned") or 0) or str(status.get("deleted_at_utc") or "").strip()),
         "banned_reason": str(status.get("banned_reason") or ""),
+        "cosmetics": cosmetics,
     })
+
+
+@app.get("/api/achievements/summary")
+async def api_achievements_summary(x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    if not await _premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
+    conn = await db.connect(s.DB_PATH)
+    try:
+        tz_name = await db.get_user_tz(conn, tg_user_id)
+        local_date = db.get_user_local_date(tz_name or None)
+        newly = await db.evaluate_and_unlock_achievements(conn, tg_user_id, local_date)
+        user_id = await db.get_or_create_user(conn, tg_user_id)
+        achievements_rows = await db.fetchall(conn, "SELECT key, title_ru, desc_ru, category, rarity, points, reward_json FROM achievements ORDER BY points ASC, key ASC")
+        unlock_rows = await db.fetchall(conn, "SELECT achievement_key, unlocked_at_utc FROM user_achievements WHERE user_id=?", (user_id,))
+        unlock_map = {str(r["achievement_key"]): str(r["unlocked_at_utc"] or "") for r in unlock_rows}
+        rewards = []
+        achievements = []
+        for row in achievements_rows:
+            reward = {}
+            try:
+                reward = json.loads(row["reward_json"] or "{}")
+                if not isinstance(reward, dict):
+                    reward = {}
+            except Exception:
+                reward = {}
+            key = str(row["key"] or "")
+            unlocked_at = unlock_map.get(key, "")
+            if unlocked_at:
+                rewards.append(reward)
+            achievements.append({
+                "key": key,
+                "title_ru": str(row["title_ru"] or ""),
+                "desc_ru": str(row["desc_ru"] or ""),
+                "category": str(row["category"] or ""),
+                "rarity": str(row["rarity"] or "common"),
+                "points": int(row["points"] or 0),
+                "reward": reward,
+                "unlocked": bool(unlocked_at),
+                "unlocked_at_utc": unlocked_at,
+            })
+        allowed = db.compute_allowed_cosmetics(rewards)
+        cosmetics = await db.get_user_cosmetics(conn, tg_user_id)
+    finally:
+        await conn.close()
+    return JSONResponse({
+        "ok": True,
+        "date_local": local_date,
+        "newly_unlocked": newly,
+        "cosmetics": cosmetics,
+        "allowed_cosmetics": allowed,
+        "catalogs": {"themes": THEMES, "tab_skins": TAB_SKINS, "badges": BADGES},
+        "achievements": achievements,
+    })
+
+
+@app.post("/api/cosmetics/set")
+async def api_cosmetics_set(body: CosmeticsSetBody, x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    if not await _premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
+    conn = await db.connect(s.DB_PATH)
+    try:
+        user_id = await db.get_or_create_user(conn, tg_user_id)
+        unlock_rows = await db.fetchall(conn, """SELECT a.reward_json
+                                          FROM user_achievements ua
+                                          JOIN achievements a ON a.key=ua.achievement_key
+                                          WHERE ua.user_id=?""", (user_id,))
+        rewards = []
+        for row in unlock_rows:
+            try:
+                reward = json.loads(row["reward_json"] or "{}")
+                if isinstance(reward, dict):
+                    rewards.append(reward)
+            except Exception:
+                pass
+        allowed = db.compute_allowed_cosmetics(rewards)
+        updated = await db.set_user_cosmetics(conn, tg_user_id, body.model_dump(exclude_none=True), allowed)
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+    finally:
+        await conn.close()
+    return JSONResponse({"ok": True, "cosmetics": updated})
 
 
 @app.get("/api/admin/supplements")
@@ -600,6 +699,7 @@ async def api_today_toggle(body: TodayToggleBody, x_telegram_init_data: str = He
         tz_name = await db.get_user_tz(conn, tg_user_id)
         day = db.get_user_local_date(tz_name or None)
         await db.set_day_status(conn, tg_user_id, day, int(body.supplement_id), body.status)
+        await db.evaluate_and_unlock_achievements(conn, tg_user_id, day)
     finally:
         await conn.close()
     return JSONResponse({"ok": True})
@@ -620,6 +720,7 @@ async def api_today_toggle_complex(body: TodayToggleComplexBody, x_telegram_init
         tz_name = await db.get_user_tz(conn, tg_user_id)
         day = db.get_user_local_date(tz_name or None)
         await db.toggle_complex_for_day(conn, tg_user_id, day, int(body.complex_id), body.status)
+        await db.evaluate_and_unlock_achievements(conn, tg_user_id, day)
     finally:
         await conn.close()
     return JSONResponse({"ok": True})
@@ -783,7 +884,7 @@ async def api_stats_summary(x_telegram_init_data: str = Header(default="", alias
         {"slug": str(x.get("slug") or ""), "name_ru": streaks_map.get(str(x.get("slug") or ""), ""), "streak": int(x.get("streak") or 0)}
         for x in list(compact.get("top_streaks") or [])
     ]
-    return JSONResponse({"ok": True, "summary": summary})
+    return JSONResponse({"ok": True, "summary": summary, "date_local": target_date})
 
 
 @app.get("/api/body_map")
@@ -1013,6 +1114,17 @@ async def _normalize_recommendations(conn, recs: list[dict]) -> list[dict]:
     return out
 
 
+def _resolve_target_day(tz_name: str | None, target_raw: str | None) -> tuple[str, str, object]:
+    now_local = db.local_now(tz_name or None)
+    target = str(target_raw or "auto").strip().lower() or "auto"
+    if target not in {"today", "tomorrow", "auto"}:
+        target = "auto"
+    if target == "auto":
+        target = "tomorrow" if now_local.hour >= 18 else "today"
+    local_date = (now_local.date() + timedelta(days=1)).isoformat() if target == "tomorrow" else now_local.date().isoformat()
+    return target, local_date, now_local
+
+
 @app.post("/api/checkin")
 async def api_checkin(body: CheckinBody, x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
     tg_user_id = await _auth_user_id(x_telegram_init_data)
@@ -1023,15 +1135,19 @@ async def api_checkin(body: CheckinBody, x_telegram_init_data: str = Header(defa
     conn = await db.connect(s.DB_PATH)
     try:
         tz_name = await db.get_user_tz(conn, tg_user_id)
-        local_date = db.get_user_local_date(tz_name or None)
+        target, local_date, now_local = _resolve_target_day(tz_name, body.target)
         checkin_id = await db.upsert_daily_checkin(conn, tg_user_id, local_date, answers)
         ctx = await db.build_ai_context_compact(conn, tg_user_id, local_date)
+        ctx["now_local_hhmm"] = now_local.strftime("%H:%M")
+        ctx["target_day"] = target
+        if body.client_local_iso:
+            ctx["client_local_iso"] = body.client_local_iso
         p_hash = _prompt_hash(answers, ctx)
         try:
             recs_raw, meta = await _ai_recommendations(answers, ctx)
             recs = await _normalize_recommendations(conn, recs_raw)
             await db.save_ai_result(conn, checkin_id, recs, p_hash)
-            return JSONResponse({"ok": True, "checkin_id": checkin_id, "recommendations": recs, "meta": meta})
+            return JSONResponse({"ok": True, "checkin_id": checkin_id, "recommendations": recs, "meta": meta, "date_local": local_date, "target": target})
         except Exception:
             await db.save_ai_result(conn, checkin_id, {"error": "AI_UNAVAILABLE"}, p_hash)
             return JSONResponse({"ok": False, "checkin_id": checkin_id, "error": "AI_UNAVAILABLE"})
@@ -1046,8 +1162,6 @@ async def api_checkin_apply(body: CheckinApplyBody, x_telegram_init_data: str = 
         return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
     conn = await db.connect(s.DB_PATH)
     try:
-        tz_name = await db.get_user_tz(conn, tg_user_id)
-        local_date = db.get_user_local_date(tz_name or None)
         checkin = await db.get_daily_checkin_by_id(conn, int(body.checkin_id), tg_user_id)
         if not checkin:
             return JSONResponse({"ok": False, "error": "NOT_FOUND"}, status_code=404)
@@ -1059,10 +1173,14 @@ async def api_checkin_apply(body: CheckinApplyBody, x_telegram_init_data: str = 
         else:
             selected = set(int(x) for x in (body.selected_ids or []))
             picked = [x for x in recs if int(x.get("supplement_id") or 0) in selected]
-        summary = await db.apply_recommendations_to_today(conn, tg_user_id, local_date, picked, mode=(body.mode or "selected"))
+        tz_name = await db.get_user_tz(conn, tg_user_id)
+        _, local_date, _ = _resolve_target_day(tz_name, None)
+        target_date = str(checkin.get("date_local") or "").strip() or local_date
+        summary = await db.apply_recommendations_to_today(conn, tg_user_id, target_date, picked, mode=(body.mode or "selected"))
+        await db.evaluate_and_unlock_achievements(conn, tg_user_id, target_date)
     finally:
         await conn.close()
-    return JSONResponse({"ok": True, "summary": summary})
+    return JSONResponse({"ok": True, "summary": summary, "date_local": target_date})
 
 
 @app.post("/api/recommendations/apply_all")
@@ -1085,19 +1203,19 @@ async def api_recommendations_apply_all(body: RecommendationsApplyBody, x_telegr
 
 
 @app.get("/api/checkin/today")
-async def api_checkin_today(x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
+async def api_checkin_today(target: str | None = None, x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
     tg_user_id = await _auth_user_id(x_telegram_init_data)
     if not await _premium_guard(tg_user_id):
         return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
     conn = await db.connect(s.DB_PATH)
     try:
         tz_name = await db.get_user_tz(conn, tg_user_id)
-        local_date = db.get_user_local_date(tz_name or None)
+        resolved_target, local_date, _ = _resolve_target_day(tz_name, target)
         row = await db.get_today_checkin(conn, tg_user_id, local_date)
     finally:
         await conn.close()
     if not row:
-        return JSONResponse({"ok": True, "checkin": None})
+        return JSONResponse({"ok": True, "checkin": None, "date_local": local_date, "target": resolved_target})
     recs = []
     try:
         parsed = json.loads(row.get("ai_raw_json") or "[]")
@@ -1109,7 +1227,7 @@ async def api_checkin_today(x_telegram_init_data: str = Header(default="", alias
         answers = json.loads(row.get("answers_json") or "{}")
     except Exception:
         pass
-    return JSONResponse({"ok": True, "checkin": {"id": int(row.get("id") or 0), "answers": answers, "recommendations": recs}})
+    return JSONResponse({"ok": True, "checkin": {"id": int(row.get("id") or 0), "answers": answers, "recommendations": recs}, "date_local": local_date, "target": resolved_target})
 
 
 @app.post("/api/admin/diagnostics/run")

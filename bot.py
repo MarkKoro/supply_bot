@@ -72,6 +72,11 @@ from keyboards import (
     admin_supp_audit_back_kb,
     admin_diag_kb,
     admin_diag_confirm_kb,
+    complexes_hub_kb,
+    complex_open_kb,
+    complex_add_results_kb,
+    complex_item_actions_kb,
+    complex_schedule_kb,
 )
 import tz
 from openai_client import (
@@ -1595,31 +1600,36 @@ async def _show_complexes_hub(update: Update, context: ContextTypes.DEFAULT_TYPE
         await show(update, context, "Комплексы доступны в Premium.", premium_upsell_kb(), route="menu:premium")
         return
     items = await db.list_complexes(conn, tg_uid)
-    if not items:
-        await show(
-            update,
-            context,
-            "🧩 <b>Комплексы</b>\n\nПока пусто. Создай первый комплекс в WebApp.",
-            InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔓 Открыть WebApp", callback_data="menu:webapp")],
-                [InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")],
-            ]),
-            route="menu:complexes",
-        )
+    text = "🧩 <b>Комплексы</b>\n\nСоздавай, наполняй и настраивай расписание прямо в боте."
+    await show(update, context, text, complexes_hub_kb(items), route="settings:complexes")
+
+
+async def _show_complex_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, tg_uid: int, complex_id: int) -> None:
+    items = await db.list_complexes(conn, tg_uid)
+    target = next((x for x in items if int(x.get("id") or 0) == int(complex_id)), None)
+    if not target:
+        await _show_complexes_hub(update, context, conn, tg_uid)
         return
-    lines = ["🧩 <b>Комплексы</b>"]
-    for c in items[:20]:
-        lines.append(f"• {c['name']} ({c['items_count']})")
-    await show(
-        update,
-        context,
-        "\n".join(lines),
-        InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔓 Управлять в WebApp", callback_data="menu:webapp")],
-            [InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")],
-        ]),
-        route="menu:complexes",
-    )
+    c_items = await db.list_complex_items(conn, tg_uid, int(complex_id))
+    schedules = [x for x in await db.list_complex_schedules(conn, tg_uid) if int(x.get("complex_id") or 0) == int(complex_id)]
+    lines = [f"🧩 <b>{target.get('name') or 'Комплекс'}</b>", f"Позиций: {len(c_items)}"]
+    if schedules:
+        sched_txt = ", ".join([f"{str(x.get('slot_id') or '')}:{str(x.get('time_local') or '--:--')}" for x in schedules])
+        lines.append(f"Расписание: {sched_txt}")
+    else:
+        lines.append("Расписание: не назначено")
+    if c_items:
+        lines.append("")
+        lines.append("Состав:")
+        for idx, item in enumerate(c_items, start=1):
+            dose = str(item.get("dose_override") or "").strip()
+            line = f"{idx}) {item.get('name_ru') or item.get('slug') or item.get('supplement_id')}"
+            if dose:
+                line += f" — доза: {dose}"
+            lines.append(line)
+    kb_rows = [[InlineKeyboardButton(f"⚙️ {str(item.get('name_ru') or item.get('slug') or item.get('supplement_id'))}", callback_data=f"cx:item:open:{int(complex_id)}:{int(item.get('supplement_id') or 0)}")] for item in c_items[:20]]
+    kb_rows.extend(complex_open_kb(int(complex_id)).inline_keyboard)
+    await show(update, context, "\n".join(lines), InlineKeyboardMarkup(kb_rows), route=f"cx:open:{int(complex_id)}")
 
 
 async def _show_premium_hub(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2088,6 +2098,80 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if data == "menu:complexes":
             await _show_complexes_hub(update, context, conn, tg_uid)
             return
+        if data == "cx:create":
+            context.user_data[WAITING_KEY] = "cx:create"
+            await show(update, context, "Введи название нового комплекса.", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="settings:complexes")]]), route="cx:create")
+            return
+        if data.startswith("cx:open:"):
+            complex_id = int(data.split(":", 2)[2])
+            await _show_complex_detail(update, context, conn, tg_uid, complex_id)
+            return
+        if data.startswith("cx:rename:"):
+            complex_id = int(data.split(":", 2)[2])
+            context.user_data[WAITING_KEY] = f"cx:rename:{complex_id}"
+            await show(update, context, "Введи новое название комплекса.", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"cx:open:{complex_id}")]]), route=f"cx:rename:{complex_id}")
+            return
+        if data.startswith("cx:delete:confirm:"):
+            complex_id = int(data.split(":", 3)[3])
+            await db.delete_complex(conn, tg_uid, complex_id)
+            await _show_complexes_hub(update, context, conn, tg_uid)
+            return
+        if data.startswith("cx:delete:"):
+            complex_id = int(data.split(":", 2)[2])
+            await show(update, context, "Удалить комплекс?", InlineKeyboardMarkup([[InlineKeyboardButton("🗑 Да, удалить", callback_data=f"cx:delete:confirm:{complex_id}")],[InlineKeyboardButton("⬅️ Отмена", callback_data=f"cx:open:{complex_id}")]]), route=f"cx:delete:{complex_id}")
+            return
+        if data.startswith("cx:add_pick:"):
+            _, _, _, cx_id, supp_id = data.split(":", 4)
+            await db.add_item_to_complex(conn, tg_uid, int(cx_id), int(supp_id), dose_override="")
+            await _show_complex_detail(update, context, conn, tg_uid, int(cx_id))
+            return
+        if data.startswith("cx:add:"):
+            complex_id = int(data.split(":", 2)[2])
+            context.user_data[WAITING_KEY] = f"cx:add_query:{complex_id}"
+            await show(update, context, "Введи название БАДа для добавления в комплекс.", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ К комплексу", callback_data=f"cx:open:{complex_id}")]]), route=f"cx:add:{complex_id}")
+            return
+        if data.startswith("cx:item:open:"):
+            _, _, _, _, cx_id, supp_id = data.split(":", 5)
+            items = await db.list_complex_items(conn, tg_uid, int(cx_id))
+            target = next((x for x in items if int(x.get("supplement_id") or 0) == int(supp_id)), None)
+            if not target:
+                await _show_complex_detail(update, context, conn, tg_uid, int(cx_id))
+                return
+            dose = str(target.get("dose_override") or "").strip() or "не задана"
+            await show(update, context, f"БАД: <b>{target.get('name_ru') or target.get('slug') or supp_id}</b>\nДоза: {dose}", complex_item_actions_kb(int(cx_id), int(supp_id)), route=f"cx:item:open:{cx_id}:{supp_id}")
+            return
+        if data.startswith("cx:item:dose:"):
+            _, _, _, _, cx_id, supp_id = data.split(":", 5)
+            context.user_data[WAITING_KEY] = f"cx:item:dose:{cx_id}:{supp_id}"
+            await show(update, context, "Введи дозировку для этой добавки в комплексе.", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"cx:item:open:{cx_id}:{supp_id}")]]), route=f"cx:item:dose:{cx_id}:{supp_id}")
+            return
+        if data.startswith("cx:item:remove:"):
+            _, _, _, _, cx_id, supp_id = data.split(":", 5)
+            await db.remove_item_from_complex(conn, tg_uid, int(cx_id), int(supp_id))
+            await _show_complex_detail(update, context, conn, tg_uid, int(cx_id))
+            return
+        if data.startswith("cx:schedule:") and data.count(":") == 2:
+            complex_id = int(data.split(":", 2)[2])
+            user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
+            slots = await db.get_user_slots(conn, user_id)
+            await show(update, context, "Выбери слот для комплекса.", complex_schedule_kb(complex_id, slots), route=f"cx:schedule:{complex_id}")
+            return
+        if data.startswith("cx:schedule:set:"):
+            _, _, _, cx_id, slot_id = data.split(":", 4)
+            user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
+            slots = await db.get_user_slots(conn, user_id)
+            slot = next((x for x in slots if str(x.get("slot_id") or "") == slot_id), None)
+            time_local = str(slot.get("time_local") or "") if slot else ""
+            await db.set_complex_schedule(conn, tg_uid, int(cx_id), slot_id, time_local)
+            await _show_complex_detail(update, context, conn, tg_uid, int(cx_id))
+            return
+        if data.startswith("cx:schedule:clear:"):
+            complex_id = int(data.split(":", 3)[3])
+            schedules = [x for x in await db.list_complex_schedules(conn, tg_uid) if int(x.get("complex_id") or 0) == complex_id]
+            for item in schedules:
+                await db.remove_complex_schedule(conn, tg_uid, complex_id, str(item.get("slot_id") or ""))
+            await _show_complex_detail(update, context, conn, tg_uid, complex_id)
+            return
         if data == "menu:stats":
             await _show_stats_screen(update, context, conn, tg_uid)
             return
@@ -2165,6 +2249,9 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
         if data == "settings:schedule":
             await _show_schedule_home(update, context, conn, tg_uid)
+            return
+        if data == "settings:complexes":
+            await _show_complexes_hub(update, context, conn, tg_uid)
             return
         if data == "schedule:slot_pick":
             user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
@@ -5115,6 +5202,44 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await _show_timezone_picker(update, context, 0)
             return
 
+        if waiting == "cx:create":
+            name = txt.strip()[:120]
+            if not name:
+                await show(update, context, "Название не может быть пустым.", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="settings:complexes")]]), route="cx:create")
+            else:
+                try:
+                    created = await db.create_complex(conn, tg_uid, name)
+                    context.user_data.pop(WAITING_KEY, None)
+                    await _show_complex_detail(update, context, conn, tg_uid, int(created.get("id") or 0))
+                except Exception:
+                    await show(update, context, "Не удалось создать комплекс (возможно, такое имя уже есть).", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="settings:complexes")]]), route="cx:create")
+            return
+        if waiting.startswith("cx:rename:"):
+            complex_id = int(waiting.split(":", 2)[2])
+            name = txt.strip()[:120]
+            if not name:
+                await show(update, context, "Название не может быть пустым.", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"cx:open:{complex_id}")]]), route=f"cx:rename:{complex_id}")
+            else:
+                await db.rename_complex(conn, tg_uid, complex_id, name)
+                context.user_data.pop(WAITING_KEY, None)
+                await _show_complex_detail(update, context, conn, tg_uid, complex_id)
+            return
+        if waiting.startswith("cx:add_query:"):
+            complex_id = int(waiting.split(":", 2)[2])
+            rows, _ = await db.search_supplements(conn, txt, page=0, page_size=15)
+            if not rows:
+                await show(update, context, "Не нашёл в каталоге.", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ К комплексу", callback_data=f"cx:open:{complex_id}")]]), route=f"cx:add:{complex_id}")
+            else:
+                await show(update, context, "Выбери добавку для комплекса:", complex_add_results_kb(complex_id, rows), route=f"cx:add:{complex_id}")
+            context.user_data.pop(WAITING_KEY, None)
+            return
+        if waiting.startswith("cx:item:dose:"):
+            _, _, _, cx_id, supp_id = waiting.split(":", 4)
+            await db.add_item_to_complex(conn, tg_uid, int(cx_id), int(supp_id), dose_override=txt.strip()[:120])
+            context.user_data.pop(WAITING_KEY, None)
+            await _show_complex_detail(update, context, conn, tg_uid, int(cx_id))
+            return
+
         if waiting == "add_query":
             rows, _ = await db.search_supplements(conn, txt, page=0, page_size=10)
             if not rows:
@@ -5568,7 +5693,7 @@ async def _bootstrap() -> Application:
     app.add_handler(CommandHandler("premium", premium_command))
     app.add_handler(CallbackQueryHandler(
         on_menu,
-        pattern=r"^(main$|menu:|settings:|schedule:|supplement:|admin:|add_pick:|compat_pick:|cat:|curated:|supp:|card:|mysupp:|today:|intake:|rem:(home|edit|set:|toggle:))",
+        pattern=r"^(main$|menu:|settings:|schedule:|cx:|supplement:|admin:|add_pick:|compat_pick:|cat:|curated:|supp:|card:|mysupp:|today:|intake:|rem:(home|edit|set:|toggle:))",
     ))
     app.add_handler(CallbackQueryHandler(on_ai_add, pattern=r"^aiadd:"))
     app.add_handler(CallbackQueryHandler(on_ai_checkin, pattern=r"^aicheck:"))

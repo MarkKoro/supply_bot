@@ -20,6 +20,15 @@
       --neutral: rgba(255,255,255,0.17);
     }
 
+    html[data-theme="nebula"] { --bg-1:#0c0a23; --bg-2:#25125d; --bg-3:#130b2d; --accent:#b48bff; }
+    html[data-theme="aurora"] { --bg-1:#041a18; --bg-2:#0f3c3e; --bg-3:#12252f; --accent:#7df0c2; }
+    html[data-theme="noir"] { --bg-1:#090909; --bg-2:#171717; --bg-3:#101010; --accent:#bbbbbb; }
+    html[data-theme="solar"] { --bg-1:#2a1d08; --bg-2:#4e3310; --bg-3:#2b1a0b; --accent:#ffd36d; }
+    html[data-theme="emerald"] { --bg-1:#062015; --bg-2:#0c4630; --bg-3:#0a2c1f; --accent:#6ff0b8; }
+    html[data-theme="bloodline"] { --bg-1:#28050d; --bg-2:#4a0d1d; --bg-3:#25050f; --accent:#ff6a86; }
+    html[data-theme="glitch"] { --bg-1:#0b1129; --bg-2:#1e255f; --bg-3:#13223e; --accent:#68e4ff; }
+    html[data-theme="ivory"] { --bg-1:#1a1b20; --bg-2:#2a2d36; --bg-3:#1f2229; --accent:#f0e6ce; }
+
     * { box-sizing: border-box; }
 
     html, body {
@@ -170,6 +179,19 @@
     }
 
     .tab-emoji { font-size: 17px; line-height: 1; }
+    .tabs[data-skin="neon"] .tab.active { box-shadow: 0 0 0 1px rgba(125,210,255,.65) inset, 0 0 18px rgba(96,190,255,.55); }
+    .tabs[data-skin="neon"] .tab.active::after { content:""; position:absolute; inset:-3px; border-radius:16px; border:1px solid rgba(117,226,255,.65); }
+    .tabs[data-skin="thumbs"] .tab.active::after { content:"👍"; position:absolute; top:-10px; right:6px; font-size:12px; }
+    .tabs[data-skin="gold"] .tab.active { box-shadow:0 0 0 1px rgba(255,211,122,.9) inset,0 8px 20px rgba(165,118,36,.45); }
+    .tabs[data-skin="plasma"] .tab.active::after { content:""; position:absolute; inset:-2px; border-radius:15px; background:linear-gradient(120deg, rgba(96,163,255,.2), rgba(249,112,255,.2)); z-index:-1; filter:blur(1px);}
+    .tabs[data-skin="frost"] .tab.active { box-shadow:0 0 0 1px rgba(172,236,255,.7) inset,0 0 16px rgba(141,218,255,.4);}
+    .tabs[data-skin="minimal"] .tab.active { background:rgba(255,255,255,.08); box-shadow: inset 0 -2px 0 var(--accent);}
+    .tabs[data-skin="glitch"] .tab.active { text-shadow: 1px 0 rgba(255,80,80,.5), -1px 0 rgba(80,220,255,.5); box-shadow:0 0 0 1px rgba(121,200,255,.35) inset, 2px 0 10px rgba(255,88,122,.2), -2px 0 10px rgba(88,195,255,.2);}
+    .tab { position: relative; }
+    .badge-pill { font-size:12px; padding:4px 9px; border-radius:999px; border:1px solid rgba(255,255,255,.28); background:rgba(255,255,255,.12); }
+    .ach-grid{display:grid;gap:8px;margin-top:8px;}
+    .ach-item{border:1px solid rgba(255,255,255,.14);border-radius:12px;padding:8px;background:rgba(255,255,255,.05);}
+    .ach-item.locked{opacity:.72;}
 
     .slot-actions { display:flex; gap:8px; flex-wrap:wrap; margin-top: 8px; }
     .chip { border-radius: 999px; padding: 5px 10px; font-size: 12px; font-weight: 700; }
@@ -402,6 +424,7 @@
     loadingToday: false,
     loadingStats: false,
     stats: null,
+    ach: null,
     toastTimer: null,
     catalog: {
       q: "", page: 0, items: [], total: 0, loading: false,
@@ -504,6 +527,27 @@
   }
 
 
+
+  function applyCosmetics(c) {
+    const cosmetics = c || {};
+    document.documentElement.dataset.theme = cosmetics.theme_id || "base";
+    document.documentElement.dataset.tabSkin = cosmetics.tab_skin_id || "classic";
+    document.documentElement.dataset.badge = cosmetics.badge_id || "none";
+  }
+
+  function getBadgeMeta(id) {
+    const badges = state.ach?.catalogs?.badges || [];
+    return badges.find((b) => b.id === id) || { id: "none", emoji: "", title_ru: "" };
+  }
+
+  async function loadAchievements(force = false) {
+    if (state.ach && !force) return state.ach;
+    const data = await api("./api/achievements/summary");
+    state.ach = data;
+    applyCosmetics(data.cosmetics || {});
+    return data;
+  }
+
   function showBannedScreen(reason) {
     appEl.innerHTML = `
       <div class="main-content">
@@ -563,6 +607,7 @@
     try {
       const me = await api("./api/me");
       state.me = me;
+      applyCosmetics(me.cosmetics || {});
       state.userId = tg?.initDataUnsafe?.user?.id || me?.tg_user_id || me?.id || "anon";
       if (me.banned) {
         showBannedScreen(me.banned_reason || "");
@@ -698,7 +743,7 @@
 
   function renderTabs(isLocked) {
     const list = activeTabs();
-    return `<nav class="tabs ${(state.me?.role && state.me.role !== "none") ? "admin-enabled" : ""}">
+    return `<nav class="tabs ${(state.me?.role && state.me.role !== "none") ? "admin-enabled" : ""}" data-skin="${document.documentElement.dataset.tabSkin || "classic"}">
       ${list.map(t => `<button class="tab ${state.activeTab === t.id ? "active" : ""}" data-tab="${t.id}" ${isLocked ? "disabled" : ""}>
         <span class="tab-emoji">${t.icon}</span>
         <span>${t.title}</span>
@@ -713,6 +758,7 @@
           <div>
             <h1 class="headline">${APP_NAME}</h1>
             <div class="subline">${formatDate()}</div>
+            ${(() => { const bid = document.documentElement.dataset.badge || "none"; const b = getBadgeMeta(bid); return bid !== "none" ? `<span class="badge-pill">${esc(b.emoji || "")} ${esc(b.title_ru || bid)}</span>` : ""; })()}
           </div>
           <button class="btn" id="refreshBtn" aria-label="Обновить">⟳</button>
         </header>
@@ -748,6 +794,9 @@
         if (tab === "survey") {
           await loadSurveyForTarget();
         }
+        if (tab === "settings") {
+          try { await loadAchievements(); } catch {}
+        }
       });
     });
 
@@ -765,6 +814,7 @@
         await loadAdminSupplements(true);
       } else if (state.activeTab === "settings") {
         await loadStatsOnly();
+        try { await loadAchievements(true); } catch {}
         showToast("Статистика обновлена");
       } else {
         showToast("Раздел обновлён");
@@ -1841,17 +1891,51 @@ function adminField(label, field, value, kind='input') {
 
   function renderSettings() {
     const adminHint = state.me?.role && state.me.role !== "none" ? '<li>Админ-панель в отдельной вкладке</li>' : '';
+    const ach = state.ach || {};
+    const items = Array.isArray(ach.achievements) ? ach.achievements : [];
+    const unlocked = items.filter((x) => x.unlocked);
+    const locked = items.filter((x) => !x.unlocked);
+    const allowed = ach.allowed_cosmetics || { themes:["base"], tab_skins:["classic"], badges:["none"] };
+    const catalogs = ach.catalogs || { themes:[], tab_skins:[], badges:[] };
+    const cosmetics = ach.cosmetics || state.me?.cosmetics || { theme_id:"base", tab_skin_id:"classic", badge_id:"none" };
+    const rarityIcon = { common:"⚪", rare:"🔵", epic:"🟣", legendary:"🟡" };
+    const rewardChips = (reward) => {
+      const unlock = reward?.unlock || {};
+      const chips = [];
+      (unlock.themes||[]).forEach((x)=> chips.push(`Тема: ${x}`));
+      (unlock.tab_skins||[]).forEach((x)=> chips.push(`Скин: ${x}`));
+      (unlock.badges||[]).forEach((x)=> chips.push(`Бейдж: ${x}`));
+      return chips.map((c)=>`<span class="chip">${esc(c)}</span>`).join(' ');
+    };
+    const options = (items, allowedIds, current) => (items||[]).filter((x)=>allowedIds.includes(x.id)).map((x)=>`<option value="${esc(x.id)}" ${x.id===current?'selected':''}>${esc(x.emoji||'')} ${esc(x.title_ru||x.id)}</option>`).join('');
     return `
       ${renderStatsBlock() || '<section class="card fade"><div class="row"><strong>📈 Статистика</strong></div><div class="muted" style="margin-top:8px">Пока нет данных для отображения.</div><div style="margin-top:10px"><button class="btn secondary" data-stats-refresh>Обновить</button></div></section>'}
       <section class="card fade">
+        <div class="row"><strong>🏆 Достижения</strong><button class="btn secondary" data-ach-refresh>Обновить достижения</button></div>
+        <div class="muted" style="margin-top:8px">Открытые: ${unlocked.length} · Закрытые: ${locked.length}</div>
+        <div class="ach-grid">
+          ${unlocked.map((a)=>`<div class="ach-item"><div><strong>${rarityIcon[a.rarity]||'⚪'} ${esc(a.title_ru)}</strong></div><div class="muted">${esc(a.desc_ru)}</div><div class="muted">${a.unlocked_at_utc ? 'Открыто: '+esc(a.unlocked_at_utc) : ''}</div><div style="margin-top:6px">${rewardChips(a.reward)}</div></div>`).join('') || '<div class="muted">Пока ничего не открыто.</div>'}
+          ${locked.map((a)=>`<div class="ach-item locked"><div><strong>🔒 ${esc(a.title_ru)}</strong></div><div class="muted">${esc(a.desc_ru)}</div><div style="margin-top:6px">${rewardChips(a.reward)}</div></div>`).join('')}
+        </div>
+      </section>
+      <section class="card fade">
+        <div class="row"><strong>🎨 Косметика</strong></div>
+        <div style="margin-top:8px">
+          <label class="muted">Тема</label>
+          <select class="select" id="cosTheme">${options(catalogs.themes, allowed.themes || ["base"], cosmetics.theme_id || "base")}</select>
+        </div>
+        <div style="margin-top:8px">
+          <label class="muted">Таб-меню</label>
+          <select class="select" id="cosTab">${options(catalogs.tab_skins, allowed.tab_skins || ["classic"], cosmetics.tab_skin_id || "classic")}</select>
+        </div>
+        <div style="margin-top:8px">
+          <label class="muted">Бейдж</label>
+          <select class="select" id="cosBadge">${options(catalogs.badges, allowed.badges || ["none"], cosmetics.badge_id || "none")}</select>
+        </div>
+      </section>
+      <section class="card fade">
         <div class="row"><strong>⚙️ Настройки</strong></div>
-        <ul class="muted" style="margin:10px 0 0; padding-left:20px; line-height:1.6">
-          <li>Таймзона</li>
-          <li>Слоты и расписание</li>
-          <li>Уведомления</li>
-          <li>Достижения</li>
-          ${adminHint}
-        </ul>
+        <ul class="muted" style="margin:10px 0 0; padding-left:20px; line-height:1.6"><li>Таймзона</li><li>Слоты и расписание</li><li>Уведомления</li><li>Достижения</li>${adminHint}</ul>
       </section>
     `;
   }
@@ -1866,6 +1950,40 @@ function adminField(label, field, value, kind='input') {
           showToast('Статистика обновлена');
         } catch {}
       });
+    });
+    document.querySelectorAll("[data-ach-refresh]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        haptic();
+        try {
+          await loadAchievements(true);
+          renderActiveTab();
+          showToast("Достижения обновлены");
+        } catch {
+          showToast("Не удалось обновить достижения");
+        }
+      });
+    });
+    const applyPatch = async () => {
+      const patch = {
+        theme_id: document.getElementById("cosTheme")?.value || "base",
+        tab_skin_id: document.getElementById("cosTab")?.value || "classic",
+        badge_id: document.getElementById("cosBadge")?.value || "none",
+      };
+      try {
+        const res = await api("./api/cosmetics/set", { method: "POST", body: patch });
+        state.ach = state.ach || {};
+        state.ach.cosmetics = res.cosmetics;
+        state.me = { ...(state.me || {}), cosmetics: res.cosmetics };
+        applyCosmetics(res.cosmetics);
+        renderMainApp();
+        if (state.activeTab === "settings") renderActiveTab();
+      } catch {
+        showToast("Косметика пока не доступна");
+      }
+    };
+    ["cosTheme", "cosTab", "cosBadge"].forEach((id) => {
+      const el = document.getElementById(id);
+      el?.addEventListener("change", applyPatch);
     });
   }
 

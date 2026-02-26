@@ -767,8 +767,67 @@ def settings_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🕒 Часовой пояс", callback_data="settings:tz")],
         [InlineKeyboardButton("✨ Начальный подбор", callback_data="settings:initial_pick")],
         [InlineKeyboardButton("⏰ Расписание", callback_data="settings:schedule")],
+        [InlineKeyboardButton("🧩 Комплексы", callback_data="settings:complexes")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")],
     ])
+
+
+def complexes_hub_kb(items: list[dict]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for item in items[:20]:
+        cid = int(item.get("id") or 0)
+        name = str(item.get("name") or "Комплекс")
+        count = int(item.get("items_count") or 0)
+        rows.append([InlineKeyboardButton(f"🧩 {name} ({count})", callback_data=f"cx:open:{cid}")])
+    rows.append([InlineKeyboardButton("➕ Создать комплекс", callback_data="cx:create")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="menu:settings")])
+    return InlineKeyboardMarkup(rows)
+
+
+def complex_open_kb(complex_id: int) -> InlineKeyboardMarkup:
+    cid = int(complex_id)
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ Добавить БАД", callback_data=f"cx:add:{cid}")],
+        [InlineKeyboardButton("⏱ Расписание", callback_data=f"cx:schedule:{cid}")],
+        [InlineKeyboardButton("✏️ Переименовать", callback_data=f"cx:rename:{cid}")],
+        [InlineKeyboardButton("🗑 Удалить", callback_data=f"cx:delete:{cid}")],
+        [InlineKeyboardButton("⬅️ К списку комплексов", callback_data="settings:complexes")],
+    ])
+
+
+def complex_add_results_kb(complex_id: int, rows: list[dict]) -> InlineKeyboardMarkup:
+    cid = int(complex_id)
+    btns: list[list[InlineKeyboardButton]] = []
+    for item in rows[:15]:
+        sid = int(item.get("id") or 0)
+        title = item.get("name_ru") or item.get("name_en") or item.get("name") or f"ID {sid}"
+        btns.append([InlineKeyboardButton(f"• {title}", callback_data=f"cx:add_pick:{cid}:{sid}")])
+    btns.append([InlineKeyboardButton("🔎 Новый поиск", callback_data=f"cx:add:{cid}")])
+    btns.append([InlineKeyboardButton("⬅️ К комплексу", callback_data=f"cx:open:{cid}")])
+    return InlineKeyboardMarkup(btns)
+
+
+def complex_item_actions_kb(complex_id: int, supplement_id: int) -> InlineKeyboardMarkup:
+    cid = int(complex_id)
+    sid = int(supplement_id)
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✏️ Изменить дозу", callback_data=f"cx:item:dose:{cid}:{sid}")],
+        [InlineKeyboardButton("➖ Убрать из комплекса", callback_data=f"cx:item:remove:{cid}:{sid}")],
+        [InlineKeyboardButton("⬅️ К комплексу", callback_data=f"cx:open:{cid}")],
+    ])
+
+
+def complex_schedule_kb(complex_id: int, slots: list[dict]) -> InlineKeyboardMarkup:
+    cid = int(complex_id)
+    rows: list[list[InlineKeyboardButton]] = []
+    for slot in slots:
+        slot_id = str(slot.get("slot_id") or "")
+        title = str(slot.get("title_ru") or "Слот")
+        time_local = str(slot.get("time_local") or "--:--")
+        rows.append([InlineKeyboardButton(f"{title} · {time_local}", callback_data=f"cx:schedule:set:{cid}:{slot_id}")])
+    rows.append([InlineKeyboardButton("🧹 Убрать расписание", callback_data=f"cx:schedule:clear:{cid}")])
+    rows.append([InlineKeyboardButton("⬅️ К комплексу", callback_data=f"cx:open:{cid}")])
+    return InlineKeyboardMarkup(rows)
 
 
 def schedule_menu_kb() -> InlineKeyboardMarkup:

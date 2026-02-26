@@ -7,6 +7,7 @@ import httpx
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.exception_handlers import http_exception_handler as fastapi_http_exception_handler
 from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from telegram_webapp_auth import verify_init_data
@@ -17,8 +18,11 @@ from achievements import THEMES, TAB_SKINS, BADGES
 
 BASE_DIR = Path(__file__).resolve().parent
 WEBAPP_DIR = BASE_DIR / "webapp"
+ASSETS_DIR = WEBAPP_DIR / "assets"
+ASSETS_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="SupplyBot WebApp")
+app.mount("/assets", StaticFiles(directory=str(ASSETS_DIR)), name="assets")
 s = get_settings()
 BOT_TOKEN = s.TG_TOKEN
 

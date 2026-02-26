@@ -5221,28 +5221,117 @@ BODY_MAP_SYSTEM_KEYS = [
 ]
 
 
+def _norm_system(value: str | None) -> str:
+    s = str(value or "").strip().lower()
+    if not s:
+        return ""
+    s = re.sub(r"[\s\-\/]+", "_", s)
+    s = re.sub(r"[^a-z0-9_]+", "", s)
+    s = re.sub(r"_+", "_", s).strip("_")
+    return s
+
+
 def _is_endocrine_like(system_raw: str) -> bool:
     value = (system_raw or "").strip().lower()
-    return any(token in value for token in ("hormon", "endocr", "adrenal", "insulin", "thyroid", "pancrea", "testoster", "estrogen", "cortisol"))
+    return any(token in value for token in (
+        "hormon", "endocr", "adrenal", "cortisol",
+        "testoster", "estrogen", "progester", "androgen",
+        "pituitar", "growth_hormone", "gh", "prolact", "melatonin",
+    ))
 
 
 def _body_map_system_key(system_raw: str | None) -> str | None:
-    system = str(system_raw or "").strip().lower()
+    system = _norm_system(system_raw)
     if not system:
         return None
     if system in BODY_MAP_SYSTEM_KEYS:
         return system
+
     aliases = {
         "stomach": "gut",
         "intestine": "gut",
         "kidneys": "kidney",
         "cns": "brain",
+        "brain_cns": "brain",
+        "heart_cv": "heart",
+        "vessels_blood": "blood",
+        "skin_hair": "skin",
     }
     if system in aliases:
         return aliases[system]
+
+    if any(t in system for t in ("thyroid", "thyreoid", "tiroid", "tsh", "thyrox", "t3", "t4")):
+        return "thyroid"
+
+    if any(t in system for t in ("pancrea", "insulin", "glucose", "glycem", "hba1c")):
+        return "pancreas"
+
+    if any(t in system for t in ("hepat", "hepatic", "bile", "gall")):
+        return "liver"
+
+    if any(t in system for t in ("renal", "nephr", "kidney")):
+        return "kidney"
+
+    if any(t in system for t in ("gut", "gi", "gastro", "digest", "microbiome", "intestin", "stomach")):
+        return "gut"
+
+    if any(t in system for t in ("lung", "respir", "bronch")):
+        return "lungs"
+
+    if any(t in system for t in ("heart", "cardio", "cardiac")):
+        return "heart"
+
+    if any(t in system for t in ("blood", "vessel", "vascular", "vein", "venous", "arter", "microcircul", "capillar")):
+        return "blood"
+
+    if any(t in system for t in ("immune", "immun")):
+        return "immune"
+
+    if any(t in system for t in ("skin", "hair", "derm")):
+        return "skin"
+
+    if any(t in system for t in ("joint", "cartilage", "connective")):
+        return "joints"
+
+    if any(t in system for t in ("muscle", "myo", "strength")):
+        return "muscle"
+
+    if any(t in system for t in ("bone", "skelet", "oste")):
+        return "bone"
+
+    if any(t in system for t in ("brain", "neuro", "nerv", "cognit", "mood", "sleep", "cns")):
+        return "brain"
+
     if _is_endocrine_like(system):
         return "endocrine"
+
     return None
+
+
+async def debug_bodymap_unknown_systems(conn: aiosqlite.Connection, limit: int = 50) -> list[tuple[str, int]]:
+    rows = await fetchall(
+        conn,
+        "SELECT body_effects_json FROM supplements WHERE body_effects_json IS NOT NULL AND TRIM(body_effects_json) != ''",
+    )
+    counter: dict[str, int] = {}
+    for row in rows:
+        try:
+            effects = json.loads(row["body_effects_json"] or "[]")
+        except Exception:
+            continue
+        if not isinstance(effects, list):
+            continue
+        for effect in effects:
+            if not isinstance(effect, dict):
+                continue
+            raw = effect.get("system")
+            key = _body_map_system_key(raw)
+            if key is None:
+                normalized = _norm_system(raw)
+                if normalized:
+                    counter[normalized] = counter.get(normalized, 0) + 1
+    items = sorted(counter.items(), key=lambda x: -x[1])
+    return items[:limit]
 
 
 

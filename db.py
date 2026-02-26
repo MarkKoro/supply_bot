@@ -5949,8 +5949,10 @@ async def body_map_aggregate(conn: aiosqlite.Connection, tg_user_id: int, local_
         key: {
             "benefit_count": 0,
             "burden_count": 0,
+            "mixed_count": 0,
             "benefit_strength_sum": 0,
             "burden_strength_sum": 0,
+            "mixed_strength_sum": 0,
             "top": [],
         }
         for key in BODY_MAP_SYSTEM_KEYS
@@ -5993,13 +5995,16 @@ async def body_map_aggregate(conn: aiosqlite.Connection, tg_user_id: int, local_
                 strength = 0
 
             entry = systems[system_key]
-            if direction in {"benefit", "mixed"}:
+            if direction == "benefit":
                 entry["benefit_count"] += 1
                 entry["benefit_strength_sum"] += strength
-            if direction in {"burden", "mixed"}:
+            elif direction == "burden":
                 entry["burden_count"] += 1
                 entry["burden_strength_sum"] += strength
-            if direction not in {"benefit", "burden", "mixed"}:
+            elif direction == "mixed":
+                entry["mixed_count"] += 1
+                entry["mixed_strength_sum"] += strength
+            else:
                 continue
             entry["top"].append(
                 {
@@ -6022,7 +6027,11 @@ async def body_map_aggregate(conn: aiosqlite.Connection, tg_user_id: int, local_
             )
         )
         systems[key]["top"] = top[:12]
-        total = int(systems[key]["benefit_count"] or 0) + int(systems[key]["burden_count"] or 0)
+        total = (
+            int(systems[key]["benefit_count"] or 0)
+            + int(systems[key]["burden_count"] or 0)
+            + int(systems[key]["mixed_count"] or 0)
+        )
         if total > max_count:
             max_count = total
 

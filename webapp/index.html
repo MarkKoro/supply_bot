@@ -430,6 +430,7 @@
     .badge { border-radius:999px; padding:2px 8px; font-size:12px; font-weight:700; }
     .badge.plus { background: rgba(73,216,141,0.2); color:#b7ffd5; }
     .badge.minus { background: rgba(255,107,121,0.24); color:#ffd0d5; }
+    .badge.mixed { background: rgba(255,191,92,0.26); color:#ffe1b0; }
     .sheet-backdrop { position: fixed; inset:0; background: rgba(2,5,16,0.58); z-index: 32; }
     .sheet { position: fixed; left:10px; right:10px; bottom: calc(82px + env(safe-area-inset-bottom)); z-index: 33; max-height: 66vh; overflow: auto; opacity:1; transform: translateY(0); transition: all .18s ease; }
     .sheet-empty { padding:12px; border-radius: 14px; background: rgba(255,255,255,0.05); color: var(--muted); text-align:center; }
@@ -1730,7 +1731,7 @@ function adminField(label, field, value, kind='input') {
   }
 
   function bodyMapSystem(key) {
-    return state.bodyMap?.systems?.[key] || { benefit_count: 0, burden_count: 0, benefit_strength_sum: 0, burden_strength_sum: 0, top: [] };
+    return state.bodyMap?.systems?.[key] || { benefit_count: 0, burden_count: 0, mixed_count: 0, benefit_strength_sum: 0, burden_strength_sum: 0, mixed_strength_sum: 0, top: [] };
   }
 
   async function fetchOrganSvg(key) {
@@ -1792,14 +1793,20 @@ function adminField(label, field, value, kind='input') {
             const s = bodyMapSystem(key);
             const benefitSum = Number(s.benefit_strength_sum || 0);
             const burdenSum = Number(s.burden_strength_sum || 0);
+            const mixedCount = Number(s.mixed_count || 0);
+            const total = Number(s.benefit_count || 0) + Number(s.burden_count || 0) + mixedCount;
+            const mixedBalanced = mixedCount > 0 && Number(s.benefit_count || 0) === Number(s.burden_count || 0);
             const benefitI = benefitSum > 0 ? clamp(benefitSum / maxBenefitSum, 0.12, 1) : 0;
             const burdenI = burdenSum > 0 ? clamp(burdenSum / maxBurdenSum, 0.12, 1) : 0;
+            const colorBias = mixedBalanced ? 0.44 : null;
+            const tileBenefitI = colorBias === null ? benefitI : colorBias;
+            const tileBurdenI = colorBias === null ? burdenI : colorBias;
             const emoji = tileEmoji(key, benefitI, burdenI);
-            return `<button class="organ-tile" data-system="${key}" style="--bI:${benefitI.toFixed(3)};--rI:${burdenI.toFixed(3)};">
+            return `<button class="organ-tile" data-system="${key}" data-total="${total}" style="--bI:${tileBenefitI.toFixed(3)};--rI:${tileBurdenI.toFixed(3)};">
               <div class="organ-icon" data-organ-icon="${key}"></div>
               <div class="organ-text">
                 <div class="title">${SYSTEM_LABELS[key] || key}</div>
-                <div class="muted">${s.benefit_count||0} + / ${s.burden_count||0} -</div>
+                <div class="muted">${(() => { const mc = s.mixed_count || 0; return `${s.benefit_count||0} + / ${s.burden_count||0} -${mc ? ` · ${mc} ±` : ''}`; })()}</div>
               </div>
               ${emoji ? `<div class="organ-emoji">${emoji}</div>` : ''}
             </button>`;
@@ -1816,8 +1823,8 @@ function adminField(label, field, value, kind='input') {
     const list = data.top || [];
     return `<div class="sheet-backdrop" data-sheet-close></div><div class="card sheet" role="dialog">
       <div class="row"><strong>${SYSTEM_LABELS[systemKey] || systemKey}</strong><button class="btn secondary" data-sheet-close>Закрыть</button></div>
-      <div class="row" style="margin-top:8px"><span class="badge plus">Польза: ${data.benefit_count || 0}</span><span class="badge minus">Нагрузка: ${data.burden_count || 0}</span></div>
-      <div style="margin-top:10px">${list.length ? list.map((item)=>`<button class="item-row" data-bodymap-open="${esc(item.slug)}"><span class="badge ${item.direction==='burden'?'minus':'plus'}">${item.direction==='burden'?'-':'+'}</span><span>${esc(item.name_ru || item.slug)}</span></button>`).join('') : '<div class="sheet-empty">нет данных</div>'}</div>
+      <div class="row" style="margin-top:8px"><span class="badge plus">Польза: ${data.benefit_count || 0}</span><span class="badge minus">Нагрузка: ${data.burden_count || 0}</span>${(data.mixed_count || 0) > 0 ? `<span class="badge mixed">Смешанное: ${data.mixed_count || 0}</span>` : ''}</div>
+      <div style="margin-top:10px">${list.length ? list.map((item)=>{ const cls = item.direction==='burden' ? 'minus' : (item.direction==='mixed' ? 'mixed' : 'plus'); const sign = item.direction==='burden' ? '-' : (item.direction==='mixed' ? '±' : '+'); return `<button class="item-row" data-bodymap-open="${esc(item.slug)}"><span class="badge ${cls}">${sign}</span><span>${esc(item.name_ru || item.slug)}</span></button>`; }).join('') : '<div class="sheet-empty">нет данных</div>'}</div>
       <div class="row" style="margin-top:10px"><button class="btn" data-bodymap-catalog="${systemKey}">Открыть в каталоге</button></div>
     </div>`;
   }

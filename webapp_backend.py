@@ -1,5 +1,6 @@
 import hashlib
 import json
+from datetime import timedelta
 from pathlib import Path
 
 import httpx
@@ -74,6 +75,8 @@ class CatalogToggleBody(BaseModel):
 
 class CheckinBody(BaseModel):
     answers: dict
+    target: str | None = None
+    client_local_iso: str | None = None
 
 
 class CheckinApplyBody(BaseModel):
@@ -787,7 +790,7 @@ async def api_stats_summary(x_telegram_init_data: str = Header(default="", alias
         {"slug": str(x.get("slug") or ""), "name_ru": streaks_map.get(str(x.get("slug") or ""), ""), "streak": int(x.get("streak") or 0)}
         for x in list(compact.get("top_streaks") or [])
     ]
-    return JSONResponse({"ok": True, "summary": summary})
+    return JSONResponse({"ok": True, "summary": summary, "date_local": target_date})
 
 
 @app.get("/api/body_map")
@@ -1017,6 +1020,17 @@ async def _normalize_recommendations(conn, recs: list[dict]) -> list[dict]:
     return out
 
 
+def _resolve_target_day(tz_name: str | None, target_raw: str | None) -> tuple[str, str, object]:
+    now_local = db.local_now(tz_name or None)
+    target = str(target_raw or "auto").strip().lower() or "auto"
+    if target not in {"today", "tomorrow", "auto"}:
+        target = "auto"
+    if target == "auto":
+        target = "tomorrow" if now_local.hour >= 18 else "today"
+    local_date = (now_local.date() + timedelta(days=1)).isoformat() if target == "tomorrow" else now_local.date().isoformat()
+    return target, local_date, now_local
+
+
 @app.post("/api/checkin")
 async def api_checkin(body: CheckinBody, x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
     tg_user_id = await _auth_user_id(x_telegram_init_data)
@@ -1027,15 +1041,19 @@ async def api_checkin(body: CheckinBody, x_telegram_init_data: str = Header(defa
     conn = await db.connect(s.DB_PATH)
     try:
         tz_name = await db.get_user_tz(conn, tg_user_id)
-        local_date = db.get_user_local_date(tz_name or None)
+        target, local_date, now_local = _resolve_target_day(tz_name, body.target)
         checkin_id = await db.upsert_daily_checkin(conn, tg_user_id, local_date, answers)
         ctx = await db.build_ai_context_compact(conn, tg_user_id, local_date)
+        ctx["now_local_hhmm"] = now_local.strftime("%H:%M")
+        ctx["target_day"] = target
+        if body.client_local_iso:
+            ctx["client_local_iso"] = body.client_local_iso
         p_hash = _prompt_hash(answers, ctx)
         try:
             recs_raw, meta = await _ai_recommendations(answers, ctx)
             recs = await _normalize_recommendations(conn, recs_raw)
             await db.save_ai_result(conn, checkin_id, recs, p_hash)
-            return JSONResponse({"ok": True, "checkin_id": checkin_id, "recommendations": recs, "meta": meta})
+            return JSONResponse({"ok": True, "checkin_id": checkin_id, "recommendations": recs, "meta": meta, "date_local": local_date, "target": target})
         except Exception:
             await db.save_ai_result(conn, checkin_id, {"error": "AI_UNAVAILABLE"}, p_hash)
             return JSONResponse({"ok": False, "checkin_id": checkin_id, "error": "AI_UNAVAILABLE"})
@@ -1050,8 +1068,6 @@ async def api_checkin_apply(body: CheckinApplyBody, x_telegram_init_data: str = 
         return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
     conn = await db.connect(s.DB_PATH)
     try:
-        tz_name = await db.get_user_tz(conn, tg_user_id)
-        local_date = db.get_user_local_date(tz_name or None)
         checkin = await db.get_daily_checkin_by_id(conn, int(body.checkin_id), tg_user_id)
         if not checkin:
             return JSONResponse({"ok": False, "error": "NOT_FOUND"}, status_code=404)
@@ -1063,10 +1079,13 @@ async def api_checkin_apply(body: CheckinApplyBody, x_telegram_init_data: str = 
         else:
             selected = set(int(x) for x in (body.selected_ids or []))
             picked = [x for x in recs if int(x.get("supplement_id") or 0) in selected]
-        summary = await db.apply_recommendations_to_today(conn, tg_user_id, local_date, picked, mode=(body.mode or "selected"))
+        tz_name = await db.get_user_tz(conn, tg_user_id)
+        _, local_date, _ = _resolve_target_day(tz_name, None)
+        target_date = str(checkin.get("date_local") or "").strip() or local_date
+        summary = await db.apply_recommendations_to_today(conn, tg_user_id, target_date, picked, mode=(body.mode or "selected"))
     finally:
         await conn.close()
-    return JSONResponse({"ok": True, "summary": summary})
+    return JSONResponse({"ok": True, "summary": summary, "date_local": target_date})
 
 
 @app.post("/api/recommendations/apply_all")
@@ -1089,19 +1108,19 @@ async def api_recommendations_apply_all(body: RecommendationsApplyBody, x_telegr
 
 
 @app.get("/api/checkin/today")
-async def api_checkin_today(x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
+async def api_checkin_today(target: str | None = None, x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
     tg_user_id = await _auth_user_id(x_telegram_init_data)
     if not await _premium_guard(tg_user_id):
         return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
     conn = await db.connect(s.DB_PATH)
     try:
         tz_name = await db.get_user_tz(conn, tg_user_id)
-        local_date = db.get_user_local_date(tz_name or None)
+        resolved_target, local_date, _ = _resolve_target_day(tz_name, target)
         row = await db.get_today_checkin(conn, tg_user_id, local_date)
     finally:
         await conn.close()
     if not row:
-        return JSONResponse({"ok": True, "checkin": None})
+        return JSONResponse({"ok": True, "checkin": None, "date_local": local_date, "target": resolved_target})
     recs = []
     try:
         parsed = json.loads(row.get("ai_raw_json") or "[]")
@@ -1113,7 +1132,7 @@ async def api_checkin_today(x_telegram_init_data: str = Header(default="", alias
         answers = json.loads(row.get("answers_json") or "{}")
     except Exception:
         pass
-    return JSONResponse({"ok": True, "checkin": {"id": int(row.get("id") or 0), "answers": answers, "recommendations": recs}})
+    return JSONResponse({"ok": True, "checkin": {"id": int(row.get("id") or 0), "answers": answers, "recommendations": recs}, "date_local": local_date, "target": resolved_target})
 
 
 @app.post("/api/admin/diagnostics/run")

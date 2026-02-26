@@ -13,6 +13,7 @@ from telegram_webapp_auth import verify_init_data
 import db
 from settings import get_settings
 from openai_client import OpenAIConfig, _sync_call
+from achievements import THEMES, TAB_SKINS, BADGES
 
 BASE_DIR = Path(__file__).resolve().parent
 WEBAPP_DIR = BASE_DIR / "webapp"
@@ -128,6 +129,12 @@ class RecommendationsApplyBody(BaseModel):
     recommendations: list[dict] = []
 
 
+class CosmeticsSetBody(BaseModel):
+    theme_id: str | None = None
+    tab_skin_id: str | None = None
+    badge_id: str | None = None
+
+
 async def _auth_user_id(init_data: str) -> int:
     ok, parsed = verify_init_data(init_data, BOT_TOKEN)
     if not ok:
@@ -224,6 +231,7 @@ async def api_me(x_telegram_init_data: str = Header(default="", alias="X-Telegra
         premium = is_admin or await db.is_premium_active(conn, tg_user_id)
         premium_until = None if is_admin else await db.get_premium_until(conn, tg_user_id)
         status = await db.get_user_status(conn, tg_user_id)
+        cosmetics = await db.get_user_cosmetics(conn, tg_user_id)
     finally:
         await conn.close()
     return JSONResponse({
@@ -236,7 +244,91 @@ async def api_me(x_telegram_init_data: str = Header(default="", alias="X-Telegra
         "perms": perms,
         "banned": bool(int(status.get("is_banned") or 0) or str(status.get("deleted_at_utc") or "").strip()),
         "banned_reason": str(status.get("banned_reason") or ""),
+        "cosmetics": cosmetics,
     })
+
+
+@app.get("/api/achievements/summary")
+async def api_achievements_summary(x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    if not await _premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
+    conn = await db.connect(s.DB_PATH)
+    try:
+        tz_name = await db.get_user_tz(conn, tg_user_id)
+        local_date = db.get_user_local_date(tz_name or None)
+        newly = await db.evaluate_and_unlock_achievements(conn, tg_user_id, local_date)
+        user_id = await db.get_or_create_user(conn, tg_user_id)
+        achievements_rows = await db.fetchall(conn, "SELECT key, title_ru, desc_ru, category, rarity, points, reward_json FROM achievements ORDER BY points ASC, key ASC")
+        unlock_rows = await db.fetchall(conn, "SELECT achievement_key, unlocked_at_utc FROM user_achievements WHERE user_id=?", (user_id,))
+        unlock_map = {str(r["achievement_key"]): str(r["unlocked_at_utc"] or "") for r in unlock_rows}
+        rewards = []
+        achievements = []
+        for row in achievements_rows:
+            reward = {}
+            try:
+                reward = json.loads(row["reward_json"] or "{}")
+                if not isinstance(reward, dict):
+                    reward = {}
+            except Exception:
+                reward = {}
+            key = str(row["key"] or "")
+            unlocked_at = unlock_map.get(key, "")
+            if unlocked_at:
+                rewards.append(reward)
+            achievements.append({
+                "key": key,
+                "title_ru": str(row["title_ru"] or ""),
+                "desc_ru": str(row["desc_ru"] or ""),
+                "category": str(row["category"] or ""),
+                "rarity": str(row["rarity"] or "common"),
+                "points": int(row["points"] or 0),
+                "reward": reward,
+                "unlocked": bool(unlocked_at),
+                "unlocked_at_utc": unlocked_at,
+            })
+        allowed = db.compute_allowed_cosmetics(rewards)
+        cosmetics = await db.get_user_cosmetics(conn, tg_user_id)
+    finally:
+        await conn.close()
+    return JSONResponse({
+        "ok": True,
+        "date_local": local_date,
+        "newly_unlocked": newly,
+        "cosmetics": cosmetics,
+        "allowed_cosmetics": allowed,
+        "catalogs": {"themes": THEMES, "tab_skins": TAB_SKINS, "badges": BADGES},
+        "achievements": achievements,
+    })
+
+
+@app.post("/api/cosmetics/set")
+async def api_cosmetics_set(body: CosmeticsSetBody, x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    if not await _premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
+    conn = await db.connect(s.DB_PATH)
+    try:
+        user_id = await db.get_or_create_user(conn, tg_user_id)
+        unlock_rows = await db.fetchall(conn, """SELECT a.reward_json
+                                          FROM user_achievements ua
+                                          JOIN achievements a ON a.key=ua.achievement_key
+                                          WHERE ua.user_id=?""", (user_id,))
+        rewards = []
+        for row in unlock_rows:
+            try:
+                reward = json.loads(row["reward_json"] or "{}")
+                if isinstance(reward, dict):
+                    rewards.append(reward)
+            except Exception:
+                pass
+        allowed = db.compute_allowed_cosmetics(rewards)
+        updated = await db.set_user_cosmetics(conn, tg_user_id, body.model_dump(exclude_none=True), allowed)
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+    finally:
+        await conn.close()
+    return JSONResponse({"ok": True, "cosmetics": updated})
 
 
 @app.get("/api/admin/supplements")
@@ -607,6 +699,7 @@ async def api_today_toggle(body: TodayToggleBody, x_telegram_init_data: str = He
         tz_name = await db.get_user_tz(conn, tg_user_id)
         day = db.get_user_local_date(tz_name or None)
         await db.set_day_status(conn, tg_user_id, day, int(body.supplement_id), body.status)
+        await db.evaluate_and_unlock_achievements(conn, tg_user_id, day)
     finally:
         await conn.close()
     return JSONResponse({"ok": True})
@@ -627,6 +720,7 @@ async def api_today_toggle_complex(body: TodayToggleComplexBody, x_telegram_init
         tz_name = await db.get_user_tz(conn, tg_user_id)
         day = db.get_user_local_date(tz_name or None)
         await db.toggle_complex_for_day(conn, tg_user_id, day, int(body.complex_id), body.status)
+        await db.evaluate_and_unlock_achievements(conn, tg_user_id, day)
     finally:
         await conn.close()
     return JSONResponse({"ok": True})
@@ -1083,6 +1177,7 @@ async def api_checkin_apply(body: CheckinApplyBody, x_telegram_init_data: str = 
         _, local_date, _ = _resolve_target_day(tz_name, None)
         target_date = str(checkin.get("date_local") or "").strip() or local_date
         summary = await db.apply_recommendations_to_today(conn, tg_user_id, target_date, picked, mode=(body.mode or "selected"))
+        await db.evaluate_and_unlock_achievements(conn, tg_user_id, target_date)
     finally:
         await conn.close()
     return JSONResponse({"ok": True, "summary": summary, "date_local": target_date})

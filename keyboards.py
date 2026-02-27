@@ -80,9 +80,15 @@ def intake_pick_kb(slot_id: str, items: list[dict], selected_set: set[str], page
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="today:slots")])
     return InlineKeyboardMarkup(rows)
 
-def ai_checkin_entry_kb() -> InlineKeyboardMarkup:
+def ai_checkin_entry_kb(target_day: str = "today") -> InlineKeyboardMarkup:
+    is_tomorrow = target_day == "tomorrow"
+    day_label = "Завтра" if is_tomorrow else "Сегодня"
+    toggle_label = "Переключить на: Сегодня" if is_tomorrow else "Переключить на: Завтра"
+    toggle_target = "today" if is_tomorrow else "tomorrow"
     return InlineKeyboardMarkup(
         [
+            [InlineKeyboardButton(f"🎯 Рекомендация на: {day_label}", callback_data="noop")],
+            [InlineKeyboardButton(toggle_label, callback_data=f"aicheck:target:{toggle_target}")],
             [InlineKeyboardButton("🟦 Быстрый опрос (кнопки)", callback_data="aicheck:quick")],
             [InlineKeyboardButton("✍️ Свободный текст", callback_data="aicheck:text")],
             [InlineKeyboardButton("🎙 Опрос голосом", callback_data="aicheck:voice")],

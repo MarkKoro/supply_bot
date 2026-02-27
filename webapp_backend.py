@@ -98,6 +98,7 @@ class ReminderSetBody(BaseModel):
 class CheckinBody(BaseModel):
     answers: dict
     target: str | None = None
+    target_day: str | None = None
     client_local_iso: str | None = None
 
 
@@ -1271,7 +1272,8 @@ async def api_checkin(body: CheckinBody, x_telegram_init_data: str = Header(defa
     conn = await db.connect(s.DB_PATH)
     try:
         tz_name = await db.get_user_tz(conn, tg_user_id)
-        target, local_date, now_local = _resolve_target_day(tz_name, body.target)
+        target_raw = body.target_day if body.target_day is not None else body.target
+        target, local_date, now_local = _resolve_target_day(tz_name, target_raw)
         checkin_id = await db.upsert_daily_checkin(conn, tg_user_id, local_date, answers)
         ctx = await db.build_ai_context_compact(conn, tg_user_id, local_date)
         ctx["now_local_hhmm"] = now_local.strftime("%H:%M")

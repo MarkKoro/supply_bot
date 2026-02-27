@@ -25,6 +25,160 @@ EVIDENCE_ORDER = {
     "D": 3,
     "": 4,
 }
+DEFAULT_AI_TIME = "08:00"
+
+
+async def _preferred_user_time(conn: aiosqlite.Connection, user_id: int) -> str:
+    slots = await db.get_user_slots(conn, user_id)
+    enabled = [s for s in slots if int(s.get("is_enabled", 1)) == 1]
+    if not enabled:
+        enabled = slots
+    enabled.sort(key=lambda s: str(s.get("time_local") or "99:99"))
+    for slot in enabled:
+        normalized = db._normalize_hhmm(str(slot.get("time_local") or "").strip())
+        if normalized:
+            return normalized
+    return DEFAULT_AI_TIME
+
+
+async def assign_slots_by_time(
+    conn: aiosqlite.Connection,
+    user_id: int,
+    items: list[dict],
+    *,
+    action_field: str,
+    add_actions: set[str],
+    time_field: str,
+    slot_field: str,
+) -> tuple[list[dict], set[str]]:
+    default_time = await _preferred_user_time(conn, user_id)
+    slots = await db.get_user_slots(conn, user_id)
+    by_time: dict[str, str] = {}
+    for slot in slots:
+        hhmm = db._normalize_hhmm(str(slot.get("time_local") or "").strip())
+        slot_id = str(slot.get("slot_id") or "").strip()
+        if hhmm and slot_id and hhmm not in by_time:
+            by_time[hhmm] = slot_id
+
+    created_times: set[str] = set()
+    prepared: list[dict] = []
+    for raw in list(items or []):
+        item = dict(raw)
+        action = str(item.get(action_field) or "").strip().lower()
+        if action not in add_actions:
+            prepared.append(item)
+            continue
+        hhmm = db._normalize_hhmm(str(item.get(time_field) or "").strip()) or default_time
+        slot_id = by_time.get(hhmm)
+        if not slot_id:
+            slot_id = await db.add_custom_slot(conn, user_id, hhmm, hhmm)
+            by_time[hhmm] = slot_id
+            created_times.add(hhmm)
+        item[time_field] = hhmm
+        item[slot_field] = slot_id
+        prepared.append(item)
+    return prepared, created_times
+
+
+async def ensure_supplement_reminders(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    items: list[dict],
+    *,
+    action_field: str,
+    add_actions: set[str],
+    supplement_field: str,
+    time_field: str,
+    only_times: set[str] | None = None,
+) -> int:
+    created = 0
+    for item in items:
+        action = str(item.get(action_field) or "").strip().lower()
+        if action not in add_actions:
+            continue
+        supplement_id = int(item.get(supplement_field) or 0)
+        hhmm = db._normalize_hhmm(str(item.get(time_field) or "").strip())
+        if supplement_id <= 0 or not hhmm:
+            continue
+        if only_times and hhmm not in only_times:
+            continue
+        await db.upsert_reminder(conn, tg_user_id, supplement_id, hhmm, enabled=1)
+        created += 1
+    return created
+
+
+async def apply_day_plan_actions_with_slots(
+    conn: aiosqlite.Connection,
+    *,
+    user_id: int,
+    tg_user_id: int,
+    date_local: str,
+    ai_actions: dict,
+    selected_ids: set[str] | None = None,
+) -> int:
+    await db.clear_day_plan(conn, user_id, date_local)
+    actions = ai_actions.get("actions") if isinstance(ai_actions, dict) else None
+    if not isinstance(actions, list):
+        return 0
+    picked: list[dict] = []
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        action_id = str(action.get("id") or "").strip()
+        if selected_ids is not None and action_id not in selected_ids:
+            continue
+        picked.append(dict(action))
+
+    prepared, created_times = await assign_slots_by_time(
+        conn,
+        user_id,
+        picked,
+        action_field="type",
+        add_actions={"add", "adjust"},
+        time_field="suggested_time",
+        slot_field="suggested_slot_id",
+    )
+    inserted = 0
+    for action in prepared:
+        slug = str(action.get("slug") or "").strip()
+        supplement_id = int(action.get("supplement_id") or 0)
+        if supplement_id <= 0 and slug:
+            row = await db.get_supplement_by_slug(conn, slug)
+            supplement_id = int(row["id"]) if row else 0
+        if supplement_id <= 0:
+            continue
+        hhmm = db._normalize_hhmm(str(action.get("suggested_time") or "").strip())
+        await conn.execute(
+            """INSERT OR IGNORE INTO day_plan_items(
+                   user_id, date_local, supplement_id, action, dose_text, time_hint, slot_id, time_local, reason, source, created_at_utc
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                user_id,
+                date_local,
+                supplement_id,
+                str(action.get("type") or "").strip() or "add",
+                str(action.get("dose_text") or "").strip() or None,
+                hhmm,
+                str(action.get("suggested_slot_id") or "").strip() or None,
+                hhmm,
+                str(action.get("reason_short_ru") or "").strip() or None,
+                "ai",
+                db.utc_now_iso(),
+            ),
+        )
+        inserted += 1
+    await ensure_supplement_reminders(
+        conn,
+        tg_user_id,
+        prepared,
+        action_field="type",
+        add_actions={"add", "adjust"},
+        supplement_field="supplement_id",
+        time_field="suggested_time",
+        only_times=created_times,
+    )
+    await conn.commit()
+    return inserted
 
 async def describe_interactions(conn: aiosqlite.Connection, supp_row, *, limit_each: int = 8) -> dict[str, dict[str, list[dict]]]:
     supp_id = int(supp_row["id"])

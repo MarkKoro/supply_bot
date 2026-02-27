@@ -464,6 +464,8 @@
     loadingStats: false,
     stats: null,
     ach: null,
+    mySupplements: { open: false, tab: "active", loading: false, busy: {}, active: [], frozen: [] },
+    suppHub: { open: false, loading: false, saving: false, item: null, slots: [], slotId: "morning", time: "", doseText: "", noteText: "", remindersMode: "slot", reminderTimes: [], reminderInput: "" },
     toastTimer: null,
     catalog: {
       q: "", page: 0, items: [], total: 0, loading: false,
@@ -1895,6 +1897,23 @@ function adminField(label, field, value, kind='input') {
     }
   }
 
+  async function loadMySupplements(force) {
+    const ms = state.mySupplements;
+    if (ms.loading && !force) return;
+    ms.loading = true;
+    renderActiveTab();
+    try {
+      const res = await api("./api/my_supplements");
+      ms.active = Array.isArray(res.active) ? res.active : [];
+      ms.frozen = Array.isArray(res.frozen) ? res.frozen : [];
+    } catch (e) {
+      showToast("Не удалось загрузить список БАДов");
+    } finally {
+      ms.loading = false;
+      renderActiveTab();
+    }
+  }
+
   async function loadStatsOnly() {
     state.loadingStats = true;
     renderActiveTab();
@@ -1924,13 +1943,123 @@ function adminField(label, field, value, kind='input') {
     return `<section class="card fade"><div class="row"><strong>📈 Статистика</strong><span class="muted">Сегодня и 7 дней</span></div><div class="muted" style="margin-top:8px">Сегодня: ${tLine}</div><div class="muted">7 дней: ${d7Line}</div><div style="margin-top:10px"><button class="btn secondary" data-stats-refresh>${state.loadingStats ? 'Обновляем…' : 'Обновить'}</button></div></section>`;
   }
 
+  function renderMySupplementsSheet() {
+    const ms = state.mySupplements;
+    if (!ms.open) return "";
+    const items = ms.tab === "frozen" ? ms.frozen : ms.active;
+    const title = ms.tab === "frozen" ? "Замороженные" : "Активные";
+    return `
+      <div class="sheet-backdrop" data-my-supp-close></div>
+      <div class="card sheet" role="dialog">
+        <div class="row"><strong>🧴 Мои БАДы</strong><button class="btn secondary" data-my-supp-close>✕</button></div>
+        <div class="row" style="margin-top:10px; gap:8px">
+          <button class="chip ${ms.tab === "active" ? "green" : ""}" data-my-supp-tab="active">Активные (${ms.active.length})</button>
+          <button class="chip ${ms.tab === "frozen" ? "green" : ""}" data-my-supp-tab="frozen">Замороженные (${ms.frozen.length})</button>
+        </div>
+        <div class="muted" style="margin-top:8px">${title}</div>
+        <div style="margin-top:8px">
+          ${ms.loading ? '<div class="muted">Загрузка…</div>' : ''}
+          ${!ms.loading && !items.length ? '<div class="sheet-empty">Список пуст.</div>' : ''}
+          ${items.map((item) => {
+            const name = item.name_ru || item.name_en || item.name || 'Добавка';
+            const nextEnabled = ms.tab === "frozen" ? 1 : 0;
+            const actionLabel = ms.tab === "frozen" ? "Разморозить" : "Заморозить";
+            const busy = !!ms.busy[item.supplement_id];
+            return `<div class="item-row" style="display:block">
+              <div class="row" style="gap:8px; align-items:flex-start">
+                <button class="btn secondary" style="flex:1; text-align:left" data-my-supp-open="${item.supplement_id}">
+                  <strong>${esc(name)}</strong>
+                  <div class="muted" style="margin-top:4px">${esc(item.dose_text || 'Доза не указана')}</div>
+                </button>
+                <button class="btn secondary" ${busy ? 'disabled' : ''} data-my-supp-freeze="${item.supplement_id}" data-enabled="${nextEnabled}">${busy ? '...' : actionLabel}</button>
+              </div>
+            </div>`;
+          }).join('')}
+        </div>
+      </div>
+    `;
+  }
+
+  function normalizeHHMM(value) {
+    const raw = String(value || '').trim();
+    const m = raw.match(/^(\d{1,2}):(\d{2})$/);
+    if (!m) return '';
+    const hh = Number(m[1]);
+    const mm = Number(m[2]);
+    if (!Number.isFinite(hh) || !Number.isFinite(mm) || hh < 0 || hh > 23 || mm < 0 || mm > 59) return '';
+    return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+  }
+
+  function renderSuppHubSheet() {
+    const hub = state.suppHub;
+    if (!hub.open) return '';
+    const item = hub.item || {};
+    const slotOptions = (hub.slots || []).map((slot) => `<option value="${esc(slot.slot_id || 'morning')}" ${String(slot.slot_id || 'morning') === String(hub.slotId || 'morning') ? 'selected' : ''}>${esc(slot.title_ru || 'Слот')} · ${esc(slot.time_local || '--:--')}</option>`).join('');
+    const normTime = normalizeHHMM(hub.time);
+    const hasSlotAtTime = !!(hub.slots || []).find((slot) => String(slot.time_local || '') === normTime);
+    const canCreateSlot = !!normTime && !hasSlotAtTime;
+    const reminderCustom = hub.remindersMode === 'custom';
+    return `
+      <div class="sheet-backdrop" data-supp-hub-close></div>
+      <div class="card sheet" role="dialog" style="max-height:72vh">
+        <div class="row"><strong>🧪 Хаб добавки</strong><button class="btn secondary" data-supp-hub-close>✕</button></div>
+        ${hub.loading ? '<div class="muted" style="margin-top:8px">Загрузка...</div>' : `
+          <div class="muted" style="margin-top:8px">${esc(item.name_ru || item.name_en || item.name || 'Добавка')}</div>
+          <div style="margin-top:10px">
+            <label class="muted">Доза</label>
+            <input id="hubDose" class="input" value="${esc(hub.doseText || '')}" placeholder="например, 1 капсула" />
+          </div>
+          <div style="margin-top:8px">
+            <label class="muted">Заметка</label>
+            <textarea id="hubNote" class="textarea" placeholder="заметки по приёму">${esc(hub.noteText || '')}</textarea>
+          </div>
+          <div style="margin-top:10px" class="row">
+            <strong>Расписание</strong>
+          </div>
+          <div style="margin-top:8px">
+            <label class="muted">Вставить в слот</label>
+            <select id="hubSlot" class="select">${slotOptions}</select>
+          </div>
+          <div style="margin-top:8px">
+            <label class="muted">Точное время (HH:MM)</label>
+            <input id="hubTime" class="input" value="${esc(hub.time || '')}" placeholder="08:30" />
+          </div>
+          ${canCreateSlot ? `<div style="margin-top:8px"><button class="btn secondary" data-schedule-add-slot>Создать отдельный слот на ${esc(normTime)}</button></div>` : ''}
+          <div style="margin-top:10px" class="row">
+            <strong>Напоминания</strong>
+          </div>
+          <div class="row" style="margin-top:8px; gap:8px">
+            <button class="chip ${!reminderCustom ? 'green' : ''}" data-rem-mode="slot">Как у слота</button>
+            <button class="chip ${reminderCustom ? 'green' : ''}" data-rem-mode="custom">Свои</button>
+          </div>
+          ${reminderCustom ? `
+            <div style="margin-top:8px" class="row">
+              <input id="hubRemTime" class="input" placeholder="HH:MM" value="${esc(hub.reminderInput || '')}" style="flex:1" />
+              <button class="btn secondary" data-rem-add-time>Добавить время</button>
+            </div>
+            <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap">
+              ${(hub.reminderTimes || []).map((t)=>`<button class="chip" data-rem-remove="${esc(t)}">${esc(t)} ✕</button>`).join('') || '<span class="muted">Пока нет собственных напоминаний.</span>'}
+            </div>
+          ` : '<div class="muted" style="margin-top:8px">Используется только время слота, персональные reminders не создаются.</div>'}
+          <div style="margin-top:12px" class="row">
+            <button class="btn" data-supp-hub-save ${hub.saving ? 'disabled' : ''}>${hub.saving ? 'Сохраняем...' : 'Сохранить'}</button>
+          </div>
+        `}
+      </div>
+    `;
+  }
+
   function renderToday() {
     const slots = state.today?.slots || [];
     if (!slots.length) {
       return `<div class="card">На сегодня приёмов не найдено.</div>`;
     }
 
-    return `${slots.map((slot) => {
+    return `
+      <section class="card fade">
+        <div class="row"><strong>Сегодняшний план</strong><button class="btn secondary" data-open-my-supp>Мои БАДы</button></div>
+      </section>
+      ${slots.map((slot) => {
       const items = slot.items || [];
       const complexes = slot.complexes || [];
       const totalTaken = items.filter(i => i.status === "taken").length + complexes.reduce((acc,c)=>acc + (c.taken_count||0),0);
@@ -1939,7 +2068,11 @@ function adminField(label, field, value, kind='input') {
         <article class="card fade" data-slot="${slot.slot_id}">
           <div class="row">
             <div><strong>${slot.title || "Слот"} · ${slot.time_local || "--:--"}</strong></div>
-            <span class="chip green">✅ ${totalTaken} / ${totalAll}</span>
+            <div class="row" style="gap:8px">
+              <button class="btn secondary" data-slot-action="all-taken" data-slot-id="${slot.slot_id}" title="Отметить всё как принято">✅ Всё</button>
+              <button class="btn secondary" data-slot-action="reset" data-slot-id="${slot.slot_id}" title="Сбросить статусы">↺ Сброс</button>
+              <span class="chip green">✅ ${totalTaken} / ${totalAll}</span>
+            </div>
           </div>
           <div>
             ${complexes.map((c) => `
@@ -1962,7 +2095,10 @@ function adminField(label, field, value, kind='input') {
           </div>
         </article>
       `;
-    }).join("")}`;
+    }).join("")}
+      ${renderMySupplementsSheet()}
+      ${renderSuppHubSheet()}
+    `;
   }
 
   function renderSettings() {
@@ -2075,6 +2211,40 @@ function adminField(label, field, value, kind='input') {
     return "◻ Не отмечено";
   }
 
+  async function openSupplementHub(supplementId) {
+    const sid = Number(supplementId);
+    if (!sid) return;
+    const all = [...(state.mySupplements.active || []), ...(state.mySupplements.frozen || [])];
+    const item = all.find((x) => Number(x.supplement_id) === sid);
+    if (!item) return;
+    state.suppHub.open = true;
+    state.suppHub.loading = true;
+    state.suppHub.item = item;
+    state.suppHub.doseText = item.dose_text || '';
+    state.suppHub.noteText = item.note_text || '';
+    state.suppHub.reminderInput = '';
+    renderActiveTab();
+    try {
+      const [scheduleRes, remRes] = await Promise.all([
+        api('./api/schedule'),
+        api(`./api/reminders/for_supplement?supplement_id=${sid}`),
+      ]);
+      const slots = Array.isArray(scheduleRes.slots) ? scheduleRes.slots : [];
+      const schedules = Array.isArray(scheduleRes.schedules) ? scheduleRes.schedules : [];
+      const sch = schedules.find((x) => Number(x.supplement_id) === sid);
+      state.suppHub.slots = slots;
+      state.suppHub.slotId = sch?.slot_id || 'morning';
+      state.suppHub.time = sch?.time_hhmm || '';
+      state.suppHub.reminderTimes = Array.isArray(remRes.times) ? remRes.times : [];
+      state.suppHub.remindersMode = state.suppHub.reminderTimes.length ? 'custom' : 'slot';
+    } catch {
+      showToast('Не удалось загрузить хаб добавки');
+    } finally {
+      state.suppHub.loading = false;
+      renderActiveTab();
+    }
+  }
+
   function bindTodayEvents() {
     appEl.querySelectorAll("[data-item]").forEach((row) => {
       row.addEventListener("click", () => {
@@ -2102,6 +2272,133 @@ function adminField(label, field, value, kind='input') {
         const action = btn.dataset.slotAction;
         const status = action === "all-taken" ? "taken" : "none";
         await setSlotStatus(slotId, status);
+      });
+    });
+
+    appEl.querySelectorAll("[data-open-my-supp]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        haptic();
+        state.mySupplements.open = true;
+        state.mySupplements.tab = "active";
+        renderActiveTab();
+        await loadMySupplements(true);
+      });
+    });
+
+    appEl.querySelectorAll("[data-my-supp-close]").forEach((el) => {
+      el.addEventListener("click", () => {
+        state.mySupplements.open = false;
+        renderActiveTab();
+      });
+    });
+
+    appEl.querySelectorAll("[data-my-supp-tab]").forEach((el) => {
+      el.addEventListener("click", () => {
+        state.mySupplements.tab = el.dataset.mySuppTab === "frozen" ? "frozen" : "active";
+        renderActiveTab();
+      });
+    });
+
+    appEl.querySelectorAll("[data-my-supp-freeze]").forEach((el) => {
+      el.addEventListener("click", async () => {
+        const supplementId = Number(el.dataset.mySuppFreeze);
+        const enabled = Number(el.dataset.enabled);
+        state.mySupplements.busy[supplementId] = true;
+        renderActiveTab();
+        try {
+          await api("./api/my_supplements/freeze", { method: "POST", body: { supplement_id: supplementId, enabled } });
+          await Promise.all([loadMySupplements(true), loadToday(true)]);
+          showToast(enabled ? "Добавка разморожена" : "Добавка заморожена");
+        } catch {
+          showToast("Не удалось изменить статус");
+        } finally {
+          delete state.mySupplements.busy[supplementId];
+          renderActiveTab();
+        }
+      });
+    });
+
+    appEl.querySelectorAll("[data-my-supp-open]").forEach((el) => {
+      el.addEventListener("click", async () => {
+        await openSupplementHub(Number(el.dataset.mySuppOpen));
+      });
+    });
+
+    appEl.querySelectorAll('[data-supp-hub-close]').forEach((el) => {
+      el.addEventListener('click', () => {
+        state.suppHub.open = false;
+        renderActiveTab();
+      });
+    });
+
+    appEl.querySelectorAll('[data-rem-mode]').forEach((el) => {
+      el.addEventListener('click', () => {
+        state.suppHub.remindersMode = el.dataset.remMode === 'custom' ? 'custom' : 'slot';
+        renderActiveTab();
+      });
+    });
+
+    appEl.querySelectorAll('[data-rem-remove]').forEach((el) => {
+      el.addEventListener('click', () => {
+        state.suppHub.reminderTimes = (state.suppHub.reminderTimes || []).filter((x) => x !== el.dataset.remRemove);
+        renderActiveTab();
+      });
+    });
+
+    document.getElementById('hubDose')?.addEventListener('input', (e) => { state.suppHub.doseText = e.target.value || ''; });
+    document.getElementById('hubNote')?.addEventListener('input', (e) => { state.suppHub.noteText = e.target.value || ''; });
+    document.getElementById('hubSlot')?.addEventListener('change', (e) => { state.suppHub.slotId = e.target.value || 'morning'; });
+    document.getElementById('hubTime')?.addEventListener('input', (e) => { state.suppHub.time = e.target.value || ''; });
+    document.getElementById('hubRemTime')?.addEventListener('input', (e) => { state.suppHub.reminderInput = e.target.value || ''; });
+
+    appEl.querySelectorAll('[data-rem-add-time]').forEach((el) => {
+      el.addEventListener('click', () => {
+        const time = normalizeHHMM(state.suppHub.reminderInput);
+        if (!time) return showToast('Введите время HH:MM');
+        if ((state.suppHub.reminderTimes || []).includes(time)) return;
+        state.suppHub.reminderTimes = [...(state.suppHub.reminderTimes || []), time].sort();
+        state.suppHub.reminderInput = '';
+        renderActiveTab();
+      });
+    });
+
+    appEl.querySelectorAll('[data-schedule-add-slot]').forEach((el) => {
+      el.addEventListener('click', async () => {
+        const time = normalizeHHMM(state.suppHub.time);
+        if (!time) return showToast('Укажите корректное время');
+        try {
+          const r = await api('./api/schedule/add_slot', { method: 'POST', body: { time_local: time, title_ru: `Слот ${time}` } });
+          const s = await api('./api/schedule');
+          state.suppHub.slots = Array.isArray(s.slots) ? s.slots : [];
+          state.suppHub.slotId = r.slot_id || state.suppHub.slotId;
+          renderActiveTab();
+          showToast('Слот создан');
+        } catch {
+          showToast('Не удалось создать слот');
+        }
+      });
+    });
+
+    appEl.querySelectorAll('[data-supp-hub-save]').forEach((el) => {
+      el.addEventListener('click', async () => {
+        const item = state.suppHub.item;
+        if (!item) return;
+        const sid = Number(item.supplement_id);
+        const time = normalizeHHMM(state.suppHub.time) || null;
+        state.suppHub.saving = true;
+        renderActiveTab();
+        try {
+          await api('./api/my_supplements/update', { method: 'POST', body: { supplement_id: sid, dose_text: state.suppHub.doseText || '', note_text: state.suppHub.noteText || '' } });
+          await api('./api/schedule/set', { method: 'POST', body: { supplement_id: sid, slot_id: state.suppHub.slotId || 'morning', time_hhmm: time } });
+          await api('./api/reminders/set', { method: 'POST', body: { supplement_id: sid, mode: state.suppHub.remindersMode, times: state.suppHub.remindersMode === 'custom' ? (state.suppHub.reminderTimes || []) : [] } });
+          await Promise.all([loadMySupplements(true), loadToday(true)]);
+          showToast('Изменения сохранены');
+        } catch {
+          showToast('Не удалось сохранить изменения');
+        } finally {
+          state.suppHub.saving = false;
+          renderActiveTab();
+        }
       });
     });
   }
@@ -2138,25 +2435,67 @@ function adminField(label, field, value, kind='input') {
   async function setSlotStatus(slotId, status) {
     haptic();
     const slot = (state.today?.slots || []).find(s => String(s.slot_id) === String(slotId));
-    if (!slot || !(slot.items || []).length) return;
+    if (!slot) return;
 
-    const snapshot = slot.items.map(i => ({ id: i.supplement_id, status: i.status }));
-    slot.items.forEach(i => { i.status = status; });
+    const items = slot.items || [];
+    const complexes = slot.complexes || [];
+    if (!items.length && !complexes.length) return;
+
+    const snapshot = {
+      items: items.map((i) => ({ id: i.supplement_id, status: i.status })),
+      complexes: complexes.map((c) => ({
+        id: c.complex_id,
+        status: c.status,
+        takenCount: c.taken_count,
+        itemStatuses: (c.items || []).map((item) => ({ id: item.supplement_id, status: item.status })),
+      })),
+    };
+
+    items.forEach((i) => { i.status = status; });
+    complexes.forEach((complex) => {
+      complex.status = status;
+      complex.taken_count = status === "taken" ? (complex.total_count || 0) : 0;
+      (complex.items || []).forEach((item) => { item.status = status; });
+    });
     renderActiveTab();
 
     try {
-      const pending = slot.items.map((item) => () => api("./api/today/toggle", {
+      const complexPending = complexes.map((complex) => () => api("./api/today/toggle_complex", {
+        method: "POST",
+        body: { complex_id: Number(complex.complex_id), status }
+      }));
+      await runBatched(complexPending, 3);
+
+      const complexItemIds = new Set(
+        complexes.flatMap((complex) => (complex.items || []).map((item) => String(item.supplement_id)))
+      );
+      const singlePending = items
+        .filter((item) => !complexItemIds.has(String(item.supplement_id)))
+        .map((item) => () => api("./api/today/toggle", {
         method: "POST",
         body: { supplement_id: Number(item.supplement_id), status }
       }));
-      await runBatched(pending, 3);
+
+      await runBatched(singlePending, 3);
+      await loadToday(true);
       showToast(status === "taken" ? "Отметил всё как принято" : "Слот сброшен");
     } catch (e) {
-      slot.items.forEach((item) => {
-        const old = snapshot.find(s => String(s.id) === String(item.supplement_id));
+      items.forEach((item) => {
+        const old = snapshot.items.find(s => String(s.id) === String(item.supplement_id));
         if (old) item.status = old.status;
       });
+      complexes.forEach((complex) => {
+        const oldComplex = snapshot.complexes.find((c) => String(c.id) === String(complex.complex_id));
+        if (!oldComplex) return;
+        complex.status = oldComplex.status;
+        complex.taken_count = oldComplex.takenCount;
+        (complex.items || []).forEach((item) => {
+          const oldItem = oldComplex.itemStatuses.find((x) => String(x.id) === String(item.supplement_id));
+          if (oldItem) item.status = oldItem.status;
+        });
+      });
       renderActiveTab();
+      await loadToday(true);
       showToast("Не удалось применить к слоту");
     }
   }

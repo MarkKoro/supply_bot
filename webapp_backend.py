@@ -78,6 +78,23 @@ class CatalogToggleBody(BaseModel):
     action: str
 
 
+class MySuppFreezeBody(BaseModel):
+    supplement_id: int
+    enabled: int
+
+
+class MySuppUpdateBody(BaseModel):
+    supplement_id: int
+    dose_text: str = ""
+    note_text: str = ""
+
+
+class ReminderSetBody(BaseModel):
+    supplement_id: int
+    mode: str
+    times: list[str] = []
+
+
 class CheckinBody(BaseModel):
     answers: dict
     target: str | None = None
@@ -958,6 +975,121 @@ async def api_supplement_detail(slug: str, x_telegram_init_data: str = Header(de
     if not item:
         return JSONResponse({"ok": False, "error": "NOT_FOUND"}, status_code=404)
     return JSONResponse({"ok": True, "item": item})
+
+
+
+
+@app.get("/api/my_supplements")
+async def api_my_supplements(
+    x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
+):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    if not await _premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "error": "PREMIUM_REQUIRED", "code": "PREMIUM_REQUIRED"}, status_code=402)
+
+    conn = await db.connect(s.DB_PATH)
+    try:
+        items = await db.get_user_supplements_with_enabled(conn, tg_user_id)
+    finally:
+        await conn.close()
+
+    active = [x for x in items if int(x.get("enabled", 0)) == 1]
+    frozen = [x for x in items if int(x.get("enabled", 0)) == 0]
+    return JSONResponse({"ok": True, "active": active, "frozen": frozen})
+
+
+@app.post("/api/my_supplements/freeze")
+async def api_my_supplements_freeze(
+    body: MySuppFreezeBody,
+    x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
+):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    if not await _premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "error": "PREMIUM_REQUIRED", "code": "PREMIUM_REQUIRED"}, status_code=402)
+
+    enabled = 1 if int(body.enabled) else 0
+
+    conn = await db.connect(s.DB_PATH)
+    try:
+        user_id = await db.get_or_create_user(conn, tg_user_id, tz_name="")
+        updated = await db.set_user_supp_enabled(conn, user_id, int(body.supplement_id), enabled)
+    finally:
+        await conn.close()
+
+    if not updated:
+        return JSONResponse({"ok": False, "error": "NOT_FOUND"}, status_code=404)
+    return JSONResponse({"ok": True, "supplement_id": int(body.supplement_id), "enabled": enabled})
+
+@app.post("/api/my_supplements/update")
+async def api_my_supplements_update(
+    body: MySuppUpdateBody,
+    x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
+):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    if not await _premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "error": "PREMIUM_REQUIRED", "code": "PREMIUM_REQUIRED"}, status_code=402)
+
+    conn = await db.connect(s.DB_PATH)
+    try:
+        updated = await db.set_user_supp_fields(
+            conn,
+            tg_user_id=tg_user_id,
+            supplement_id=int(body.supplement_id),
+            dose_text=str(body.dose_text or "").strip(),
+            note_text=str(body.note_text or "").strip(),
+        )
+    finally:
+        await conn.close()
+
+    if not updated:
+        return JSONResponse({"ok": False, "error": "NOT_FOUND"}, status_code=404)
+    return JSONResponse({"ok": True})
+
+
+@app.get("/api/reminders/for_supplement")
+async def api_reminders_for_supplement(
+    supplement_id: int,
+    x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
+):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    if not await _premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "error": "PREMIUM_REQUIRED", "code": "PREMIUM_REQUIRED"}, status_code=402)
+
+    conn = await db.connect(s.DB_PATH)
+    try:
+        times = await db.list_reminders_for_supplement(conn, tg_user_id, int(supplement_id))
+    finally:
+        await conn.close()
+    return JSONResponse({"ok": True, "times": times})
+
+
+@app.post("/api/reminders/set")
+async def api_reminders_set(
+    body: ReminderSetBody,
+    x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
+):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    if not await _premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "error": "PREMIUM_REQUIRED", "code": "PREMIUM_REQUIRED"}, status_code=402)
+
+    mode = str(body.mode or "").strip().lower()
+    if mode not in {"slot", "custom"}:
+        return JSONResponse({"ok": False, "error": "INVALID_MODE"}, status_code=400)
+
+    conn = await db.connect(s.DB_PATH)
+    try:
+        await db.set_reminders_for_supplement(
+            conn,
+            tg_user_id=tg_user_id,
+            supplement_id=int(body.supplement_id),
+            mode=mode,
+            times=list(body.times or []),
+        )
+        times = await db.list_reminders_for_supplement(conn, tg_user_id, int(body.supplement_id))
+    finally:
+        await conn.close()
+
+    return JSONResponse({"ok": True, "mode": mode, "times": times})
 
 
 @app.post("/api/my_supplements/toggle")

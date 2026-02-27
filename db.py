@@ -4217,13 +4217,83 @@ async def list_user_supplements(conn: aiosqlite.Connection, tg_user_id: int, lim
         conn,
         """SELECT s.* FROM user_supplements us
            JOIN supplements s ON s.id=us.supplement_id
-           WHERE us.user_id=? AND us.is_active=1
+           WHERE us.user_id=? AND us.is_active=1 AND us.enabled=1
            ORDER BY s.name LIMIT ?""",
         (user_id, limit),
     )
 
 async def list_user_supps(conn: aiosqlite.Connection, user_id: int):
     return await list_user_supplements(conn, user_id, limit=1000)
+
+
+async def get_user_supplements_with_enabled(conn: aiosqlite.Connection, tg_user_id: int) -> list[dict]:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    rows = await fetchall(
+        conn,
+        """SELECT us.supplement_id, us.enabled, us.is_active,
+                  s.slug, s.name_ru, s.name_en, s.name,
+                  COALESCE(NULLIF(uss.dose_text,''), us.dose_text, '') AS dose_text,
+                  COALESCE(NULLIF(us.note_text,''), '') AS note_text
+           FROM user_supplements us
+           JOIN supplements s ON s.id=us.supplement_id
+           LEFT JOIN user_supp_settings uss ON uss.user_id=us.user_id AND uss.supplement_id=us.supplement_id
+           WHERE us.user_id=? AND us.is_active=1
+           ORDER BY COALESCE(NULLIF(s.name_ru,''), NULLIF(s.name_en,''), s.name), us.supplement_id""",
+        (user_id,),
+    )
+    return [
+        {
+            "supplement_id": int(r["supplement_id"] or 0),
+            "enabled": int(r["enabled"] or 0),
+            "slug": str(r["slug"] or "").strip(),
+            "name_ru": str(r["name_ru"] or "").strip(),
+            "name_en": str(r["name_en"] or "").strip(),
+            "name": str(r["name"] or "").strip(),
+            "dose_text": str(r["dose_text"] or "").strip(),
+            "note_text": str(r["note_text"] or "").strip(),
+        }
+        for r in rows
+    ]
+
+
+async def set_user_supp_enabled(conn: aiosqlite.Connection, user_id: int, supp_id: int, enabled: int) -> bool:
+    cur = await conn.execute(
+        """UPDATE user_supplements
+           SET enabled=?
+           WHERE user_id=? AND supplement_id=? AND is_active=1""",
+        (1 if int(enabled) else 0, int(user_id), int(supp_id)),
+    )
+    await conn.commit()
+    return (cur.rowcount or 0) > 0
+
+
+async def set_user_supp_fields(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    supplement_id: int,
+    dose_text: str,
+    note_text: str,
+) -> bool:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    cur = await conn.execute(
+        """UPDATE user_supplements
+           SET dose_text=?, note_text=?
+           WHERE user_id=? AND supplement_id=? AND is_active=1""",
+        (str(dose_text or "").strip(), str(note_text or "").strip(), user_id, int(supplement_id)),
+    )
+    await conn.execute(
+        """INSERT OR IGNORE INTO user_supp_settings(user_id, supplement_id, updated_at)
+           VALUES(?,?,?)""",
+        (user_id, int(supplement_id), utc_now_iso()),
+    )
+    await conn.execute(
+        """UPDATE user_supp_settings
+           SET dose_text=?, updated_at=?
+           WHERE user_id=? AND supplement_id=?""",
+        (str(dose_text or "").strip(), utc_now_iso(), user_id, int(supplement_id)),
+    )
+    await conn.commit()
+    return (cur.rowcount or 0) > 0
 
 async def list_user_stack_details(conn: aiosqlite.Connection, tg_user_id: int, local_date: str | None = None):
     user_id = await get_or_create_user(conn, tg_user_id)
@@ -4246,7 +4316,7 @@ async def list_user_stack_details(conn: aiosqlite.Connection, tg_user_id: int, l
             LEFT JOIN user_supp_settings uss ON uss.user_id=us.user_id AND uss.supplement_id=us.supplement_id
             LEFT JOIN user_schedules sch ON sch.user_id=us.user_id AND sch.supplement_id=us.supplement_id
             {status_join}
-            WHERE us.user_id=? AND us.is_active=1
+            WHERE us.user_id=? AND us.is_active=1 AND us.enabled=1
             ORDER BY s.name""",
         tuple(params),
     )
@@ -4286,7 +4356,9 @@ async def list_enabled_schedules(conn: aiosqlite.Connection):
         """SELECT u.tg_user_id, u.tz_name, sch.supplement_id, sch.time_hhmm
            FROM user_schedules sch
            JOIN users u ON u.id=sch.user_id
+           JOIN user_supplements us ON us.user_id=sch.user_id AND us.supplement_id=sch.supplement_id
            WHERE sch.is_enabled=1 AND sch.time_hhmm IS NOT NULL AND sch.time_hhmm!=''
+             AND us.is_active=1 AND us.enabled=1
              AND u.tz_name IS NOT NULL AND u.tz_name!=''""",
     )
 
@@ -4296,7 +4368,9 @@ async def list_enabled_reminders(conn: aiosqlite.Connection):
         """SELECT u.tg_user_id, u.tz_name, uss.supplement_id, uss.reminder_time
            FROM user_supp_settings uss
            JOIN users u ON u.id=uss.user_id
+           JOIN user_supplements us ON us.user_id=uss.user_id AND us.supplement_id=uss.supplement_id
            WHERE uss.reminder_enabled=1 AND uss.reminder_time IS NOT NULL AND uss.reminder_time!=''
+             AND us.is_active=1 AND us.enabled=1
              AND u.tz_name IS NOT NULL AND u.tz_name!=''""",
     )
 
@@ -4338,6 +4412,60 @@ async def delete_reminders_for_supplement(
         "DELETE FROM reminders WHERE user_id=? AND supplement_id=?",
         (user_id, supplement_id),
     )
+    await conn.commit()
+
+
+async def list_reminders_for_supplement(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    supplement_id: int,
+) -> list[str]:
+    rows = await fetchall(
+        conn,
+        """SELECT DISTINCT time_local
+           FROM reminders
+           WHERE user_id=? AND supplement_id=? AND enabled=1
+           ORDER BY time_local""",
+        (int(tg_user_id), int(supplement_id)),
+    )
+    out: list[str] = []
+    for row in rows:
+        val = _normalize_hhmm(str(row["time_local"] or "").strip())
+        if val:
+            out.append(val)
+    return out
+
+
+async def set_reminders_for_supplement(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    supplement_id: int,
+    mode: str,
+    times: list[str],
+) -> None:
+    normalized_mode = str(mode or "").strip().lower()
+    if normalized_mode not in {"slot", "custom"}:
+        raise ValueError("invalid_mode")
+
+    await conn.execute(
+        "DELETE FROM reminders WHERE user_id=? AND supplement_id=?",
+        (int(tg_user_id), int(supplement_id)),
+    )
+
+    if normalized_mode == "custom":
+        seen: set[str] = set()
+        for raw in list(times or []):
+            norm = _normalize_hhmm(str(raw or "").strip())
+            if not norm or norm in seen:
+                continue
+            seen.add(norm)
+            await conn.execute(
+                """INSERT INTO reminders(user_id, supplement_id, time_local, enabled, created_at)
+                   VALUES(?,?,?,?,?)
+                   ON CONFLICT(user_id, supplement_id, time_local) DO UPDATE SET enabled=excluded.enabled""",
+                (int(tg_user_id), int(supplement_id), norm, 1, utc_now_iso()),
+            )
+
     await conn.commit()
 
 async def list_reminders_for_user(conn: aiosqlite.Connection, user_id: int):
@@ -5041,7 +5169,7 @@ async def get_user_base_stack(conn: aiosqlite.Connection, user_id: int) -> list[
            FROM user_supplements us
            JOIN supplements s ON s.id=us.supplement_id
            LEFT JOIN user_schedules sch ON sch.user_id=us.user_id AND sch.supplement_id=us.supplement_id
-           WHERE us.user_id=? AND us.is_active=1
+           WHERE us.user_id=? AND us.is_active=1 AND us.enabled=1
            ORDER BY s.name""",
         (user_id,),
     )
@@ -5136,7 +5264,7 @@ async def get_today_plan_groups(conn: aiosqlite.Connection, tg_user_id: int, loc
            JOIN supplements s ON s.id=us.supplement_id
            LEFT JOIN user_supp_settings uss ON uss.user_id=us.user_id AND uss.supplement_id=us.supplement_id
            LEFT JOIN user_schedules sch ON sch.user_id=us.user_id AND sch.supplement_id=us.supplement_id
-           WHERE us.user_id=? AND us.is_active=1
+           WHERE us.user_id=? AND us.is_active=1 AND us.enabled=1
            ORDER BY s.name_ru, s.name, us.supplement_id""",
         (user_id,),
     )
@@ -5429,9 +5557,10 @@ async def list_complex_items(conn: aiosqlite.Connection, tg_user_id: int, comple
                   ci.dose_override
            FROM user_complex_items ci
            JOIN supplements s ON s.id=ci.supplement_id
-           WHERE ci.complex_id=?
+           JOIN user_supplements us ON us.user_id=? AND us.supplement_id=ci.supplement_id
+           WHERE ci.complex_id=? AND us.is_active=1 AND us.enabled=1
            ORDER BY ci.sort_order, name_ru""",
-        (int(complex_id),),
+        (user_id, int(complex_id)),
     )
     return [{"supplement_id": int(r["supplement_id"]), "slug": str(r["slug"] or ""), "name_ru": str(r["name_ru"] or ""), "dose_override": str(r["dose_override"] or "")} for r in rows]
 

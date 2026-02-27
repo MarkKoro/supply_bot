@@ -570,6 +570,7 @@ def _get_ai_checkin_state(context: ContextTypes.DEFAULT_TYPE) -> dict:
         return state
     state = {
         "step": 1,
+        "target_day": "today",
         "answers": {
             "sleep_range": "",
             "energy": None,
@@ -610,6 +611,23 @@ def _ai_checkin_actions_payload(state: dict) -> dict:
 def _ai_checkin_entry_payload() -> dict:
     return {"screen": "entry"}
 
+def _ai_checkin_target_day_label(target_day: str) -> str:
+    return "завтра" if target_day == "tomorrow" else "сегодня"
+
+
+def _get_ai_checkin_target_day(context: ContextTypes.DEFAULT_TYPE) -> str:
+    raw = str(context.user_data.get("ai_checkin_target_day") or "today").strip().lower()
+    if raw not in {"today", "tomorrow"}:
+        raw = "today"
+    context.user_data["ai_checkin_target_day"] = raw
+    return raw
+
+
+def _set_ai_checkin_target_day(context: ContextTypes.DEFAULT_TYPE, target_day: str) -> str:
+    normalized = "tomorrow" if str(target_day).strip().lower() == "tomorrow" else "today"
+    context.user_data["ai_checkin_target_day"] = normalized
+    return normalized
+
 def _ai_checkin_voice_payload() -> dict:
     return {"note_pending": True, "return_screen": "main", "date_local": ""}
 
@@ -620,10 +638,12 @@ async def _render_ai_checkin_entry(
     target_chat_id: int | None = None,
     target_message_id: int | None = None,
 ) -> None:
+    target_day = _get_ai_checkin_target_day(context)
+    target_label = _ai_checkin_target_day_label(target_day)
     text = (
         "📝 <b>Ежедневный опрос</b>\n\n"
         "Расскажи, как прошло утро и вчерашний день — это поможет подобрать изменения "
-        "в сегодняшнем стеке: усилить эффект, убрать лишнее или предложить эксперимент.\n\n"
+        f"в стеке на {target_label}: усилить эффект, убрать лишнее или предложить эксперимент.\n\n"
         "Мы уже учитываем, что ты вчера выпил(а) и что пропустил(а), а также все изменения, "
         "которые ты делал(а) в стеке.\n\n"
         "Выбери формат:\n"
@@ -635,7 +655,7 @@ async def _render_ai_checkin_entry(
         update,
         context,
         text,
-        ai_checkin_entry_kb(),
+        ai_checkin_entry_kb(target_day),
         route=AI_CHECKIN_ROUTE,
         payload=_ai_checkin_entry_payload(),
         target_chat_id=target_chat_id,
@@ -884,6 +904,8 @@ def build_ai_checkin_prompt(
     recent_checkins_payload: list[dict],
     ai_plan_history_payload: list[dict],
 ) -> list[dict]:
+    target_day = str(checkin.get("target_day") or "today")
+    target_day_ru = "завтра" if target_day == "tomorrow" else "сегодня"
     system_msg = (
         "Ты — осторожный помощник по добавкам. "
         "Никаких диагнозов и назначений. "
@@ -891,7 +913,7 @@ def build_ai_checkin_prompt(
         "Тебе передан полный контекст: текущий чек-ин, история приема за 14 дней, "
         "история AI-предложений и ответы в прошлых чек-инах. "
         "Обязательно анализируй динамику в прогрессии, что помогало и что не соблюдалось, "
-        "и на этой основе давай адаптированные предложения только на сегодня. "
+        f"и на этой основе давай адаптированные предложения только на {target_day_ru}. "
         "Нельзя предлагать добавки вне списка кандидатов и текущего стека. "
         "Не предлагай рецептурные препараты. "
         "Будь консервативным, максимум 6 действий. "
@@ -968,8 +990,10 @@ async def _render_ai_checkin_results(
     summary = str(payload.get("summary_ru") or "").strip() or "Короткое резюме недоступно."
     disclaimer = str(payload.get("disclaimer_ru") or "").strip()
     actions = payload.get("actions") or []
+    state = _get_ai_checkin_state(context)
+    target_day_label = _ai_checkin_target_day_label(str(state.get("target_day") or "today"))
     lines = [
-        f"🤖 AI-рекомендации на сегодня ({date_local})",
+        f"🤖 AI-рекомендации на {target_day_label} ({date_local})",
         "",
         summary,
         "",
@@ -1012,7 +1036,7 @@ async def _render_ai_checkin_results(
 
     kb = InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("✅ Применить всё на сегодня", callback_data="aicheck:apply:all")],
+            [InlineKeyboardButton("✅ Применить всё", callback_data="aicheck:apply:all")],
             [InlineKeyboardButton("🎯 Выбрать точечно", callback_data="aicheck:select")],
             [InlineKeyboardButton("❌ Не применять", callback_data="aicheck:deny")],
         ]
@@ -1289,7 +1313,16 @@ async def _finalize_ai_checkin(
     target_chat_id: int | None = None,
     target_message_id: int | None = None,
 ) -> None:
+    target_day = str(state.get("target_day") or "today")
+    if target_day not in {"today", "tomorrow"}:
+        target_day = "today"
+    state["target_day"] = target_day
     day = await db.ensure_daily_rollover(conn, tg_uid)
+    if target_day == "tomorrow":
+        try:
+            day = (datetime.strptime(day, "%Y-%m-%d").date() + timedelta(days=1)).isoformat()
+        except ValueError:
+            pass
     answers = state.get("answers", {}) if isinstance(state.get("answers"), dict) else {}
     goals = list(answers.get("goals") or [])
     goals_ru = [_goal_label(goal) for goal in goals]
@@ -1302,6 +1335,7 @@ async def _finalize_ai_checkin(
         "goals_ru": goals_ru,
         "note": _truncate_text(answers.get("note")),
         "date_local": day,
+        "target_day": state.get("target_day") or "today",
     }
     await db.upsert_daily_checkin(
         conn,
@@ -1497,7 +1531,7 @@ async def _show_today_plan(
     stack_rows = await db.list_user_stack_details(conn, tg_uid, local_date=day)
     day_items = await db.list_day_plan_items(conn, user_id, day)
 
-    lines = [f"📅 <b>План на сегодня</b> ({_format_day_ru(day)})", ""]
+    lines = [f"📅 <b>План дня</b> ({_format_day_ru(day)})", ""]
     if stack_rows:
         lines.append("Базовый стек:")
         for idx, row in enumerate(stack_rows, start=1):
@@ -3759,6 +3793,7 @@ async def on_ai_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     if data == "aicheck:entry":
         context.user_data.pop(WAITING_KEY, None)
+        _get_ai_checkin_target_day(context)
         await _render_ai_checkin_entry(update, context)
         return
 
@@ -3772,10 +3807,20 @@ async def on_ai_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await _render_ai_checkin_text_prompt(update, context)
         return
 
+    if data.startswith("aicheck:target:"):
+        next_target = data.split(":", 2)[2]
+        _set_ai_checkin_target_day(context, next_target)
+        state["target_day"] = _get_ai_checkin_target_day(context)
+        _set_ai_checkin_state(context, state)
+        await _render_ai_checkin_entry(update, context)
+        return
+
     if data == "aicheck:quick":
         context.user_data.pop(WAITING_KEY, None)
+        target_day = _get_ai_checkin_target_day(context)
         state = {
             "step": 1,
+            "target_day": target_day,
             "answers": {
                 "sleep_range": "",
                 "energy": None,
@@ -3837,6 +3882,7 @@ async def on_ai_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     if data == "aicheck:finish":
+        state["target_day"] = str(state.get("target_day") or _get_ai_checkin_target_day(context))
         required_fields = ["sleep_range", "energy", "stress"]
         for field in required_fields:
             if not answers.get(field):
@@ -3973,11 +4019,11 @@ async def on_ai_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             await conn.close()
         kb = InlineKeyboardMarkup(
             [
-                [InlineKeyboardButton("📅 План на сегодня", callback_data="menu:todayplan")],
+                [InlineKeyboardButton("📅 План дня", callback_data="menu:todayplan")],
                 [InlineKeyboardButton("🏠 Меню", callback_data="menu:home")],
             ]
         )
-        await show(update, context, "Готово ✅ План на сегодня обновлён.", kb, route=AI_CHECKIN_ROUTE)
+        await show(update, context, "Готово ✅ План дня обновлён.", kb, route=AI_CHECKIN_ROUTE)
         return
 
     if data == "aicheck:apply:selected":
@@ -3994,11 +4040,11 @@ async def on_ai_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             await conn.close()
         kb = InlineKeyboardMarkup(
             [
-                [InlineKeyboardButton("📅 План на сегодня", callback_data="menu:todayplan")],
+                [InlineKeyboardButton("📅 План дня", callback_data="menu:todayplan")],
                 [InlineKeyboardButton("🏠 Меню", callback_data="menu:home")],
             ]
         )
-        await show(update, context, "Готово ✅ План на сегодня обновлён.", kb, route=AI_CHECKIN_ROUTE)
+        await show(update, context, "Готово ✅ План дня обновлён.", kb, route=AI_CHECKIN_ROUTE)
         return
 
     if data == "aicheck:deny":
@@ -5329,6 +5375,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 )
                 state = {
                     "step": 5,
+                    "target_day": _get_ai_checkin_target_day(context),
                     "answers": answers,
                     "note_pending": False,
                     "last_ai_actions_json": "",
@@ -5508,6 +5555,7 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             state = {
                 "step": 5,
+                "target_day": _get_ai_checkin_target_day(context),
                 "answers": answers,
                 "note_pending": False,
                 "last_ai_actions_json": "",

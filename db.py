@@ -2860,6 +2860,145 @@ async def admin_toggle_supplement_active(
         await conn.commit()
 
 
+async def admin_import_purchase_urls(
+    conn: aiosqlite.Connection,
+    admin_tg_id: int,
+    raw_json_text: str,
+) -> dict:
+    raw = str(raw_json_text or '').strip()
+    if not raw:
+        raise ValueError('empty_json')
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError('invalid_json') from exc
+
+    pairs: list[dict] = []
+    if isinstance(payload, dict):
+        for name, url in payload.items():
+            pairs.append({'name': str(name or ''), 'url': str(url or '')})
+    elif isinstance(payload, list):
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            pairs.append({'name': str(item.get('name') or ''), 'url': str(item.get('url') or '')})
+    else:
+        raise ValueError('invalid_json_shape')
+
+    updated: list[dict] = []
+    not_found: list[dict] = []
+    duplicates: list[dict] = []
+    seen_names: set[str] = set()
+
+    for pair in pairs:
+        name = str(pair.get('name') or '').strip()
+        url = str(pair.get('url') or '').strip()
+        name_norm = normalize(name)
+        if not name_norm:
+            not_found.append({'name': name, 'url': url, 'reason': 'empty_name'})
+            continue
+        if name_norm in seen_names:
+            duplicates.append({'name': name, 'url': url, 'reason': 'duplicate_name_in_import'})
+            continue
+        seen_names.add(name_norm)
+
+        try:
+            normalized_url = _validate_admin_supplement_value('purchase_url', url) or ''
+        except ValueError as exc:
+            not_found.append({'name': name, 'url': url, 'reason': str(exc)})
+            continue
+
+        alias_rows = await fetchall(
+            conn,
+            """SELECT DISTINCT s.id,
+                         COALESCE(NULLIF(s.name_ru,''), NULLIF(s.name_en,''), s.name) AS title,
+                         s.purchase_url
+                  FROM supplement_aliases a
+                  JOIN supplements s ON s.id=a.supplement_id
+                  WHERE a.alias_norm=?
+                  ORDER BY s.id""",
+            (name_norm,),
+        )
+        if len(alias_rows) > 1:
+            duplicates.append({
+                'name': name,
+                'url': normalized_url,
+                'reason': 'alias_ambiguous',
+                'candidates': [
+                    {'id': int(r['id']), 'name': str(r['title'] or '')}
+                    for r in alias_rows
+                ],
+            })
+            continue
+
+        match_rows = alias_rows
+        matched_by = 'alias_norm'
+        if not match_rows:
+            by_name_rows = await fetchall(
+                conn,
+                """SELECT id,
+                             COALESCE(NULLIF(name_ru,''), NULLIF(name_en,''), name) AS title,
+                             purchase_url
+                      FROM supplements
+                      WHERE lower(COALESCE(name_ru,''))=lower(?)
+                         OR lower(COALESCE(name_en,''))=lower(?)
+                         OR lower(COALESCE(name,''))=lower(?)
+                      ORDER BY id""",
+                (name, name, name),
+            )
+            if len(by_name_rows) > 1:
+                duplicates.append({
+                    'name': name,
+                    'url': normalized_url,
+                    'reason': 'name_ambiguous',
+                    'candidates': [
+                        {'id': int(r['id']), 'name': str(r['title'] or '')}
+                        for r in by_name_rows
+                    ],
+                })
+                continue
+            match_rows = by_name_rows
+            matched_by = 'name_exact'
+
+        if not match_rows:
+            not_found.append({'name': name, 'url': normalized_url, 'reason': 'supplement_not_found'})
+            continue
+
+        row = match_rows[0]
+        supplement_id = int(row['id'])
+        current_url = str(row['purchase_url'] or '').strip()
+        if current_url == normalized_url:
+            continue
+
+        await admin_set_supplement_field(
+            conn,
+            int(admin_tg_id),
+            supplement_id,
+            'purchase_url',
+            normalized_url,
+            commit=False,
+        )
+        updated.append({
+            'id': supplement_id,
+            'name': str(row['title'] or ''),
+            'matched_by': matched_by,
+            'url': normalized_url,
+        })
+
+    await conn.commit()
+    return {
+        'updated': updated,
+        'not_found': not_found,
+        'duplicates': duplicates,
+        'counts': {
+            'total': len(pairs),
+            'updated': len(updated),
+            'not_found': len(not_found),
+            'duplicates': len(duplicates),
+        },
+    }
+
+
 def _json_list_load(s: str) -> list[str]:
     raw = str(s or "").strip()
     if not raw:

@@ -918,6 +918,8 @@ def build_ai_checkin_prompt(
         "Не предлагай рецептурные препараты. "
         "Будь консервативным, максимум 6 действий. "
         "Если уверенность низкая — явно скажи. "
+        "Для каждого действия suggested_time обязателен и строго в формате HH:MM. "
+        "prefer_existing_time всегда true: выбирай из уже существующих слотов пользователя, если возможно. "
         "Верни строго JSON без Markdown."
     )
 
@@ -939,7 +941,8 @@ def build_ai_checkin_prompt(
       "type": "add" | "remove" | "adjust",
       "slug": "caffeine",
       "dose_text": "200 mg",
-      "time_hint": "утро",
+      "suggested_time": "08:00",
+      "prefer_existing_time": true,
       "confidence": 0.0,
       "reason_short_ru": "коротко почему",
       "safety_ru": "короткая фраза о рисках"
@@ -1007,7 +1010,7 @@ async def _render_ai_checkin_results(
             label = type_map.get(action_type, "ИЗМЕНИТЬ")
             details = []
             dose_text = str(action.get("dose_text") or "").strip()
-            time_hint = str(action.get("time_hint") or "").strip()
+            time_hint = str(action.get("suggested_time") or action.get("time_hint") or "").strip()
             if dose_text:
                 details.append(dose_text)
             if time_hint:
@@ -1494,6 +1497,8 @@ async def _finalize_ai_checkin(
                 "supplement_id": int(row["id"]),
                 "ru_name": ru_name,
                 "dose_text": _truncate_text(action.get("dose_text"), 80),
+                "suggested_time": db._normalize_hhmm(str(action.get("suggested_time") or "").strip()),
+                "prefer_existing_time": True,
                 "time_hint": _truncate_text(action.get("time_hint"), 60),
                 "confidence": confidence,
                 "reason_short_ru": _truncate_text(action.get("reason_short_ru"), 200),
@@ -4014,7 +4019,13 @@ async def on_ai_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         try:
             user_id = await db.get_or_create_user(conn, tg_uid)
             date_local = state.get("last_date_local") or await db.get_user_local_day(conn, user_id)
-            await db.apply_day_plan_all(conn, user_id, date_local, payload)
+            await engine.apply_day_plan_actions_with_slots(
+                conn,
+                user_id=user_id,
+                tg_user_id=tg_uid,
+                date_local=date_local,
+                ai_actions=payload,
+            )
         finally:
             await conn.close()
         kb = InlineKeyboardMarkup(
@@ -4035,7 +4046,14 @@ async def on_ai_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         try:
             user_id = await db.get_or_create_user(conn, tg_uid)
             date_local = state.get("last_date_local") or await db.get_user_local_day(conn, user_id)
-            await db.apply_day_plan_selective(conn, user_id, date_local, selected, payload)
+            await engine.apply_day_plan_actions_with_slots(
+                conn,
+                user_id=user_id,
+                tg_user_id=tg_uid,
+                date_local=date_local,
+                ai_actions=payload,
+                selected_ids=set(selected),
+            )
         finally:
             await conn.close()
         kb = InlineKeyboardMarkup(

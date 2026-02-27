@@ -4,7 +4,7 @@ from datetime import timedelta
 from pathlib import Path
 
 import httpx
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import Body, FastAPI, Header, HTTPException
 from fastapi.exception_handlers import http_exception_handler as fastapi_http_exception_handler
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -12,6 +12,7 @@ from pydantic import BaseModel
 
 from telegram_webapp_auth import verify_init_data
 import db
+import engine
 from settings import get_settings
 from openai_client import OpenAIConfig, _sync_call
 from achievements import THEMES, TAB_SKINS, BADGES
@@ -700,6 +701,25 @@ async def api_admin_roles_set(
         await conn.close()
     return JSONResponse({"ok": True, "tg_user_id": target_id, "role": current_role})
 
+@app.post("/api/admin/import_purchase_urls")
+async def api_admin_import_purchase_urls(
+    raw_json_text: str = Body(..., media_type="text/plain"),
+    x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
+):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    ok_perm, forbidden, _, _ = await _require_perm(tg_user_id, "content_edit")
+    if not ok_perm:
+        return forbidden
+    conn = await db.connect(s.DB_PATH)
+    try:
+        report = await db.admin_import_purchase_urls(conn, int(tg_user_id), raw_json_text)
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "code": str(exc)}, status_code=400)
+    finally:
+        await conn.close()
+    return JSONResponse({"ok": True, **report})
+
+
 @app.get("/api/today")
 async def api_today(x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
     tg_user_id = await _auth_user_id(x_telegram_init_data)
@@ -1210,8 +1230,9 @@ async def _ai_recommendations(answers: dict, ctx: dict) -> tuple[list[dict], dic
     cfg = OpenAIConfig(api_key=s.OPENAI_API_KEY, model=s.OPENAI_MODEL or "gpt-4o-mini")
     instructions = (
         "Ты ассистент по БАДам. Верни строго JSON-массив, без markdown и лишнего текста. "
-        "Формат каждого элемента: action, slug, name_ru, reason_ru, priority, suggested_time, suggested_slot_id. "
+        "Формат каждого элемента: action, slug, name_ru, reason_ru, priority, suggested_time, suggested_slot_id, prefer_existing_time. "
         "action только add/remove/adjust. priority только 1..3. "
+        "suggested_time обязателен и строго в формате HH:MM. prefer_existing_time всегда true: выбирай из уже существующих слотов пользователя, если возможно. "
         "Консервативный стиль, без медицинских заявлений и без рецептурных препаратов."
     )
     prompt = json.dumps({"answers": answers, "context": ctx}, ensure_ascii=False)
@@ -1234,7 +1255,7 @@ async def _normalize_recommendations(conn, recs: list[dict]) -> list[dict]:
         action = str(item.get("action") or "add").strip().lower()
         if action not in {"add", "remove", "adjust"}:
             action = "add"
-        suggested_time = str(item.get("suggested_time") or "").strip() or None
+        suggested_time = db._normalize_hhmm(str(item.get("suggested_time") or "").strip())
         suggested_slot_id = str(item.get("suggested_slot_id") or "").strip() or None
         out.append({
             "action": action,
@@ -1244,6 +1265,7 @@ async def _normalize_recommendations(conn, recs: list[dict]) -> list[dict]:
             "priority": min(3, max(1, int(item.get("priority") or 2))),
             "suggested_time": suggested_time,
             "suggested_slot_id": suggested_slot_id,
+            "prefer_existing_time": True,
             "supplement_id": int(row["id"]),
         })
         if len(out) >= 12:
@@ -1314,7 +1336,29 @@ async def api_checkin_apply(body: CheckinApplyBody, x_telegram_init_data: str = 
         tz_name = await db.get_user_tz(conn, tg_user_id)
         _, local_date, _ = _resolve_target_day(tz_name, None)
         target_date = str(checkin.get("date_local") or "").strip() or local_date
-        summary = await db.apply_recommendations_to_today(conn, tg_user_id, target_date, picked, mode=(body.mode or "selected"))
+        user_id = await db.get_or_create_user(conn, tg_user_id, tz_name="")
+        prepared, created_times = await engine.assign_slots_by_time(
+            conn,
+            user_id,
+            picked,
+            action_field="action",
+            add_actions={"add", "adjust"},
+            time_field="suggested_time",
+            slot_field="suggested_slot_id",
+        )
+        summary = await db.apply_recommendations_to_today(conn, tg_user_id, target_date, prepared, mode=(body.mode or "selected"))
+        reminders_added = await engine.ensure_supplement_reminders(
+            conn,
+            tg_user_id,
+            prepared,
+            action_field="action",
+            add_actions={"add", "adjust"},
+            supplement_field="supplement_id",
+            time_field="suggested_time",
+            only_times=created_times,
+        )
+        summary["new_time_groups"] = sorted(created_times)
+        summary["reminders_added"] = reminders_added
         await db.evaluate_and_unlock_achievements(conn, tg_user_id, target_date)
     finally:
         await conn.close()
@@ -1333,7 +1377,29 @@ async def api_recommendations_apply_all(body: RecommendationsApplyBody, x_telegr
     try:
         tz_name = await db.get_user_tz(conn, tg_user_id)
         local_date = str(body.local_date or "").strip() or db.get_user_local_date(tz_name or None)
-        summary = await db.apply_recommendations_to_today(conn, tg_user_id, local_date, recs, mode="apply_all")
+        user_id = await db.get_or_create_user(conn, tg_user_id, tz_name="")
+        prepared, created_times = await engine.assign_slots_by_time(
+            conn,
+            user_id,
+            recs,
+            action_field="action",
+            add_actions={"add", "adjust"},
+            time_field="suggested_time",
+            slot_field="suggested_slot_id",
+        )
+        summary = await db.apply_recommendations_to_today(conn, tg_user_id, local_date, prepared, mode="apply_all")
+        reminders_added = await engine.ensure_supplement_reminders(
+            conn,
+            tg_user_id,
+            prepared,
+            action_field="action",
+            add_actions={"add", "adjust"},
+            supplement_field="supplement_id",
+            time_field="suggested_time",
+            only_times=created_times,
+        )
+        summary["new_time_groups"] = sorted(created_times)
+        summary["reminders_added"] = reminders_added
     finally:
         await conn.close()
     today = await _today_payload(tg_user_id)

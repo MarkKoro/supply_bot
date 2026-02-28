@@ -226,6 +226,45 @@ def _plans_payload() -> list[dict]:
     return rows
 
 
+async def _build_newly_unlocked_details(conn, newly_keys: list[str]) -> list[dict]:
+    clean_keys = [str(key or "").strip() for key in list(newly_keys or []) if str(key or "").strip()]
+    if not clean_keys:
+        return []
+    placeholders = ",".join(["?"] * len(clean_keys))
+    rows = await db.fetchall(
+        conn,
+        f"""SELECT key, title_ru, desc_ru, rarity, points, reward_json
+            FROM achievements
+            WHERE key IN ({placeholders})""",
+        tuple(clean_keys),
+    )
+    by_key = {str(row["key"] or ""): row for row in rows}
+    catalogs = {"themes": THEMES, "tab_skins": TAB_SKINS, "badges": BADGES}
+    result = []
+    for key in clean_keys:
+        row = by_key.get(key)
+        if not row:
+            continue
+        reward_raw = str(row["reward_json"] or "{}")
+        try:
+            reward_json = json.loads(reward_raw)
+            if not isinstance(reward_json, dict):
+                reward_json = {}
+        except Exception:
+            reward_json = {}
+        result.append(
+            {
+                "key": key,
+                "title_ru": str(row["title_ru"] or ""),
+                "desc_ru": str(row["desc_ru"] or ""),
+                "rarity": str(row["rarity"] or "common"),
+                "points": int(row["points"] or 0),
+                "reward_verbose": db.describe_rewards_ru(reward_json, catalogs),
+            }
+        )
+    return result
+
+
 @app.get("/health")
 def health():
     return {"ok": True}
@@ -281,12 +320,28 @@ async def api_achievements_summary(x_telegram_init_data: str = Header(default=""
         tz_name = await db.get_user_tz(conn, tg_user_id)
         local_date = db.get_user_local_date(tz_name or None)
         newly = await db.evaluate_and_unlock_achievements(conn, tg_user_id, local_date)
+        metrics = await db.get_user_metrics(conn, tg_user_id, local_date)
         user_id = await db.get_or_create_user(conn, tg_user_id)
+        unseen_count = await db.get_unseen_achievements_count(conn, tg_user_id)
+        unseen_rows = await db.fetchall(
+            conn,
+            """SELECT achievement_key
+               FROM user_achievements
+               WHERE user_id=? AND COALESCE(seen_at_utc, '')=''
+               ORDER BY unlocked_at_utc DESC, achievement_key ASC
+               LIMIT 50""",
+            (user_id,),
+        )
+        unseen_keys = [str(row["achievement_key"] or "") for row in unseen_rows if str(row["achievement_key"] or "").strip()]
         achievements_rows = await db.fetchall(conn, "SELECT key, title_ru, desc_ru, category, rarity, points, reward_json FROM achievements ORDER BY points ASC, key ASC")
-        unlock_rows = await db.fetchall(conn, "SELECT achievement_key, unlocked_at_utc FROM user_achievements WHERE user_id=?", (user_id,))
-        unlock_map = {str(r["achievement_key"]): str(r["unlocked_at_utc"] or "") for r in unlock_rows}
+        from achievements import ACHIEVEMENTS
+        ach_rules = {str(item.get("key") or ""): dict(item.get("rule") or {}) for item in ACHIEVEMENTS}
+        unlock_rows = await db.fetchall(conn, "SELECT achievement_key, unlocked_at_utc, seen_at_utc FROM user_achievements WHERE user_id=?", (user_id,))
+        unlock_map = {str(r["achievement_key"]): {"unlocked_at_utc": str(r["unlocked_at_utc"] or ""), "seen_at_utc": str(r["seen_at_utc"] or "")} for r in unlock_rows}
         rewards = []
         achievements = []
+        next_up_candidates = []
+        points_total = 0
         for row in achievements_rows:
             reward = {}
             try:
@@ -296,10 +351,13 @@ async def api_achievements_summary(x_telegram_init_data: str = Header(default=""
             except Exception:
                 reward = {}
             key = str(row["key"] or "")
-            unlocked_at = unlock_map.get(key, "")
+            unlock_meta = unlock_map.get(key) or {}
+            unlocked_at = str(unlock_meta.get("unlocked_at_utc") or "")
+            seen_at = str(unlock_meta.get("seen_at_utc") or "")
             if unlocked_at:
                 rewards.append(reward)
-            achievements.append({
+                points_total += int(row["points"] or 0)
+            achievement_item = {
                 "key": key,
                 "title_ru": str(row["title_ru"] or ""),
                 "desc_ru": str(row["desc_ru"] or ""),
@@ -309,8 +367,37 @@ async def api_achievements_summary(x_telegram_init_data: str = Header(default=""
                 "reward": reward,
                 "unlocked": bool(unlocked_at),
                 "unlocked_at_utc": unlocked_at,
-            })
+                "seen_at_utc": seen_at,
+            }
+            achievements.append(achievement_item)
+            if not unlocked_at:
+                progress = db.get_achievement_progress({"rule": ach_rules.get(key) or {}}, metrics)
+                pct = progress.get("pct")
+                if pct is not None and int(pct) >= 40:
+                    next_up_candidates.append({
+                        "key": key,
+                        "title_ru": achievement_item["title_ru"],
+                        "desc_ru": achievement_item["desc_ru"],
+                        "category": achievement_item["category"],
+                        "rarity": achievement_item["rarity"],
+                        "points": achievement_item["points"],
+                        "pct": int(pct),
+                        "hint_ru": str(progress.get("hint_ru") or ""),
+                    })
         allowed = db.compute_allowed_cosmetics(rewards)
+        level_status = db.get_level_status(points_total)
+        next_up = sorted(next_up_candidates, key=lambda item: (-int(item.get("pct") or 0), int(item.get("points") or 0), str(item.get("key") or "")))[:5]
+        catalogs_payload = {"themes": THEMES, "tab_skins": TAB_SKINS, "badges": BADGES}
+        recent_rows = await db.get_recent_achievements(conn, user_id, limit=20)
+        recent_achievements = [
+            {
+                "key": str(item.get("key") or ""),
+                "title_ru": str(item.get("title_ru") or ""),
+                "unlocked_at_utc": str(item.get("unlocked_at_utc") or ""),
+                "reward_verbose": db.describe_rewards_ru(item.get("reward") or {}, catalogs_payload),
+            }
+            for item in recent_rows
+        ]
         cosmetics = await db.get_user_cosmetics(conn, tg_user_id)
     finally:
         await conn.close()
@@ -318,11 +405,33 @@ async def api_achievements_summary(x_telegram_init_data: str = Header(default=""
         "ok": True,
         "date_local": local_date,
         "newly_unlocked": newly,
+        "unseen_count": unseen_count,
+        "unseen_keys": unseen_keys,
+        "next_up": next_up,
+        "level": int(level_status.get("level") or 1),
+        "level_title_ru": str(level_status.get("level_title_ru") or "Новичок"),
+        "level_progress_pct": int(level_status.get("level_progress_pct") or 0),
+        "points_total": int(level_status.get("points_total") or 0),
+        "next_level_points": level_status.get("next_level_points"),
+        "recent_achievements": recent_achievements,
         "cosmetics": cosmetics,
         "allowed_cosmetics": allowed,
-        "catalogs": {"themes": THEMES, "tab_skins": TAB_SKINS, "badges": BADGES},
+        "catalogs": catalogs_payload,
         "achievements": achievements,
     })
+
+
+@app.post("/api/achievements/mark_seen")
+async def api_achievements_mark_seen(x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    if not await _premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
+    conn = await db.connect(s.DB_PATH)
+    try:
+        unseen_count = await db.mark_achievements_seen(conn, tg_user_id)
+    finally:
+        await conn.close()
+    return JSONResponse({"ok": True, "unseen_count": unseen_count})
 
 
 @app.post("/api/cosmetics/set")
@@ -741,10 +850,11 @@ async def api_today_toggle(body: TodayToggleBody, x_telegram_init_data: str = He
         tz_name = await db.get_user_tz(conn, tg_user_id)
         day = db.get_user_local_date(tz_name or None)
         await db.set_day_status(conn, tg_user_id, day, int(body.supplement_id), body.status)
-        await db.evaluate_and_unlock_achievements(conn, tg_user_id, day)
+        newly = await db.evaluate_and_unlock_achievements(conn, tg_user_id, day)
+        newly_unlocked_details = await _build_newly_unlocked_details(conn, newly)
     finally:
         await conn.close()
-    return JSONResponse({"ok": True})
+    return JSONResponse({"ok": True, "newly_unlocked": newly, "newly_unlocked_details": newly_unlocked_details})
 
 
 
@@ -762,10 +872,11 @@ async def api_today_toggle_complex(body: TodayToggleComplexBody, x_telegram_init
         tz_name = await db.get_user_tz(conn, tg_user_id)
         day = db.get_user_local_date(tz_name or None)
         await db.toggle_complex_for_day(conn, tg_user_id, day, int(body.complex_id), body.status)
-        await db.evaluate_and_unlock_achievements(conn, tg_user_id, day)
+        newly = await db.evaluate_and_unlock_achievements(conn, tg_user_id, day)
+        newly_unlocked_details = await _build_newly_unlocked_details(conn, newly)
     finally:
         await conn.close()
-    return JSONResponse({"ok": True})
+    return JSONResponse({"ok": True, "newly_unlocked": newly, "newly_unlocked_details": newly_unlocked_details})
 
 
 @app.get("/api/complexes")
@@ -1359,10 +1470,17 @@ async def api_checkin_apply(body: CheckinApplyBody, x_telegram_init_data: str = 
         )
         summary["new_time_groups"] = sorted(created_times)
         summary["reminders_added"] = reminders_added
-        await db.evaluate_and_unlock_achievements(conn, tg_user_id, target_date)
+        newly = await db.evaluate_and_unlock_achievements(conn, tg_user_id, target_date)
+        newly_unlocked_details = await _build_newly_unlocked_details(conn, newly)
     finally:
         await conn.close()
-    return JSONResponse({"ok": True, "summary": summary, "date_local": target_date})
+    return JSONResponse({
+        "ok": True,
+        "summary": summary,
+        "date_local": target_date,
+        "newly_unlocked": newly,
+        "newly_unlocked_details": newly_unlocked_details,
+    })
 
 
 @app.post("/api/recommendations/apply_all")

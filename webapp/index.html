@@ -28,6 +28,10 @@
     html[data-theme="bloodline"] { --bg-1:#28050d; --bg-2:#4a0d1d; --bg-3:#25050f; --accent:#ff6a86; }
     html[data-theme="glitch"] { --bg-1:#0b1129; --bg-2:#1e255f; --bg-3:#13223e; --accent:#68e4ff; }
     html[data-theme="ivory"] { --bg-1:#1a1b20; --bg-2:#2a2d36; --bg-3:#1f2229; --accent:#f0e6ce; }
+    html[data-theme="graphite"] { --bg-1:#101114; --bg-2:#1b1e24; --bg-3:#14161b; --accent:#c6ced9; }
+    html[data-theme="sakura"] { --bg-1:#201824; --bg-2:#32243a; --bg-3:#261b2d; --accent:#ffbcd4; }
+    html[data-theme="deepsea"] { --bg-1:#071a2b; --bg-2:#0f2f49; --bg-3:#0b2337; --accent:#7dd9ff; }
+    html[data-theme="ember"] { --bg-1:#24130f; --bg-2:#3f241b; --bg-3:#2b1913; --accent:#ffb27d; }
 
     * { box-sizing: border-box; }
 
@@ -179,6 +183,17 @@
     }
 
     .tab-emoji { font-size: 17px; line-height: 1; }
+    .tab-emoji-wrap { position: relative; display: inline-flex; align-items: center; justify-content: center; }
+    .tab-unseen-dot {
+      position: absolute;
+      top: -4px;
+      right: -6px;
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+      background: #ff4d6d;
+      box-shadow: 0 0 0 2px rgba(6, 10, 24, 0.92);
+    }
     .tabs[data-skin="neon"] .tab.active { box-shadow: 0 0 0 1px rgba(125,210,255,.65) inset, 0 0 18px rgba(96,190,255,.55); }
     .tabs[data-skin="neon"] .tab.active::after { content:""; position:absolute; inset:-3px; border-radius:16px; border:1px solid rgba(117,226,255,.65); }
     .tabs[data-skin="thumbs"] .tab.active::after { content:"👍"; position:absolute; top:-10px; right:6px; font-size:12px; }
@@ -187,15 +202,78 @@
     .tabs[data-skin="frost"] .tab.active { box-shadow:0 0 0 1px rgba(172,236,255,.7) inset,0 0 16px rgba(141,218,255,.4);}
     .tabs[data-skin="minimal"] .tab.active { background:rgba(255,255,255,.08); box-shadow: inset 0 -2px 0 var(--accent);}
     .tabs[data-skin="glitch"] .tab.active { text-shadow: 1px 0 rgba(255,80,80,.5), -1px 0 rgba(80,220,255,.5); box-shadow:0 0 0 1px rgba(121,200,255,.35) inset, 2px 0 10px rgba(255,88,122,.2), -2px 0 10px rgba(88,195,255,.2);}
+    .tabs[data-skin="glass"] { background: rgba(16,24,38,.58); border-color: rgba(198,224,255,.34); backdrop-filter: blur(18px); }
+    .tabs[data-skin="glass"] .tab.active { background: rgba(168,212,255,.2); box-shadow: 0 0 0 1px rgba(194,229,255,.55) inset; }
+    .tabs[data-skin="mono"] .tab { background: rgba(255,255,255,.015); color: rgba(221,226,233,.78); }
+    .tabs[data-skin="mono"] .tab.active { background: rgba(255,255,255,.06); box-shadow: inset 0 -2px 0 #e1e5ec; color: #fff; }
+    .tabs[data-skin="pulse2"] .tab.active { box-shadow: 0 0 0 1px rgba(255,170,200,.55) inset, 0 0 18px rgba(255,126,184,.28); animation: pulse2Active 1.4s ease-in-out infinite; }
+    @keyframes pulse2Active { 0% { transform: translateY(0); } 50% { transform: translateY(-1px); } 100% { transform: translateY(0); } }
     .tab { position: relative; }
     .badge-pill { font-size:12px; padding:4px 9px; border-radius:999px; border:1px solid rgba(255,255,255,.28); background:rgba(255,255,255,.12); }
     .ach-grid{display:grid;gap:8px;margin-top:8px;}
     .ach-item{border:1px solid rgba(255,255,255,.14);border-radius:12px;padding:8px;background:rgba(255,255,255,.05);}
     .ach-item.locked{opacity:.72;}
+    .ach-category { margin-top: 10px; }
+    .ach-category-title { font-size: 13px; color: var(--muted); margin: 8px 0 6px; text-transform: uppercase; letter-spacing: .02em; }
+    .new-pill { margin-left: 8px; padding: 2px 7px; border-radius: 999px; background: rgba(255,77,109,.18); border:1px solid rgba(255,77,109,.5); color:#ffd7df; font-size:11px; font-weight:800; }
+    .cos-meta { margin-top:6px; font-size:12px; color: var(--muted); display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+
+    .unlock-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 60;
+      background: rgba(6, 10, 24, 0.35);
+      display: flex;
+      align-items: flex-end;
+      justify-content: center;
+      padding: 0 12px calc(12px + env(safe-area-inset-bottom));
+    }
+    .unlock-card {
+      position: relative;
+      width: 100%;
+      max-width: 520px;
+      border-radius: 18px;
+      padding: 14px;
+      border: 1px solid rgba(255,255,255,.2);
+      background: linear-gradient(180deg, rgba(36,56,112,.95), rgba(21,30,56,.96));
+      box-shadow: 0 26px 40px rgba(0,0,0,.45), 0 1px 0 rgba(255,255,255,.2) inset;
+      animation: unlockSheetIn .22s ease-out;
+      overflow: hidden;
+    }
+    .unlock-card.sparkle::after {
+      content: "";
+      position: absolute;
+      inset: -40% -10%;
+      background: linear-gradient(120deg, transparent 10%, rgba(255,255,255,.2) 50%, transparent 90%);
+      transform: translateX(-120%) rotate(8deg);
+      animation: unlockSparkle 1s ease-out;
+      pointer-events: none;
+    }
+    .unlock-title { font-size: 17px; font-weight: 800; margin: 0 0 10px; }
+    .unlock-list { display: grid; gap: 8px; max-height: 32vh; overflow: auto; padding-right: 2px; }
+    .unlock-item { border: 1px solid rgba(255,255,255,.15); border-radius: 12px; padding: 10px; background: rgba(255,255,255,.05); }
+    .unlock-meta { color: var(--muted); font-size: 12px; margin-top: 4px; }
+    .unlock-rewards { margin-top: 10px; border-top: 1px dashed rgba(255,255,255,.2); padding-top: 8px; }
+    .unlock-actions { margin-top: 12px; display: flex; justify-content: flex-end; gap: 8px; }
+    @keyframes unlockSparkle {
+      0% { transform: translateX(-120%) rotate(8deg); opacity: 0; }
+      20% { opacity: .95; }
+      100% { transform: translateX(120%) rotate(8deg); opacity: 0; }
+    }
+    @keyframes unlockSheetIn {
+      from { transform: translateY(10px); opacity: 0; }
+      to { transform: translateY(0); opacity: 1; }
+    }
 
     .slot-actions { display:flex; gap:8px; flex-wrap:wrap; margin-top: 8px; }
     .chip { border-radius: 999px; padding: 5px 10px; font-size: 12px; font-weight: 700; }
     .chip.green { background: rgba(72,216,141,0.2); color: #bbffd9; }
+    .ach-progress { margin-top: 8px; }
+    .ach-progress .bar { height: 8px; border-radius: 999px; background: rgba(255,255,255,.12); overflow: hidden; }
+    .ach-progress .bar > i { display:block; height:100%; background: linear-gradient(90deg, #82a7ff, #49d88d); }
+    .level-mini { margin-bottom: 10px; }
+    .level-mini .bar { height: 8px; border-radius: 999px; background: rgba(255,255,255,.12); overflow: hidden; margin-top: 8px; }
+    .level-mini .bar > i { display:block; height:100%; background: linear-gradient(90deg, #8fb0ff, #66e0a6); }
 
     .segmented {
       display: inline-flex;
@@ -495,6 +573,8 @@
     loadingStats: false,
     stats: null,
     ach: null,
+    ui: { unseenAchCount: 0, achFilter: "all", achQuery: "", microWowLastAt: 0 },
+    unlockToast: { open: false, applying: false, items: [], sparkleTick: 0 },
     mySupplements: { open: false, tab: "active", loading: false, busy: {}, active: [], frozen: [] },
     suppHub: { open: false, loading: false, saving: false, item: null, slots: [], slotId: "morning", time: "", doseText: "", noteText: "", remindersMode: "slot", reminderTimes: [], reminderInput: "" },
     toastTimer: null,
@@ -612,6 +692,13 @@
     state.toastTimer = setTimeout(() => { wrap.innerHTML = ""; }, 2200);
   }
 
+  function formatUtcShort(iso) {
+    const value = String(iso || "").trim();
+    if (!value) return "";
+    const d = new Date(value.replace(" ", "T").replace("Z", "") + (value.endsWith("Z") ? "" : ""));
+    if (Number.isNaN(d.getTime())) return value;
+    return d.toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit" }) + " " + d.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
+  }
 
 
   function applyCosmetics(c) {
@@ -621,17 +708,136 @@
     document.documentElement.dataset.badge = cosmetics.badge_id || "none";
   }
 
+  function getThemeMeta(id) {
+    const themes = state.ach?.catalogs?.themes || [];
+    return themes.find((x) => x.id === id) || { id: String(id || ""), emoji: "", title_ru: String(id || "") };
+  }
+
+  function getTabMeta(id) {
+    const tabs = state.ach?.catalogs?.tab_skins || [];
+    return tabs.find((x) => x.id === id) || { id: String(id || ""), emoji: "", title_ru: String(id || "") };
+  }
+
   function getBadgeMeta(id) {
     const badges = state.ach?.catalogs?.badges || [];
-    return badges.find((b) => b.id === id) || { id: "none", emoji: "", title_ru: "" };
+    return badges.find((b) => b.id === id) || { id: String(id || ""), emoji: "", title_ru: String(id || "") };
+  }
+
+  function getUnseenAchievementsCount() {
+    const achCount = Number(state.ach?.unseen_count || 0);
+    const uiCount = Number(state.ui?.unseenAchCount || 0);
+    return Math.max(0, achCount, uiCount);
   }
 
   async function loadAchievements(force = false) {
     if (state.ach && !force) return state.ach;
     const data = await api("./api/achievements/summary");
     state.ach = data;
+    state.ui = state.ui || {};
+    state.ui.unseenAchCount = Number(data.unseen_count || 0);
     applyCosmetics(data.cosmetics || {});
     return data;
+  }
+
+  async function markAchievementsSeen() {
+    try {
+      await api("./api/achievements/mark_seen", { method: "POST" });
+    } catch {}
+    state.ach = state.ach || {};
+    state.ui = state.ui || {};
+    state.ach.unseen_count = 0;
+    state.ui.unseenAchCount = 0;
+  }
+
+  function getUnlockPatchFromItems(items) {
+    const details = Array.isArray(items) ? items : [];
+    if (!details.length) return null;
+    const byKey = new Map((state.ach?.achievements || []).map((a) => [String(a.key || ""), a]));
+    const patch = {};
+    for (const detail of details) {
+      const ach = byKey.get(String(detail?.key || ""));
+      const unlock = ach?.reward?.unlock || {};
+      const theme = (unlock.themes || []).slice(-1)[0];
+      const tabSkin = (unlock.tab_skins || []).slice(-1)[0];
+      const badge = (unlock.badges || []).slice(-1)[0];
+      if (theme) patch.theme_id = theme;
+      if (tabSkin) patch.tab_skin_id = tabSkin;
+      if (badge) patch.badge_id = badge;
+    }
+    return Object.keys(patch).length ? patch : null;
+  }
+
+  async function showUnlockToastFromPayload(payload) {
+    const details = Array.isArray(payload?.newly_unlocked_details) ? payload.newly_unlocked_details : [];
+    if (!details.length) return;
+    try { await loadAchievements(true); } catch {}
+    state.unlockToast = {
+      open: true,
+      applying: false,
+      items: details,
+      sparkleTick: Date.now(),
+    };
+    tg?.HapticFeedback?.notificationOccurred?.("success");
+    renderMainApp();
+  }
+
+  async function applyUnlockCosmeticsFromModal() {
+    if (state.unlockToast?.applying) return;
+    state.unlockToast = { ...(state.unlockToast || {}), applying: true };
+    renderMainApp();
+    try {
+      const patch = getUnlockPatchFromItems(state.unlockToast?.items || []);
+      if (!patch) {
+        state.unlockToast = { open: false, applying: false, items: [], sparkleTick: 0 };
+        renderMainApp();
+        return;
+      }
+      const res = await api("./api/cosmetics/set", { method: "POST", body: patch });
+      state.ach = state.ach || {};
+      state.ach.cosmetics = res.cosmetics;
+      state.me = { ...(state.me || {}), cosmetics: res.cosmetics };
+      applyCosmetics(res.cosmetics);
+      showToast("Косметика применена");
+    } catch {
+      showToast("Не удалось применить косметику");
+    } finally {
+      state.unlockToast = { open: false, applying: false, items: [], sparkleTick: 0 };
+      renderMainApp();
+    }
+  }
+
+  function closeUnlockToast() {
+    state.unlockToast = { open: false, applying: false, items: [], sparkleTick: 0 };
+    renderMainApp();
+  }
+
+  function renderUnlockToastCard() {
+    const toast = state.unlockToast || {};
+    if (!toast.open) return "";
+    const items = Array.isArray(toast.items) ? toast.items : [];
+    const patch = getUnlockPatchFromItems(items);
+    const hasCosmeticReward = !!patch;
+    const rarityMap = { common: "Обычная", rare: "Редкая", epic: "Эпическая", legendary: "Легендарная" };
+    return `
+      <div class="unlock-overlay" data-unlock-overlay>
+        <section class="unlock-card sparkle" data-sparkle-key="${toast.sparkleTick || 0}">
+          <h3 class="unlock-title">🏆 Достижение открыто</h3>
+          <div class="unlock-list">
+            ${items.map((item) => `
+              <div class="unlock-item">
+                <div><strong>${esc(item.title_ru || "Достижение")}</strong></div>
+                <div class="unlock-meta">${esc(rarityMap[item.rarity] || item.rarity || "Обычная")} · ${Number(item.points || 0)} очков</div>
+                ${(Array.isArray(item.reward_verbose) && item.reward_verbose.length) ? `<div class="unlock-rewards"><div class="muted" style="margin-bottom:6px">Открылось</div>${item.reward_verbose.map((x) => `<div>${esc(x)}</div>`).join("")}</div>` : ""}
+              </div>
+            `).join("")}
+          </div>
+          <div class="unlock-actions">
+            <button class="btn secondary" data-unlock-close>Закрыть</button>
+            <button class="btn" data-unlock-apply ${toast.applying ? "disabled" : ""}>${hasCosmeticReward ? (toast.applying ? "Применяю..." : "Применить") : "Ок"}</button>
+          </div>
+        </section>
+      </div>
+    `;
   }
 
   function showBannedScreen(reason) {
@@ -858,9 +1064,10 @@
 
   function renderTabs(isLocked) {
     const list = activeTabs();
+    const showSettingsDot = getUnseenAchievementsCount() > 0;
     return `<nav class="tabs ${(state.me?.role && state.me.role !== "none") ? "admin-enabled" : ""}" data-skin="${document.documentElement.dataset.tabSkin || "classic"}">
       ${list.map(t => `<button class="tab ${state.activeTab === t.id ? "active" : ""}" data-tab="${t.id}" ${isLocked ? "disabled" : ""}>
-        <span class="tab-emoji">${t.icon}</span>
+        <span class="tab-emoji-wrap"><span class="tab-emoji">${t.icon}</span>${t.id === "settings" && showSettingsDot ? '<i class="tab-unseen-dot" aria-hidden="true"></i>' : ''}</span>
         <span>${t.title}</span>
       </button>`).join("")}
     </nav>`;
@@ -880,10 +1087,33 @@
         <section id="tabContent" class="fade"></section>
       </div>
       ${renderTabs(false)}
+      ${renderUnlockToastCard()}
     `;
 
     bindMainEvents();
+    bindUnlockToastEvents();
     renderActiveTab();
+  }
+
+  function bindUnlockToastEvents() {
+    document.querySelectorAll('[data-unlock-close]').forEach((btn) => btn.addEventListener('click', () => {
+      haptic();
+      closeUnlockToast();
+    }));
+    document.querySelectorAll('[data-unlock-apply]').forEach((btn) => btn.addEventListener('click', async () => {
+      haptic();
+      const patch = getUnlockPatchFromItems(state.unlockToast?.items || []);
+      if (!patch) {
+        closeUnlockToast();
+        return;
+      }
+      await applyUnlockCosmeticsFromModal();
+    }));
+    document.querySelectorAll('[data-unlock-overlay]').forEach((overlay) => {
+      overlay.addEventListener('click', (e) => {
+        if (e.target === overlay) closeUnlockToast();
+      });
+    });
   }
 
   function bindMainEvents() {
@@ -910,7 +1140,11 @@
           await loadSurveyForTarget();
         }
         if (tab === "settings") {
-          try { await loadAchievements(); } catch {}
+          try {
+            await loadAchievements();
+            await markAchievementsSeen();
+            renderMainApp();
+          } catch {}
         }
       });
     });
@@ -1158,6 +1392,7 @@
           await loadSurveyForTarget(true);
           renderActiveTab();
         }
+        await showUnlockToastFromPayload(out);
       } catch {
         showToast('Не удалось применить рекомендации');
       } finally {
@@ -1182,6 +1417,7 @@
           await loadSurveyForTarget(true);
           renderActiveTab();
         }
+        await showUnlockToastFromPayload(out);
       } catch {
         showToast('Не удалось применить выбранные');
       } finally {
@@ -2022,6 +2258,74 @@ function adminField(label, field, value, kind='input') {
     } catch {}
   }
 
+  function slotProgress(slot) {
+    const safeSlot = slot || {};
+    const items = Array.isArray(safeSlot.items) ? safeSlot.items : [];
+    const complexes = Array.isArray(safeSlot.complexes) ? safeSlot.complexes : [];
+    const singleTaken = items.filter((i) => i?.status === "taken").length;
+    const singleTotal = items.length;
+    let complexTaken = 0;
+    let complexTotal = 0;
+    for (const complex of complexes) {
+      const cItems = Array.isArray(complex?.items) ? complex.items : [];
+      if (cItems.length) {
+        complexTotal += cItems.length;
+        complexTaken += cItems.filter((i) => i?.status === "taken").length;
+      } else {
+        complexTotal += Number(complex?.total_count || 0);
+        complexTaken += Number(complex?.taken_count || 0);
+      }
+    }
+    const total = singleTotal + complexTotal;
+    const taken = singleTaken + complexTaken;
+    return { total, taken, closed: total > 0 && taken >= total };
+  }
+
+  function findSlotBySupplementId(supplementId) {
+    for (const slot of state.today?.slots || []) {
+      const inItems = (slot.items || []).some((i) => String(i.supplement_id) === String(supplementId));
+      const inComplex = (slot.complexes || []).some((c) => (c.items || []).some((i) => String(i.supplement_id) === String(supplementId)));
+      if (inItems || inComplex) return slot;
+    }
+    return null;
+  }
+
+  function findSlotByComplexId(complexId) {
+    for (const slot of state.today?.slots || []) {
+      const found = (slot.complexes || []).some((c) => String(c.complex_id) === String(complexId));
+      if (found) return slot;
+    }
+    return null;
+  }
+
+  function extractUnlockedPoints(payloads) {
+    return (Array.isArray(payloads) ? payloads : []).reduce((acc, payload) => {
+      const details = Array.isArray(payload?.newly_unlocked_details) ? payload.newly_unlocked_details : [];
+      return acc + details.reduce((sum, x) => sum + Number(x?.points || 0), 0);
+    }, 0);
+  }
+
+  function canShowMicroWow() {
+    state.ui = state.ui || {};
+    const now = Date.now();
+    const last = Number(state.ui.microWowLastAt || 0);
+    if (now - last < 20000) return false;
+    state.ui.microWowLastAt = now;
+    return true;
+  }
+
+  function maybeCelebrateSlotClosed() {
+    if (!canShowMicroWow()) return;
+    tg?.HapticFeedback?.impactOccurred?.("light");
+    showToast("Слот закрыт. Красиво.");
+  }
+
+  function maybeCelebratePerfectDay(pointsGain) {
+    if (!canShowMicroWow()) return;
+    tg?.HapticFeedback?.notificationOccurred?.("success");
+    showToast(`Идеальный день. +${Math.max(0, Number(pointsGain || 0))} очков.`);
+  }
+
   async function loadToday(force) {
     if (state.loadingToday && !force) return;
     state.loadingToday = true;
@@ -2257,38 +2561,139 @@ function adminField(label, field, value, kind='input') {
     const catalogs = ach.catalogs || { themes:[], tab_skins:[], badges:[] };
     const cosmetics = ach.cosmetics || state.me?.cosmetics || { theme_id:"base", tab_skin_id:"classic", badge_id:"none" };
     const rarityIcon = { common:"⚪", rare:"🔵", epic:"🟣", legendary:"🟡" };
+    const unseenCount = getUnseenAchievementsCount();
+    const level = Number(ach.level || 1);
+    const levelTitle = String(ach.level_title_ru || "Новичок");
+    const levelPct = Math.max(0, Math.min(100, Number(ach.level_progress_pct || 0)));
+    const pointsTotal = Number(ach.points_total || 0);
+    const nextLevelPoints = ach.next_level_points == null ? null : Number(ach.next_level_points);
+    const achFilter = String(state.ui?.achFilter || "all");
+    const achQuery = String(state.ui?.achQuery || "").trim().toLowerCase();
     const rewardChips = (reward) => {
       const unlock = reward?.unlock || {};
       const chips = [];
-      (unlock.themes||[]).forEach((x)=> chips.push(`Тема: ${x}`));
-      (unlock.tab_skins||[]).forEach((x)=> chips.push(`Скин: ${x}`));
-      (unlock.badges||[]).forEach((x)=> chips.push(`Бейдж: ${x}`));
+      (unlock.themes||[]).forEach((x)=> { const m=getThemeMeta(x); chips.push(`Тема: ${(m.emoji||"").trim()} ${m.title_ru||x}`.trim()); });
+      (unlock.tab_skins||[]).forEach((x)=> { const m=getTabMeta(x); chips.push(`Таб-меню: ${(m.emoji||"").trim()} ${m.title_ru||x}`.trim()); });
+      (unlock.badges||[]).forEach((x)=> { const m=getBadgeMeta(x); chips.push(`Бейдж: ${(m.emoji||"").trim()} ${m.title_ru||x}`.trim()); });
       return chips.map((c)=>`<span class="chip">${esc(c)}</span>`).join(' ');
     };
     const options = (items, allowedIds, current) => (items||[]).filter((x)=>allowedIds.includes(x.id)).map((x)=>`<option value="${esc(x.id)}" ${x.id===current?'selected':''}>${esc(x.emoji||'')} ${esc(x.title_ru||x.id)}</option>`).join('');
-    return `
-      ${renderStatsBlock() || '<section class="card fade"><div class="row"><strong>📈 Статистика</strong></div><div class="muted" style="margin-top:8px">Пока нет данных для отображения.</div><div style="margin-top:10px"><button class="btn secondary" data-stats-refresh>Обновить</button></div></section>'}
-      <section class="card fade">
-        <div class="row"><strong>🏆 Достижения</strong><button class="btn secondary" data-ach-refresh>Обновить достижения</button></div>
-        <div class="muted" style="margin-top:8px">Открытые: ${unlocked.length} · Закрытые: ${locked.length}</div>
-        <div class="ach-grid">
-          ${unlocked.map((a)=>`<div class="ach-item"><div><strong>${rarityIcon[a.rarity]||'⚪'} ${esc(a.title_ru)}</strong></div><div class="muted">${esc(a.desc_ru)}</div><div class="muted">${a.unlocked_at_utc ? 'Открыто: '+esc(a.unlocked_at_utc) : ''}</div><div style="margin-top:6px">${rewardChips(a.reward)}</div></div>`).join('') || '<div class="muted">Пока ничего не открыто.</div>'}
-          ${locked.map((a)=>`<div class="ach-item locked"><div><strong>🔒 ${esc(a.title_ru)}</strong></div><div class="muted">${esc(a.desc_ru)}</div><div style="margin-top:6px">${rewardChips(a.reward)}</div></div>`).join('')}
+
+    const unlockedAchievements = items.filter((x) => x.unlocked);
+    const unseenUnlockedAchievements = unlockedAchievements.filter((x) => !String(x.seen_at_utc || "").trim());
+    const getCosmeticUnlockInfo = (kind, id) => {
+      const safeId = String(id || "").trim();
+      if (!safeId) return { by: "", isNew: false };
+      const by = unlockedAchievements.filter((a) => Array.isArray(a.reward?.unlock?.[kind]) && a.reward.unlock[kind].map(String).includes(safeId)).map((a) => a.title_ru).filter(Boolean);
+      const isNew = unseenUnlockedAchievements.some((a) => Array.isArray(a.reward?.unlock?.[kind]) && a.reward.unlock[kind].map(String).includes(safeId));
+      return { by: by[0] || "", isNew };
+    };
+    const newestUnlockedId = (kind, allowedIds, currentId) => {
+      for (const a of unseenUnlockedAchievements) {
+        const ids = Array.isArray(a.reward?.unlock?.[kind]) ? a.reward.unlock[kind].map((x) => String(x || "").trim()).filter(Boolean) : [];
+        for (const id of ids) {
+          if (allowedIds.includes(id) && id !== currentId) return id;
+        }
+      }
+      return "";
+    };
+    const quickThemeId = newestUnlockedId("themes", allowed.themes || ["base"], cosmetics.theme_id || "base");
+    const quickTabId = newestUnlockedId("tab_skins", allowed.tab_skins || ["classic"], cosmetics.tab_skin_id || "classic");
+    const quickBadgeId = newestUnlockedId("badges", allowed.badges || ["none"], cosmetics.badge_id || "none");
+    const themeUnlockInfo = getCosmeticUnlockInfo("themes", cosmetics.theme_id || "base");
+    const tabUnlockInfo = getCosmeticUnlockInfo("tab_skins", cosmetics.tab_skin_id || "classic");
+    const badgeUnlockInfo = getCosmeticUnlockInfo("badges", cosmetics.badge_id || "none");
+
+    const filtered = items.filter((a) => {
+      const isNew = Boolean(a.unlocked && !String(a.seen_at_utc || "").trim());
+      if (achFilter === "unlocked" && !a.unlocked) return false;
+      if (achFilter === "locked" && a.unlocked) return false;
+      if (achFilter === "new" && !isNew) return false;
+      if (achQuery) {
+        const blob = `${String(a.title_ru || "")} ${String(a.desc_ru || "")}`.toLowerCase();
+        if (!blob.includes(achQuery)) return false;
+      }
+      return true;
+    });
+
+    const grouped = new Map();
+    filtered.forEach((a) => {
+      const category = String(a.category || "Без категории");
+      if (!grouped.has(category)) grouped.set(category, []);
+      grouped.get(category).push(a);
+    });
+
+    const groupedHtml = [...grouped.entries()].map(([category, arr]) => {
+      const sorted = [...arr].sort((a, b) => {
+        if (Boolean(b.unlocked) !== Boolean(a.unlocked)) return Number(b.unlocked) - Number(a.unlocked);
+        return Number(b.points || 0) - Number(a.points || 0);
+      });
+      return `
+        <div class="ach-category">
+          <div class="ach-category-title">${esc(category)}</div>
+          <div class="ach-grid">
+            ${sorted.map((a)=>{
+              const isNew = Boolean(a.unlocked && !String(a.seen_at_utc || "").trim());
+              return `<div class="ach-item ${a.unlocked ? "" : "locked"}"><div><strong>${a.unlocked ? (rarityIcon[a.rarity]||'⚪') : '🔒'} ${esc(a.title_ru)}</strong>${isNew ? '<span class="new-pill">NEW</span>' : ''}</div><div class="muted">${esc(a.desc_ru)}</div><div class="muted">${a.unlocked_at_utc ? 'Открыто: '+esc(a.unlocked_at_utc) : ''}</div><div style="margin-top:6px">${rewardChips(a.reward)}</div></div>`;
+            }).join('')}
+          </div>
         </div>
+      `;
+    }).join('');
+
+    const filterBtn = (key, label) => `<button class="chip ${achFilter===key?'green':''}" data-ach-filter="${key}">${label}</button>`;
+    return `
+      <section class="card fade level-mini">
+        <div class="row"><strong>Уровень ${level} · ${esc(levelTitle)}</strong><span class="muted">${pointsTotal} очков</span></div>
+        <div class="bar"><i style="width:${levelPct}%"></i></div>
+        <div class="muted" style="margin-top:6px">${nextLevelPoints == null ? 'Максимальный уровень достигнут' : `До следующего уровня: ${Math.max(0, nextLevelPoints - pointsTotal)} очков`}</div>
+      </section>
+      ${renderStatsBlock() || '<section class="card fade"><div class="row"><strong>📈 Статистика</strong></div><div class="muted" style="margin-top:8px">Пока нет данных для отображения.</div><div style="margin-top:10px"><button class="btn secondary" data-stats-refresh>Обновить</button></div></section>'}
+      ${(() => {
+        const next = Array.isArray(ach.next_up) ? ach.next_up : [];
+        if (!next.length) return '';
+        return `<section class="card fade"><div class="row"><strong>🎯 Дальше по плану</strong></div><div style="margin-top:8px; display:grid; gap:8px;">${next.map((item) => `<div class="ach-item"><div><strong>${esc(item.title_ru || '')}</strong></div><div class="ach-progress"><div class="bar"><i style="width:${Math.max(0, Math.min(100, Number(item.pct || 0)))}%"></i></div><div class="muted" style="margin-top:4px">Прогресс: ${Math.max(0, Math.min(100, Number(item.pct || 0)))}%</div>${item.hint_ru ? `<div class="muted">${esc(item.hint_ru)}</div>` : ''}</div></div>`).join('')}</div></section>`;
+      })()}
+      ${(() => {
+        const recent = Array.isArray(ach.recent_achievements) ? ach.recent_achievements : [];
+        if (!recent.length) return '';
+        return `<section class="card fade"><div class="row"><strong>🕒 Последние открытия</strong><button class="btn secondary" data-ach-scroll>Посмотреть всё</button></div><div style="margin-top:8px; display:grid; gap:8px;">${recent.slice(0,8).map((item) => `<div class="ach-item"><div><strong>${esc(item.title_ru || '')}</strong></div><div class="muted">${esc(formatUtcShort(item.unlocked_at_utc || ''))}</div>${(item.reward_verbose || []).length ? `<div class="muted" style="margin-top:4px">${item.reward_verbose.map((x) => esc(x)).join(' · ')}</div>` : ''}</div>`).join('')}</div></section>`;
+      })()}
+      <section class="card fade" id="achievementsBlock">
+        <div class="row"><strong>🏆 Достижения ${unseenCount > 0 ? `<span class="chip" style="margin-left:8px">Новое: ${unseenCount}</span>` : ""}</strong></div>
+        <div class="muted" style="margin-top:8px">Открытые: ${unlocked.length} · Закрытые: ${locked.length}</div>
+        <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap;">${filterBtn('all','Все')}${filterBtn('unlocked','Открытые')}${filterBtn('locked','Закрытые')}${filterBtn('new','Новые')}</div>
+        <div style="margin-top:8px"><input class="input" id="achSearch" placeholder="Поиск по названию или описанию" value="${esc(state.ui?.achQuery || "")}" /></div>
+        ${groupedHtml || '<div class="muted" style="margin-top:10px">Ничего не найдено по выбранным фильтрам.</div>'}
       </section>
       <section class="card fade">
         <div class="row"><strong>🎨 Косметика</strong></div>
         <div style="margin-top:8px">
           <label class="muted">Тема</label>
           <select class="select" id="cosTheme">${options(catalogs.themes, allowed.themes || ["base"], cosmetics.theme_id || "base")}</select>
+          <div class="cos-meta">
+            ${themeUnlockInfo.isNew ? '<span class="new-pill">Новое</span>' : ''}
+            ${themeUnlockInfo.by ? `<span>Открыто достижением: ${esc(themeUnlockInfo.by)}</span>` : '<span>Базовая доступность</span>'}
+            ${quickThemeId ? `<button class="btn secondary" data-cos-quick="theme" data-cos-id="${esc(quickThemeId)}">Применить</button>` : ''}
+          </div>
         </div>
         <div style="margin-top:8px">
           <label class="muted">Таб-меню</label>
           <select class="select" id="cosTab">${options(catalogs.tab_skins, allowed.tab_skins || ["classic"], cosmetics.tab_skin_id || "classic")}</select>
+          <div class="cos-meta">
+            ${tabUnlockInfo.isNew ? '<span class="new-pill">Новое</span>' : ''}
+            ${tabUnlockInfo.by ? `<span>Открыто достижением: ${esc(tabUnlockInfo.by)}</span>` : '<span>Базовая доступность</span>'}
+            ${quickTabId ? `<button class="btn secondary" data-cos-quick="tab" data-cos-id="${esc(quickTabId)}">Применить</button>` : ''}
+          </div>
         </div>
         <div style="margin-top:8px">
           <label class="muted">Бейдж</label>
           <select class="select" id="cosBadge">${options(catalogs.badges, allowed.badges || ["none"], cosmetics.badge_id || "none")}</select>
+          <div class="cos-meta">
+            ${badgeUnlockInfo.isNew ? '<span class="new-pill">Новое</span>' : ''}
+            ${badgeUnlockInfo.by ? `<span>Открыто достижением: ${esc(badgeUnlockInfo.by)}</span>` : '<span>Базовая доступность</span>'}
+            ${quickBadgeId ? `<button class="btn secondary" data-cos-quick="badge" data-cos-id="${esc(quickBadgeId)}">Применить</button>` : ''}
+          </div>
         </div>
       </section>
       <section class="card fade">
@@ -2309,17 +2714,24 @@ function adminField(label, field, value, kind='input') {
         } catch {}
       });
     });
-    document.querySelectorAll("[data-ach-refresh]").forEach((btn) => {
-      btn.addEventListener("click", async () => {
-        haptic();
-        try {
-          await loadAchievements(true);
-          renderActiveTab();
-          showToast("Достижения обновлены");
-        } catch {
-          showToast("Не удалось обновить достижения");
-        }
+    document.querySelectorAll('[data-ach-scroll]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const block = document.getElementById('achievementsBlock');
+        block?.scrollIntoView({ behavior: 'smooth', block: 'start' });
       });
+    });
+    document.querySelectorAll('[data-ach-filter]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        state.ui = state.ui || {};
+        state.ui.achFilter = String(btn.dataset.achFilter || 'all');
+        renderActiveTab();
+      });
+    });
+    const achSearch = document.getElementById('achSearch');
+    achSearch?.addEventListener('input', (e) => {
+      state.ui = state.ui || {};
+      state.ui.achQuery = e.target.value || '';
+      renderActiveTab();
     });
     const applyPatch = async () => {
       const patch = {
@@ -2339,6 +2751,32 @@ function adminField(label, field, value, kind='input') {
         showToast("Косметика пока не доступна");
       }
     };
+    document.querySelectorAll('[data-cos-quick]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        haptic();
+        const kind = String(btn.dataset.cosQuick || '');
+        const cid = String(btn.dataset.cosId || '').trim();
+        if (!cid) return;
+        const patch = {};
+        if (kind === 'theme') patch.theme_id = cid;
+        if (kind === 'tab') patch.tab_skin_id = cid;
+        if (kind === 'badge') patch.badge_id = cid;
+        if (!Object.keys(patch).length) return;
+        try {
+          const res = await api("./api/cosmetics/set", { method: "POST", body: patch });
+          state.ach = state.ach || {};
+          state.ach.cosmetics = res.cosmetics;
+          state.me = { ...(state.me || {}), cosmetics: res.cosmetics };
+          applyCosmetics(res.cosmetics);
+          renderMainApp();
+          if (state.activeTab === "settings") renderActiveTab();
+          showToast('Косметика применена');
+        } catch {
+          showToast('Не удалось применить косметику');
+        }
+      });
+    });
+
     ["cosTheme", "cosTab", "cosBadge"].forEach((id) => {
       const el = document.getElementById(id);
       el?.addEventListener("change", applyPatch);
@@ -2404,10 +2842,21 @@ function adminField(label, field, value, kind='input') {
       btn.addEventListener("click", async ()=>{
         const complexId = Number(btn.dataset.complexToggle);
         const next = btn.dataset.next;
+        const prevSlot = findSlotByComplexId(complexId);
+        const wasClosedBefore = slotProgress(prevSlot).closed;
         haptic();
         try {
-          await api("./api/today/toggle_complex", { method:"POST", body:{ complex_id: complexId, status: next } });
+          const out = await api("./api/today/toggle_complex", { method:"POST", body:{ complex_id: complexId, status: next } });
           await loadToday(true);
+          if (next === "taken") {
+            const afterSlot = findSlotByComplexId(complexId);
+            const isClosedAfter = slotProgress(afterSlot).closed;
+            const perfectDay = Number(state.today?.expected || 0) >= 3 && Number(state.today?.adherence || 0) === 100;
+            const gain = extractUnlockedPoints([out]);
+            if (perfectDay) maybeCelebratePerfectDay(gain);
+            else if (!wasClosedBefore && isClosedAfter) maybeCelebrateSlotClosed();
+          }
+          await showUnlockToastFromPayload(out);
         } catch { showToast("Не удалось отметить комплекс"); }
       });
     });
@@ -2562,15 +3011,27 @@ function adminField(label, field, value, kind='input') {
     const item = findItemById(supplementId);
     if (!item) return;
 
+    const prevSlot = findSlotBySupplementId(supplementId);
+    const wasClosedBefore = slotProgress(prevSlot).closed;
     const prev = item.status;
     item.status = nextStatus;
     renderActiveTab();
 
     try {
-      await api("./api/today/toggle", {
+      const out = await api("./api/today/toggle", {
         method: "POST",
         body: { supplement_id: Number(supplementId), status: nextStatus }
       });
+      await loadToday(true);
+      if (nextStatus === "taken") {
+        const afterSlot = findSlotBySupplementId(supplementId);
+        const isClosedAfter = slotProgress(afterSlot).closed;
+        const perfectDay = Number(state.today?.expected || 0) >= 3 && Number(state.today?.adherence || 0) === 100;
+        const gain = extractUnlockedPoints([out]);
+        if (perfectDay) maybeCelebratePerfectDay(gain);
+        else if (!wasClosedBefore && isClosedAfter) maybeCelebrateSlotClosed();
+      }
+      await showUnlockToastFromPayload(out);
     } catch (e) {
       item.status = prev;
       renderActiveTab();
@@ -2606,10 +3067,14 @@ function adminField(label, field, value, kind='input') {
     renderActiveTab();
 
     try {
-      const complexPending = complexes.map((complex) => () => api("./api/today/toggle_complex", {
-        method: "POST",
-        body: { complex_id: Number(complex.complex_id), status }
-      }));
+      const unlockPayloads = [];
+      const complexPending = complexes.map((complex) => async () => {
+        const out = await api("./api/today/toggle_complex", {
+          method: "POST",
+          body: { complex_id: Number(complex.complex_id), status }
+        });
+        unlockPayloads.push(out);
+      });
       await runBatched(complexPending, 3);
 
       const complexItemIds = new Set(
@@ -2617,14 +3082,30 @@ function adminField(label, field, value, kind='input') {
       );
       const singlePending = items
         .filter((item) => !complexItemIds.has(String(item.supplement_id)))
-        .map((item) => () => api("./api/today/toggle", {
-        method: "POST",
-        body: { supplement_id: Number(item.supplement_id), status }
-      }));
+        .map((item) => async () => {
+          const out = await api("./api/today/toggle", {
+            method: "POST",
+            body: { supplement_id: Number(item.supplement_id), status }
+          });
+          unlockPayloads.push(out);
+        });
 
       await runBatched(singlePending, 3);
       await loadToday(true);
       showToast(status === "taken" ? "Отметил всё как принято" : "Слот сброшен");
+      if (status === "taken") {
+        const afterSlot = (state.today?.slots || []).find((s) => String(s.slot_id) === String(slotId));
+        const wasClosedBefore = (snapshot.items.every((x) => x.status === "taken") && snapshot.complexes.every((c) => (c.itemStatuses || []).every((x) => x.status === "taken")));
+        const isClosedAfter = slotProgress(afterSlot).closed;
+        const perfectDay = Number(state.today?.expected || 0) >= 3 && Number(state.today?.adherence || 0) === 100;
+        const gain = extractUnlockedPoints(unlockPayloads);
+        if (perfectDay) maybeCelebratePerfectDay(gain);
+        else if (!wasClosedBefore && isClosedAfter) maybeCelebrateSlotClosed();
+      }
+      const mergedDetails = unlockPayloads.flatMap((x) => Array.isArray(x?.newly_unlocked_details) ? x.newly_unlocked_details : []);
+      if (mergedDetails.length) {
+        await showUnlockToastFromPayload({ newly_unlocked_details: mergedDetails });
+      }
     } catch (e) {
       items.forEach((item) => {
         const old = snapshot.items.find(s => String(s.id) === String(item.supplement_id));

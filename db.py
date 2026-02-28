@@ -672,10 +672,12 @@ async def _ensure_achievements_tables(conn: aiosqlite.Connection) -> None:
           user_id INTEGER NOT NULL,
           achievement_key TEXT NOT NULL,
           unlocked_at_utc TEXT NOT NULL,
+          seen_at_utc TEXT NOT NULL DEFAULT '',
           meta_json TEXT NOT NULL DEFAULT '{}',
           PRIMARY KEY(user_id, achievement_key)
         )"""
     )
+    await _ensure_column(conn, "user_achievements", "seen_at_utc", "TEXT NOT NULL DEFAULT ''")
     await conn.execute(
         """CREATE TABLE IF NOT EXISTS user_cosmetics (
           user_id INTEGER PRIMARY KEY,
@@ -6018,6 +6020,9 @@ async def get_user_metrics(conn: aiosqlite.Connection, tg_user_id: int, local_da
     row = await fetchone(conn, "SELECT COUNT(*) AS c FROM user_complexes WHERE user_id=?", (user_id,))
     metrics["complex_count"] = int((row["c"] if row else 0) or 0)
 
+    row = await fetchone(conn, "SELECT COUNT(*) AS c FROM user_supplements WHERE user_id=? AND is_active=1 AND enabled=0", (user_id,))
+    metrics["frozen_count"] = int((row["c"] if row else 0) or 0)
+
     row = await fetchone(conn, "SELECT COUNT(*) AS c FROM user_supp_settings WHERE user_id=? AND reminder_enabled=1", (user_id,))
     metrics["reminders_enabled_count"] = int((row["c"] if row else 0) or 0)
 
@@ -6103,6 +6108,29 @@ async def get_user_metrics(conn: aiosqlite.Connection, tg_user_id: int, local_da
     row = await fetchone(conn, "SELECT 1 AS x FROM supplement_day_state WHERE user_id=? AND status='taken' LIMIT 1", (user_id,))
     metrics["has_any_taken"] = 1 if row else 0
 
+    complex_taken_days_7 = 0
+    day_cursor = date.fromisoformat(local_date)
+    for _ in range(7):
+        day_value = day_cursor.isoformat()
+        rows = await fetchall(
+            conn,
+            """SELECT c.id,
+                      COUNT(ci.supplement_id) AS total_cnt,
+                      SUM(CASE WHEN sds.status='taken' THEN 1 ELSE 0 END) AS taken_cnt
+               FROM user_complexes c
+               JOIN user_complex_items ci ON ci.complex_id=c.id
+               LEFT JOIN users u ON u.id=c.user_id
+               LEFT JOIN supplement_day_state sds
+                 ON sds.user_id=u.tg_user_id AND sds.day=? AND sds.supplement_id=ci.supplement_id
+               WHERE c.user_id=?
+               GROUP BY c.id""",
+            (day_value, user_id),
+        )
+        if any(int(r["total_cnt"] or 0) > 0 and int(r["taken_cnt"] or 0) >= int(r["total_cnt"] or 0) for r in rows):
+            complex_taken_days_7 += 1
+        day_cursor -= timedelta(days=1)
+    metrics["complex_taken_days_7"] = int(complex_taken_days_7)
+
     streaks = await get_streaks(conn, tg_user_id, local_date, stack_ids, max_back=90)
     metrics["max_single_supp_streak"] = max([int(item.get("streak_days") or 0) for item in streaks], default=0)
     return metrics
@@ -6141,6 +6169,89 @@ def _eval_rule(rule: dict, metrics: dict) -> bool:
     return _compare_values(left, op, right)
 
 
+def get_achievement_progress(ach, metrics) -> dict:
+    rule = dict((ach or {}).get("rule") or {})
+
+    def _single(rule_item: dict) -> tuple[int | None, str]:
+        metric = str((rule_item or {}).get("metric") or "").strip()
+        op = str((rule_item or {}).get("op") or "").strip()
+        if not metric or not op:
+            return None, ""
+        if "value_metric" in rule_item:
+            return None, ""
+        try:
+            left = float(metrics.get(metric) or 0)
+            right = float((rule_item or {}).get("value") or 0)
+        except Exception:
+            return None, ""
+        if op == ">=":
+            if right <= 0:
+                return 100, ""
+            pct = max(0, min(100, int((left / right) * 100)))
+            remain = max(0, int(right - left))
+            return pct, (f"осталось: {remain}" if remain > 0 else "цель достигнута")
+        if op == "==":
+            if right == 0:
+                pct = 100 if left == 0 else 0
+            else:
+                pct = max(0, min(100, int((min(left, right) / right) * 100)))
+            remain = abs(int(right - left))
+            return pct, (f"осталось: {remain}" if remain > 0 else "цель достигнута")
+        return None, ""
+
+    if isinstance(rule.get("all"), list):
+        parts = [get_achievement_progress({"rule": r}, metrics) for r in list(rule.get("all") or [])]
+        valid = [p for p in parts if p.get("pct") is not None]
+        if not valid:
+            return {"pct": None, "hint_ru": ""}
+        worst = min(valid, key=lambda x: int(x.get("pct") or 0))
+        return {"pct": int(worst.get("pct") or 0), "hint_ru": str(worst.get("hint_ru") or "")}
+
+    pct, hint = _single(rule)
+    return {"pct": pct, "hint_ru": hint or ""}
+
+
+LEVEL_THRESHOLDS_RU = [
+    (1, 0, 49, "Новичок"),
+    (2, 50, 119, "Собранный"),
+    (3, 120, 219, "Системный"),
+    (4, 220, 359, "Протокол"),
+    (5, 360, 549, "Архитектор"),
+    (6, 550, 799, "Наставленный"),
+    (7, 800, 1099, "Куратор"),
+    (8, 1100, 1499, "Мастер ритма"),
+    (9, 1500, 1949, "Инженер системы"),
+    (10, 1950, 2449, "Практик высокого уровня"),
+    (11, 2450, 2999, "Стратег"),
+    (12, 3000, 10**9, "Легенда протокола"),
+]
+
+
+def get_level_status(total_points: int) -> dict:
+    pts = max(0, int(total_points or 0))
+    current = LEVEL_THRESHOLDS_RU[-1]
+    for lvl in LEVEL_THRESHOLDS_RU:
+        if lvl[1] <= pts <= lvl[2]:
+            current = lvl
+            break
+    level, min_pts, max_pts, title = current
+    next_level_points = None
+    if level < LEVEL_THRESHOLDS_RU[-1][0]:
+        next_level_points = int(max_pts + 1)
+    span = max(1, int(max_pts - min_pts + 1))
+    progress = int(((pts - min_pts) / span) * 100)
+    progress = max(0, min(100, progress))
+    if next_level_points is None:
+        progress = 100
+    return {
+        "level": int(level),
+        "level_title_ru": str(title),
+        "level_progress_pct": int(progress),
+        "points_total": int(pts),
+        "next_level_points": next_level_points,
+    }
+
+
 def compute_allowed_cosmetics(unlocked_rewards: list[dict]) -> dict:
     themes = {"base"}
     tab_skins = {"classic"}
@@ -6151,6 +6262,47 @@ def compute_allowed_cosmetics(unlocked_rewards: list[dict]) -> dict:
         tab_skins.update([str(x) for x in list(unlock.get("tab_skins") or []) if str(x).strip()])
         badges.update([str(x) for x in list(unlock.get("badges") or []) if str(x).strip()])
     return {"themes": sorted(themes), "tab_skins": sorted(tab_skins), "badges": sorted(badges)}
+
+
+def describe_rewards_ru(reward_json: dict | str | None, catalogs_from_achievements_py: dict | None) -> list[str]:
+    reward = reward_json if isinstance(reward_json, dict) else {}
+    if not reward and isinstance(reward_json, str):
+        try:
+            parsed = json.loads(reward_json)
+            reward = parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            reward = {}
+    unlock = dict((reward or {}).get("unlock") or {})
+    catalogs = catalogs_from_achievements_py or {}
+
+    def _build_map(items: list[dict] | None) -> dict[str, str]:
+        result: dict[str, str] = {}
+        for item in list(items or []):
+            item_id = str((item or {}).get("id") or "").strip()
+            if not item_id:
+                continue
+            emoji = str((item or {}).get("emoji") or "").strip()
+            title_ru = str((item or {}).get("title_ru") or item_id).strip()
+            label = f"{emoji} {title_ru}".strip()
+            result[item_id] = label
+        return result
+
+    theme_map = _build_map(catalogs.get("themes"))
+    tab_skin_map = _build_map(catalogs.get("tab_skins"))
+    badge_map = _build_map(catalogs.get("badges"))
+
+    result: list[str] = []
+    for key, prefix, mapping in (
+        ("themes", "Тема", theme_map),
+        ("tab_skins", "Таб-меню", tab_skin_map),
+        ("badges", "Бейдж", badge_map),
+    ):
+        for item_id in list(unlock.get(key) or []):
+            safe_id = str(item_id or "").strip()
+            if not safe_id:
+                continue
+            result.append(f"{prefix}: {mapping.get(safe_id, safe_id)}")
+    return result
 
 
 async def evaluate_and_unlock_achievements(conn, tg_user_id: int, local_date: str) -> list[str]:
@@ -6169,13 +6321,70 @@ async def evaluate_and_unlock_achievements(conn, tg_user_id: int, local_date: st
             continue
         before = conn.total_changes
         await conn.execute(
-            "INSERT OR IGNORE INTO user_achievements(user_id, achievement_key, unlocked_at_utc, meta_json) VALUES(?,?,?,?)",
-            (user_id, key, now, "{}"),
+            "INSERT OR IGNORE INTO user_achievements(user_id, achievement_key, unlocked_at_utc, seen_at_utc, meta_json) VALUES(?,?,?,?,?)",
+            (user_id, key, now, "", "{}"),
         )
         if conn.total_changes > before:
             newly.append(key)
     await conn.commit()
     return newly
+
+
+async def get_unseen_achievements_count(conn, tg_user_id: int) -> int:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    row = await fetchone(
+        conn,
+        """SELECT COUNT(*) AS cnt
+           FROM user_achievements
+           WHERE user_id=? AND COALESCE(seen_at_utc, '')=''""",
+        (user_id,),
+    )
+    return int((row["cnt"] if row else 0) or 0)
+
+
+async def mark_achievements_seen(conn, tg_user_id: int) -> int:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    now = utc_now_iso()
+    await conn.execute(
+        """UPDATE user_achievements
+           SET seen_at_utc=?
+           WHERE user_id=? AND COALESCE(seen_at_utc, '')=''""",
+        (now, user_id),
+    )
+    await conn.commit()
+    return await get_unseen_achievements_count(conn, int(tg_user_id))
+
+
+async def get_recent_achievements(conn, user_id: int, limit: int = 20) -> list[dict]:
+    safe_limit = max(1, min(100, int(limit or 20)))
+    rows = await fetchall(
+        conn,
+        """SELECT ua.achievement_key, ua.unlocked_at_utc,
+                  a.title_ru, a.reward_json
+           FROM user_achievements ua
+           JOIN achievements a ON a.key=ua.achievement_key
+           WHERE ua.user_id=?
+           ORDER BY ua.unlocked_at_utc DESC, ua.achievement_key ASC
+           LIMIT ?""",
+        (int(user_id), safe_limit),
+    )
+    result: list[dict] = []
+    for row in rows:
+        reward = {}
+        try:
+            parsed = json.loads(row["reward_json"] or "{}")
+            reward = parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            reward = {}
+        result.append(
+            {
+                "key": str(row["achievement_key"] or ""),
+                "title_ru": str(row["title_ru"] or ""),
+                "unlocked_at_utc": str(row["unlocked_at_utc"] or ""),
+                "reward": reward,
+            }
+        )
+    return result
 
 
 async def get_user_cosmetics(conn, tg_user_id:int) -> dict:

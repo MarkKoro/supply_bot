@@ -8,6 +8,10 @@ THEMES = [
   {"id":"bloodline","title_ru":"Бладлайн","emoji":"🩸"},
   {"id":"glitch","title_ru":"Глитч","emoji":"🧊"},
   {"id":"ivory","title_ru":"Айвори","emoji":"🤍"},
+  {"id":"graphite","title_ru":"Графит","emoji":"🪨"},
+  {"id":"sakura","title_ru":"Сакура","emoji":"🌸"},
+  {"id":"deepsea","title_ru":"Глубина","emoji":"🌊"},
+  {"id":"ember","title_ru":"Угольки","emoji":"🔥"},
 ]
 
 TAB_SKINS = [
@@ -19,6 +23,9 @@ TAB_SKINS = [
   {"id":"plasma","title_ru":"Плазма","emoji":"✨"},
   {"id":"minimal","title_ru":"Минимал","emoji":"▫️"},
   {"id":"glitch","title_ru":"Глитч","emoji":"🧬"},
+  {"id":"glass","title_ru":"Стекло","emoji":"🫧"},
+  {"id":"mono","title_ru":"Моно","emoji":"⬛"},
+  {"id":"pulse2","title_ru":"Пульс II","emoji":"💓"},
 ]
 
 BADGES = [
@@ -35,6 +42,11 @@ BADGES = [
   {"id":"sniper","title_ru":"Снайпер","emoji":"🎯"},
   {"id":"spark","title_ru":"Искра","emoji":"✨"},
   {"id":"clock","title_ru":"Будильник","emoji":"⏰"},
+  {"id":"glitcher","title_ru":"Глитч","emoji":"🧊"},
+  {"id":"pilot","title_ru":"Пилот протокола","emoji":"🧭"},
+  {"id":"caretaker","title_ru":"Бережный","emoji":"🤍"},
+  {"id":"scribe","title_ru":"Скриптор","emoji":"✒️"},
+  {"id":"vector","title_ru":"Вектор","emoji":"➤"},
 ]
 
 ACHIEVEMENTS = [
@@ -93,5 +105,15 @@ ACHIEVEMENTS = [
   {"key":"a_gut_calm","title_ru":"Спокойный ЖКТ","desc_ru":"Нагрузка на ЖКТ = 0 при наличии 3+ поддержек ЖКТ.","category":"Бережность","rarity":"epic","points":90,"rule":{"all":[{"metric":"gut_burden_count","op":"==","value":0},{"metric":"gut_benefit_count","op":">=","value":3}]},"reward":{"unlock":{"themes":["aurora"]}}},
   {"key":"a_liver_guard","title_ru":"Печень-сторож","desc_ru":"Нагрузка на печень = 0 при стеке 10+.","category":"Бережность","rarity":"epic","points":100,"rule":{"all":[{"metric":"stack_size","op":">=","value":10},{"metric":"liver_burden_count","op":"==","value":0}]},"reward":{"unlock":{"tab_skins":["gold"]}}},
   {"key":"a_pancreas_3","title_ru":"Сахар под контролем","desc_ru":"В стеке 3+ добавки по поджелудочной.","category":"Системы","rarity":"rare","points":40,"rule":{"metric":"pancreas_benefit_count","op":">=","value":3},"reward":{"unlock":{"themes":["emerald"]}}},
+  {"key":"a_freeze_1","title_ru":"Крио-режим","desc_ru":"Заморозил хотя бы одну добавку, сохранив контроль над протоколом.","category":"Контроль","rarity":"common","points":20,"rule":{"metric":"frozen_count","op":">=","value":1},"reward":{"unlock":{"badges":["glitcher"],"themes":["graphite"]}}},
+  {"key":"a_freeze_5_stack","title_ru":"Склад протоколов","desc_ru":"Заморозил 5+ добавок, при этом активный стек не развалился (5+).","category":"Контроль","rarity":"rare","points":45,"rule":{"all":[{"metric":"frozen_count","op":">=","value":5},{"metric":"stack_size","op":">=","value":5}]},"reward":{"unlock":{"tab_skins":["mono"],"badges":["pilot"]}}},
+  {"key":"a_clean_morning","title_ru":"Чистое утро","desc_ru":"Самый ранний слот не позже 07:00 и за 7 дней ≥70% выполнения.","category":"Ритм","rarity":"rare","points":50,"rule":{"all":[{"metric":"earliest_slot_hhmm","op":"<=","value":700},{"metric":"last7_adherence","op":">=","value":70}]},"reward":{"unlock":{"themes":["sakura"],"badges":["clock"]}}},
+  {"key":"a_no_noise","title_ru":"Без шума","desc_ru":"Напоминания выключены, но дисциплина за 7 дней ≥80%.","category":"Контроль","rarity":"epic","points":80,"rule":{"all":[{"metric":"reminders_enabled_count","op":"==","value":0},{"metric":"last7_adherence","op":">=","value":80}]},"reward":{"unlock":{"tab_skins":["glass"],"badges":["caretaker"]}}},
+  {"key":"a_human_setup","title_ru":"Настроил как человек","desc_ru":"Есть кастом-слот и минимум 3 разных времени приёма.","category":"Расписание","rarity":"rare","points":55,"rule":{"all":[{"metric":"custom_slot_count","op":">=","value":1},{"metric":"distinct_schedule_times","op":">=","value":3}]},"reward":{"unlock":{"tab_skins":["pulse2"],"badges":["vector"]}}},
+  {"key":"a_complex_control_7","title_ru":"Комплекс под контролем","desc_ru":"Хотя бы один комплекс отмечался все последние 7 дней.","category":"Комплексы","rarity":"epic","points":90,"rule":{"all":[{"metric":"complex_count","op":">=","value":1},{"metric":"complex_taken_days_7","op":">=","value":7}]},"reward":{"unlock":{"themes":["deepsea"],"badges":["pilot"]}}},
+  {"key":"a_gentle_burden_bronze","title_ru":"Бережный протокол · бронза","desc_ru":"Суммарная нагрузка core (печень+почки+ЖКТ) ≤ 40 при стеке 5+.","category":"Бережность","rarity":"rare","points":50,"rule":{"all":[{"metric":"stack_size","op":">=","value":5},{"metric":"burden_strength_total_core","op":"<=","value":40}]},"reward":{"unlock":{"badges":["caretaker"]}}},
+  {"key":"a_gentle_burden_silver","title_ru":"Бережный протокол · серебро","desc_ru":"Суммарная нагрузка core ≤ 20 при стеке 8+.","category":"Бережность","rarity":"epic","points":90,"rule":{"all":[{"metric":"stack_size","op":">=","value":8},{"metric":"burden_strength_total_core","op":"<=","value":20}]},"reward":{"unlock":{"themes":["ivory"],"tab_skins":["glass"]}}},
+  {"key":"a_gentle_burden_gold","title_ru":"Бережный протокол · золото","desc_ru":"Суммарная нагрузка core ≤ 5 при стеке 10+.","category":"Бережность","rarity":"legendary","points":150,"rule":{"all":[{"metric":"stack_size","op":">=","value":10},{"metric":"burden_strength_total_core","op":"<=","value":5}]},"reward":{"unlock":{"themes":["ember"],"badges":["caretaker"]}}},
+  {"key":"a_methodologist_practice","title_ru":"Методолог-практик","desc_ru":"В стеке 5+ добавок с уровнем доказательности A/B и 80%+ за 30 дней.","category":"Методология","rarity":"epic","points":95,"rule":{"all":[{"metric":"evidence_ab_count","op":">=","value":5},{"metric":"last30_adherence","op":">=","value":80}]},"reward":{"unlock":{"themes":["deepsea"],"badges":["scribe"],"tab_skins":["mono"]}}},
   {"key":"a_allrounder_10","title_ru":"Десятисистемник","desc_ru":"Твой стек поддерживает 10+ систем. Это уже дизайн-проект организма.","category":"Баланс","rarity":"legendary","points":200,"rule":{"metric":"systems_supported","op":">=","value":10},"reward":{"unlock":{"themes":["glitch"],"tab_skins":["plasma"],"badges":["alchemist"]}}}
 ]

@@ -630,7 +630,10 @@
       diagLoading: false,
       purchaseImportText: "",
       purchaseImportLoading: false,
-      purchaseImportReport: null
+      purchaseImportReport: null,
+      duplicates: [],
+      duplicatesLoading: false,
+      duplicateResolveBusy: ""
     }
   };
 
@@ -1135,6 +1138,7 @@
         }
         if (tab === "admin" && !state.admin.items.length) {
           await loadAdminSupplements(true);
+          await loadAdminDuplicates();
         }
         if (tab === "survey") {
           await loadSurveyForTarget();
@@ -1161,6 +1165,7 @@
         await loadBodyMap(true);
       } else if (state.activeTab === "admin") {
         await loadAdminSupplements(true);
+        await loadAdminDuplicates();
       } else if (state.activeTab === "settings") {
         await loadStatsOnly();
         try { await loadAchievements(true); } catch {}
@@ -1754,6 +1759,7 @@
     const perms = state.me?.perms || {};
     const selected = selectedAdminIds();
     return `
+      ${renderAdminDuplicateAlert()}
       ${perms.content_edit ? `<div class="card fade">
         <div class="row"><strong>Редактор добавок</strong><span class="muted">${a.total} найдено</span></div>
         <div style="display:flex; gap:8px; margin-top:8px;">
@@ -1816,6 +1822,46 @@
     `;
   }
 
+  function duplicateDisplayName(item) {
+    const ru = String(item?.name_ru || '').trim();
+    const en = String(item?.name_en || '').trim();
+    const base = String(item?.name || '').trim();
+    if (ru && en && ru !== en) return `${ru} (${en})`;
+    return ru || en || base || String(item?.slug || 'Без названия');
+  }
+
+  function renderAdminDuplicateAlert() {
+    const groups = Array.isArray(state.admin.duplicates) ? state.admin.duplicates : [];
+    if (!groups.length) return '';
+    const busy = String(state.admin.duplicateResolveBusy || '');
+    return `<div class="card fade" style="border:1px solid rgba(255,145,107,.45)">
+      <div class="row"><strong>⚠️ Найдены дубликаты по имени</strong><span class="muted">${groups.length}</span></div>
+      <div class="muted" style="margin-top:6px">Выберите, какую запись оставить. Вторая будет удалена.</div>
+      <div style="margin-top:8px; display:grid; gap:8px;">
+        ${groups.map((g)=>{
+          const candidates = Array.isArray(g.candidates) ? g.candidates : [];
+          if (candidates.length < 2) return '';
+          const left = candidates[0];
+          const right = candidates[1];
+          const pairKey = `${Math.min(left.id, right.id)}:${Math.max(left.id, right.id)}`;
+          const disable = busy === pairKey;
+          return `<div class="card" style="padding:10px; background:rgba(255,255,255,.02)">
+            <div><strong>${esc(g.name || 'duplicate')}</strong></div>
+            <div class="muted" style="margin-top:4px">${candidates.length} совпадения</div>
+            <div style="display:grid; gap:6px; margin-top:8px">
+              <div>1) ${esc(duplicateDisplayName(left))} <span class="muted">#${left.id} · ${esc(left.slug || '')}</span></div>
+              <div>2) ${esc(duplicateDisplayName(right))} <span class="muted">#${right.id} · ${esc(right.slug || '')}</span></div>
+            </div>
+            <div class="row" style="margin-top:8px; gap:6px; flex-wrap:wrap">
+              <button class="btn" data-dup-keep="${left.id}" data-dup-remove="${right.id}" ${disable ? 'disabled' : ''}>Оставить #${left.id}</button>
+              <button class="btn secondary" data-dup-keep="${right.id}" data-dup-remove="${left.id}" ${disable ? 'disabled' : ''}>Оставить #${right.id}</button>
+            </div>
+          </div>`;
+        }).join('')}
+      </div>
+    </div>`;
+  }
+
 function adminField(label, field, value, kind='input') {
     const err = state.admin.errors[field] || '';
     const input = kind === 'textarea'
@@ -1866,6 +1912,40 @@ function adminField(label, field, value, kind='input') {
       else showToast('Ошибка загрузки admin-списка');
     } finally {
       state.admin.loading = false;
+      renderActiveTab();
+    }
+  }
+
+  async function loadAdminDuplicates() {
+    state.admin.duplicatesLoading = true;
+    try {
+      const res = await api('./api/admin/duplicates');
+      state.admin.duplicates = Array.isArray(res.groups) ? res.groups : [];
+    } catch {
+      state.admin.duplicates = [];
+    } finally {
+      state.admin.duplicatesLoading = false;
+      renderActiveTab();
+    }
+  }
+
+  async function resolveAdminDuplicate(keepId, removeId) {
+    const k = Number(keepId || 0);
+    const r = Number(removeId || 0);
+    if (!k || !r || k === r) return;
+    if (!confirm(`Оставить запись #${k} и удалить #${r}?`)) return;
+    state.admin.duplicateResolveBusy = `${Math.min(k, r)}:${Math.max(k, r)}`;
+    renderActiveTab();
+    try {
+      await api('./api/admin/duplicates/resolve', { method:'POST', body:{ keep_id: k, remove_id: r } });
+      showToast('Дубликат обработан');
+      state.admin.page = 0;
+      await loadAdminSupplements(true);
+      await loadAdminDuplicates();
+    } catch (e) {
+      showToast(`Не удалось обработать дубликат: ${e.message}`);
+    } finally {
+      state.admin.duplicateResolveBusy = '';
       renderActiveTab();
     }
   }
@@ -1984,6 +2064,7 @@ function adminField(label, field, value, kind='input') {
     document.getElementById('adminEvidence')?.addEventListener('change', async (e)=>{ state.admin.filters.evidence = e.target.value; state.admin.page=0; await loadAdminSupplements(true); });
     document.getElementById('adminMore')?.addEventListener('click', async ()=>{ state.admin.page += 1; await loadAdminSupplements(true); });
     appEl.querySelectorAll('[data-admin-open]').forEach((el)=>el.addEventListener('click', ()=>loadAdminSupplement(el.dataset.adminOpen)));
+    appEl.querySelectorAll('[data-dup-keep]').forEach((el)=>el.addEventListener('click', ()=>resolveAdminDuplicate(el.dataset.dupKeep, el.dataset.dupRemove)));
     appEl.querySelectorAll('[data-admin-select]').forEach((el)=>el.addEventListener('change', (e)=>{ state.admin.selectedIds[Number(e.target.dataset.adminSelect)] = !!e.target.checked; renderActiveTab(); }));
     appEl.querySelectorAll('[data-admin-close]').forEach((el)=>el.addEventListener('click', ()=>{ state.admin.detail = null; renderActiveTab(); }));
     appEl.querySelectorAll('[data-admin-field]').forEach((el)=>el.addEventListener('input', (e)=>{

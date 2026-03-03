@@ -555,6 +555,11 @@ class AdminBulkBody(BaseModel):
     params: dict = {}
 
 
+class AdminResolveDuplicateBody(BaseModel):
+    keep_id: int
+    remove_id: int
+
+
 @app.post("/api/admin/supplement/{supplement_id}/toggle_active")
 async def api_admin_supplement_toggle_active(
     supplement_id: int,
@@ -616,6 +621,41 @@ async def api_admin_bulk_apply(
     finally:
         await conn.close()
     return JSONResponse({"ok": True, **summary})
+
+
+@app.get("/api/admin/duplicates")
+async def api_admin_duplicates(
+    x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
+):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    ok_perm, forbidden, _, _ = await _require_perm(tg_user_id, "content_edit")
+    if not ok_perm:
+        return forbidden
+    conn = await db.connect(s.DB_PATH)
+    try:
+        groups = await db.admin_list_name_duplicates(conn)
+    finally:
+        await conn.close()
+    return JSONResponse({"ok": True, "groups": groups})
+
+
+@app.post("/api/admin/duplicates/resolve")
+async def api_admin_duplicates_resolve(
+    body: AdminResolveDuplicateBody,
+    x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
+):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    ok_perm, forbidden, _, _ = await _require_perm(tg_user_id, "content_edit")
+    if not ok_perm:
+        return forbidden
+    conn = await db.connect(s.DB_PATH)
+    try:
+        await db.admin_resolve_name_duplicate(conn, int(tg_user_id), int(body.keep_id), int(body.remove_id))
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "code": str(exc)}, status_code=400)
+    finally:
+        await conn.close()
+    return JSONResponse({"ok": True})
 
 
 @app.post("/api/billing/create_invoice_link")

@@ -2862,6 +2862,119 @@ async def admin_toggle_supplement_active(
         await conn.commit()
 
 
+async def admin_list_name_duplicates(conn: aiosqlite.Connection, limit_groups: int = 50) -> list[dict]:
+    rows = await fetchall(
+        conn,
+        """SELECT lower(trim(COALESCE(NULLIF(name_ru,''), NULLIF(name_en,''), name))) AS norm_name,
+                  COUNT(*) AS cnt
+           FROM supplements
+           WHERE trim(COALESCE(NULLIF(name_ru,''), NULLIF(name_en,''), name)) <> ''
+           GROUP BY norm_name
+           HAVING cnt > 1
+           ORDER BY cnt DESC, norm_name
+           LIMIT ?""",
+        (max(1, int(limit_groups)),),
+    )
+    groups: list[dict] = []
+    for row in rows:
+        norm_name = str(row["norm_name"] or "").strip()
+        if not norm_name:
+            continue
+        candidates = await fetchall(
+            conn,
+            """SELECT id, slug, name_ru, name_en, name, is_active
+               FROM supplements
+               WHERE lower(trim(COALESCE(NULLIF(name_ru,''), NULLIF(name_en,''), name)))=?
+               ORDER BY is_active DESC,
+                        COALESCE(NULLIF(name_ru,''), NULLIF(name_en,''), name) COLLATE NOCASE,
+                        id""",
+            (norm_name,),
+        )
+        prepared = []
+        for item in candidates:
+            prepared.append(
+                {
+                    "id": int(item["id"]),
+                    "slug": str(item["slug"] or ""),
+                    "name_ru": str(item["name_ru"] or ""),
+                    "name_en": str(item["name_en"] or ""),
+                    "name": str(item["name"] or ""),
+                    "is_active": int(item["is_active"] or 0),
+                }
+            )
+        if len(prepared) > 1:
+            groups.append({"name": norm_name, "count": len(prepared), "candidates": prepared})
+    return groups
+
+
+async def admin_resolve_name_duplicate(
+    conn: aiosqlite.Connection,
+    admin_tg_id: int,
+    keep_id: int,
+    remove_id: int,
+) -> None:
+    keep_id = int(keep_id)
+    remove_id = int(remove_id)
+    if keep_id <= 0 or remove_id <= 0 or keep_id == remove_id:
+        raise ValueError("invalid_duplicate_choice")
+
+    keep_row = await fetchone(conn, "SELECT * FROM supplements WHERE id=?", (keep_id,))
+    remove_row = await fetchone(conn, "SELECT * FROM supplements WHERE id=?", (remove_id,))
+    if not keep_row or not remove_row:
+        raise ValueError("supplement_not_found")
+
+    keep_name = normalize(str(keep_row["name_ru"] or keep_row["name_en"] or keep_row["name"] or ""))
+    remove_name = normalize(str(remove_row["name_ru"] or remove_row["name_en"] or remove_row["name"] or ""))
+    if not keep_name or keep_name != remove_name:
+        raise ValueError("duplicate_name_mismatch")
+
+    alias_rows = await fetchall(conn, "SELECT alias FROM supplement_aliases WHERE supplement_id=?", (remove_id,))
+    alias_values = [str(row["alias"] or "").strip() for row in alias_rows if str(row["alias"] or "").strip()]
+    if alias_values:
+        await upsert_aliases(conn, keep_id, alias_values)
+
+    interaction_rows = await fetchall(
+        conn,
+        """SELECT a_id, b_id, relation, severity, evidence_grade, note, source_url
+           FROM interactions
+           WHERE a_id=? OR b_id=?""",
+        (remove_id, remove_id),
+    )
+    for item in interaction_rows:
+        a_id = int(item["a_id"])
+        b_id = int(item["b_id"])
+        other_id = b_id if a_id == remove_id else a_id
+        if other_id == keep_id:
+            continue
+        await upsert_interaction(
+            conn,
+            keep_id,
+            other_id,
+            {
+                "relation": str(item["relation"] or "neutral"),
+                "severity": int(item["severity"] or 0),
+                "evidence_grade": str(item["evidence_grade"] or ""),
+                "note": str(item["note"] or ""),
+                "source_url": str(item["source_url"] or ""),
+            },
+        )
+
+    await conn.execute("DELETE FROM interactions WHERE a_id=? OR b_id=?", (remove_id, remove_id))
+    await conn.execute("DELETE FROM supplement_aliases WHERE supplement_id=?", (remove_id,))
+    await conn.execute("DELETE FROM supplements WHERE id=?", (remove_id,))
+
+    await _admin_insert_audit(
+        conn,
+        int(admin_tg_id),
+        keep_id,
+        "duplicate_merge",
+        str(remove_id),
+        str(keep_id),
+        "resolve_duplicate",
+    )
+    await conn.commit()
+
+
 async def admin_import_purchase_urls(
     conn: aiosqlite.Connection,
     admin_tg_id: int,

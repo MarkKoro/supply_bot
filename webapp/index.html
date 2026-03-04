@@ -137,7 +137,8 @@
       margin-bottom: 12px;
     }
 
-    .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
+    .row > * { min-width: 0; }
     .muted { color: var(--muted); }
 
     .tabs {
@@ -308,6 +309,7 @@
       align-items: center;
       gap: 10px;
       width: 100%;
+      min-width: 0;
       border: 1px solid rgba(255,255,255,0.14);
       text-align: left;
       padding: 10px;
@@ -315,6 +317,14 @@
       margin-top: 8px;
       background: rgba(255,255,255,0.05);
       color: inherit;
+      overflow: hidden;
+    }
+
+    .item-row > span,
+    .item-row > strong {
+      min-width: 0;
+      overflow-wrap: anywhere;
+      word-break: break-word;
     }
 
     .catalog-toolbar,
@@ -334,7 +344,17 @@
     .catalog-list { display:grid; gap:10px; }
     .catalog-status { text-align:center; font-size:12px; color: var(--muted); padding: 6px 0; }
     .catalog-skeleton { height: 72px; border-radius: 14px; border: 1px solid rgba(255,255,255,0.12); background: linear-gradient(110deg, rgba(255,255,255,0.05) 8%, rgba(255,255,255,0.12) 18%, rgba(255,255,255,0.05) 33%); background-size: 180% 100%; animation: shimmer 1.4s linear infinite; }
-    .supp-name { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .supp-name {
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: normal;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+      line-height: 1.35;
+    }
     .catalog-quick-grid { display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap:8px; margin-top: 8px; }
     @media (min-width: 860px) {
       .catalog-quick-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
@@ -422,13 +442,29 @@
     .bulk-menu { position:absolute; right:0; bottom:42px; display:grid; gap:6px; min-width:180px; padding:8px; border-radius:12px; background: rgba(8,13,34,0.96); border:1px solid rgba(255,255,255,0.2); }
 
     .status-pill {
-      min-width: 72px;
+      width: clamp(86px, 15%, 112px);
+      min-width: clamp(86px, 15%, 112px);
+      max-width: clamp(86px, 15%, 112px);
+      flex: 0 0 clamp(86px, 15%, 112px);
       text-align: center;
       padding: 7px 10px;
       border-radius: 999px;
       font-size: 12px;
       font-weight: 700;
       border: 1px solid transparent;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .today-item-row { align-items: flex-start; }
+    .today-item-name {
+      flex: 1;
+      min-width: 0;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+      line-height: 1.35;
+      padding-top: 2px;
     }
 
     .status-taken { background: rgba(73,216,141,0.24); border-color: rgba(158,255,205,0.72); box-shadow: 0 0 12px rgba(73,216,141,0.42); }
@@ -563,14 +599,34 @@
     .ios-group .ios-content { padding: 0 14px 12px; display:grid; gap:8px; }
     .ios-arrow { color: var(--muted); font-size: 13px; }
 
-    .catalog-modal { position:fixed; inset:auto 10px 90px; z-index:35; max-height:72vh; overflow:auto; }
-    .catalog-modal .modal-head { position: sticky; top: 0; z-index: 3; padding-bottom: 8px; margin-bottom: 8px; background: linear-gradient(180deg, rgba(14,18,36,0.98), rgba(14,18,36,0.88)); border-bottom: 1px solid rgba(255,255,255,0.12); }
-    .catalog-modal .modal-title { font-size: 17px; line-height: 1.25; }
-    .catalog-modal .modal-content { line-height: 1.62; letter-spacing: .01em; }
-    .catalog-modal .section-tabs { display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; }
-    .catalog-modal .section-tab { border:1px solid rgba(125,183,255,.4); background: rgba(125,183,255,.12); }
-    .catalog-modal .action-grid { margin-top:12px; display:grid; grid-template-columns: 1fr; gap:8px; }
-    .catalog-modal .action-grid .btn { width:100%; max-width:100%; }
+    .catalog-modal-overlay { position: fixed; inset: 0; z-index: 34; background: rgba(2,5,16,0.62); }
+    .catalog-modal-shell { position: fixed; left: 10px; right: 10px; bottom: calc(88px + env(safe-area-inset-bottom)); z-index: 35; display: grid; gap: 8px; max-height: calc(100vh - 130px - env(safe-area-inset-bottom)); }
+    .catalog-modal-head,
+    .catalog-modal-body { margin-bottom: 0; }
+    .catalog-modal-head {
+      padding: 12px;
+      background: linear-gradient(160deg, rgba(26,35,71,0.98), rgba(12,18,38,0.94));
+      border-color: rgba(189,216,255,0.36);
+      box-shadow: 0 20px 34px rgba(1,3,12,0.58), 0 1px 0 rgba(255,255,255,0.28) inset;
+    }
+    .catalog-modal-head .modal-title { font-size: 17px; line-height: 1.3; }
+    .catalog-modal-body {
+      overflow: auto;
+      max-height: min(60vh, calc(100vh - 220px - env(safe-area-inset-bottom)));
+      padding: 14px;
+      background: linear-gradient(180deg, rgba(14,18,36,0.95), rgba(10,14,30,0.95));
+    }
+    .catalog-modal-body .modal-content { line-height: 1.65; letter-spacing: .01em; }
+    .modal-summary p,
+    .section-content p { margin: 0 0 8px; }
+    .modal-summary p:last-child,
+    .section-content p:last-child { margin-bottom: 0; }
+    .catalog-modal-body .section-tabs { display:flex; gap:8px; flex-wrap:wrap; margin-top:12px; }
+    .catalog-modal-body .section-tab { border:1px solid rgba(125,183,255,.45); background: rgba(125,183,255,.12); }
+    .catalog-modal-body .section-tab.active { background: rgba(125,183,255,.3); border-color: rgba(170,211,255,.78); }
+    .catalog-modal-body .section-content { margin-top: 10px; padding: 10px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.14); background: rgba(255,255,255,0.04); }
+    .catalog-modal-body .action-grid { margin-top:14px; display:grid; grid-template-columns: 1fr; gap:8px; }
+    .catalog-modal-body .action-grid .btn { width:100%; max-width:100%; }
     .survey-actions { display:grid; grid-template-columns: 1fr 1fr; gap:8px; margin-top:10px; }
     .survey-actions .btn { width:100%; }
     @media (max-width: 560px) { .survey-actions { grid-template-columns: 1fr; } }
@@ -608,7 +664,8 @@
       hasMore: true,
       error: false,
       filters: { evidence: [], targets: [], burdens: [], sort: "alpha" },
-      detail: null, detailLoading: false, filtersOpen: false
+      detail: null, detailLoading: false, filtersOpen: false,
+      detailSection: null
     },
     searchDebounce: null,
     bodyMap: null,
@@ -1469,7 +1526,7 @@
       ...filters.burdens.map((v) => ({ key: 'burdens', value: v, label: `Нагрузка: ${BURDEN_LABELS_RU[v] || v}` }))
     ];
     const itemsHtml = c.items.map((item) => `
-      <button class="card item-row" data-catalog-open="${item.slug}" style="display:block; width:100%; margin-top:0;">
+      <button type="button" class="card item-row" data-catalog-open="${item.slug}" style="display:block; width:100%; margin-top:0;">
         <div class="row catalog-item-head"><strong class="supp-name">${esc(item.name_ru || item.name_en)}</strong><span>${item.has_purchase ? '🛒' : ''}</span></div>
         <div class="muted" style="margin-top:6px">${esc(item.evidence_grade || '—')} • ${esc(item.confidence || '—')} ${item.in_stack ? '• ✅ в стеке' : ''}</div>
       </button>`).join('');
@@ -1524,33 +1581,66 @@
     </div>`;
   }
 
+  function detailParagraphs(text) {
+    return String(text || '')
+      .split(/\n{2,}/)
+      .map((part) => part.trim())
+      .filter(Boolean)
+      .map((part) => `<p>${esc(part).replace(/\n/g, '<br/>')}</p>`)
+      .join('');
+  }
+
   function renderDetailModal(item) {
     const isLoading = !!item?._loading;
     const displayName = esc(item.name_ru || item.name_en || item.slug || 'Добавка');
-    const summary = esc(item.summary_verified || item.summary_theoretical || '');
-    const hasMeta = !!(String(item.dose_ru || '').trim() || String(item.timing_ru || '').trim() || String(item.safety_ru || '').trim() || String(item.molecular_mechanisms || '').trim());
-    return `<div class="card catalog-modal">
-      <div class="modal-head">
-        <div class="row" style="align-items:flex-start; gap:8px; flex-wrap:nowrap"><strong class="modal-title">${displayName}</strong><button class="btn secondary" data-detail-close>Закрыть</button></div>
-        <div class="muted" style="margin-top:6px">${isLoading ? 'Загружаем карточку…' : `${esc(item.evidence_grade || '—')} • ${esc(item.confidence || '—')}`}</div>
-      </div>
-      ${isLoading ? `<div class="catalog-skeleton" style="height:100px"></div><div class="catalog-skeleton" style="height:84px; margin-top:8px"></div><div class="catalog-skeleton" style="height:44px; margin-top:8px"></div>` : `
-      <div class="modal-content">
-        ${summary ? `<p style="margin:0">${summary}</p>` : '<p class="muted" style="margin:0">Описание скоро появится.</p>'}
-        <div class="section-tabs">
-          <span class="chip section-tab">Механизмы</span>
-          <span class="chip section-tab">Дозировки</span>
-          <span class="chip section-tab">Тайминг</span>
-          <span class="chip section-tab">Безопасность</span>
+    const summary = detailParagraphs(item.summary_verified || item.summary_theoretical || '');
+    const sections = [
+      { key: 'mechanisms', title: 'Механизмы', text: item.molecular_mechanisms || '' },
+      { key: 'dose', title: 'Дозировка', text: item.dose_ru || '' },
+      { key: 'timing', title: 'Тайминг', text: item.timing_ru || '' },
+      { key: 'safety', title: 'Безопасность', text: item.safety_ru || '' },
+    ];
+    const available = sections.filter((s) => String(s.text || '').trim());
+    const activeSection = state.catalog.detailSection;
+    const sectionButtons = available.map((section) => `
+      <button type="button" class="chip section-tab ${activeSection === section.key ? 'active' : ''}" data-detail-section="${section.key}">${section.title}</button>
+    `).join('');
+    const openedSection = available.find((s) => s.key === activeSection);
+    return `<div class="catalog-modal-overlay" data-detail-close></div>
+      <div class="catalog-modal-shell">
+        <div class="card catalog-modal-head">
+          <div class="row" style="align-items:flex-start; gap:8px; flex-wrap:nowrap">
+            <strong class="modal-title">${displayName}</strong>
+            <button type="button" class="btn secondary" data-detail-close>Закрыть</button>
+          </div>
+          <div class="muted" style="margin-top:6px">${isLoading ? 'Загружаем карточку…' : `${esc(item.evidence_grade || '—')} • ${esc(item.confidence || '—')}`}</div>
         </div>
-        ${hasMeta ? `<details open style="margin-top:8px"><summary>Полезные детали</summary><div class="muted" style="margin-top:6px; line-height:1.6">${esc(item.molecular_mechanisms || '')}${item.molecular_mechanisms ? '<br/>' : ''}${esc(item.dose_ru || '')}${item.dose_ru ? '<br/>' : ''}${esc(item.timing_ru || '')}${item.timing_ru ? '<br/>' : ''}${esc(item.safety_ru || '')}</div></details>` : ''}
-        <div class="action-grid">
-          <button class="btn" data-stack-toggle data-id="${item.id}" data-in="${item.in_stack ? '1':'0'}">${item.in_stack ? 'Убрать из стека' : 'Добавить в мой стек'}</button>
-          <button class="btn secondary" data-add-complex data-id="${item.id}">Добавить в комплекс</button>
-          ${item.purchase_url ? '<button class="btn secondary" data-open-shop>Перейти в магазин</button>' : ''}
+        <div class="card catalog-modal-body">
+          ${isLoading ? `<div class="catalog-skeleton" style="height:100px"></div><div class="catalog-skeleton" style="height:84px; margin-top:8px"></div><div class="catalog-skeleton" style="height:44px; margin-top:8px"></div>` : `
+          <div class="modal-content">
+            <div class="modal-summary">${summary || '<p class="muted">Описание скоро появится.</p>'}</div>
+            ${available.length ? `<div class="section-tabs">${sectionButtons}</div>` : ''}
+            ${openedSection ? `<div class="section-content">${detailParagraphs(openedSection.text)}</div>` : ''}
+            <div class="action-grid">
+              <button type="button" class="btn" data-stack-toggle data-id="${item.id}" data-in="${item.in_stack ? '1':'0'}">${item.in_stack ? 'Убрать из стека' : 'Добавить в мой стек'}</button>
+              <button type="button" class="btn secondary" data-add-complex data-id="${item.id}">Добавить в комплекс</button>
+              ${item.purchase_url ? '<button type="button" class="btn secondary" data-open-shop>Перейти в магазин</button>' : ''}
+            </div>
+          </div>`}
         </div>
-      </div>`}
-    </div>`;
+      </div>`;
+  }
+
+
+  function defaultDetailSection(item) {
+    const order = [
+      ['mechanisms', item?.molecular_mechanisms],
+      ['dose', item?.dose_ru],
+      ['timing', item?.timing_ru],
+      ['safety', item?.safety_ru],
+    ];
+    const found = order.find(([, text]) => String(text || '').trim());
+    return found ? found[0] : null;
   }
 
   async function openSupplementDetail(slug, { silent = false } = {}) {
@@ -1559,16 +1649,19 @@
     state.catalog.detailCache = state.catalog.detailCache || {};
     const cached = state.catalog.detailCache[key];
     state.catalog.detail = cached || { slug: key, name_ru: 'Карточка добавки', _loading: true };
+    state.catalog.detailSection = cached ? defaultDetailSection(cached) : null;
     renderActiveTab();
     if (cached && !silent) return;
     try {
       const d = await api(`./api/supplement/${key}`);
       state.catalog.detailCache[key] = d.item;
       state.catalog.detail = d.item;
+      state.catalog.detailSection = defaultDetailSection(d.item);
       renderActiveTab();
     } catch {
       if (!cached) {
         state.catalog.detail = null;
+        state.catalog.detailSection = null;
         renderActiveTab();
       }
       showToast('Не удалось открыть карточку');
@@ -1645,8 +1738,17 @@
   }
 
   function bindDetailModalEvents() {
-    appEl.querySelector('[data-detail-close]')?.addEventListener('click', ()=>{ state.catalog.detail=null; renderActiveTab(); });
+    appEl.querySelectorAll('[data-detail-close]').forEach((el)=>el.addEventListener('click', ()=>{
+      state.catalog.detail=null;
+      state.catalog.detailSection = null;
+      renderActiveTab();
+    }));
     appEl.querySelector('[data-open-shop]')?.addEventListener('click', ()=>{ const u=state.catalog.detail?.purchase_url; if(u) tg?.openLink?.(u); });
+    appEl.querySelectorAll('[data-detail-section]').forEach((el)=>el.addEventListener('click', ()=>{
+      const key = el.dataset.detailSection;
+      state.catalog.detailSection = state.catalog.detailSection === key ? null : key;
+      renderActiveTab();
+    }));
     appEl.querySelector('[data-add-complex]')?.addEventListener('click', async (e)=>{
       haptic();
       const id=Number(e.currentTarget.dataset.id);
@@ -2454,6 +2556,32 @@ function adminField(label, field, value, kind='input') {
     showToast(`Идеальный день. +${Math.max(0, Number(pointsGain || 0))} очков.`);
   }
 
+  function recalcTodaySnapshot() {
+    const slots = state.today?.slots || [];
+    let expected = 0;
+    let taken = 0;
+    for (const slot of slots) {
+      for (const item of (slot.items || [])) {
+        expected += 1;
+        if (item.status === 'taken') taken += 1;
+      }
+      for (const complex of (slot.complexes || [])) {
+        for (const item of (complex.items || [])) {
+          expected += 1;
+          if (item.status === 'taken') taken += 1;
+        }
+      }
+    }
+    state.today.expected = expected;
+    state.today.taken = taken;
+    state.today.adherence = expected > 0 ? Math.round((taken / expected) * 100) : 0;
+    if (state.stats?.today) {
+      state.stats.today.expected = expected;
+      state.stats.today.taken = taken;
+      state.stats.today.adherence = state.today.adherence;
+    }
+  }
+
   async function loadToday(force) {
     if (state.loadingToday && !force) return;
     state.loadingToday = true;
@@ -2531,8 +2659,8 @@ function adminField(label, field, value, kind='input') {
       <div class="card sheet" role="dialog">
         <div class="row"><strong>🧴 Мои БАДы</strong><button class="btn secondary" data-my-supp-close>✕</button></div>
         <div class="row" style="margin-top:10px; gap:8px">
-          <button class="chip ${ms.tab === "active" ? "green" : ""}" data-my-supp-tab="active">Активные (${ms.active.length})</button>
-          <button class="chip ${ms.tab === "frozen" ? "green" : ""}" data-my-supp-tab="frozen">Замороженные (${ms.frozen.length})</button>
+          <button type="button" class="chip ${ms.tab === "active" ? "green" : ""}" data-my-supp-tab="active">Активные (${ms.active.length})</button>
+          <button type="button" class="chip ${ms.tab === "frozen" ? "green" : ""}" data-my-supp-tab="frozen">Замороженные (${ms.frozen.length})</button>
         </div>
         <div class="muted" style="margin-top:8px">${title}</div>
         <div style="margin-top:8px">
@@ -2545,11 +2673,11 @@ function adminField(label, field, value, kind='input') {
             const busy = !!ms.busy[item.supplement_id];
             return `<div class="item-row" style="display:block">
               <div class="row" style="gap:8px; align-items:flex-start">
-                <button class="btn secondary" style="flex:1; text-align:left" data-my-supp-open="${item.supplement_id}">
+                <button type="button" class="btn secondary" style="flex:1; min-width:0; text-align:left; white-space:normal; overflow-wrap:anywhere; word-break:break-word" data-my-supp-open="${item.supplement_id}">
                   <strong>${esc(name)}</strong>
                   <div class="muted" style="margin-top:4px">${esc(item.dose_text || 'Доза не указана')}</div>
                 </button>
-                <button class="btn secondary" ${busy ? 'disabled' : ''} data-my-supp-freeze="${item.supplement_id}" data-enabled="${nextEnabled}">${busy ? '...' : actionLabel}</button>
+                <button type="button" class="btn secondary" ${busy ? 'disabled' : ''} data-my-supp-freeze="${item.supplement_id}" data-enabled="${nextEnabled}">${busy ? '...' : actionLabel}</button>
               </div>
             </div>`;
           }).join('')}
@@ -2635,7 +2763,7 @@ function adminField(label, field, value, kind='input') {
 
     return `
       <section class="card fade">
-        <div class="row"><strong>Сегодняшний план</strong><button class="btn secondary" data-open-my-supp>Мои БАДы</button></div>
+        <div class="row"><strong>Сегодняшний план</strong><button type="button" class="btn secondary" data-open-my-supp>Мои БАДы</button></div>
       </section>
       ${slots.map((slot) => {
       const items = slot.items || [];
@@ -2647,8 +2775,8 @@ function adminField(label, field, value, kind='input') {
           <div class="row">
             <div><strong>${slot.title || "Слот"} · ${slot.time_local || "--:--"}</strong></div>
             <div class="row" style="gap:8px">
-              <button class="btn secondary" data-slot-action="all-taken" data-slot-id="${slot.slot_id}" title="Отметить всё как принято">✅ Всё</button>
-              <button class="btn secondary" data-slot-action="reset" data-slot-id="${slot.slot_id}" title="Сбросить статусы">↺ Сброс</button>
+              <button type="button" class="btn secondary" data-slot-action="all-taken" data-slot-id="${slot.slot_id}" title="Отметить всё как принято">✅ Всё</button>
+              <button type="button" class="btn secondary" data-slot-action="reset" data-slot-id="${slot.slot_id}" title="Сбросить статусы">↺ Сброс</button>
               <span class="chip green">✅ ${totalTaken} / ${totalAll}</span>
             </div>
           </div>
@@ -2657,17 +2785,17 @@ function adminField(label, field, value, kind='input') {
               <div class="item-row" style="display:block" data-complex="${c.complex_id}">
                 <div class="row">
                   <span><strong>🧩 ${c.name}</strong> <span class="muted">✅ ${c.taken_count}/${c.total_count}</span></span>
-                  <button class="btn secondary" data-complex-toggle="${c.complex_id}" data-next="${c.status==='taken'?'none':'taken'}">${c.status==='taken'?'Снять':'Выпил комплекс'}</button>
+                  <button type="button" class="btn secondary" data-complex-toggle="${c.complex_id}" data-next="${c.status==='taken'?'none':'taken'}">${c.status==='taken'?'Снять':'Выпил комплекс'}</button>
                 </div>
                 <details><summary>Состав</summary>
-                  ${(c.items||[]).map((item)=>`<button class="item-row" data-item="${item.supplement_id}" data-next="${item.status === "taken" ? "none" : "taken"}"><span class="status-pill ${statusClass(item.status)}">${statusText(item.status)}</span><span>${item.name}</span></button>`).join('')}
+                  ${(c.items||[]).map((item)=>`<button type="button" class="item-row today-item-row" data-item="${item.supplement_id}" data-next="${item.status === "taken" ? "none" : "taken"}"><span class="status-pill ${statusClass(item.status)}">${statusText(item.status)}</span><span class="today-item-name">${item.name}</span></button>`).join('')}
                 </details>
               </div>
             `).join('')}
             ${items.map((item) => `
-              <button class="item-row" data-item="${item.supplement_id}" data-next="${item.status === "taken" ? "none" : "taken"}">
+              <button type="button" class="item-row today-item-row" data-item="${item.supplement_id}" data-next="${item.status === "taken" ? "none" : "taken"}">
                 <span class="status-pill ${statusClass(item.status)}">${statusText(item.status)}</span>
-                <span>${item.name}</span>
+                <span class="today-item-name">${item.name}</span>
               </button>
             `).join("")}
           </div>
@@ -3000,7 +3128,8 @@ function adminField(label, field, value, kind='input') {
 
   function bindTodayEvents() {
     appEl.querySelectorAll("[data-item]").forEach((row) => {
-      row.addEventListener("click", () => {
+      row.addEventListener("click", (e) => {
+        e.preventDefault();
         const supplementId = row.dataset.item;
         const next = row.dataset.next;
         toggleOne(supplementId, next);
@@ -3008,15 +3137,31 @@ function adminField(label, field, value, kind='input') {
     });
 
     appEl.querySelectorAll("[data-complex-toggle]").forEach((btn)=>{
-      btn.addEventListener("click", async ()=>{
+      btn.addEventListener("click", async (e)=>{
+        e.preventDefault();
+        e.stopPropagation();
         const complexId = Number(btn.dataset.complexToggle);
         const next = btn.dataset.next;
         const prevSlot = findSlotByComplexId(complexId);
         const wasClosedBefore = slotProgress(prevSlot).closed;
+        const complex = (prevSlot?.complexes || []).find((c) => Number(c.complex_id) === complexId);
+        const snapshot = complex ? {
+          status: complex.status,
+          takenCount: complex.taken_count,
+          items: (complex.items || []).map((it) => ({ id: it.supplement_id, status: it.status })),
+        } : null;
+        if (complex) {
+          complex.status = next;
+          complex.taken_count = next === 'taken' ? Number(complex.total_count || 0) : 0;
+          (complex.items || []).forEach((it) => { it.status = next; });
+          recalcTodaySnapshot();
+          renderActiveTab();
+        }
         haptic();
         try {
           const out = await api("./api/today/toggle_complex", { method:"POST", body:{ complex_id: complexId, status: next } });
-          await loadToday(true);
+          recalcTodaySnapshot();
+          renderActiveTab();
           if (next === "taken") {
             const afterSlot = findSlotByComplexId(complexId);
             const isClosedAfter = slotProgress(afterSlot).closed;
@@ -3026,12 +3171,25 @@ function adminField(label, field, value, kind='input') {
             else if (!wasClosedBefore && isClosedAfter) maybeCelebrateSlotClosed();
           }
           await showUnlockToastFromPayload(out);
-        } catch { showToast("Не удалось отметить комплекс"); }
+        } catch {
+          if (complex && snapshot) {
+            complex.status = snapshot.status;
+            complex.taken_count = snapshot.takenCount;
+            (complex.items || []).forEach((it) => {
+              const prevItem = snapshot.items.find((x) => String(x.id) === String(it.supplement_id));
+              if (prevItem) it.status = prevItem.status;
+            });
+            recalcTodaySnapshot();
+            renderActiveTab();
+          }
+          showToast("Не удалось отметить комплекс");
+        }
       });
     });
 
     appEl.querySelectorAll("[data-slot-action]").forEach((btn) => {
-      btn.addEventListener("click", async () => {
+      btn.addEventListener("click", async (e) => {
+        e.preventDefault();
         const slotId = btn.dataset.slotId;
         const action = btn.dataset.slotAction;
         const status = action === "all-taken" ? "taken" : "none";
@@ -3184,6 +3342,7 @@ function adminField(label, field, value, kind='input') {
     const wasClosedBefore = slotProgress(prevSlot).closed;
     const prev = item.status;
     item.status = nextStatus;
+    recalcTodaySnapshot();
     renderActiveTab();
 
     try {
@@ -3191,7 +3350,7 @@ function adminField(label, field, value, kind='input') {
         method: "POST",
         body: { supplement_id: Number(supplementId), status: nextStatus }
       });
-      await loadToday(true);
+      recalcTodaySnapshot();
       if (nextStatus === "taken") {
         const afterSlot = findSlotBySupplementId(supplementId);
         const isClosedAfter = slotProgress(afterSlot).closed;
@@ -3203,6 +3362,7 @@ function adminField(label, field, value, kind='input') {
       await showUnlockToastFromPayload(out);
     } catch (e) {
       item.status = prev;
+      recalcTodaySnapshot();
       renderActiveTab();
       showToast("Ошибка синхронизации, откат");
     }
@@ -3233,6 +3393,7 @@ function adminField(label, field, value, kind='input') {
       complex.taken_count = status === "taken" ? (complex.total_count || 0) : 0;
       (complex.items || []).forEach((item) => { item.status = status; });
     });
+    recalcTodaySnapshot();
     renderActiveTab();
 
     try {
@@ -3290,6 +3451,7 @@ function adminField(label, field, value, kind='input') {
           if (oldItem) item.status = oldItem.status;
         });
       });
+      recalcTodaySnapshot();
       renderActiveTab();
       await loadToday(true);
       showToast("Не удалось применить к слоту");

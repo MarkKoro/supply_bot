@@ -158,6 +158,10 @@ class CosmeticsSetBody(BaseModel):
     badge_id: str | None = None
 
 
+class UserTimezoneBody(BaseModel):
+    tz_name: str
+
+
 async def _auth_user_id(init_data: str) -> int:
     ok, parsed = verify_init_data(init_data, BOT_TOKEN)
     if not ok:
@@ -656,6 +660,37 @@ async def api_admin_duplicates_resolve(
     finally:
         await conn.close()
     return JSONResponse({"ok": True})
+
+@app.get("/api/settings")
+async def api_settings_get(
+    x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
+):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    conn = await db.connect(s.DB_PATH)
+    try:
+        tz_name = await db.get_user_tz(conn, tg_user_id)
+    finally:
+        await conn.close()
+    return JSONResponse({"ok": True, "tz_name": str(tz_name or "UTC")})
+
+
+@app.post("/api/settings/timezone")
+async def api_settings_timezone_set(
+    body: UserTimezoneBody,
+    x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
+):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    tz_name = str(body.tz_name or "").strip().upper()
+    if not tz_name.startswith("UTC"):
+        return JSONResponse({"ok": False, "code": "VALIDATION"}, status_code=400)
+    conn = await db.connect(s.DB_PATH)
+    try:
+        await db.set_user_tz(conn, tg_user_id, tz_name)
+        await conn.commit()
+    finally:
+        await conn.close()
+    return JSONResponse({"ok": True, "tz_name": tz_name})
+
 
 
 @app.post("/api/billing/create_invoice_link")

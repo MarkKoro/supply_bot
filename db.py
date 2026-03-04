@@ -4282,9 +4282,8 @@ async def add_user_supp(conn: aiosqlite.Connection, user_id: int, supplement_id:
 
 async def remove_user_supplement(conn: aiosqlite.Connection, tg_user_id: int, supplement_id: int) -> None:
     user_id = await get_or_create_user(conn, tg_user_id)
-    await conn.execute("DELETE FROM user_supplements WHERE user_id=? AND supplement_id=?", (user_id, supplement_id))
     await conn.execute(
-        "DELETE FROM user_supp_settings WHERE user_id=? AND supplement_id=?",
+        "UPDATE user_supplements SET is_active=0, enabled=0 WHERE user_id=? AND supplement_id=?",
         (user_id, supplement_id),
     )
     await conn.execute(
@@ -4309,11 +4308,7 @@ async def remove_user_supplements_bulk(
     user_id = await get_or_create_user(conn, tg_user_id)
     placeholders = ",".join("?" for _ in cleaned)
     await conn.execute(
-        f"DELETE FROM user_supplements WHERE user_id=? AND supplement_id IN ({placeholders})",
-        (user_id, *cleaned),
-    )
-    await conn.execute(
-        f"DELETE FROM user_supp_settings WHERE user_id=? AND supplement_id IN ({placeholders})",
+        f"UPDATE user_supplements SET is_active=0, enabled=0 WHERE user_id=? AND supplement_id IN ({placeholders})",
         (user_id, *cleaned),
     )
     await conn.execute(
@@ -4321,6 +4316,57 @@ async def remove_user_supplements_bulk(
         (tg_user_id, *cleaned),
     )
     await conn.commit()
+
+
+async def get_user_supplement_intake_history(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    supplement_id: int,
+    limit: int = 20,
+) -> dict:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    rows = await fetchall(
+        conn,
+        """SELECT sds.day, sds.status,
+                  COALESCE(NULLIF(dpi.dose_text,''), NULLIF(uss.dose_text,''), NULLIF(us.dose_text,''), '') AS dose_text,
+                  COALESCE(NULLIF(dpi.time_hint,''), NULLIF(sch.time_hhmm,''), '') AS time_hint
+           FROM supplement_day_state sds
+           LEFT JOIN day_plan_items dpi
+             ON dpi.user_id=? AND dpi.supplement_id=sds.supplement_id AND dpi.date_local=sds.day
+           LEFT JOIN user_supp_settings uss
+             ON uss.user_id=? AND uss.supplement_id=sds.supplement_id
+           LEFT JOIN user_supplements us
+             ON us.user_id=? AND us.supplement_id=sds.supplement_id
+           LEFT JOIN user_schedules sch
+             ON sch.user_id=? AND sch.supplement_id=sds.supplement_id
+           WHERE sds.user_id=? AND sds.supplement_id=?
+           ORDER BY sds.day DESC
+           LIMIT ?""",
+        (user_id, user_id, user_id, user_id, user_id, int(supplement_id), int(limit)),
+    )
+    entries = []
+    taken_days = []
+    for row in rows:
+        day = str(row["day"] or "")
+        status = str(row["status"] or "")
+        if status == "taken":
+            taken_days.append(day)
+        entries.append(
+            {
+                "day": day,
+                "status": status,
+                "status_label": "Принято" if status == "taken" else ("Пропуск" if status == "skipped" else "Не отмечено"),
+                "dose_text": str(row["dose_text"] or "").strip(),
+                "time_hint": str(row["time_hint"] or "").strip(),
+            }
+        )
+
+    summary = {
+        "taken_days": len(taken_days),
+        "last_taken_day": taken_days[0] if taken_days else "",
+        "first_taken_day": taken_days[-1] if taken_days else "",
+    }
+    return {"entries": entries, "summary": summary}
 
 async def get_user_supplement(conn: aiosqlite.Connection, tg_user_id: int, supplement_id: int):
     user_id = await get_or_create_user(conn, tg_user_id)

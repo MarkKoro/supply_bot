@@ -90,6 +90,10 @@ class MySuppUpdateBody(BaseModel):
     note_text: str = ""
 
 
+class MySuppDeleteBody(BaseModel):
+    supplement_id: int
+
+
 class ReminderSetBody(BaseModel):
     supplement_id: int
     mode: str
@@ -1326,6 +1330,40 @@ async def api_my_supplements_toggle(
     return JSONResponse({"ok": True, "in_stack": in_stack})
 
 
+@app.post("/api/my_supplements/remove")
+async def api_my_supplements_remove(
+    body: MySuppDeleteBody,
+    x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
+):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    if not await _premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "error": "PREMIUM_REQUIRED", "code": "PREMIUM_REQUIRED"}, status_code=402)
+
+    conn = await db.connect(s.DB_PATH)
+    try:
+        await db.remove_user_supplement(conn, tg_user_id, int(body.supplement_id))
+    finally:
+        await conn.close()
+    return JSONResponse({"ok": True})
+
+
+@app.get("/api/my_supplements/history")
+async def api_my_supplements_history(
+    supplement_id: int,
+    x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
+):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    if not await _premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "error": "PREMIUM_REQUIRED", "code": "PREMIUM_REQUIRED"}, status_code=402)
+
+    conn = await db.connect(s.DB_PATH)
+    try:
+        payload = await db.get_user_supplement_intake_history(conn, tg_user_id, int(supplement_id), limit=20)
+    finally:
+        await conn.close()
+    return JSONResponse({"ok": True, **payload})
+
+
 @app.get("/api/schedule")
 async def api_schedule(x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
     tg_user_id = await _auth_user_id(x_telegram_init_data)
@@ -1419,7 +1457,9 @@ async def _ai_recommendations(answers: dict, ctx: dict) -> tuple[list[dict], dic
         "Формат каждого элемента: action, slug, name_ru, reason_ru, priority, suggested_time, suggested_slot_id, prefer_existing_time. "
         "action только add/remove/adjust. priority только 1..3. "
         "suggested_time обязателен и строго в формате HH:MM. prefer_existing_time всегда true: выбирай из уже существующих слотов пользователя, если возможно. "
-        "Консервативный стиль, без медицинских заявлений и без рецептурных препаратов."
+        "Консервативный стиль, без медицинских заявлений и без рецептурных препаратов. "
+        "Поле answers.note трактуй как приоритетный свободный запрос пользователя и явно учитывай его в причине каждой рекомендации. "
+        "Контекст context.last7 и context.stats содержит историю прошлых и сегодняшних приёмов — обязательно используй её."
     )
     prompt = json.dumps({"answers": answers, "context": ctx}, ensure_ascii=False)
     text = await __import__('asyncio').to_thread(_sync_call, cfg, instructions=instructions, input_text=prompt, max_output_tokens=800, timeout_s=20)

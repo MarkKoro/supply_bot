@@ -447,15 +447,20 @@
       max-width: clamp(86px, 15%, 112px);
       flex: 0 0 clamp(86px, 15%, 112px);
       text-align: center;
-      padding: 7px 10px;
-      border-radius: 999px;
-      font-size: 12px;
+      padding: 8px 10px;
+      border-radius: 14px;
+      font-size: 11px;
       font-weight: 700;
       border: 1px solid transparent;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
+      white-space: normal;
+      line-height: 1.15;
+      min-height: 44px;
+      display: grid;
+      align-items: center;
     }
+
+    .status-pill-icon { display:block; font-size:13px; line-height:1; margin-bottom:2px; }
+    .status-pill-label { display:block; }
 
     .today-item-row { align-items: flex-start; }
     .today-item-name {
@@ -629,6 +634,13 @@
     .catalog-modal-body .action-grid .btn { width:100%; max-width:100%; }
     .survey-actions { display:grid; grid-template-columns: 1fr 1fr; gap:8px; margin-top:10px; }
     .survey-actions .btn { width:100%; }
+    .survey-head { align-items:flex-start; gap:10px; flex-wrap:wrap; }
+    .survey-title-wrap { display:flex; align-items:center; gap:8px; }
+    .survey-target-wrap { display:flex; gap:6px; align-items:center; flex-wrap:wrap; justify-content:flex-end; }
+    .survey-help-btn { width:30px; height:30px; border-radius:999px; padding:0; display:grid; place-items:center; font-weight:900; }
+    .survey-help { margin-top:8px; border:1px solid rgba(125,183,255,.35); border-radius:12px; padding:10px; background:rgba(125,183,255,.1); }
+    .history-list { display:grid; gap:8px; margin-top:8px; }
+    .history-item { border:1px solid rgba(255,255,255,0.14); border-radius:12px; padding:10px; background:rgba(255,255,255,0.05); }
     @media (max-width: 560px) { .survey-actions { grid-template-columns: 1fr; } }
 
   </style>
@@ -656,7 +668,7 @@
     ui: { unseenAchCount: 0, achFilter: "all", achQuery: "", microWowLastAt: 0 },
     unlockToast: { open: false, applying: false, items: [], sparkleTick: 0 },
     mySupplements: { open: false, tab: "active", loading: false, busy: {}, active: [], frozen: [] },
-    suppHub: { open: false, loading: false, saving: false, item: null, slots: [], slotId: "morning", time: "", doseText: "", noteText: "", remindersMode: "slot", reminderTimes: [], reminderInput: "" },
+    suppHub: { open: false, loading: false, saving: false, item: null, slots: [], slotId: "morning", time: "", doseText: "", noteText: "", remindersMode: "slot", reminderTimes: [], reminderInput: "", historyOpen: false, historyLoading: false, history: null, deleting: false },
     toastTimer: null,
     catalog: {
       q: "", page: 0, items: [], total: 0, loading: false,
@@ -681,6 +693,7 @@
       recommendations: [],
       selected: {},
       applying: false,
+      helpOpen: false,
       answers: { energy:"", sleep:"", stress:"", training:"", goals:[], note:"" }
     },
     admin: {
@@ -1373,6 +1386,7 @@
     state.survey.checkinId = null;
     state.survey.recommendations = [];
     state.survey.selected = {};
+    state.survey.helpOpen = false;
     state.survey.answers = { energy:"", sleep:"", stress:"", training:"", goals:[], note:"" };
     try {
       const data = await api(`./api/checkin/today?target=${state.survey.target}`);
@@ -1403,7 +1417,7 @@
         const already = todaySet.has(Number(r.supplement_id || 0));
         return `<div class="rec-card"><div class="row"><label><input type="checkbox" data-rec-toggle="${r.supplement_id}" ${sv.selected[r.supplement_id] !== false ? 'checked' : ''}/> <strong>${esc(r.name_ru || r.slug)}</strong></label><span class="badge ${r.action==='remove'?'minus':(r.action==='adjust'?'':'plus')}">${r.action==='add'?'+':(r.action==='remove'?'−':'≈')}</span></div><div class="muted" style="margin-top:6px">${esc(r.reason || '')}${already ? ' • уже в плане' : ''}</div></div>`;
       }).join('');
-      return `<div class="card fade"><div class="row"><h3 style="margin:0">Рекомендации</h3><div class="row" style="gap:8px"><span class="muted" style="font-size:12px">Рекомендация на:</span><div class="segmented" data-survey-target><button class="seg-btn ${sv.target==='today'?'active':''}" data-set-target="today">Сегодня</button><button class="seg-btn ${sv.target==='tomorrow'?'active':''}" data-set-target="tomorrow">Завтра</button></div></div></div>${rows || '<div class="muted">Нет рекомендаций</div>'}<div style="margin-top:10px"><button class="btn" id="applyAll" style="width:100%; font-weight:800" ${sv.applying ? 'disabled' : ''}>✅ Применить всё</button></div><div class="survey-actions"><button class="btn secondary" id="applySelected" ${sv.applying ? 'disabled' : ''}>Применить выбранное</button><button class="btn secondary" id="cancelSurvey" ${sv.applying ? 'disabled' : ''}>Отмена</button></div></div>`;
+      return `<div class="card fade"><div class="row survey-head"><div class="survey-title-wrap"><h3 style="margin:0">Рекомендации</h3><button class="btn secondary survey-help-btn" type="button" data-survey-help>?</button></div><div class="survey-target-wrap"><span class="muted" style="font-size:12px">Рекомендация на:</span><div class="segmented" data-survey-target><button class="seg-btn ${sv.target==='today'?'active':''}" data-set-target="today">Сегодня</button><button class="seg-btn ${sv.target==='tomorrow'?'active':''}" data-set-target="tomorrow">Завтра</button></div></div></div>${sv.helpOpen ? `<div class="survey-help muted">Опрос «Сегодня» учитывает текущее время, что вы уже принимали сегодня и вчера, и подсказывает добавки на оставшуюся часть дня. Опрос «Завтра» строит рекомендации заранее на основе вашего стека, истории приёма и выбранной цели.</div>` : ''}${rows || '<div class="muted">Нет рекомендаций</div>'}<div style="margin-top:10px"><button class="btn" id="applyAll" style="width:100%; font-weight:800" ${sv.applying ? 'disabled' : ''}>✅ Применить всё</button></div><div class="survey-actions"><button class="btn secondary" id="applySelected" ${sv.applying ? 'disabled' : ''}>Применить выбранное</button><button class="btn secondary" id="cancelSurvey" ${sv.applying ? 'disabled' : ''}>Отмена</button></div></div>`;
     }
     const step = SURVEY_STEPS[sv.step];
     const p = Math.round(((sv.step+1)/SURVEY_STEPS.length)*100);
@@ -1415,7 +1429,7 @@
     } else {
       body = `<textarea id="surveyNote" maxlength="280" class="survey-note" placeholder="Короткая заметка">${esc(sv.answers.note || '')}</textarea><div class="muted" style="margin-top:6px">${(sv.answers.note||'').length}/280</div>`;
     }
-    return `<div class="card fade"><div class="row"><strong>${step.title}</strong><div class="row" style="gap:6px"><span class="muted" style="font-size:12px">Рекомендация на:</span><div class="segmented" data-survey-target><button class="seg-btn ${sv.target==='today'?'active':''}" data-set-target="today">Сегодня</button><button class="seg-btn ${sv.target==='tomorrow'?'active':''}" data-set-target="tomorrow">Завтра</button></div><span class="muted">${sv.step+1}/${SURVEY_STEPS.length}</span></div></div><div class="progress"><i style="width:${p}%"></i></div>${body}<div class="survey-actions" style="margin-top:12px"><button class="btn secondary" id="surveyBack" ${sv.step===0?'disabled':''}>Назад</button><button class="btn" id="surveyNext">${sv.step===SURVEY_STEPS.length-1?'Получить рекомендации':'Далее'}</button></div></div>`;
+    return `<div class="card fade"><div class="row survey-head"><div class="survey-title-wrap"><strong>${step.title}</strong><button class="btn secondary survey-help-btn" type="button" data-survey-help>?</button></div><div class="survey-target-wrap"><span class="muted" style="font-size:12px">Рекомендация на:</span><div class="segmented" data-survey-target><button class="seg-btn ${sv.target==='today'?'active':''}" data-set-target="today">Сегодня</button><button class="seg-btn ${sv.target==='tomorrow'?'active':''}" data-set-target="tomorrow">Завтра</button></div><span class="muted">${sv.step+1}/${SURVEY_STEPS.length}</span></div></div>${sv.helpOpen ? `<div class="survey-help muted">Опрос «Сегодня» учитывает текущее время, что вы уже принимали сегодня и вчера, и подсказывает добавки на оставшуюся часть дня. Опрос «Завтра» строит рекомендации заранее на основе вашего стека, истории приёма и выбранной цели.</div>` : ''}<div class="progress"><i style="width:${p}%"></i></div>${body}<div class="survey-actions" style="margin-top:12px"><button class="btn secondary" id="surveyBack" ${sv.step===0?'disabled':''}>Назад</button><button class="btn" id="surveyNext">${sv.step===SURVEY_STEPS.length-1?'Получить рекомендации':'Далее'}</button></div></div>`;
   }
 
   function bindSurveyEvents() {
@@ -1432,7 +1446,8 @@
 
     appEl.querySelectorAll('[data-survey-pick]').forEach((el)=>el.addEventListener('click', ()=>{ haptic(); const [k,v]=el.dataset.surveyPick.split(':'); state.survey.answers[k]=v; localStorage.setItem(surveyStorageKey(), JSON.stringify(state.survey.answers)); renderActiveTab(); }));
     appEl.querySelectorAll('[data-goal-toggle]').forEach((el)=>el.addEventListener('click', ()=>{ haptic(); const g=el.dataset.goalToggle; const set=new Set(state.survey.answers.goals||[]); if (set.has(g)) set.delete(g); else set.add(g); state.survey.answers.goals=[...set]; localStorage.setItem(surveyStorageKey(), JSON.stringify(state.survey.answers)); renderActiveTab(); }));
-    document.getElementById('surveyNote')?.addEventListener('input', (e)=>{ state.survey.answers.note=String(e.target.value||'').slice(0,280); localStorage.setItem(surveyStorageKey(), JSON.stringify(state.survey.answers)); renderActiveTab(); });
+    appEl.querySelectorAll('[data-survey-help]').forEach((el)=>el.addEventListener('click', ()=>{ state.survey.helpOpen = !state.survey.helpOpen; renderActiveTab(); }));
+    document.getElementById('surveyNote')?.addEventListener('input', (e)=>{ state.survey.answers.note=String(e.target.value||'').slice(0,280); localStorage.setItem(surveyStorageKey(), JSON.stringify(state.survey.answers)); const noteLen = e.target.parentElement?.querySelector('.muted'); if (noteLen) noteLen.textContent = `${state.survey.answers.note.length}/280`; });
     document.getElementById('surveyBack')?.addEventListener('click', ()=>{ haptic(); state.survey.step=Math.max(0,state.survey.step-1); renderActiveTab(); });
 
     document.getElementById('surveyNext')?.addEventListener('click', async ()=>{
@@ -1470,9 +1485,7 @@
         if (out.date_local === localDateISO()) showToast('✅ Применено к плану: сегодня');
         else showToast('✅ Применено на завтра');
         if (out.date_local === localDateISO()) {
-          await loadToday(true);
           state.activeTab='today';
-          renderMainApp();
           renderActiveTab();
         } else {
           await loadSurveyForTarget(true);
@@ -1495,9 +1508,7 @@
         if (out.date_local === localDateISO()) showToast('✅ Применено к плану: сегодня');
         else showToast('✅ Применено на завтра');
         if (out.date_local === localDateISO()) {
-          await loadToday(true);
           state.activeTab='today';
-          renderMainApp();
           renderActiveTab();
         } else {
           await loadSurveyForTarget(true);
@@ -1673,7 +1684,7 @@
     if ((c.loading || c.loadingMore) && !force) return;
     if (c.page > 0) c.loadingMore = true;
     else c.loading = true;
-    renderActiveTab();
+    if (!c.items.length || c.page > 0) renderActiveTab();
 
     const f = c.filters;
     const qp = new URLSearchParams({ q: c.q || '', page: String(c.page), page_size: '20', sort: f.sort || 'alpha' });
@@ -2747,8 +2758,13 @@ function adminField(label, field, value, kind='input') {
               ${(hub.reminderTimes || []).map((t)=>`<button class="chip" data-rem-remove="${esc(t)}">${esc(t)} ✕</button>`).join('') || '<span class="muted">Пока нет собственных напоминаний.</span>'}
             </div>
           ` : '<div class="muted" style="margin-top:8px">Используется только время слота, персональные reminders не создаются.</div>'}
-          <div style="margin-top:12px" class="row">
+          <div style="margin-top:12px" class="row" >
             <button class="btn" data-supp-hub-save ${hub.saving ? 'disabled' : ''}>${hub.saving ? 'Сохраняем...' : 'Сохранить'}</button>
+            <button class="btn secondary" type="button" data-supp-hub-history>${hub.historyOpen ? 'Скрыть последние приёмы' : 'Мои последние приёмы'}</button>
+          </div>
+          ${hub.historyOpen ? `<div class="history-list">${hub.historyLoading ? '<div class="muted">Загружаем историю…</div>' : renderSuppHistory(hub.history)}</div>` : ''}
+          <div style="margin-top:10px" class="row">
+            <button class="btn secondary" type="button" data-my-supp-delete ${hub.deleting ? 'disabled' : ''}>${hub.deleting ? 'Удаляем…' : 'Удалить из моих БАДов'}</button>
           </div>
         `}
       </div>
@@ -2928,23 +2944,6 @@ function adminField(label, field, value, kind='input') {
         <div class="bar"><i style="width:${levelPct}%"></i></div>
         <div class="muted" style="margin-top:6px">${nextLevelPoints == null ? 'Максимальный уровень достигнут' : `До следующего уровня: ${Math.max(0, nextLevelPoints - pointsTotal)} очков`}</div>
       </section>
-      ${renderStatsBlock() || '<section class="card fade"><div class="row"><strong>📈 Статистика</strong></div><div class="muted" style="margin-top:8px">Пока нет данных для отображения.</div><div style="margin-top:10px"><button class="btn secondary" data-stats-refresh>Обновить</button></div></section>'}
-      ${(() => {
-        const next = (Array.isArray(ach.next_up) ? ach.next_up : []).filter((item) => Number(item?.pct || 0) > 0 && Number(item?.pct || 0) < 100);
-        const recent = Array.isArray(ach.recent_achievements) ? ach.recent_achievements : [];
-        const nextHtml = !next.length ? '<div class="muted">Сейчас нет актуальных шагов.</div>' : `<div style="display:grid; gap:8px;">${next.map((item) => `<div class="ach-item"><div><strong>${esc(item.title_ru || '')}</strong></div><div class="ach-progress"><div class="bar"><i style="width:${Math.max(0, Math.min(100, Number(item.pct || 0)))}%"></i></div><div class="muted" style="margin-top:4px">Прогресс: ${Math.max(0, Math.min(100, Number(item.pct || 0)))}%</div>${item.hint_ru ? `<div class="muted">${esc(item.hint_ru)}</div>` : ''}</div></div>`).join('')}</div>`;
-        const recentHtml = !recent.length ? '<div class="muted">Пока нет новых открытий.</div>' : `<div style="display:grid; gap:8px;">${recent.slice(0,8).map((item) => `<div class="ach-item"><div><strong>${esc(item.title_ru || '')}</strong></div><div class="muted">${esc(formatUtcShort(item.unlocked_at_utc || ''))}</div>${(item.reward_verbose || []).length ? `<div class="muted" style="margin-top:4px">${item.reward_verbose.map((x) => esc(x)).join(' · ')}</div>` : ''}</div>`).join('')}</div>`;
-        return `<section class="card fade"><div class="row"><strong>🏆 Достижения и персонализация</strong></div><div class="ios-group">
-          <details><summary><span>🎯 Дальше по плану</span><span class="ios-arrow">▾</span></summary><div class="ios-content">${nextHtml}</div></details>
-          <details><summary><span>🕒 Последние открытия</span><span class="ios-arrow">▾</span></summary><div class="ios-content">${recentHtml}</div></details>
-          <details open id="achievementsBlock"><summary><span>🏅 Все достижения ${unseenCount > 0 ? `<span class="chip" style="margin-left:8px">Новое: ${unseenCount}</span>` : ""}</span><span class="ios-arrow">▾</span></summary><div class="ios-content"><div class="muted">Открытые: ${unlocked.length} · Закрытые: ${locked.length}</div><div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap;">${filterBtn('all','Все')}${filterBtn('unlocked','Открытые')}${filterBtn('locked','Закрытые')}${filterBtn('new','Новые')}</div><div style="margin-top:8px"><input class="input" id="achSearch" placeholder="Поиск по названию или описанию" value="${esc(state.ui?.achQuery || "")}" /></div>${groupedHtml || '<div class="muted" style="margin-top:10px">Ничего не найдено по выбранным фильтрам.</div>'}</div></details>
-          <details><summary><span>🎨 Косметика</span><span class="ios-arrow">▾</span></summary><div class="ios-content">
-            <div><label class="muted">Тема</label><select class="select" id="cosTheme">${options(catalogs.themes, allowed.themes || ["base"], cosmetics.theme_id || "base")}</select><div class="cos-meta">${themeUnlockInfo.isNew ? '<span class="new-pill">Новое</span>' : ''}${themeUnlockInfo.by ? `<span>Открыто достижением: ${esc(themeUnlockInfo.by)}</span>` : '<span>Базовая доступность</span>'}${quickThemeId ? `<button class="btn secondary" data-cos-quick="theme" data-cos-id="${esc(quickThemeId)}">Применить</button>` : ''}</div></div>
-            <div><label class="muted">Таб-меню</label><select class="select" id="cosTab">${options(catalogs.tab_skins, allowed.tab_skins || ["classic"], cosmetics.tab_skin_id || "classic")}</select><div class="cos-meta">${tabUnlockInfo.isNew ? '<span class="new-pill">Новое</span>' : ''}${tabUnlockInfo.by ? `<span>Открыто достижением: ${esc(tabUnlockInfo.by)}</span>` : '<span>Базовая доступность</span>'}${quickTabId ? `<button class="btn secondary" data-cos-quick="tab" data-cos-id="${esc(quickTabId)}">Применить</button>` : ''}</div></div>
-            <div><label class="muted">Бейдж</label><select class="select" id="cosBadge">${options(catalogs.badges, allowed.badges || ["none"], cosmetics.badge_id || "none")}</select><div class="cos-meta">${badgeUnlockInfo.isNew ? '<span class="new-pill">Новое</span>' : ''}${badgeUnlockInfo.by ? `<span>Открыто достижением: ${esc(badgeUnlockInfo.by)}</span>` : '<span>Базовая доступность</span>'}${quickBadgeId ? `<button class="btn secondary" data-cos-quick="badge" data-cos-id="${esc(quickBadgeId)}">Применить</button>` : ''}</div></div>
-          </div></details>
-        </div></section>`;
-      })()}
       <section class="card fade">
         <div class="row"><strong>⚙️ Настройки аккаунта</strong></div>
         <div class="ios-group">
@@ -2969,6 +2968,23 @@ function adminField(label, field, value, kind='input') {
           </details>
         </div>
       </section>
+      ${(() => {
+        const next = (Array.isArray(ach.next_up) ? ach.next_up : []).filter((item) => Number(item?.pct || 0) > 0 && Number(item?.pct || 0) < 100);
+        const recent = Array.isArray(ach.recent_achievements) ? ach.recent_achievements : [];
+        const nextHtml = !next.length ? '<div class="muted">Сейчас нет актуальных шагов.</div>' : `<div style="display:grid; gap:8px;">${next.map((item) => `<div class="ach-item"><div><strong>${esc(item.title_ru || '')}</strong></div><div class="ach-progress"><div class="bar"><i style="width:${Math.max(0, Math.min(100, Number(item.pct || 0)))}%"></i></div><div class="muted" style="margin-top:4px">Прогресс: ${Math.max(0, Math.min(100, Number(item.pct || 0)))}%</div>${item.hint_ru ? `<div class="muted">${esc(item.hint_ru)}</div>` : ''}</div></div>`).join('')}</div>`;
+        const recentHtml = !recent.length ? '<div class="muted">Пока нет новых открытий.</div>' : `<div style="display:grid; gap:8px;">${recent.slice(0,8).map((item) => `<div class="ach-item"><div><strong>${esc(item.title_ru || '')}</strong></div><div class="muted">${esc(formatUtcShort(item.unlocked_at_utc || ''))}</div>${(item.reward_verbose || []).length ? `<div class="muted" style="margin-top:4px">${item.reward_verbose.map((x) => esc(x)).join(' · ')}</div>` : ''}</div>`).join('')}</div>`;
+        return `<section class="card fade"><div class="row"><strong>🏆 Достижения и персонализация</strong></div><div class="ios-group">
+          <details><summary><span>🎯 Дальше по плану</span><span class="ios-arrow">▾</span></summary><div class="ios-content">${nextHtml}</div></details>
+          <details><summary><span>🕒 Последние открытия</span><span class="ios-arrow">▾</span></summary><div class="ios-content">${recentHtml}</div></details>
+          <details id="achievementsBlock"><summary><span>🏅 Все достижения ${unseenCount > 0 ? `<span class="chip" style="margin-left:8px">Новое: ${unseenCount}</span>` : ""}</span><span class="ios-arrow">▾</span></summary><div class="ios-content"><div class="muted">Открытые: ${unlocked.length} · Закрытые: ${locked.length}</div><div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap;">${filterBtn('all','Все')}${filterBtn('unlocked','Открытые')}${filterBtn('locked','Закрытые')}${filterBtn('new','Новые')}</div><div style="margin-top:8px"><input class="input" id="achSearch" placeholder="Поиск по названию или описанию" value="${esc(state.ui?.achQuery || "")}" /></div>${groupedHtml || '<div class="muted" style="margin-top:10px">Ничего не найдено по выбранным фильтрам.</div>'}</div></details>
+          <details><summary><span>🎨 Косметика</span><span class="ios-arrow">▾</span></summary><div class="ios-content">
+            <div><label class="muted">Тема</label><select class="select" id="cosTheme">${options(catalogs.themes, allowed.themes || ["base"], cosmetics.theme_id || "base")}</select><div class="cos-meta">${themeUnlockInfo.isNew ? '<span class="new-pill">Новое</span>' : ''}${themeUnlockInfo.by ? `<span>Открыто достижением: ${esc(themeUnlockInfo.by)}</span>` : '<span>Базовая доступность</span>'}${quickThemeId ? `<button class="btn secondary" data-cos-quick="theme" data-cos-id="${esc(quickThemeId)}">Применить</button>` : ''}</div></div>
+            <div><label class="muted">Таб-меню</label><select class="select" id="cosTab">${options(catalogs.tab_skins, allowed.tab_skins || ["classic"], cosmetics.tab_skin_id || "classic")}</select><div class="cos-meta">${tabUnlockInfo.isNew ? '<span class="new-pill">Новое</span>' : ''}${tabUnlockInfo.by ? `<span>Открыто достижением: ${esc(tabUnlockInfo.by)}</span>` : '<span>Базовая доступность</span>'}${quickTabId ? `<button class="btn secondary" data-cos-quick="tab" data-cos-id="${esc(quickTabId)}">Применить</button>` : ''}</div></div>
+            <div><label class="muted">Бейдж</label><select class="select" id="cosBadge">${options(catalogs.badges, allowed.badges || ["none"], cosmetics.badge_id || "none")}</select><div class="cos-meta">${badgeUnlockInfo.isNew ? '<span class="new-pill">Новое</span>' : ''}${badgeUnlockInfo.by ? `<span>Открыто достижением: ${esc(badgeUnlockInfo.by)}</span>` : '<span>Базовая доступность</span>'}${quickBadgeId ? `<button class="btn secondary" data-cos-quick="badge" data-cos-id="${esc(quickBadgeId)}">Применить</button>` : ''}</div></div>
+          </div></details>
+        </div></section>`;
+      })()}
+      ${renderStatsBlock() || '<section class="card fade"><div class="row"><strong>📈 Статистика</strong></div><div class="muted" style="margin-top:8px">Пока нет данных для отображения.</div><div style="margin-top:10px"><button class="btn secondary" data-stats-refresh>Обновить</button></div></section>'}
     `;
   }
 
@@ -3087,9 +3103,9 @@ function adminField(label, field, value, kind='input') {
   }
 
   function statusText(status) {
-    if (status === "taken") return "✅ Принято";
-    if (status === "skipped") return "⛔ Пропуск";
-    return "◻ Не отмечено";
+    if (status === "taken") return '<span class="status-pill-icon">✅</span><span class="status-pill-label">Принято</span>';
+    if (status === "skipped") return '<span class="status-pill-icon">⛔</span><span class="status-pill-label">Пропуск</span>';
+    return '<span class="status-pill-icon">◻</span><span class="status-pill-label">Не отмечено</span>';
   }
 
   async function openSupplementHub(supplementId) {
@@ -3104,6 +3120,10 @@ function adminField(label, field, value, kind='input') {
     state.suppHub.doseText = item.dose_text || '';
     state.suppHub.noteText = item.note_text || '';
     state.suppHub.reminderInput = '';
+    state.suppHub.historyOpen = false;
+    state.suppHub.history = null;
+    state.suppHub.historyLoading = false;
+    state.suppHub.deleting = false;
     renderActiveTab();
     try {
       const [scheduleRes, remRes] = await Promise.all([
@@ -3270,6 +3290,49 @@ function adminField(label, field, value, kind='input') {
     document.getElementById('hubDose')?.addEventListener('input', (e) => { state.suppHub.doseText = e.target.value || ''; });
     document.getElementById('hubNote')?.addEventListener('input', (e) => { state.suppHub.noteText = e.target.value || ''; });
     document.getElementById('hubSlot')?.addEventListener('change', (e) => { state.suppHub.slotId = e.target.value || 'morning'; });
+
+    appEl.querySelector('[data-supp-hub-history]')?.addEventListener('click', async () => {
+      state.suppHub.historyOpen = !state.suppHub.historyOpen;
+      if (!state.suppHub.historyOpen) {
+        renderActiveTab();
+        return;
+      }
+      if (state.suppHub.history || state.suppHub.historyLoading) {
+        renderActiveTab();
+        return;
+      }
+      state.suppHub.historyLoading = true;
+      renderActiveTab();
+      try {
+        state.suppHub.history = await api(`./api/my_supplements/history?supplement_id=${Number(state.suppHub.item?.supplement_id || 0)}`);
+      } catch {
+        showToast('Не удалось загрузить историю');
+      } finally {
+        state.suppHub.historyLoading = false;
+        renderActiveTab();
+      }
+    });
+
+    appEl.querySelector('[data-my-supp-delete]')?.addEventListener('click', async () => {
+      haptic();
+      const sid = Number(state.suppHub.item?.supplement_id || 0);
+      if (!sid) return;
+      if (!confirm('Удалить добавку из моих БАДов? История приёмов сохранится.')) return;
+      state.suppHub.deleting = true;
+      renderActiveTab();
+      try {
+        await api('./api/my_supplements/remove', { method: 'POST', body: { supplement_id: sid } });
+        state.suppHub.open = false;
+        await loadMySupplements(true);
+        await loadToday(true);
+        renderActiveTab();
+        showToast('Добавка удалена из списка');
+      } catch {
+        showToast('Не удалось удалить добавку');
+      } finally {
+        state.suppHub.deleting = false;
+      }
+    });
     document.getElementById('hubTime')?.addEventListener('input', (e) => { state.suppHub.time = e.target.value || ''; });
     document.getElementById('hubRemTime')?.addEventListener('input', (e) => { state.suppHub.reminderInput = e.target.value || ''; });
 
@@ -3421,7 +3484,6 @@ function adminField(label, field, value, kind='input') {
         });
 
       await runBatched(singlePending, 3);
-      await loadToday(true);
       showToast(status === "taken" ? "Отметил всё как принято" : "Слот сброшен");
       if (status === "taken") {
         const afterSlot = (state.today?.slots || []).find((s) => String(s.slot_id) === String(slotId));
@@ -3453,7 +3515,6 @@ function adminField(label, field, value, kind='input') {
       });
       recalcTodaySnapshot();
       renderActiveTab();
-      await loadToday(true);
       showToast("Не удалось применить к слоту");
     }
   }
@@ -3464,6 +3525,15 @@ function adminField(label, field, value, kind='input') {
       await Promise.all(chunk);
       await new Promise((resolve) => setTimeout(resolve, 80));
     }
+  }
+
+  function renderSuppHistory(history) {
+    if (!history) return '<div class="muted">История пока недоступна.</div>';
+    const summary = history.summary || {};
+    const rows = history.entries || [];
+    const summaryHtml = `<div class="history-item"><strong>Последний приём: ${esc(summary.last_taken_day || '—')}</strong><div class="muted" style="margin-top:4px">Дней с приёмом: ${Number(summary.taken_days || 0)} · Период: ${esc(summary.first_taken_day || '—')} → ${esc(summary.last_taken_day || '—')}</div></div>`;
+    const rowsHtml = rows.length ? rows.map((row)=>`<div class="history-item"><strong>${esc(row.day || '—')} · ${esc(row.status_label || '—')}</strong><div class="muted" style="margin-top:4px">Доза: ${esc(row.dose_text || 'не указана')} · Время: ${esc(row.time_hint || '—')}</div></div>`).join('') : '<div class="muted">Пока нет записей о приёме этой добавки.</div>';
+    return `${summaryHtml}${rowsHtml}`;
   }
 
   boot();

@@ -112,7 +112,18 @@ CREATE TABLE IF NOT EXISTS users (
   last_view_payload TEXT NOT NULL DEFAULT '',
   last_chat_id  INTEGER NOT NULL DEFAULT 0,
   last_message_id INTEGER NOT NULL DEFAULT 0,
-  initial_stack_json TEXT NOT NULL DEFAULT '[]'
+  initial_stack_json TEXT NOT NULL DEFAULT '[]',
+  onboarding_status TEXT NOT NULL DEFAULT '',
+  onboarding_goal_text TEXT NOT NULL DEFAULT '',
+  onboarding_raw_json TEXT NOT NULL DEFAULT '',
+  onboarding_prefix_line TEXT NOT NULL DEFAULT '',
+  onboarding_free_pick_used INTEGER NOT NULL DEFAULT 0,
+  onboarding_started_at_utc TEXT NOT NULL DEFAULT '',
+  onboarding_completed_at_utc TEXT NOT NULL DEFAULT '',
+  starter_trial_used INTEGER NOT NULL DEFAULT 0,
+  starter_trial_started_at_utc TEXT NOT NULL DEFAULT '',
+  starter_trial_until_utc TEXT NOT NULL DEFAULT '',
+  starter_trial_source TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS supplements (
@@ -447,6 +458,17 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     await _ensure_column(conn, "users", "premium_plan", "TEXT")
     await _ensure_column(conn, "users", "premium_source", "TEXT")
     await _ensure_column(conn, "users", "premium_updated_at_utc", "TEXT")
+    await _ensure_column(conn, "users", "onboarding_status", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "users", "onboarding_goal_text", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "users", "onboarding_raw_json", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "users", "onboarding_prefix_line", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "users", "onboarding_free_pick_used", "INTEGER NOT NULL DEFAULT 0")
+    await _ensure_column(conn, "users", "onboarding_started_at_utc", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "users", "onboarding_completed_at_utc", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "users", "starter_trial_used", "INTEGER NOT NULL DEFAULT 0")
+    await _ensure_column(conn, "users", "starter_trial_started_at_utc", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "users", "starter_trial_until_utc", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "users", "starter_trial_source", "TEXT NOT NULL DEFAULT ''")
     await conn.execute(
         """CREATE TABLE IF NOT EXISTS user_complexes (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -586,6 +608,39 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     )
     await conn.execute(
         "UPDATE supplements SET goals='' WHERE goals IS NULL"
+    )
+    await conn.execute(
+        "UPDATE users SET onboarding_status='' WHERE onboarding_status IS NULL"
+    )
+    await conn.execute(
+        "UPDATE users SET onboarding_goal_text='' WHERE onboarding_goal_text IS NULL"
+    )
+    await conn.execute(
+        "UPDATE users SET onboarding_raw_json='' WHERE onboarding_raw_json IS NULL"
+    )
+    await conn.execute(
+        "UPDATE users SET onboarding_prefix_line='' WHERE onboarding_prefix_line IS NULL"
+    )
+    await conn.execute(
+        "UPDATE users SET onboarding_free_pick_used=0 WHERE onboarding_free_pick_used IS NULL"
+    )
+    await conn.execute(
+        "UPDATE users SET onboarding_started_at_utc='' WHERE onboarding_started_at_utc IS NULL"
+    )
+    await conn.execute(
+        "UPDATE users SET onboarding_completed_at_utc='' WHERE onboarding_completed_at_utc IS NULL"
+    )
+    await conn.execute(
+        "UPDATE users SET starter_trial_used=0 WHERE starter_trial_used IS NULL"
+    )
+    await conn.execute(
+        "UPDATE users SET starter_trial_started_at_utc='' WHERE starter_trial_started_at_utc IS NULL"
+    )
+    await conn.execute(
+        "UPDATE users SET starter_trial_until_utc='' WHERE starter_trial_until_utc IS NULL"
+    )
+    await conn.execute(
+        "UPDATE users SET starter_trial_source='' WHERE starter_trial_source IS NULL"
     )
     await conn.execute(
         "UPDATE supplements SET rules_tags='' WHERE rules_tags IS NULL"
@@ -1953,6 +2008,70 @@ async def extend_premium(
     new_until = _add_months_utc(baseline, months)
     return await set_premium_until(conn, tg_user_id, new_until, source, plan_id)
 
+
+async def get_starter_trial_until(conn: aiosqlite.Connection, tg_user_id: int) -> str | None:
+    row = await fetchone(conn, "SELECT starter_trial_until_utc FROM users WHERE tg_user_id=?", (tg_user_id,))
+    if not row:
+        return None
+    value = str(row["starter_trial_until_utc"] or "").strip()
+    return value or None
+
+
+async def is_starter_trial_active(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    now_utc: datetime | None = None,
+) -> bool:
+    until_iso = await get_starter_trial_until(conn, tg_user_id)
+    until_dt = _parse_utc_iso_dt(until_iso)
+    if until_dt is None:
+        return False
+    now = now_utc or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    else:
+        now = now.astimezone(timezone.utc)
+    return until_dt > now
+
+
+async def start_starter_trial(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    days: int = 3,
+    source: str = "onboarding",
+) -> str:
+    if days <= 0:
+        raise ValueError("days must be > 0")
+    await get_or_create_user(conn, tg_user_id)
+    now = datetime.now(timezone.utc)
+    until = now + timedelta(days=int(days))
+    until_iso = _to_utc_iso(until)
+    await conn.execute(
+        """UPDATE users
+           SET starter_trial_used=1,
+               starter_trial_started_at_utc=?,
+               starter_trial_until_utc=?,
+               starter_trial_source=?
+           WHERE tg_user_id=?""",
+        (utc_now_iso(), until_iso, str(source or ""), int(tg_user_id)),
+    )
+    await conn.commit()
+    return until_iso
+
+
+async def has_any_webapp_access(conn: aiosqlite.Connection, tg_user_id: int) -> bool:
+    settings = None
+    try:
+        from settings import get_settings
+        settings = get_settings()
+    except Exception:
+        settings = None
+    if settings and int(tg_user_id) in set(settings.ADMIN_IDS or []):
+        return True
+    if await is_premium_active(conn, tg_user_id):
+        return True
+    return await is_starter_trial_active(conn, tg_user_id)
+
 async def log_payment_paid(
     conn: aiosqlite.Connection,
     tg_user_id: int,
@@ -2928,51 +3047,305 @@ async def admin_resolve_name_duplicate(
     if not keep_name or keep_name != remove_name:
         raise ValueError("duplicate_name_mismatch")
 
-    alias_rows = await fetchall(conn, "SELECT alias FROM supplement_aliases WHERE supplement_id=?", (remove_id,))
-    alias_values = [str(row["alias"] or "").strip() for row in alias_rows if str(row["alias"] or "").strip()]
-    if alias_values:
-        await upsert_aliases(conn, keep_id, alias_values)
+    def _pick_non_empty(*values: object) -> str:
+        for value in values:
+            text = str(value or "").strip()
+            if text:
+                return text
+        return ""
 
-    interaction_rows = await fetchall(
-        conn,
-        """SELECT a_id, b_id, relation, severity, evidence_grade, note, source_url
-           FROM interactions
-           WHERE a_id=? OR b_id=?""",
-        (remove_id, remove_id),
-    )
-    for item in interaction_rows:
-        a_id = int(item["a_id"])
-        b_id = int(item["b_id"])
-        other_id = b_id if a_id == remove_id else a_id
-        if other_id == keep_id:
-            continue
-        await upsert_interaction(
+    def _status_rank(status: object) -> int:
+        safe = str(status or "").strip().lower()
+        if safe == "taken":
+            return 2
+        if safe == "skipped":
+            return 1
+        return 0
+
+    try:
+        await conn.execute("BEGIN")
+
+        alias_values: list[str] = []
+        if await _table_exists(conn, "supplement_aliases"):
+            alias_cols = await _table_columns(conn, "supplement_aliases")
+            alias_col = "alias_raw" if "alias_raw" in alias_cols else ("alias" if "alias" in alias_cols else "")
+            if alias_col:
+                alias_rows = await fetchall(
+                    conn,
+                    f"SELECT {alias_col} AS alias_value FROM supplement_aliases WHERE supplement_id=?",
+                    (remove_id,),
+                )
+                alias_values = [
+                    str(row["alias_value"] or "").strip()
+                    for row in alias_rows
+                    if str(row["alias_value"] or "").strip()
+                ]
+        if alias_values:
+            await upsert_aliases(conn, keep_id, alias_values)
+
+        interaction_rows = await fetchall(
             conn,
-            keep_id,
-            other_id,
-            {
-                "relation": str(item["relation"] or "neutral"),
-                "severity": int(item["severity"] or 0),
-                "evidence_grade": str(item["evidence_grade"] or ""),
-                "note": str(item["note"] or ""),
-                "source_url": str(item["source_url"] or ""),
-            },
+            """SELECT a_id, b_id, relation, severity, evidence_grade, note, source_url
+               FROM interactions
+               WHERE a_id=? OR b_id=?""",
+            (remove_id, remove_id),
         )
+        for item in interaction_rows:
+            a_id = int(item["a_id"])
+            b_id = int(item["b_id"])
+            other_id = b_id if a_id == remove_id else a_id
+            if other_id == keep_id:
+                continue
+            await upsert_interaction(
+                conn,
+                keep_id,
+                other_id,
+                {
+                    "relation": str(item["relation"] or "neutral"),
+                    "severity": int(item["severity"] or 0),
+                    "evidence_grade": str(item["evidence_grade"] or ""),
+                    "note": str(item["note"] or ""),
+                    "source_url": str(item["source_url"] or ""),
+                },
+            )
 
-    await conn.execute("DELETE FROM interactions WHERE a_id=? OR b_id=?", (remove_id, remove_id))
-    await conn.execute("DELETE FROM supplement_aliases WHERE supplement_id=?", (remove_id,))
-    await conn.execute("DELETE FROM supplements WHERE id=?", (remove_id,))
+        if await _table_exists(conn, "user_supplements"):
+            rows = await fetchall(conn, "SELECT * FROM user_supplements WHERE supplement_id=?", (remove_id,))
+            for row in rows:
+                user_id = int(row["user_id"])
+                keep_rec = await fetchone(
+                    conn,
+                    "SELECT * FROM user_supplements WHERE user_id=? AND supplement_id=?",
+                    (user_id, keep_id),
+                )
+                if not keep_rec:
+                    await conn.execute(
+                        "UPDATE user_supplements SET supplement_id=? WHERE id=?",
+                        (keep_id, int(row["id"])),
+                    )
+                    continue
+                await conn.execute(
+                    """UPDATE user_supplements SET
+                         enabled=?,
+                         is_active=?,
+                         dose_text=?,
+                         note_text=?,
+                         notes=?
+                       WHERE id=?""",
+                    (
+                        max(int(keep_rec["enabled"] or 0), int(row["enabled"] or 0)),
+                        max(int(keep_rec["is_active"] or 0), int(row["is_active"] or 0)),
+                        _pick_non_empty(keep_rec["dose_text"], row["dose_text"]),
+                        _pick_non_empty(keep_rec["note_text"], row["note_text"]),
+                        _pick_non_empty(keep_rec["notes"], row["notes"]),
+                        int(keep_rec["id"]),
+                    ),
+                )
+                await conn.execute("DELETE FROM user_supplements WHERE id=?", (int(row["id"]),))
 
-    await _admin_insert_audit(
-        conn,
-        int(admin_tg_id),
-        keep_id,
-        "duplicate_merge",
-        str(remove_id),
-        str(keep_id),
-        "resolve_duplicate",
-    )
-    await conn.commit()
+        if await _table_exists(conn, "user_schedules"):
+            rows = await fetchall(conn, "SELECT * FROM user_schedules WHERE supplement_id=?", (remove_id,))
+            for row in rows:
+                user_id = int(row["user_id"])
+                keep_rec = await fetchone(
+                    conn,
+                    "SELECT * FROM user_schedules WHERE user_id=? AND supplement_id=?",
+                    (user_id, keep_id),
+                )
+                if not keep_rec:
+                    await conn.execute(
+                        "UPDATE user_schedules SET supplement_id=? WHERE id=?",
+                        (keep_id, int(row["id"])),
+                    )
+                    continue
+                await conn.execute(
+                    """UPDATE user_schedules SET
+                         time_hhmm=?,
+                         slot_id=?,
+                         is_enabled=?
+                       WHERE id=?""",
+                    (
+                        _pick_non_empty(keep_rec["time_hhmm"], row["time_hhmm"]),
+                        _pick_non_empty(keep_rec["slot_id"], row["slot_id"]),
+                        max(int(keep_rec["is_enabled"] or 0), int(row["is_enabled"] or 0)),
+                        int(keep_rec["id"]),
+                    ),
+                )
+                await conn.execute("DELETE FROM user_schedules WHERE id=?", (int(row["id"]),))
+
+        if await _table_exists(conn, "user_supp_settings"):
+            rows = await fetchall(conn, "SELECT * FROM user_supp_settings WHERE supplement_id=?", (remove_id,))
+            for row in rows:
+                user_id = int(row["user_id"])
+                keep_rec = await fetchone(
+                    conn,
+                    "SELECT * FROM user_supp_settings WHERE user_id=? AND supplement_id=?",
+                    (user_id, keep_id),
+                )
+                if not keep_rec:
+                    await conn.execute(
+                        "UPDATE user_supp_settings SET supplement_id=? WHERE user_id=? AND supplement_id=?",
+                        (keep_id, user_id, remove_id),
+                    )
+                    continue
+                await conn.execute(
+                    """UPDATE user_supp_settings SET
+                         dose_text=?,
+                         reminder_time=?,
+                         reminder_enabled=?,
+                         taken_date=?,
+                         skip_date=?,
+                         updated_at=?
+                       WHERE user_id=? AND supplement_id=?""",
+                    (
+                        _pick_non_empty(keep_rec["dose_text"], row["dose_text"]),
+                        _pick_non_empty(keep_rec["reminder_time"], row["reminder_time"]),
+                        max(int(keep_rec["reminder_enabled"] or 0), int(row["reminder_enabled"] or 0)),
+                        _pick_non_empty(keep_rec["taken_date"], row["taken_date"]),
+                        _pick_non_empty(keep_rec["skip_date"], row["skip_date"]),
+                        _pick_non_empty(keep_rec["updated_at"], row["updated_at"], utc_now_iso()),
+                        user_id,
+                        keep_id,
+                    ),
+                )
+                await conn.execute(
+                    "DELETE FROM user_supp_settings WHERE user_id=? AND supplement_id=?",
+                    (user_id, remove_id),
+                )
+
+        if await _table_exists(conn, "reminders"):
+            rows = await fetchall(conn, "SELECT user_id, time_local, enabled, snooze_min, created_at FROM reminders WHERE supplement_id=?", (remove_id,))
+            for row in rows:
+                await conn.execute(
+                    """INSERT OR IGNORE INTO reminders(user_id, supplement_id, time_local, enabled, snooze_min, created_at)
+                       VALUES(?,?,?,?,?,?)""",
+                    (
+                        int(row["user_id"]),
+                        keep_id,
+                        str(row["time_local"] or ""),
+                        int(row["enabled"] or 1),
+                        int(row["snooze_min"] or 15),
+                        str(row["created_at"] or utc_now_iso()),
+                    ),
+                )
+            await conn.execute("DELETE FROM reminders WHERE supplement_id=?", (remove_id,))
+
+        if await _table_exists(conn, "day_plan_items"):
+            rows = await fetchall(conn, "SELECT * FROM day_plan_items WHERE supplement_id=?", (remove_id,))
+            for row in rows:
+                keep_rec = await fetchone(
+                    conn,
+                    """SELECT * FROM day_plan_items
+                       WHERE user_id=? AND date_local=? AND supplement_id=? AND action=?""",
+                    (int(row["user_id"]), str(row["date_local"]), keep_id, str(row["action"])),
+                )
+                if not keep_rec:
+                    await conn.execute(
+                        "UPDATE day_plan_items SET supplement_id=? WHERE id=?",
+                        (keep_id, int(row["id"])),
+                    )
+                    continue
+                await conn.execute(
+                    """UPDATE day_plan_items SET
+                         dose_text=?,
+                         time_hint=?,
+                         reason=?
+                       WHERE id=?""",
+                    (
+                        _pick_non_empty(keep_rec["dose_text"], row["dose_text"]),
+                        _pick_non_empty(keep_rec["time_hint"], row["time_hint"]),
+                        _pick_non_empty(keep_rec["reason"], row["reason"]),
+                        int(keep_rec["id"]),
+                    ),
+                )
+                await conn.execute("DELETE FROM day_plan_items WHERE id=?", (int(row["id"]),))
+
+        if await _table_exists(conn, "supplement_day_state"):
+            rows = await fetchall(conn, "SELECT * FROM supplement_day_state WHERE supplement_id=?", (remove_id,))
+            for row in rows:
+                user_id = int(row["user_id"])
+                day = str(row["day"])
+                keep_rec = await fetchone(
+                    conn,
+                    "SELECT * FROM supplement_day_state WHERE user_id=? AND supplement_id=? AND day=?",
+                    (user_id, keep_id, day),
+                )
+                if not keep_rec:
+                    await conn.execute(
+                        "UPDATE supplement_day_state SET supplement_id=? WHERE user_id=? AND supplement_id=? AND day=?",
+                        (keep_id, user_id, remove_id, day),
+                    )
+                    continue
+                keep_status = str(keep_rec["status"] or "")
+                remove_status = str(row["status"] or "")
+                final_status = keep_status if _status_rank(keep_status) >= _status_rank(remove_status) else remove_status
+                await conn.execute(
+                    """UPDATE supplement_day_state SET
+                         status=?,
+                         dose_override=?
+                       WHERE user_id=? AND supplement_id=? AND day=?""",
+                    (
+                        final_status,
+                        _pick_non_empty(keep_rec["dose_override"], row["dose_override"]),
+                        user_id,
+                        keep_id,
+                        day,
+                    ),
+                )
+                await conn.execute(
+                    "DELETE FROM supplement_day_state WHERE user_id=? AND supplement_id=? AND day=?",
+                    (user_id, remove_id, day),
+                )
+
+        if await _table_exists(conn, "user_complex_items"):
+            rows = await fetchall(conn, "SELECT * FROM user_complex_items WHERE supplement_id=?", (remove_id,))
+            for row in rows:
+                complex_id = int(row["complex_id"])
+                keep_rec = await fetchone(
+                    conn,
+                    "SELECT * FROM user_complex_items WHERE complex_id=? AND supplement_id=?",
+                    (complex_id, keep_id),
+                )
+                if not keep_rec:
+                    await conn.execute(
+                        "UPDATE user_complex_items SET supplement_id=? WHERE complex_id=? AND supplement_id=?",
+                        (keep_id, complex_id, remove_id),
+                    )
+                    continue
+                await conn.execute(
+                    """UPDATE user_complex_items SET
+                         dose_override=?,
+                         sort_order=?
+                       WHERE complex_id=? AND supplement_id=?""",
+                    (
+                        _pick_non_empty(keep_rec["dose_override"], row["dose_override"]),
+                        min(int(keep_rec["sort_order"] or 0), int(row["sort_order"] or 0)),
+                        complex_id,
+                        keep_id,
+                    ),
+                )
+                await conn.execute(
+                    "DELETE FROM user_complex_items WHERE complex_id=? AND supplement_id=?",
+                    (complex_id, remove_id),
+                )
+
+        await conn.execute("DELETE FROM interactions WHERE a_id=? OR b_id=?", (remove_id, remove_id))
+        await conn.execute("DELETE FROM supplement_aliases WHERE supplement_id=?", (remove_id,))
+        await conn.execute("DELETE FROM supplements WHERE id=?", (remove_id,))
+
+        await _admin_insert_audit(
+            conn,
+            int(admin_tg_id),
+            keep_id,
+            "duplicate_merge",
+            str(remove_id),
+            str(keep_id),
+            "resolve_duplicate",
+        )
+        await conn.commit()
+    except Exception as exc:
+        await conn.rollback()
+        raise ValueError("duplicate_merge_failed") from exc
 
 
 async def admin_import_purchase_urls(
@@ -4861,6 +5234,103 @@ async def get_ui_state(conn: aiosqlite.Connection, user_id: int) -> tuple[int | 
         str(row["last_screen"] or ""),
         str(row["last_payload"] or ""),
     )
+
+async def get_onboarding_state(conn: aiosqlite.Connection, tg_user_id: int) -> dict:
+    row = await fetchone(
+        conn,
+        """SELECT onboarding_status, onboarding_goal_text, onboarding_raw_json,
+                  onboarding_prefix_line, onboarding_free_pick_used,
+                  onboarding_started_at_utc, onboarding_completed_at_utc
+           FROM users WHERE tg_user_id=?""",
+        (int(tg_user_id),),
+    )
+    if not row:
+        return {
+            "onboarding_status": "",
+            "onboarding_goal_text": "",
+            "onboarding_raw_json": "",
+            "onboarding_prefix_line": "",
+            "onboarding_free_pick_used": 0,
+            "onboarding_started_at_utc": "",
+            "onboarding_completed_at_utc": "",
+        }
+    return {
+        "onboarding_status": str(row["onboarding_status"] or ""),
+        "onboarding_goal_text": str(row["onboarding_goal_text"] or ""),
+        "onboarding_raw_json": str(row["onboarding_raw_json"] or ""),
+        "onboarding_prefix_line": str(row["onboarding_prefix_line"] or ""),
+        "onboarding_free_pick_used": int(row["onboarding_free_pick_used"] or 0),
+        "onboarding_started_at_utc": str(row["onboarding_started_at_utc"] or ""),
+        "onboarding_completed_at_utc": str(row["onboarding_completed_at_utc"] or ""),
+    }
+
+async def start_onboarding_state(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    goal_text: str = "",
+    prefix_line: str = "",
+) -> None:
+    await conn.execute(
+        """UPDATE users SET
+             onboarding_status='active',
+             onboarding_goal_text=?,
+             onboarding_raw_json='',
+             onboarding_prefix_line=?,
+             onboarding_started_at_utc=?,
+             onboarding_completed_at_utc=''
+           WHERE tg_user_id=?""",
+        (str(goal_text or ""), str(prefix_line or ""), utc_now_iso(), int(tg_user_id)),
+    )
+    await conn.commit()
+
+async def save_onboarding_results(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    goal_text: str,
+    raw_json: str,
+    prefix_line: str = "",
+) -> None:
+    await conn.execute(
+        """UPDATE users SET
+             onboarding_status='results',
+             onboarding_goal_text=?,
+             onboarding_raw_json=?,
+             onboarding_prefix_line=?
+           WHERE tg_user_id=?""",
+        (str(goal_text or ""), str(raw_json or ""), str(prefix_line or ""), int(tg_user_id)),
+    )
+    await conn.commit()
+
+async def mark_onboarding_done(conn: aiosqlite.Connection, tg_user_id: int) -> None:
+    await conn.execute(
+        """UPDATE users SET
+             onboarding_status='done',
+             onboarding_completed_at_utc=?
+           WHERE tg_user_id=?""",
+        (utc_now_iso(), int(tg_user_id)),
+    )
+    await conn.commit()
+
+async def mark_onboarding_used(conn: aiosqlite.Connection, tg_user_id: int) -> None:
+    await conn.execute(
+        "UPDATE users SET onboarding_free_pick_used=1 WHERE tg_user_id=?",
+        (int(tg_user_id),),
+    )
+    await conn.commit()
+
+async def clear_onboarding_state(conn: aiosqlite.Connection, tg_user_id: int) -> None:
+    await conn.execute(
+        """UPDATE users SET
+             onboarding_status='',
+             onboarding_goal_text='',
+             onboarding_raw_json='',
+             onboarding_prefix_line='',
+             onboarding_started_at_utc='',
+             onboarding_completed_at_utc=''
+           WHERE tg_user_id=?""",
+        (int(tg_user_id),),
+    )
+    await conn.commit()
 
 async def set_user_schedule_time(
     conn: aiosqlite.Connection,

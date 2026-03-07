@@ -956,6 +956,29 @@
     return new Date().toLocaleDateString("ru-RU", { weekday: "short", day: "2-digit", month: "short" });
   }
 
+  function evidenceUserLabel(value) {
+    const key = String(value || '').trim().toUpperCase();
+    const map = {
+      A: 'A — сильная база',
+      B: 'B — хорошая база',
+      C: 'C — умеренно',
+      D: 'D — слабо',
+    };
+    return map[key] || 'Без оценки';
+  }
+
+  function confidenceUserLabel(value) {
+    const key = String(value || '').trim().toLowerCase();
+    const map = {
+      high: 'Высокая уверенность',
+      medium: 'Средняя уверенность',
+      low: 'Низкая уверенность',
+    };
+    if (map[key]) return map[key];
+    if (/^\d+$/.test(key)) return `${key}%`;
+    return 'Уверенность не указана';
+  }
+
   async function api(path, { method = "GET", body } = {}) {
     const res = await fetch(path, {
       method,
@@ -972,7 +995,7 @@
     }
 
     if (res.status === 402) {
-      state.me = { ...(state.me || {}), premium: false };
+      state.me = { ...(state.me || {}), premium: false, starter_trial_active: false, webapp_access: false };
       renderPaywall();
       throw new Error("PREMIUM_REQUIRED");
     }
@@ -989,7 +1012,12 @@
 
     const data = await res.json().catch(() => ({}));
     if (!res.ok || data.ok === false) {
-      throw new Error(data.error || `HTTP_${res.status}`);
+      const err = new Error(data.message || data.error || data.code || `HTTP_${res.status}`);
+      if (data && typeof data === 'object') {
+        if (data.code) err.code = String(data.code);
+        if (data.message) err.serverMessage = String(data.message);
+      }
+      throw err;
     }
     return data;
   }
@@ -1033,7 +1061,7 @@
         showBannedScreen(me.banned_reason || "");
         return;
       }
-      if (!me.premium) {
+      if (!me.webapp_access) {
         renderPaywall();
       } else {
         try { await loadAchievements(); } catch {}
@@ -1097,16 +1125,20 @@
     appEl.innerHTML = `
       <div class="main-content">
         <div class="card fade">
-          <h2 style="margin:0 0 4px">Премиум открывает WebApp</h2>
-          <div class="muted">Today • Каталог • Карта • Опрос</div>
+          <h2 style="margin:0 0 4px">В боте можно начать бесплатно</h2>
+          <div class="muted">База добавок, базовый стек и стартовый подбор уже доступны.</div>
+        </div>
+        <div class="card fade">
+          <h2 style="margin:0 0 4px">Premium — про удобство каждый день</h2>
+          <div class="muted">Today • Каталог • Карта • AI check-in • настройка стека и напоминаний</div>
         </div>
 
         <div class="preview-grid">
-          ${["Today: чекбоксы и прогресс", "Catalog: RU/EN каталог", "BodyMap: органы и протоколы", "Survey: умные карточки"].map(t => `<div class="preview-card">${t}<br><span class="muted">Контент скрыт до Premium</span></div>`).join("")}
+          ${["Today: быстрые отметки и прогресс", "Catalog: быстрый поиск и фильтры", "BodyMap: органы и протоколы", "AI check-in: рекомендации на день"].map(t => `<div class="preview-card">${t}<br><span class="muted">С Premium это заметно удобнее в ежедневном режиме</span></div>`).join("")}
         </div>
 
         <div class="cta-sticky">
-          <div class="card" style="margin-top:12px; margin-bottom:8px;"><b>Купить подписку</b><div class="muted">Выберите удобный план и оплату ⭐ или ₽</div></div>
+          <div class="card" style="margin-top:12px; margin-bottom:8px;"><b>Выберите удобный формат доступа</b><div class="muted">Starter помогает попробовать рутину, Premium — закрепить её на постоянной основе</div></div>
         </div>
 
         <div class="plans">${plansHtml || '<div class="card">Планы пока недоступны.</div>'}</div>
@@ -1139,7 +1171,7 @@
           showToast("Оплата успешна, обновляю доступ...");
           try {
             state.me = await api("./api/me");
-            if (state.me.premium) {
+            if (state.me.webapp_access) {
               renderMainApp();
               await loadToday();
             } else {
@@ -1178,7 +1210,7 @@
       <div class="main-content" id="mainContent">
         <header class="topbar fade">
           <div>
-            <div class="topbar-title-row"><h1 class="headline">${APP_NAME}</h1>${(() => { const bid = document.documentElement.dataset.badge || "none"; const b = getBadgeMeta(bid); const label = String(b.title_ru || '').trim(); if (bid === 'none' || !label || label === bid) return ""; return `<span class="badge-pill">${esc(b.emoji || "")} ${esc(label)}</span>`; })()}</div>
+            <div class="topbar-title-row"><h1 class="headline">${APP_NAME}</h1>${(() => { const bid = document.documentElement.dataset.badge || "none"; const b = getBadgeMeta(bid); const label = String(b.title_ru || '').trim(); if (bid === 'none' || !label || label === bid) return ""; return `<span class="badge-pill">${esc(b.emoji || "")} ${esc(label)}</span>`; })()}${(() => { const me = state.me || {}; if (me.starter_trial_active && !me.premium) { return `<span class="chip">🎁 Starter до ${esc(String(me.starter_trial_until_utc || '').slice(0, 10) || '—')}</span>`; } return ''; })()}</div>
             <div class="subline">${formatDate()}</div>
           </div>
           <button class="btn" id="refreshBtn" aria-label="Обновить">⟳</button>
@@ -1539,7 +1571,7 @@
     const itemsHtml = c.items.map((item) => `
       <button type="button" class="card item-row" data-catalog-open="${item.slug}" style="display:block; width:100%; margin-top:0;">
         <div class="row catalog-item-head"><strong class="supp-name">${esc(item.name_ru || item.name_en)}</strong><span>${item.has_purchase ? '🛒' : ''}</span></div>
-        <div class="muted" style="margin-top:6px">${esc(item.evidence_grade || '—')} • ${esc(item.confidence || '—')} ${item.in_stack ? '• ✅ в стеке' : ''}</div>
+        <div class="muted" style="margin-top:6px">${esc(evidenceUserLabel(item.evidence_grade))} • ${esc(confidenceUserLabel(item.confidence))} ${item.in_stack ? '• ✅ в стеке' : ''}</div>
       </button>`).join('');
 
     const listHtml = c.loading && !c.items.length
@@ -1624,7 +1656,7 @@
             <strong class="modal-title">${displayName}</strong>
             <button type="button" class="btn secondary" data-detail-close>Закрыть</button>
           </div>
-          <div class="muted" style="margin-top:6px">${isLoading ? 'Загружаем карточку…' : `${esc(item.evidence_grade || '—')} • ${esc(item.confidence || '—')}`}</div>
+          <div class="muted" style="margin-top:6px">${isLoading ? 'Загружаем карточку…' : `${esc(evidenceUserLabel(item.evidence_grade))} • ${esc(confidenceUserLabel(item.confidence))}`}</div>
         </div>
         <div class="card catalog-modal-body">
           ${isLoading ? `<div class="catalog-skeleton" style="height:100px"></div><div class="catalog-skeleton" style="height:84px; margin-top:8px"></div><div class="catalog-skeleton" style="height:44px; margin-top:8px"></div>` : `
@@ -2117,7 +2149,14 @@ function adminField(label, field, value, kind='input') {
       await loadAdminSupplements(true);
       await loadAdminDuplicates();
     } catch (e) {
-      showToast(`Не удалось обработать дубликат: ${e.message}`);
+      const code = String(e?.code || '').trim();
+      const messageMap = {
+        duplicate_name_mismatch: 'Название дублей не совпало',
+        duplicate_merge_failed: 'Не удалось объединить записи',
+        supplement_not_found: 'Запись не найдена',
+      };
+      const humanText = messageMap[code] || e?.serverMessage || e?.message || 'Не удалось обработать дубликат';
+      showToast(humanText);
     } finally {
       state.admin.duplicateResolveBusy = '';
       renderActiveTab();
@@ -2849,6 +2888,13 @@ function adminField(label, field, value, kind='input') {
 
   function renderSettings() {
     const adminHint = !!(state.me?.role && state.me.role !== "none");
+    const me = state.me || {};
+    const accessLabel = me.premium ? "Premium" : (me.starter_trial_active ? "Starter" : "Нет активного доступа");
+    const accessHint = me.premium
+      ? "Полный доступ активен."
+      : (me.starter_trial_active
+          ? `Starter активен до ${String(me.starter_trial_until_utc || '').slice(0, 10) || '—'}.`
+          : "Оформи Premium, чтобы вернуть полный доступ к WebApp.");
     const ach = state.ach || {};
     const items = Array.isArray(ach.achievements) ? ach.achievements : [];
     const unlocked = items.filter((x) => x.unlocked);
@@ -2946,6 +2992,9 @@ function adminField(label, field, value, kind='input') {
       </section>
       <section class="card fade">
         <div class="row"><strong>⚙️ Настройки аккаунта</strong></div>
+        <div class="muted" style="margin-top:6px"><b>Доступ:</b> ${esc(accessLabel)}</div>
+        <div class="muted" style="margin-top:4px">${esc(accessHint)}</div>
+        <div class="muted" style="margin-top:4px">После подписки: постоянный доступ к WebApp, AI check-in и удобный ежедневный трекинг.</div>
         <div class="ios-group">
           <details open>
             <summary><span>🕒 Время и расписание</span><span class="ios-arrow">▾</span></summary>

@@ -23,8 +23,12 @@ def _payload_from_route(route: str) -> dict | None:
         return {"note_pending": True, "return_screen": "main", "date_local": ""}
     if route == "cat:home":
         return {"mode": "home"}
+    if route == "cat:goal":
+        return {"mode": "goal", "list_mode": "class", "page": 0, "query": "", "class_key": "", "body_token": "", "return_page": 0}
+    if route == "cat:organ":
+        return {"mode": "organ", "list_mode": "body_benefit", "page": 0, "query": "", "class_key": "", "body_token": "", "return_page": 0}
     if route.startswith("cat:list"):
-        return {"mode": "list", "page": 0}
+        return {"mode": "list", "list_mode": "alpha", "page": 0, "query": "", "class_key": "", "body_token": "", "return_page": 0}
     if route.startswith("cat:class:page:"):
         return {"mode": "home"}
     if route.startswith("cat:page:"):

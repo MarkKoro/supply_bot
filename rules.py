@@ -149,18 +149,18 @@ CATALOG_CLASSES = [
     {"key": "sleep", "title_ru": "Сон"},
     {"key": "stress", "title_ru": "Стресс"},
     {"key": "focus", "title_ru": "Фокус"},
-    {"key": "performance", "title_ru": "Производительность"},
+    {"key": "energy", "title_ru": "Энергия"},
     {"key": "recovery", "title_ru": "Восстановление"},
+    {"key": "mood", "title_ru": "Настроение"},
     {"key": "heart", "title_ru": "Сердце"},
     {"key": "lipids", "title_ru": "Липиды"},
     {"key": "immunity", "title_ru": "Иммунитет"},
+    {"key": "performance", "title_ru": "Выносливость"},
     {"key": "bone", "title_ru": "Кости"},
     {"key": "strength", "title_ru": "Сила"},
     {"key": "muscle", "title_ru": "Мышцы"},
-    {"key": "energy", "title_ru": "Энергия"},
     {"key": "anxiety", "title_ru": "Тревожность"},
     {"key": "inflammation", "title_ru": "Воспаление"},
-    {"key": "mood", "title_ru": "Настроение"},
 ]
 
 def get_catalog_class_title(class_key: str) -> str:

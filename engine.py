@@ -613,10 +613,10 @@ def format_supplement_hub(
     return "\n\n".join(parts)
 
 def _format_evidence_line(raw: str, grade: str | None) -> str:
-    grade_text = (grade or "").strip() or "неизвестно"
-    humans = "неизвестно"
-    participants = "неизвестно"
-    effect = "неизвестно"
+    grade_text = evidence_grade_label(grade)
+    humans = "нет данных"
+    participants = "нет данных"
+    effect = "нет данных"
     if raw:
         try:
             data = json.loads(raw)
@@ -638,3 +638,33 @@ def _format_evidence_line(raw: str, grade: str | None) -> str:
         f"Участников: {participants} | "
         f"Эффект: {effect}"
     )
+
+
+def evidence_grade_label(value: str | None) -> str:
+    grade = str(value or "").strip().upper()
+    mapping = {
+        "A": "A — сильная база",
+        "B": "B — хорошая база",
+        "C": "C — умеренно",
+        "D": "D — слабо",
+    }
+    return mapping.get(grade, "Без оценки")
+
+
+def confidence_label(value: str | None) -> str:
+    safe = str(value or "").strip().lower()
+    mapping = {
+        "high": "Высокая уверенность",
+        "medium": "Средняя уверенность",
+        "low": "Низкая уверенность",
+    }
+    if safe in mapping:
+        return mapping[safe]
+    if safe.isdigit():
+        return f"{safe}%"
+    return "Уверенность не указана"
+
+
+def metric_or_no_data(value: str | None) -> str:
+    text = str(value or "").strip()
+    return text if text else "нет данных"

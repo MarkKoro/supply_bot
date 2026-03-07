@@ -123,26 +123,11 @@ def catalog_kb(items: list[dict], page: int, pages: int) -> InlineKeyboardMarkup
 
 def catalog_home(*, is_admin: bool = False) -> InlineKeyboardMarkup:
     rows = [
-        [
-            InlineKeyboardButton("🔎 Поиск", callback_data="cat:search"),
-            InlineKeyboardButton("🧠 Доказательность", callback_data="cat:mode:evidence"),
-        ],
-        [
-            InlineKeyboardButton("🎯 По целям/влиянию", callback_data="cat:mode:class"),
-            InlineKeyboardButton("🧪 По типу", callback_data="cat:mode:type"),
-        ],
-        [
-            InlineKeyboardButton("🫀 Куда влияет", callback_data="cat:mode:body:benefit"),
-            InlineKeyboardButton("⚠️ Нагрузка", callback_data="cat:mode:body:burden"),
-        ],
-        [
-            InlineKeyboardButton("🧩 По группе", callback_data="cat:mode:group"),
-            InlineKeyboardButton("📄 Список", callback_data="cat:mode:list"),
-        ],
-        [
-            InlineKeyboardButton("💊 Мои БАДы", callback_data="menu:my"),
-            InlineKeyboardButton("🧩 Готовые стеки", callback_data="menu:curated"),
-        ],
+        [InlineKeyboardButton("🔎 Поиск", callback_data="cat:search")],
+        [InlineKeyboardButton("🎯 По цели", callback_data="cat:goal")],
+        [InlineKeyboardButton("🫀 По органу / системе", callback_data="cat:organ")],
+        [InlineKeyboardButton("📃 Весь каталог A–Я", callback_data="cat:mode:list")],
+        [InlineKeyboardButton("🧩 Готовые стеки", callback_data="menu:curated")],
     ]
     if is_admin:
         rows.append([InlineKeyboardButton("➕ Стеки (админ)", callback_data="admin:stacks")])
@@ -176,12 +161,28 @@ def catalog_search_results(
     )
     return InlineKeyboardMarkup(btns)
 
-def catalog_list(rows, has_prev: bool, has_next: bool) -> InlineKeyboardMarkup:
+def catalog_list(
+    rows,
+    has_prev: bool,
+    has_next: bool,
+    *,
+    back_cb: str = "cat:home",
+    mode_switch_body_token: str = "",
+    mode_switch_current: str = "",
+) -> InlineKeyboardMarkup:
     btns = []
     for r in rows:
         title = r["name_ru"] or r["name_en"] or r["name"]
-        grade = (r.get("evidence_grade") or "?").strip() if isinstance(r, dict) else "?"
-        btns.append([InlineKeyboardButton(f"• {title} — {grade}", callback_data=f"cat:open:{r['id']}")])
+        btns.append([InlineKeyboardButton(f"• {title}", callback_data=f"cat:open:{r['id']}")])
+    if mode_switch_body_token:
+        support_mark = "✅ " if mode_switch_current == "body_benefit" else ""
+        burden_mark = "✅ " if mode_switch_current == "body_burden" else ""
+        btns.append(
+            [
+                InlineKeyboardButton(f"{support_mark}Поддержка", callback_data=f"cat:body:benefit:{mode_switch_body_token}"),
+                InlineKeyboardButton(f"{burden_mark}Нагрузка", callback_data=f"cat:body:burden:{mode_switch_body_token}"),
+            ]
+        )
     nav: list[InlineKeyboardButton] = []
     if has_prev:
         nav.append(InlineKeyboardButton("◀️", callback_data="cat:page:prev"))
@@ -189,7 +190,7 @@ def catalog_list(rows, has_prev: bool, has_next: bool) -> InlineKeyboardMarkup:
         nav.append(InlineKeyboardButton("▶️", callback_data="cat:page:next"))
     if nav:
         btns.append(nav)
-    btns.append([InlineKeyboardButton("⬅️ Назад", callback_data="cat:home")])
+    btns.append([InlineKeyboardButton("⬅️ Назад", callback_data=back_cb)])
     return InlineKeyboardMarkup(btns)
 
 
@@ -213,7 +214,7 @@ def catalog_type_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(btns)
 
 
-def catalog_body_kb(mode: str) -> InlineKeyboardMarkup:
+def catalog_body_kb(mode: str = "benefit") -> InlineKeyboardMarkup:
     rows = [
         ("Мозг/ЦНС", "brain_cns"),
         ("Сердце", "heart_cv"),
@@ -230,7 +231,7 @@ def catalog_body_kb(mode: str) -> InlineKeyboardMarkup:
         ("Кожа/волосы", "skin_hair"),
         ("Гормоны/репродукция", "reproductive_hormones"),
     ]
-    btns = [[InlineKeyboardButton(label, callback_data=f"cat:body:{mode}:{token}")] for label, token in rows]
+    btns = [[InlineKeyboardButton(label, callback_data=f"cat:organ:pick:{token}")] for label, token in rows]
     btns.append([InlineKeyboardButton("⬅️ Назад", callback_data="cat:home")])
     return InlineKeyboardMarkup(btns)
 
@@ -643,16 +644,16 @@ def supp_tabs_kb(
     has_links: bool = False,
     linked_items: list[dict] | None = None,
     purchase_url: str | None = None,
+    in_stack: bool = False,
 ) -> InlineKeyboardMarkup:
     btns: list[list[InlineKeyboardButton]] = [
         [
-            InlineKeyboardButton("📌 Коротко", callback_data=f"supp:tab:{supplement_id}:brief"),
-            InlineKeyboardButton("🕒 Время приёма", callback_data=f"supp:tab:{supplement_id}:time"),
-            InlineKeyboardButton("💊 Дозировка", callback_data=f"supp:tab:{supplement_id}:dose"),
+            InlineKeyboardButton("🧠 Как действует", callback_data=f"supp:tab:{supplement_id}:brief"),
+            InlineKeyboardButton("💊 Как принимать", callback_data=f"supp:tab:{supplement_id}:dose"),
         ],
         [
-            InlineKeyboardButton("🤝 Совместимо", callback_data=f"supp:tab:{supplement_id}:synergy"),
-            InlineKeyboardButton("⚠️ Несовместимо", callback_data=f"supp:tab:{supplement_id}:antag"),
+            InlineKeyboardButton("🤝 Совместимость", callback_data=f"supp:tab:{supplement_id}:synergy"),
+            InlineKeyboardButton("📊 Доказательность", callback_data=f"supp:tab:{supplement_id}:time"),
         ],
     ]
 
@@ -678,19 +679,20 @@ def supp_tabs_kb(
     elif return_mode == "ai_back":
         add_cb = f"mysupp:add:{supplement_id}:retai"
         back_cb = "menu:ai"
+    elif return_mode == "onboard_back":
+        add_cb = f"mysupp:add:{supplement_id}:ret_onboard"
+        back_cb = "onboard:results"
     else:
         add_cb = f"mysupp:add:{supplement_id}:retcat:{return_page}"
         back_cb = f"cat:page:{return_page}"
 
-    btns.append(
-        [
-            InlineKeyboardButton("🟢➕ В мои", callback_data=add_cb),
-            InlineKeyboardButton("⬅️ Назад", callback_data=back_cb),
-            InlineKeyboardButton("🏠 Меню", callback_data="menu:home"),
-        ]
-    )
+    primary_label = "⚙️ Управлять" if in_stack else "🟢 Добавить в мои БАДы"
+    primary_cb = f"mysupp:open:{supplement_id}" if in_stack else add_cb
+    btns.append([InlineKeyboardButton(primary_label, callback_data=primary_cb)])
+    btns.append([InlineKeyboardButton("⬅️ Назад", callback_data=back_cb)])
+    btns.append([InlineKeyboardButton("🏠 Меню", callback_data="menu:home")])
     if purchase_url:
-        btns.append([shop_url_button(purchase_url)])
+        btns.append([InlineKeyboardButton("🛒 Где купить", url=purchase_url)])
     return InlineKeyboardMarkup(btns)
 
 def my_supplement_hub(

@@ -1108,6 +1108,7 @@ async def _render_ai_suggestions(
     raw: str | None,
     *,
     prefix_line: str | None = None,
+    save_to_onboarding: bool = True,
 ) -> bool:
     data = None
     format_error_shown = False
@@ -1120,11 +1121,11 @@ async def _render_ai_suggestions(
                 context,
                 "Начальный подбор вернул неожиданный формат. Попробуй ещё раз.",
                 back(),
-                route="menu:ai",
+                route="onboard:goal",
             )
             format_error_shown = True
     else:
-        await show(update, context, "Начальный подбор не вернул ответ. Попробуй ещё раз.", back(), route="menu:ai")
+        await show(update, context, "Начальный подбор не вернул ответ. Попробуй ещё раз.", back(), route="onboard:goal")
 
     if isinstance(data, dict):
         candidates = data.get("candidates") or []
@@ -1221,15 +1222,25 @@ async def _render_ai_suggestions(
             buttons.append(
                 [InlineKeyboardButton(f"🔎 {row['name']}", callback_data=f"supp:openai:{row['id']}")]
             )
-        buttons.append([InlineKeyboardButton("🏠 В меню", callback_data="menu:ai:exit")])
+        buttons.append([InlineKeyboardButton("✅ Завершить подбор", callback_data="onboard:finish")])
+        buttons.append([InlineKeyboardButton("⭐ Почему Premium удобнее", callback_data="premium:about")])
+        buttons.append([InlineKeyboardButton("🏠 В меню", callback_data="menu:home")])
+        if save_to_onboarding:
+            await db.save_onboarding_results(
+                conn,
+                update.effective_user.id,
+                goal_text=goal_text,
+                raw_json=raw or "",
+                prefix_line=prefix_line or "",
+            )
         await show(
             update,
             context,
             "\n".join(lines),
             InlineKeyboardMarkup(buttons),
-            route="menu:ai",
+            route="onboard:results",
             payload={
-                "ai_suggest_active": True,
+                "onboard_results": True,
                 "goal_text": goal_text,
                 "raw": raw or "",
                 "prefix_line": prefix_line or "",
@@ -1242,9 +1253,50 @@ async def _render_ai_suggestions(
             context,
             "Начальный подбор вернул неожиданный формат. Попробуй ещё раз.",
             back(),
-            route="menu:ai",
+            route="onboard:goal",
         )
     return False
+
+
+async def _render_onboarding_results(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    conn,
+    *,
+    target_chat_id: int | None = None,
+    target_message_id: int | None = None,
+) -> bool:
+    state = await db.get_onboarding_state(conn, update.effective_user.id)
+    status = str(state.get("onboarding_status") or "")
+    raw = str(state.get("onboarding_raw_json") or "")
+    if status not in {"active", "results"} or not raw:
+        return False
+    return await _render_ai_suggestions(
+        update,
+        context,
+        conn,
+        str(state.get("onboarding_goal_text") or "текущая цель"),
+        raw,
+        prefix_line=str(state.get("onboarding_prefix_line") or "") or None,
+        save_to_onboarding=False,
+    )
+
+
+async def _show_ai_used_upsell(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    lines = [
+        "✨ <b>Стартовый подбор уже использован</b>",
+        "",
+        "Ты уже получил бесплатные стартовые рекомендации. Дальше можно пользоваться каталогом бесплатно или открыть Premium для AI-сценариев и WebApp.",
+    ]
+    kb = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("⭐ Premium", callback_data="menu:premium")],
+            [InlineKeyboardButton("💊 Мои БАДы", callback_data="menu:my")],
+            [InlineKeyboardButton("📚 Каталог", callback_data="menu:catalog")],
+            [InlineKeyboardButton("🏠 Меню", callback_data="menu:home")],
+        ]
+    )
+    await show(update, context, "\n".join(lines), kb, route="menu:ai")
 
 def _truncate_text(value: str | None, limit: int = 180) -> str:
     text = str(value or "").strip()
@@ -1597,20 +1649,41 @@ async def home(
     user_id = update.effective_user.id if update.effective_user else 0
     is_admin = (await _get_role_perms_ctx(context, user_id))[0] != db.ROLE_NONE
     show_complexes = False
+    onboarding_state = {}
+    starter_active = False
     if user_id:
         settings = context.application.bot_data["settings"]
-        if user_id in settings.ADMIN_IDS:
-            show_complexes = True
-        else:
-            conn = await db.connect(settings.DB_PATH)
-            try:
+        conn = await db.connect(settings.DB_PATH)
+        try:
+            if user_id in settings.ADMIN_IDS:
+                show_complexes = True
+            else:
                 show_complexes = await db.is_premium_active(conn, user_id)
-            finally:
-                await conn.close()
+            onboarding_state = await db.get_onboarding_state(conn, user_id)
+            starter_active = await db.is_starter_trial_active(conn, user_id)
+        finally:
+            await conn.close()
+
+    status = str(onboarding_state.get("onboarding_status") or "")
+    raw = str(onboarding_state.get("onboarding_raw_json") or "")
+    used = int(onboarding_state.get("onboarding_free_pick_used") or 0)
+    has_unfinished = status in {"active", "results"} and bool(raw)
+
+    text = _home_text(
+        has_unfinished_onboarding=has_unfinished,
+        onboarding_done=(used == 1 and status == "done"),
+        starter_active=starter_active,
+    )
+
+    base_menu = main_menu(is_admin=is_admin, show_complexes=show_complexes)
+    rows = [list(row) for row in base_menu.inline_keyboard]
+    if has_unfinished:
+        rows.insert(3, [InlineKeyboardButton("✨ Продолжить подбор", callback_data="onboard:results")])
+
     await show(
         update, context,
-        _home_text(),
-        main_menu(is_admin=is_admin, show_complexes=show_complexes),
+        text,
+        InlineKeyboardMarkup(rows),
         route="menu:home",
         target_chat_id=target_chat_id,
         target_message_id=target_message_id,
@@ -1676,10 +1749,30 @@ async def _show_premium_hub(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     plans = _premium_plans_payload(s)
     text = (
         "⭐ <b>Premium</b>\n\n"
-        "Открывает WebApp, AI check-in и расширенные функции.\n"
+        "В боте уже можно читать базу и собрать основу стека.\n\n"
+        "Premium нужен не ради «закрытого клуба», а ради удобства: Today с быстрыми отметками, карта тела, AI check-in и нормальная настройка стека/напоминаний в WebApp.\n\n"
+        "Практический выигрыш — меньше хаоса в трекинге и понятнее, что реально работает для тебя.\n\n"
         "Выбери тариф:"
     )
     await show(update, context, text, premium_plans_kb(plans), route="menu:premium")
+
+
+async def _show_starter_trial_offer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    lines = [
+        "🎁 <b>3 дня полного доступа</b>",
+        "",
+        "Ты уже получил стартовый подбор.",
+        "",
+        "Теперь можно 3 дня бесплатно пользоваться WebApp: отмечать приём, смотреть карту, настраивать стек и проверить, как это ощущается в жизни.",
+    ]
+    kb = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🎁 Активировать 3 дня", callback_data="starter:activate")],
+            [InlineKeyboardButton("📚 Остаться в боте", callback_data="menu:home")],
+            [InlineKeyboardButton("⭐ Что даёт Premium", callback_data="premium:about")],
+        ]
+    )
+    await show(update, context, "\n".join(lines), kb, route="starter:offer")
 
 
 async def require_premium_or_upsell(update: Update, context: ContextTypes.DEFAULT_TYPE, feature_name: str) -> bool:
@@ -1816,12 +1909,25 @@ async def on_success_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
 
-def _home_text() -> str:
+def _home_text(
+    *,
+    has_unfinished_onboarding: bool = False,
+    onboarding_done: bool = False,
+    starter_active: bool = False,
+) -> str:
+    next_step = "Начни со стартового подбора или открой каталог."
+    if has_unfinished_onboarding:
+        next_step = "Продолжи стартовый подбор и добавь подходящие БАДы в свой список."
+    elif onboarding_done:
+        next_step = "Дальше: добавь БАДы в свой список и настрой время приёма."
+    if starter_active:
+        next_step = "Открой WebApp — там удобнее отмечать приём и смотреть план."
     return (
         "💊 <b>Supply Bot</b>\n\n"
-        "Я справочник + дневник добавок.\n"
-        "— Совместимость из базы\n"
-        "— Начальный подбор (опционально)\n\n"
+        "• Каталог: быстро найди добавку и проверь совместимость.\n"
+        "• Мои БАДы: собери свой список и настрой напоминания.\n"
+        "• AI / WebApp: стартовый подбор и удобный ежедневный трекинг.\n\n"
+        f"Следующий шаг: {next_step}\n\n"
         "<i>Не медицинский совет.</i>"
     )
 
@@ -1845,6 +1951,7 @@ async def _start_initial_pick(
     context: ContextTypes.DEFAULT_TYPE,
     *,
     prefix: str | None = None,
+    route: str = "onboard:goal",
     target_chat_id: int | None = None,
     target_message_id: int | None = None,
 ) -> None:
@@ -1854,7 +1961,7 @@ async def _start_initial_pick(
         context,
         _initial_pick_prompt_text(prefix),
         back(),
-        route="menu:ai",
+        route=route,
         target_chat_id=target_chat_id,
         target_message_id=target_message_id,
     )
@@ -2098,6 +2205,88 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if data == "menu:ai:exit":
             await home(update, context)
             return
+        if data == "onboard:results":
+            restored = await _render_onboarding_results(update, context, conn)
+            if not restored:
+                await home(update, context)
+            return
+        if data == "onboard:finish":
+            await db.mark_onboarding_done(conn, tg_uid)
+            await db.mark_onboarding_used(conn, tg_uid)
+            has_premium = await db.is_premium_active(conn, tg_uid)
+            starter_used_row = await db.fetchone(
+                conn,
+                "SELECT starter_trial_used FROM users WHERE tg_user_id=?",
+                (int(tg_uid),),
+            )
+            starter_used = int(starter_used_row["starter_trial_used"] or 0) if starter_used_row else 0
+            if not has_premium and starter_used == 0:
+                await _show_starter_trial_offer(update, context)
+                return
+            await home(update, context)
+            return
+        if data == "starter:activate":
+            has_premium = await db.is_premium_active(conn, tg_uid)
+            if not has_premium:
+                until_iso = await db.start_starter_trial(conn, tg_uid, days=3, source="onboarding_finish")
+                s_cfg = context.application.bot_data["settings"]
+                rows = []
+                if s_cfg.WEBAPP_URL:
+                    rows.append([InlineKeyboardButton("🔓 Открыть WebApp", url=s_cfg.WEBAPP_URL)])
+                rows.append([InlineKeyboardButton("🏠 В меню", callback_data="menu:home")])
+                await show(
+                    update,
+                    context,
+                    f"Starter доступ активирован до <b>{until_iso}</b>",
+                    InlineKeyboardMarkup(rows),
+                    route="starter:active",
+                )
+                return
+            await show(
+                update,
+                context,
+                "У тебя уже активен Premium — WebApp открыт без ограничений.",
+                InlineKeyboardMarkup([[InlineKeyboardButton("🏠 В меню", callback_data="menu:home")]]),
+                route="menu:home",
+            )
+            return
+        if data == "onboard:restart_confirm":
+            kb = InlineKeyboardMarkup(
+                [
+                    [InlineKeyboardButton("✅ Начать заново", callback_data="onboard:restart_apply")],
+                    [InlineKeyboardButton("⬅️ Назад", callback_data="menu:settings")],
+                ]
+            )
+            await show(
+                update,
+                context,
+                "Подтверди перезапуск стартового подбора. Предыдущие рекомендации будут очищены.",
+                kb,
+                route="onboard:restart_confirm",
+            )
+            return
+        if data == "onboard:restart_apply":
+            if not s.OPENAI_API_KEY:
+                await show(
+                    update,
+                    context,
+                    "Начальный подбор недоступен: добавь OPENAI_API_KEY в .env.",
+                    settings_menu(),
+                    route="menu:settings",
+                )
+                return
+            existing_ids = await db.get_user_initial_stack_ids(conn, tg_uid)
+            if existing_ids:
+                await db.remove_user_supplements_bulk(conn, tg_uid, existing_ids)
+            await db.set_user_initial_stack_ids(conn, tg_uid, [])
+            await db.clear_onboarding_state(conn, tg_uid)
+            await db.start_onboarding_state(conn, tg_uid)
+            await _start_initial_pick(
+                update,
+                context,
+                prefix="🔄 Начинаем новый подбор. Предыдущий список очищен.",
+            )
+            return
         if data == "menu:settings":
             await show(
                 update,
@@ -2114,7 +2303,10 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await show(
                 update,
                 context,
-                "⭐ <b>Что входит в Premium</b>\n\n• Полный доступ к WebApp\n• AI check-in\n• Расширенные функции",
+                "⭐ <b>Почему Premium удобнее</b>\n\n"
+                "Бесплатно: база добавок, стартовый подбор и работа через кнопки в боте.\n\n"
+                "С Premium удобнее каждый день: Today с быстрыми отметками, карта тела, AI check-in, гибкая настройка стека и напоминаний в WebApp.\n\n"
+                "Итог: меньше ручной рутины, выше шанс стабильно держать план и замечать эффект.",
                 premium_upsell_kb(),
                 route="menu:premium",
             )
@@ -2215,19 +2407,51 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await _show_stats_screen(update, context, conn, tg_uid)
             return
         if data == "menu:webapp":
-            ok = await require_premium_or_upsell(update, context, "WebApp")
-            if not ok:
-                return
+            has_access = await db.has_any_webapp_access(conn, tg_uid)
+            has_premium = await db.is_premium_active(conn, tg_uid)
+            starter_used_row = await db.fetchone(
+                conn,
+                "SELECT starter_trial_used FROM users WHERE tg_user_id=?",
+                (int(tg_uid),),
+            )
+            starter_used = int(starter_used_row["starter_trial_used"] or 0) if starter_used_row else 0
             s_cfg = context.application.bot_data["settings"]
             if not s_cfg.WEBAPP_URL:
                 await show(update, context, "WEBAPP_URL не настроен.", premium_upsell_kb(), route="menu:premium")
                 return
+            if has_access:
+                await show(
+                    update,
+                    context,
+                    "WebApp открыт ✅",
+                    InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔓 Открыть WebApp", url=s_cfg.WEBAPP_URL)],
+                        [InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")],
+                    ]),
+                    route="menu:webapp",
+                )
+                return
+            if not has_premium and starter_used == 0:
+                await show(
+                    update,
+                    context,
+                    "🔓 <b>WebApp можно попробовать 3 дня бесплатно</b>\n\n"
+                    "Today • Каталог • Карта • Опрос",
+                    InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🎁 Активировать 3 дня", callback_data="starter:activate")],
+                        [InlineKeyboardButton("⭐ Купить Premium", callback_data="menu:premium")],
+                        [InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")],
+                    ]),
+                    route="menu:webapp",
+                )
+                return
             await show(
                 update,
                 context,
-                "WebApp разблокирован ✅",
+                "🔒 WebApp сейчас закрыт.\n\n"
+                "Premium делает ежедневное использование заметно удобнее: быстрые отметки, AI check-in и настройка стека в одном месте.",
                 InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔓 Открыть WebApp", url=s_cfg.WEBAPP_URL)],
+                    [InlineKeyboardButton("⭐ Купить Premium", callback_data="menu:premium")],
                     [InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")],
                 ]),
                 route="menu:webapp",
@@ -2243,39 +2467,26 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     route="menu:settings",
                 )
                 return
-            existing_ids = await db.get_user_initial_stack_ids(conn, tg_uid)
-            if existing_ids:
-                kb = InlineKeyboardMarkup(
+            await show(
+                update,
+                context,
+                "Перезапустить стартовый подбор? Это очистит предыдущие рекомендации.",
+                InlineKeyboardMarkup(
                     [
-                        [InlineKeyboardButton("✅ Да, начать заново", callback_data="settings:initial_pick:confirm")],
+                        [InlineKeyboardButton("✅ Да, перезапустить", callback_data="onboard:restart_apply")],
                         [InlineKeyboardButton("⬅️ Назад", callback_data="menu:settings")],
                     ]
-                )
-                await show(
-                    update,
-                    context,
-                    "Уверены, что хотите начать заново? "
-                    "Предыдущий начальный подбор будет удалён.",
-                    kb,
-                    route="menu:settings",
-                )
-                return
-            await _start_initial_pick(update, context)
+                ),
+                route="menu:settings",
+            )
             return
         if data == "settings:initial_pick:confirm":
-            if not s.OPENAI_API_KEY:
-                await show(
-                    update,
-                    context,
-                    "Начальный подбор недоступен: добавь OPENAI_API_KEY в .env.",
-                    settings_menu(),
-                    route="menu:settings",
-                )
-                return
             existing_ids = await db.get_user_initial_stack_ids(conn, tg_uid)
             if existing_ids:
                 await db.remove_user_supplements_bulk(conn, tg_uid, existing_ids)
             await db.set_user_initial_stack_ids(conn, tg_uid, [])
+            await db.clear_onboarding_state(conn, tg_uid)
+            await db.start_onboarding_state(conn, tg_uid)
             await _start_initial_pick(
                 update,
                 context,
@@ -2922,6 +3133,14 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await _show_catalog_home(update, context, conn)
             return
 
+        if data == "cat:goal":
+            await _show_catalog_class_picker(update, context, conn, 0)
+            return
+
+        if data == "cat:organ":
+            await _show_catalog_body_picker(update, context, "benefit")
+            return
+
         if data in {"cat:search", "cat:mode:search"}:
             _, _, ui_payload = await db.get_ui_state(conn, tg_uid)
             try:
@@ -2948,6 +3167,8 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "page": 0,
                 "query": "",
                 "class_key": "",
+                "body_token": "",
+                "return_page": 0,
             })
             return
 
@@ -2958,6 +3179,8 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "page": 0,
                 "query": "",
                 "class_key": "",
+                "body_token": "",
+                "return_page": 0,
             })
             return
 
@@ -2972,6 +3195,8 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "page": max(page, 0),
                 "query": "",
                 "class_key": "",
+                "body_token": "",
+                "return_page": max(page, 0),
             })
             return
 
@@ -3008,6 +3233,21 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "page": 0,
                 "query": "",
                 "class_key": class_key,
+                "body_token": "",
+                "return_page": 0,
+            })
+            return
+
+        if data.startswith("cat:organ:pick:"):
+            token = data.split(":", 3)[-1]
+            await _show_catalog_list(update, context, conn, tg_uid, {
+                "mode": "list",
+                "list_mode": "body_benefit",
+                "page": 0,
+                "query": "",
+                "class_key": "",
+                "body_token": token,
+                "return_page": 0,
             })
             return
 
@@ -3020,6 +3260,8 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "query": "",
                 "class_key": "",
                 "type_token": token,
+                "body_token": "",
+                "return_page": 0,
             })
             return
 
@@ -3032,6 +3274,7 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "query": "",
                 "class_key": "",
                 "body_token": token,
+                "return_page": 0,
             })
             return
 
@@ -3044,6 +3287,7 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "query": "",
                 "class_key": "",
                 "body_token": token,
+                "return_page": 0,
             })
             return
 
@@ -3056,6 +3300,8 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "query": "",
                 "class_key": "",
                 "group_token": token,
+                "body_token": "",
+                "return_page": 0,
             })
             return
 
@@ -3298,7 +3544,7 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 0,
                 tab="brief",
                 page=0,
-                return_mode="ai_back",
+                return_mode="onboard_back",
             )
             return
 
@@ -3481,7 +3727,38 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         0,
                         tab=tab,
                         page=page,
-                        return_mode="ai_back",
+                        return_mode="onboard_back",
+                        show_added=True,
+                    )
+                    return
+
+        if data.startswith("mysupp:add:") and ":ret_onboard" in data:
+            parts = data.split(":")
+            if len(parts) >= 4:
+                try:
+                    supplement_id = int(parts[2])
+                except ValueError:
+                    supplement_id = None
+                if supplement_id is not None:
+                    _, _, ui_payload = await db.get_ui_state(conn, tg_uid)
+                    try:
+                        payload_data = json.loads(ui_payload) if ui_payload else {}
+                    except json.JSONDecodeError:
+                        payload_data = {}
+                    if not isinstance(payload_data, dict):
+                        payload_data = {}
+                    tab = payload_data.get("tab") or "brief"
+                    page = int(payload_data.get("page") or 0)
+                    await db.add_user_supplement(conn, tg_uid, supplement_id)
+                    await render_supplement_card(
+                        update,
+                        context,
+                        conn,
+                        supplement_id,
+                        0,
+                        tab=tab,
+                        page=page,
+                        return_mode="onboard_back",
                         show_added=True,
                     )
                     return
@@ -3686,48 +3963,32 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
 
         if data == "menu:ai":
-            if not s.OPENAI_API_KEY:
-                await show(
-                    update,
-                    context,
-                    "Начальный подбор недоступен: добавь OPENAI_API_KEY в .env.",
-                    back(),
-                    route="menu:ai",
-                )
+            onboarding_state = await db.get_onboarding_state(conn, tg_uid)
+            onboarding_status = str(onboarding_state.get("onboarding_status") or "")
+            onboarding_raw = str(onboarding_state.get("onboarding_raw_json") or "")
+            free_pick_used = int(onboarding_state.get("onboarding_free_pick_used") or 0)
+
+            if onboarding_status in {"active", "results"} and onboarding_raw:
+                restored = await _render_onboarding_results(update, context, conn)
+                if not restored:
+                    await home(update, context)
                 return
-            _, ui_screen, ui_payload = await db.get_ui_state(conn, tg_uid)
-            try:
-                payload_data = json.loads(ui_payload) if ui_payload else {}
-            except json.JSONDecodeError:
-                payload_data = {}
-            if isinstance(payload_data, dict) and ui_screen == "menu:ai" and payload_data.get("ai_suggest_active"):
-                await _render_ai_suggestions(
-                    update,
-                    context,
-                    conn,
-                    str(payload_data.get("goal_text") or "текущая цель"),
-                    str(payload_data.get("raw") or ""),
-                    prefix_line=str(payload_data.get("prefix_line") or "") or None,
-                )
+
+            if free_pick_used == 0:
+                if not s.OPENAI_API_KEY:
+                    await show(
+                        update,
+                        context,
+                        "Начальный подбор недоступен: добавь OPENAI_API_KEY в .env.",
+                        back(),
+                        route="menu:ai",
+                    )
+                    return
+                await db.start_onboarding_state(conn, tg_uid)
+                await _start_initial_pick(update, context)
                 return
-            existing_ids = await db.get_user_initial_stack_ids(conn, tg_uid)
-            if existing_ids:
-                kb = InlineKeyboardMarkup(
-                    [
-                        [InlineKeyboardButton("✅ Да, начать заново", callback_data="settings:initial_pick:confirm")],
-                        [InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")],
-                    ]
-                )
-                await show(
-                    update,
-                    context,
-                    "Уверены, что хотите начать заново? "
-                    "Предыдущий начальный подбор будет удалён.",
-                    kb,
-                    route="menu:ai",
-                )
-                return
-            await _start_initial_pick(update, context)
+
+            await _show_ai_used_upsell(update, context)
             return
 
     finally:
@@ -4127,35 +4388,27 @@ async def on_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             local_now = datetime.now(tzinfo).strftime("%H:%M")
             label = tz.format_confirmation_label(tz_value)
             if onboarding_step == "tz":
-                existing_ids = await db.get_user_initial_stack_ids(conn, tg_uid)
                 prefix = (
                     "✅ Часовой пояс сохранён: "
                     f"{label}\n"
                     f"Текущее время у тебя: {local_now}\n"
                     "Теперь сделаем начальный подбор."
                 )
-                if existing_ids:
-                    kb = InlineKeyboardMarkup(
-                        [
-                            [InlineKeyboardButton("✅ Да, начать заново", callback_data="settings:initial_pick:confirm")],
-                            [InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")],
-                        ]
-                    )
-                    await show(
-                        update,
-                        context,
-                        f"{prefix}\n\n"
-                        "У вас уже есть начальный подбор. "
-                        "При повторном запуске он будет удалён.",
-                        kb,
-                        route="menu:ai",
-                    )
-                else:
+                onboarding_state = await db.get_onboarding_state(conn, tg_uid)
+                free_pick_used = int(onboarding_state.get("onboarding_free_pick_used") or 0)
+                onboarding_status = str(onboarding_state.get("onboarding_status") or "")
+                onboarding_raw = str(onboarding_state.get("onboarding_raw_json") or "")
+                if onboarding_status in {"active", "results"} and onboarding_raw:
+                    await _render_onboarding_results(update, context, conn)
+                elif free_pick_used == 0:
+                    await db.start_onboarding_state(conn, tg_uid)
                     await _start_initial_pick(
                         update,
                         context,
                         prefix=prefix,
                     )
+                else:
+                    await _show_ai_used_upsell(update, context)
             else:
                 await show(
                     update,
@@ -4560,7 +4813,7 @@ async def _render_route(
         )
         return
     if route.startswith("cat:page:"):
-        payload = {"mode": "list", "list_mode": "evidence", "page": int(route.split(":")[-1])}
+        payload = {"mode": "list", "list_mode": "alpha", "page": int(route.split(":")[-1]), "query": "", "class_key": "", "body_token": "", "return_page": int(route.split(":")[-1])}
         await _show_catalog_list(
             update,
             context,
@@ -4580,6 +4833,20 @@ async def _render_route(
             target_message_id=target_message_id,
         )
         return
+    if route == "cat:goal":
+        page = int(payload.get("page") or 0) if isinstance(payload, dict) else 0
+        await _show_catalog_class_picker(
+            update,
+            context,
+            conn,
+            page,
+            target_chat_id=target_chat_id,
+            target_message_id=target_message_id,
+        )
+        return
+    if route == "cat:organ":
+        await _show_catalog_body_picker(update, context, "benefit")
+        return
     if route.startswith("cat:list"):
         page = 0
         parts = route.split(":")
@@ -4587,18 +4854,22 @@ async def _render_route(
             page = int(parts[2])
         elif isinstance(payload, dict):
             page = int(payload.get("page") or 0)
+        list_payload = payload if isinstance(payload, dict) else {
+            "mode": "list",
+            "list_mode": "alpha",
+            "page": max(page, 0),
+            "query": "",
+            "class_key": "",
+            "body_token": "",
+            "return_page": max(page, 0),
+        }
+        list_payload["page"] = max(page, 0)
         await _show_catalog_list(
             update,
             context,
             conn,
             tg_uid,
-            {
-                "mode": "list",
-                "list_mode": "alpha",
-                "page": max(page, 0),
-                "query": "",
-                "class_key": "",
-            },
+            list_payload,
             target_chat_id=target_chat_id,
             target_message_id=target_message_id,
         )
@@ -4813,16 +5084,15 @@ async def _render_route(
             target_message_id=target_message_id,
         )
         return
-    if route == "menu:ai":
-        if isinstance(payload, dict) and payload.get("ai_suggest_active"):
-            await _render_ai_suggestions(
-                update,
-                context,
-                conn,
-                str(payload.get("goal_text") or "текущая цель"),
-                str(payload.get("raw") or ""),
-                prefix_line=str(payload.get("prefix_line") or "") or None,
-            )
+    if route in {"menu:ai", "onboard:results"}:
+        restored = await _render_onboarding_results(
+            update,
+            context,
+            conn,
+            target_chat_id=target_chat_id,
+            target_message_id=target_message_id,
+        )
+        if restored:
             return
         await home(update, context, target_chat_id=target_chat_id, target_message_id=target_message_id)
         return
@@ -5356,16 +5626,17 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     route="menu:ai",
                 )
             else:
+                await db.start_onboarding_state(conn, tg_uid, goal_text=txt)
                 sups = await db.list_user_supplements(conn, tg_uid, limit=100)
                 user_supp_text = ", ".join([r["name"] for r in sups]) or "нет"
                 cfg = OpenAIConfig(api_key=s.OPENAI_API_KEY, model=s.OPENAI_MODEL)
-                await show(update, context, "🤖 Думаю…", back(), route="menu:ai")
+                await show(update, context, "🤖 Думаю…", back(), route="onboard:goal")
                 raw = None
                 try:
                     raw = await suggest_stack_v1(cfg, txt, user_supp_text)
                 except Exception:
                     log.exception("OpenAI request failed")
-                    await show(update, context, "Начальный подбор временно недоступен.", back(), route="menu:ai")
+                    await show(update, context, "Начальный подбор временно недоступен.", back(), route="onboard:goal")
 
                 await _render_ai_suggestions(update, context, conn, txt, raw)
         elif waiting == AI_CHECKIN_TEXT_WAIT:
@@ -5643,7 +5914,7 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             return
 
-        route = "menu:ai"
+        route = "onboard:goal"
         await show(update, context, "🎙️ Принял голосовое. Расшифровываю...", back(), route=route)
         try:
             audio_bytes, filename = await _download_voice_bytes(update, context)
@@ -5684,16 +5955,17 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 route=route,
             )
             return
+        await db.start_onboarding_state(conn, tg_uid, goal_text=transcription, prefix_line=f"🎙️ Понял цель: <b>{transcription}</b>")
         sups = await db.list_user_supplements(conn, tg_uid, limit=100)
         user_supp_text = ", ".join([r["name"] for r in sups]) or "нет"
         cfg = OpenAIConfig(api_key=s.OPENAI_API_KEY, model=s.OPENAI_MODEL)
-        await show(update, context, "🤖 Думаю…", back(), route="menu:ai")
+        await show(update, context, "🤖 Думаю…", back(), route="onboard:goal")
         raw = None
         try:
             raw = await suggest_stack_v1(cfg, transcription, user_supp_text)
         except Exception:
             log.exception("OpenAI request failed")
-            await show(update, context, "Начальный подбор временно недоступен.", back(), route="menu:ai")
+            await show(update, context, "Начальный подбор временно недоступен.", back(), route="onboard:goal")
             return
 
         rendered = await _render_ai_suggestions(
@@ -5792,12 +6064,11 @@ async def _show_catalog_home(
         context,
         (
             "📚 <b>Каталог БАДов</b>\n"
-            "Выбери, как искать: по названию, по доказательности, "
-            "по целям/влиянию или через готовые стеки."
+            "Простой старт: поиск, цель или система организма."
         ),
         catalog_home(is_admin=(await _get_role_perms_ctx(context, tg_uid))[0] != db.ROLE_NONE),
         route="cat:home",
-        payload={"mode": "home"},
+        payload={"mode": "home", "list_mode": "", "page": 0, "query": "", "class_key": "", "body_token": "", "return_page": 0},
         target_chat_id=target_chat_id,
         target_message_id=target_message_id,
     )
@@ -6152,10 +6423,12 @@ async def _load_catalog_payload(conn, tg_uid: int) -> dict:
     if view != "catalog":
         return {
             "mode": "list",
-            "list_mode": "evidence",
+            "list_mode": "alpha",
             "page": 0,
             "query": "",
             "class_key": "",
+            "body_token": "",
+            "return_page": 0,
         }
     try:
         payload_data = json.loads(payload) if payload else {}
@@ -6164,13 +6437,14 @@ async def _load_catalog_payload(conn, tg_uid: int) -> dict:
     if not isinstance(payload_data, dict):
         payload_data = {}
     payload_data.setdefault("mode", "list")
-    payload_data.setdefault("list_mode", "evidence")
+    payload_data.setdefault("list_mode", "alpha")
     payload_data.setdefault("page", 0)
     payload_data.setdefault("query", "")
     payload_data.setdefault("class_key", "")
     payload_data.setdefault("type_token", "")
     payload_data.setdefault("body_token", "")
     payload_data.setdefault("group_token", "")
+    payload_data.setdefault("return_page", int(payload_data.get("page") or 0))
     return payload_data
 
 async def _show_catalog_class_picker(
@@ -6190,15 +6464,15 @@ async def _show_catalog_class_picker(
     await show(
         update,
         context,
-        "🎯 <b>Цели/классы</b>\nВыбери категорию:",
+        "🎯 <b>По цели</b>\n\nЧто хочешь улучшить?",
         catalog_class_picker(
             sliced,
             page=page,
             has_prev=page > 0,
             has_next=end < len(classes),
         ),
-        route=f"cat:class:page:{page}",
-        payload={"mode": "home"},
+        route="cat:goal",
+        payload={"mode": "goal", "page": page, "list_mode": "class", "query": "", "class_key": "", "body_token": "", "return_page": 0},
         target_chat_id=target_chat_id,
         target_message_id=target_message_id,
     )
@@ -6223,14 +6497,14 @@ async def _show_catalog_body_picker(
     context: ContextTypes.DEFAULT_TYPE,
     mode: str,
 ) -> None:
-    title = "Каталог — Куда влияет" if mode == "benefit" else "Каталог — Нагрузка"
+    _ = mode
     await show(
         update,
         context,
-        f"🫀 <b>{title}</b>\nВыбери категорию. Дальше покажу список.",
-        catalog_body_kb(mode),
-        route=f"cat:mode:body:{mode}",
-        payload={"mode": "home"},
+        "🫀 <b>По органу / системе</b>\n\nВыбери систему, которую хочешь поддержать.",
+        catalog_body_kb(),
+        route="cat:organ",
+        payload={"mode": "organ", "list_mode": "body_benefit", "page": 0, "query": "", "class_key": "", "body_token": "", "return_page": 0},
     )
 
 
@@ -6257,7 +6531,7 @@ async def _show_catalog_list(
     target_chat_id: int | None = None,
     target_message_id: int | None = None,
 ) -> None:
-    list_mode = payload.get("list_mode") or "evidence"
+    list_mode = payload.get("list_mode") or "alpha"
     page = max(int(payload.get("page") or 0), 0)
     offset = page * CATALOG_PAGE_SIZE
     query = str(payload.get("query") or "").strip()
@@ -6265,6 +6539,7 @@ async def _show_catalog_list(
     type_token = str(payload.get("type_token") or "").strip()
     body_token = str(payload.get("body_token") or "").strip()
     group_token = str(payload.get("group_token") or "").strip()
+    return_page = int(payload.get("return_page") or page or 0)
 
     if list_mode == "search":
         rows, total = await db.search_supplements(conn, query, page=page, page_size=CATALOG_PAGE_SIZE)
@@ -6288,8 +6563,8 @@ async def _show_catalog_list(
         total = offset + len(rows)
     else:
         total = await db.count_supplements(conn)
-        rows = await db.list_supplements_sorted(conn, "evidence", limit=CATALOG_PAGE_SIZE, offset=offset)
-        list_mode = "evidence"
+        rows = await db.list_supplements_sorted(conn, "alpha", limit=CATALOG_PAGE_SIZE, offset=offset)
+        list_mode = "alpha"
 
     if list_mode in {"type", "body_benefit", "body_burden", "group"}:
         has_next = len(rows) > CATALOG_PAGE_SIZE
@@ -6298,7 +6573,7 @@ async def _show_catalog_list(
         has_next = (offset + len(rows)) < total
 
     if not rows:
-        if total == 0 and list_mode in {"evidence", "alpha"}:
+        if total == 0 and list_mode in {"alpha"}:
             await show(
                 update,
                 context,
@@ -6323,29 +6598,32 @@ async def _show_catalog_list(
         return
 
     total_pages = max(1, (total + CATALOG_PAGE_SIZE - 1) // CATALOG_PAGE_SIZE)
-    lines = ["📄 <b>Список добавок</b>"] if list_mode == "alpha" else ["📚 <b>Каталог</b>"]
+    lines = ["📚 <b>Каталог</b>"]
     if list_mode == "search":
         lines.append(f"Поиск: «{query}»")
     elif list_mode == "class":
-        lines.append(f"Класс: {rules.get_catalog_class_title(class_key)}")
+        lines.append(f"Цель: {rules.get_catalog_class_title(class_key)}")
     elif list_mode == "type":
         lines.append(f"По типу: {CATALOG_TYPE_TITLES.get(type_token, type_token or 'Не задано')}")
     elif list_mode == "body_benefit":
-        lines.append(f"Куда влияет: {CATALOG_BODY_TITLES.get(body_token, body_token or 'Не задано')}")
+        lines.append(f"Система: {CATALOG_BODY_TITLES.get(body_token, body_token or 'Не задано')} · ✅ Поддержка")
     elif list_mode == "body_burden":
-        lines.append(f"Нагрузка: {CATALOG_BODY_TITLES.get(body_token, body_token or 'Не задано')}")
+        lines.append(f"Система: {CATALOG_BODY_TITLES.get(body_token, body_token or 'Не задано')} · ⚠️ Нагрузка")
     elif list_mode == "group":
         lines.append(f"По группе: {CATALOG_GROUP_TITLES.get(group_token, group_token or 'Не задано')}")
     elif list_mode == "alpha":
-        lines.append("Сортировка: по алфавиту")
-    else:
-        lines.append("Сортировка: по доказательности")
-    if list_mode in {"type", "body_benefit", "body_burden", "group"}:
-        lines.append(f"Показаны первые {CATALOG_PAGE_SIZE if rows else 0}")
-    elif list_mode == "alpha":
-        lines.append(f"Стр. {page + 1}/{total_pages} • всего {total}")
-    else:
-        lines.append(f"Стр. {page + 1} из {total_pages}")
+        lines.append("Режим: весь каталог A–Я")
+    shown_total = total
+    if list_mode in {"type", "body_benefit", "body_burden", "group"} and has_next:
+        shown_total = offset + len(rows) + 1
+    lines.append(f"Найдено: {shown_total}")
+    lines.append("Показываю самые релевантные. Открой карточку, чтобы увидеть детали.")
+
+    list_back_cb = "cat:home"
+    if list_mode == "class":
+        list_back_cb = "cat:goal"
+    elif list_mode in {"body_benefit", "body_burden"}:
+        list_back_cb = "cat:organ"
 
     await show(
         update,
@@ -6355,8 +6633,11 @@ async def _show_catalog_list(
             rows,
             has_prev=page > 0,
             has_next=has_next,
+            back_cb=list_back_cb,
+            mode_switch_body_token=body_token if list_mode in {"body_benefit", "body_burden"} else "",
+            mode_switch_current=list_mode,
         ),
-        route="cat:list",
+        route=f"cat:list:{page}",
         payload={
             "mode": "list",
             "list_mode": list_mode,
@@ -6366,6 +6647,7 @@ async def _show_catalog_list(
             "type_token": type_token,
             "body_token": body_token,
             "group_token": group_token,
+            "return_page": return_page,
         },
         target_chat_id=target_chat_id,
         target_message_id=target_message_id,
@@ -6400,15 +6682,17 @@ async def _show_catalog_card(
     )
     summary = summary.strip() or "описание будет добавлено"
 
-    confidence = str(row["confidence"] or "").strip() or "неизвестно"
-    human_trials = str(row["human_trials_count_est"] or "").strip() or "неизвестно"
-    participants = str(row["participants_total_est"] or "").strip() or "неизвестно"
-    avg_effect = str(row["avg_effect_percent_est"] or "").strip() or "неизвестно"
+    evidence_text = engine.evidence_grade_label(row.get("evidence_grade"))
+    confidence_text = engine.confidence_label(row.get("confidence"))
+    human_trials = engine.metric_or_no_data(row.get("human_trials_count_est"))
+    participants = engine.metric_or_no_data(row.get("participants_total_est"))
+    avg_effect = engine.metric_or_no_data(row.get("avg_effect_percent_est"))
 
     text = (
         f"💊 <b>{title}</b>\n\n"
         f"Кратко: {summary}\n\n"
-        f"Доказательность: {confidence}\n"
+        f"Доказательность: {evidence_text}\n"
+        f"Уверенность: {confidence_text}\n"
         f"Исследования на людях: {human_trials}\n"
         f"Участников суммарно: {participants}\n"
         f"Средний эффект: {avg_effect}"
@@ -6417,13 +6701,14 @@ async def _show_catalog_card(
     in_my = await db.user_has_supplement(conn, tg_uid, int(row["id"]))
     btns: list[list[InlineKeyboardButton]] = []
     if in_my:
-        btns.append([InlineKeyboardButton("➖ Убрать из моих", callback_data=f"card:remove:{row['id']}")])
+        btns.append([InlineKeyboardButton("⚙️ Управлять", callback_data=f"mysupp:open:{row['id']}")])
     else:
-        btns.append([InlineKeyboardButton("🟢➕ Добавить в мои", callback_data=f"card:add:{row['id']}")])
+        btns.append([InlineKeyboardButton("🟢 Добавить в мои БАДы", callback_data=f"card:add:{row['id']}")])
+    btns.append([InlineKeyboardButton("💊 Как принимать", callback_data=f"supp:open:{row['id']}")])
     btns.append([InlineKeyboardButton("🧩 Совместимость", callback_data=f"card:compat:{row['id']}")])
     btns.append([InlineKeyboardButton("📊 Доказательность", callback_data=f"card:evidence:{row['id']}")])
-    if in_my:
-        btns.append([InlineKeyboardButton("⚙️ Управление", callback_data=f"mysupp:open:{row['id']}")])
+    if str(row.get("purchase_url") or "").strip():
+        btns.append([InlineKeyboardButton("🛒 Где купить", url=str(row.get("purchase_url") or "").strip())])
     btns.append([InlineKeyboardButton("⬅️ Назад", callback_data="cat:back")])
 
     payload = await _load_catalog_payload(conn, tg_uid)
@@ -6455,15 +6740,17 @@ async def _show_catalog_evidence(
     title = row["name_ru"] or row["name_en"] or row["name"]
     if row["name_ru"] and row["name_en"]:
         title = f"{row['name_ru']} ({row['name_en']})"
-    confidence = str(row["confidence"] or "").strip() or "неизвестно"
-    human_trials = str(row["human_trials_count_est"] or "").strip() or "неизвестно"
-    participants = str(row["participants_total_est"] or "").strip() or "неизвестно"
-    avg_effect = str(row["avg_effect_percent_est"] or "").strip() or "неизвестно"
+    evidence_text = engine.evidence_grade_label(row.get("evidence_grade"))
+    confidence_text = engine.confidence_label(row.get("confidence"))
+    human_trials = engine.metric_or_no_data(row.get("human_trials_count_est"))
+    participants = engine.metric_or_no_data(row.get("participants_total_est"))
+    avg_effect = engine.metric_or_no_data(row.get("avg_effect_percent_est"))
 
     text = (
         f"📊 <b>Доказательность</b>\n"
         f"{title}\n\n"
-        f"Уверенность: {confidence}\n"
+        f"Уровень базы: {evidence_text}\n"
+        f"Уверенность: {confidence_text}\n"
         f"Исследования на людях: {human_trials}\n"
         f"Участников суммарно: {participants}\n"
         f"Средний эффект: {avg_effect}"
@@ -6663,21 +6950,19 @@ async def render_supplement_card(
         )
         return
     tab = (tab or "brief").strip().lower()
-    if tab not in {"brief", "time", "dose", "synergy", "antag"}:
+    if tab == "time":
+        tab = "evidence"
+    if tab not in {"brief", "dose", "synergy", "antag", "evidence"}:
         tab = "brief"
 
     name_ru = str(row.get("name_ru") or "").strip()
     name_en = str(row.get("name_en") or "").strip()
     title = name_ru or name_en or str(row.get("name") or "").strip() or "Без названия"
-    evidence = (
-        str(row.get("evidence_grade") or "").strip()
-        or str(row.get("confidence") or "").strip()
-    )
-    if not evidence:
-        evidence = "неизвестно"
-    human_trials = str(row.get("human_trials_count_est") or "").strip()
-    participants = str(row.get("participants_total_est") or "").strip()
-    avg_effect = str(row.get("avg_effect_percent_est") or "").strip()
+    evidence_grade_text = engine.evidence_grade_label(row.get("evidence_grade"))
+    confidence_text = engine.confidence_label(row.get("confidence"))
+    human_trials = engine.metric_or_no_data(row.get("human_trials_count_est"))
+    participants = engine.metric_or_no_data(row.get("participants_total_est"))
+    avg_effect = engine.metric_or_no_data(row.get("avg_effect_percent_est"))
     short_desc = str(row.get("summary_ru") or "").strip()
 
     dose_raw = row.get("dose_ru")
@@ -6753,56 +7038,33 @@ async def render_supplement_card(
         top_limit = 5
         top_synergy = await db.list_linked_supplements(conn, links["synergy"][:top_limit])
         top_antag = await db.list_linked_supplements(conn, links["antagonists"][:top_limit])
-        lines = [
-            f"<b>{title}</b>",
-        ]
-        if name_en:
-            lines.append(f"Англ: {name_en}")
+        lines = [f"<b>{title}</b>"]
         if show_added:
             lines.append("✅ Добавлено в «Мои БАДы»")
-        lines.append("")
-        lines.append(f"Доказательность: {evidence}")
-        if human_trials:
-            lines.append(f"Исследования на людях: {human_trials}")
-        if participants:
-            lines.append(f"Участников всего: {participants}")
-        if avg_effect:
-            lines.append(f"Средний эффект: {avg_effect}")
-        if short_desc:
-            lines.extend(["", "Коротко:", short_desc])
+        lines.extend(["", f"Доказательность: {evidence_grade_text}"])
+        lines.extend(["", "Что делает:"])
         summary_verified = str(row.get("summary_verified") or "").strip()
         summary_theoretical = str(row.get("summary_theoretical") or "").strip()
         molecular_mechanisms = str(row.get("molecular_mechanisms") or "").strip()
-        if summary_verified:
-            lines.extend(["", "Проверено:", summary_verified])
-        if summary_theoretical:
-            lines.extend(["", "Теоретически:", summary_theoretical])
-        if molecular_mechanisms:
-            lines.extend(["", "Механизмы:", molecular_mechanisms])
-        lines.extend(
-            [
-                "",
-                "Топ совместимости (с чем лучше всего сочетают):",
-                _format_link_names(top_synergy),
-                "",
-                "Топ несовместимости (с чем лучше НЕ сочетать):",
-                _format_link_names(top_antag),
-                "",
-                "Больше деталей — во вкладках 🤝 и ⚠️.",
-            ]
-        )
-    elif tab == "time":
-        lines = [f"<b>{title}</b> — 🕒 Время приёма"]
+        effect_text = summary_verified or short_desc or summary_theoretical or molecular_mechanisms
+        lines.append(effect_text or "нет данных")
+        lines.extend(["", "На что обратить внимание:"])
+        safety_block = safety_ru or timing_comment or "нет данных"
+        lines.append(safety_block)
+        lines.extend([
+            "",
+            "Топ совместимости:",
+            _format_link_names(top_synergy),
+            "",
+            "Топ несовместимости:",
+            _format_link_names(top_antag),
+        ])
+    elif tab == "dose":
+        lines = [f"<b>{title}</b> — 💊 Как принимать"]
         if timing_ru:
-            lines.append(f"Рекомендация по времени: {timing_ru}")
+            lines.append(f"Время приёма: {timing_ru}")
         if with_food:
             lines.append(f"С едой/натощак: {with_food}")
-        if timing_comment:
-            lines.append(f"Комментарий: {timing_comment}")
-        if len(lines) == 1:
-            lines.append("Пока нет данных. Добавим по мере наполнения базы.")
-    elif tab == "dose":
-        lines = [f"<b>{title}</b> — 💊 Дозировка"]
         if dose_typical:
             lines.append(f"Рекомендуемая доза: {dose_typical}")
         if dose_range:
@@ -6814,7 +7076,14 @@ async def render_supplement_card(
         if safety_ru:
             lines.append(f"Безопасность: {safety_ru}")
         if len(lines) == 1:
-            lines.append("Пока нет данных. Добавим по мере наполнения базы.")
+            lines.append("нет данных")
+    elif tab == "evidence":
+        lines = [f"<b>{title}</b> — 📊 Доказательность"]
+        lines.append(f"Уровень базы: {evidence_grade_text}")
+        lines.append(f"Уверенность: {confidence_text}")
+        lines.append(f"Исследования на людях: {human_trials}")
+        lines.append(f"Участников суммарно: {participants}")
+        lines.append(f"Средний эффект: {avg_effect}")
     else:
         links = await db.get_supplement_links(conn, supplement_id)
         link_ids = links["synergy"] if tab == "synergy" else links["antagonists"]
@@ -6866,6 +7135,7 @@ async def render_supplement_card(
         has_links=has_links,
         linked_items=linked_items,
         purchase_url=str(row.get("purchase_url") or "").strip() or None,
+        in_stack=await db.user_has_supplement(conn, update.effective_user.id, supplement_id),
     )
     msg = await show(
         update,

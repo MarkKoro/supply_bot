@@ -201,7 +201,7 @@ async def _premium_guard(tg_user_id: int) -> bool:
         return True
     conn = await db.connect(s.DB_PATH)
     try:
-        return await db.is_premium_active(conn, tg_user_id)
+        return await db.has_any_webapp_access(conn, tg_user_id)
     finally:
         await conn.close()
 
@@ -298,7 +298,17 @@ async def api_me(x_telegram_init_data: str = Header(default="", alias="X-Telegra
         role = await db.get_role(conn, tg_user_id)
         perms = db.role_perms(role)
         is_admin = role != db.ROLE_NONE
-        premium = is_admin or await db.is_premium_active(conn, tg_user_id)
+        premium_active = await db.is_premium_active(conn, tg_user_id)
+        starter_trial_active = await db.is_starter_trial_active(conn, tg_user_id)
+        starter_trial_until_utc = await db.get_starter_trial_until(conn, tg_user_id)
+        starter_row = await db.fetchone(
+            conn,
+            "SELECT starter_trial_used FROM users WHERE tg_user_id=?",
+            (int(tg_user_id),),
+        )
+        starter_trial_used = int(starter_row["starter_trial_used"] or 0) if starter_row else 0
+        premium = is_admin or premium_active
+        webapp_access = is_admin or premium_active or starter_trial_active
         premium_until = None if is_admin else await db.get_premium_until(conn, tg_user_id)
         status = await db.get_user_status(conn, tg_user_id)
         cosmetics = await db.get_user_cosmetics(conn, tg_user_id)
@@ -308,6 +318,10 @@ async def api_me(x_telegram_init_data: str = Header(default="", alias="X-Telegra
         "ok": True,
         "premium": premium,
         "premium_until_utc": premium_until,
+        "starter_trial_active": bool(starter_trial_active),
+        "starter_trial_until_utc": starter_trial_until_utc,
+        "starter_trial_used": int(starter_trial_used),
+        "webapp_access": bool(webapp_access),
         "plans": _plans_payload(),
         "is_admin": is_admin,
         "role": role,
@@ -652,6 +666,11 @@ async def api_admin_duplicates_resolve(
     body: AdminResolveDuplicateBody,
     x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
 ):
+    messages = {
+        "duplicate_name_mismatch": "Название дублей не совпало",
+        "supplement_not_found": "Запись не найдена",
+        "duplicate_merge_failed": "Не удалось объединить записи",
+    }
     tg_user_id = await _auth_user_id(x_telegram_init_data)
     ok_perm, forbidden, _, _ = await _require_perm(tg_user_id, "content_edit")
     if not ok_perm:
@@ -660,10 +679,11 @@ async def api_admin_duplicates_resolve(
     try:
         await db.admin_resolve_name_duplicate(conn, int(tg_user_id), int(body.keep_id), int(body.remove_id))
     except ValueError as exc:
-        return JSONResponse({"ok": False, "code": str(exc)}, status_code=400)
+        code = str(exc)
+        return JSONResponse({"ok": False, "code": code, "message": messages.get(code, "Не удалось обработать дубликат")}, status_code=400)
     finally:
         await conn.close()
-    return JSONResponse({"ok": True})
+    return JSONResponse({"ok": True, "message": "Дубликат успешно объединён"})
 
 @app.get("/api/settings")
 async def api_settings_get(

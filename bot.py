@@ -5,7 +5,7 @@ import logging
 import os
 import re
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, Update
@@ -1854,10 +1854,31 @@ async def on_precheckout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     query = update.pre_checkout_query
     if not query:
         return
+
     payload = str(query.invoice_payload or "")
-    if not payload.startswith("sub:"):
+    parts = payload.split(":")
+    if len(parts) < 4 or parts[0] != "sub":
         await query.answer(ok=False, error_message="Некорректный payload")
         return
+
+    plan_id = str(parts[1] or "")
+    method = str(parts[2] or "").lower()
+    s = context.application.bot_data["settings"]
+    if plan_id not in s.PREMIUM_PLANS or method not in {"stars", "yookassa"}:
+        await query.answer(ok=False, error_message="Некорректный тариф")
+        return
+
+    if method == "stars":
+        expected_amount = int(s.PREMIUM_PRICES_STARS.get(plan_id, 0) or 0)
+        if str(query.currency or "") != "XTR" or int(query.total_amount or 0) != expected_amount:
+            await query.answer(ok=False, error_message="Сумма или валюта не совпадает")
+            return
+    else:
+        expected_amount = int(s.PREMIUM_PRICES_RUB.get(plan_id, 0) or 0)
+        if str(query.currency or "") != "RUB" or int(query.total_amount or 0) != expected_amount:
+            await query.answer(ok=False, error_message="Сумма или валюта не совпадает")
+            return
+
     await query.answer(ok=True)
 
 
@@ -5985,6 +6006,243 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception:
             pass
 
+def _parse_utc_iso(value: str | None) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        dt = datetime.fromisoformat(raw)
+        if dt.tzinfo is None:
+            return dt
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    except Exception:
+        return None
+
+
+def _fmt_avg(value: float | None) -> str:
+    if value is None:
+        return "—"
+    return f"{value:.2f}".rstrip("0").rstrip(".")
+
+
+def _fixed_rows(rows: list[tuple[str, str]]) -> str:
+    width = max((len(k) for k, _ in rows), default=0)
+    return "\n".join(f"{k.ljust(width)}  {v}" for k, v in rows)
+
+
+async def _admin_dashboard_text(conn) -> str:
+    base = await db.admin_get_global_stats(conn)
+    now_iso = db.utc_now_iso()
+
+    premium_row = await db.fetchone(conn, "SELECT COUNT(*) AS c FROM users WHERE COALESCE(premium_until_utc,'') > ?", (now_iso,))
+    premium_active = int(premium_row["c"] or 0) if premium_row else 0
+
+    starter_row = await db.fetchone(conn, "SELECT COUNT(*) AS c FROM users WHERE COALESCE(starter_trial_until_utc,'') > ?", (now_iso,))
+    starter_active = int(starter_row["c"] or 0) if starter_row else 0
+
+    access_row = await db.fetchone(
+        conn,
+        "SELECT COUNT(*) AS c FROM users WHERE COALESCE(premium_until_utc,'') > ? OR COALESCE(starter_trial_until_utc,'') > ?",
+        (now_iso, now_iso),
+    )
+    webapp_access = int(access_row["c"] or 0) if access_row else 0
+
+    avg_stack_row = await db.fetchone(
+        conn,
+        """SELECT AVG(cnt) AS avg_cnt FROM (
+               SELECT user_id, COUNT(*) AS cnt
+               FROM user_supplements
+               WHERE is_active=1
+               GROUP BY user_id
+           )""",
+    )
+    avg_stack = float(avg_stack_row["avg_cnt"]) if avg_stack_row and avg_stack_row["avg_cnt"] is not None else None
+
+    top_stack_row = await db.fetchone(
+        conn,
+        """SELECT COALESCE(s.name_ru, s.slug, CAST(us.supplement_id AS TEXT)) AS name, COUNT(*) AS c
+           FROM user_supplements us
+           LEFT JOIN supplements s ON s.id=us.supplement_id
+           WHERE us.is_active=1
+           GROUP BY us.supplement_id
+           ORDER BY c DESC
+           LIMIT 1""",
+    )
+    top_stack_name = str(top_stack_row["name"]) if top_stack_row else "—"
+    top_stack_count = int(top_stack_row["c"] or 0) if top_stack_row else 0
+
+    top_taken_row = None
+    intake_cols = await db._table_columns(conn, "user_intake_log") if await db._table_exists(conn, "user_intake_log") else set()
+    if {"supplement_id", "status", "local_date"}.issubset(intake_cols):
+        top_taken_row = await db.fetchone(
+            conn,
+            """SELECT COALESCE(s.name_ru, s.slug, CAST(uil.supplement_id AS TEXT)) AS name, COUNT(*) AS c
+               FROM user_intake_log uil
+               LEFT JOIN supplements s ON s.id=uil.supplement_id
+               WHERE uil.status='taken' AND COALESCE(uil.local_date,'') >= date('now','-30 day')
+               GROUP BY uil.supplement_id
+               ORDER BY c DESC
+               LIMIT 1""",
+        )
+    top_taken_name = str(top_taken_row["name"]) if top_taken_row else "—"
+    top_taken_count = int(top_taken_row["c"] or 0) if top_taken_row else 0
+
+    pay_rows = await db.fetchall(conn, "SELECT payload, amount, currency FROM payments WHERE status='paid'")
+    total_paid = len(pay_rows)
+    paid_stars = sum(int(r["amount"] or 0) for r in pay_rows if str(r["currency"] or "") == "XTR")
+    paid_rub_kop = sum(int(r["amount"] or 0) for r in pay_rows if str(r["currency"] or "") == "RUB")
+
+    by_plan: dict[str, int] = {}
+    for r in pay_rows:
+        payload = str(r["payload"] or "")
+        parts = payload.split(":")
+        if len(parts) >= 4 and parts[0] == "sub":
+            by_plan[parts[1]] = by_plan.get(parts[1], 0) + 1
+    top_plan = max(by_plan.items(), key=lambda x: x[1])[0] if by_plan else "—"
+
+    rows = [
+        ("Users total", str(int(base.get("users_total") or 0))),
+        ("Active 1d/7d/30d", f"{int(base.get('active_1d') or 0)} / {int(base.get('active_7d') or 0)} / {int(base.get('active_30d') or 0)}"),
+        ("Premium active", str(premium_active)),
+        ("Starter trial active", str(starter_active)),
+        ("WebApp access now", str(webapp_access)),
+        ("Avg active supplements", _fmt_avg(avg_stack)),
+        ("Avg reminders", _fmt_avg(base.get("avg_enabled_reminders"))),
+        ("Check-ins 30d", str(int(base.get("checkins_30d_total") or 0))),
+        ("Intakes 30d", str(int(base.get("intake_30d_total") or 0))),
+        ("Top supplement in stacks", f"{top_stack_name} ({top_stack_count})"),
+        ("Top taken supplement 30d", f"{top_taken_name} ({top_taken_count})"),
+        ("Paid subscriptions total", str(total_paid)),
+        ("Paid by top plan", top_plan),
+        ("Revenue RUB", f"{paid_rub_kop / 100:.2f} ₽"),
+        ("Revenue Stars", f"{paid_stars} ⭐"),
+    ]
+    return "📊 <b>Admin Stats</b>\n<pre>" + _fixed_rows(rows) + "</pre>"
+
+
+async def _ensure_admin_for_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    user = update.effective_user
+    if not user:
+        return False
+    if _is_admin(user.id):
+        return True
+    role, _ = await _get_role_perms_ctx(context, user.id)
+    if role != db.ROLE_NONE:
+        return True
+    await (update.effective_message or update.message).reply_text("Эта команда доступна только администратору.")
+    return False
+
+
+async def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard_not_banned(update, context):
+        return
+    if not await _ensure_admin_for_command(update, context):
+        return
+    s = context.application.bot_data["settings"]
+    conn = await db.connect(s.DB_PATH)
+    try:
+        text = await _admin_dashboard_text(conn)
+    finally:
+        await conn.close()
+    await show(update, context, text, admin_stats_kb(), route="admin:stats")
+
+
+async def grant_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard_not_banned(update, context):
+        return
+    if not await _ensure_admin_for_command(update, context):
+        return
+    args = list(context.args or [])
+    if len(args) != 2 or (not args[0].isdigit()) or (not args[1].isdigit()):
+        await (update.effective_message or update.message).reply_text("Использование: /grant <tg_user_id> <days>")
+        return
+    target_tg_id = int(args[0])
+    days = int(args[1])
+    if days <= 0 or days > 3650:
+        await (update.effective_message or update.message).reply_text("days должен быть в диапазоне 1..3650")
+        return
+
+    s = context.application.bot_data["settings"]
+    conn = await db.connect(s.DB_PATH)
+    try:
+        await db.get_or_create_user(conn, target_tg_id)
+        current_iso = await db.get_premium_until(conn, target_tg_id)
+        now = datetime.utcnow()
+        current_dt = _parse_utc_iso(current_iso)
+        base = current_dt if current_dt and current_dt > now else now
+        new_until = base + timedelta(days=days)
+        until_iso = await db.set_premium_until(conn, target_tg_id, new_until, source=f"grant:{update.effective_user.id}", plan_id=f"grant_{days}d")
+    finally:
+        await conn.close()
+
+    await (update.effective_message or update.message).reply_text(
+        f"✅ Premium выдан пользователю {target_tg_id} на {days} дн.\nАктивен до: {until_iso}"
+    )
+
+
+async def degrant_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard_not_banned(update, context):
+        return
+    if not await _ensure_admin_for_command(update, context):
+        return
+    args = list(context.args or [])
+    if len(args) != 2 or (not args[0].isdigit()) or (not args[1].isdigit()):
+        await (update.effective_message or update.message).reply_text("Использование: /degrant <tg_user_id> <days>")
+        return
+    target_tg_id = int(args[0])
+    days = int(args[1])
+    if days <= 0 or days > 3650:
+        await (update.effective_message or update.message).reply_text("days должен быть в диапазоне 1..3650")
+        return
+
+    s = context.application.bot_data["settings"]
+    conn = await db.connect(s.DB_PATH)
+    try:
+        await db.get_or_create_user(conn, target_tg_id)
+        current_iso = await db.get_premium_until(conn, target_tg_id)
+        now = datetime.utcnow()
+        current_dt = _parse_utc_iso(current_iso)
+        if not current_dt or current_dt <= now:
+            until_iso = await db.set_premium_until(conn, target_tg_id, now, source=f"degrant:{update.effective_user.id}", plan_id="manual_zero")
+        else:
+            new_until = current_dt - timedelta(days=days)
+            if new_until < now:
+                new_until = now
+            until_iso = await db.set_premium_until(conn, target_tg_id, new_until, source=f"degrant:{update.effective_user.id}", plan_id=f"degrant_{days}d")
+    finally:
+        await conn.close()
+
+    await (update.effective_message or update.message).reply_text(
+        f"✅ Premium скорректирован для {target_tg_id}.\nНовый срок: {until_iso}"
+    )
+
+
+async def purge_me_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard_not_banned(update, context):
+        return
+    if not update.effective_user:
+        return
+    s = context.application.bot_data["settings"]
+    conn = await db.connect(s.DB_PATH)
+    try:
+        out = await db.purge_user_data(conn, update.effective_user.id)
+    finally:
+        await conn.close()
+
+    context.user_data.clear()
+    deleted = bool(out.get("deleted"))
+    if deleted:
+        await (update.effective_message or update.message).reply_text(
+            "🧹 Ваши данные в боте очищены. Теперь вы как новый пользователь.\nНажмите /start, чтобы пройти онбординг заново."
+        )
+    else:
+        await (update.effective_message or update.message).reply_text(
+            "Данных для очистки не найдено. Нажмите /start."
+        )
+
+
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     log.exception("Unhandled error while processing update: %s", update, exc_info=context.error)
 
@@ -6029,9 +6287,13 @@ async def _bootstrap() -> Application:
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("premium", premium_command))
+    app.add_handler(CommandHandler("stats", admin_stats_command))
+    app.add_handler(CommandHandler("grant", grant_command))
+    app.add_handler(CommandHandler("degrant", degrant_command))
+    app.add_handler(CommandHandler("purge_me", purge_me_command))
     app.add_handler(CallbackQueryHandler(
         on_menu,
-        pattern=r"^(main$|menu:|settings:|schedule:|cx:|supplement:|admin:|add_pick:|compat_pick:|cat:|curated:|supp:|card:|mysupp:|today:|intake:|rem:(home|edit|set:|toggle:))",
+        pattern=r"^(main$|menu:|settings:|schedule:|cx:|supplement:|admin:|add_pick:|compat_pick:|cat:|curated:|supp:|card:|mysupp:|today:|intake:|premium:|onboard:|starter:|rem:(home|edit|set:|toggle:))",
     ))
     app.add_handler(CallbackQueryHandler(on_ai_add, pattern=r"^aiadd:"))
     app.add_handler(CallbackQueryHandler(on_ai_checkin, pattern=r"^aicheck:"))
@@ -6220,22 +6482,7 @@ async def _show_admin_supp_field_input(
 
 
 async def _show_admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE, conn) -> None:
-    stats = await db.admin_get_global_stats(conn)
-
-    def _fmt_avg(value: float | None) -> str:
-        if value is None:
-            return "—"
-        return f"{value:.2f}".rstrip("0").rstrip(".")
-
-    text = (
-        "📊 <b>Статистика</b>\n"
-        f"• Пользователей: {int(stats.get('users_total') or 0)}\n"
-        f"• Активные: 1д — {int(stats.get('active_1d') or 0)} | 7д — {int(stats.get('active_7d') or 0)} | 30д — {int(stats.get('active_30d') or 0)}\n"
-        f"• Среднее активных БАДов: {_fmt_avg(stats.get('avg_active_supplements_overall'))}\n"
-        f"• Среднее напоминаний: {_fmt_avg(stats.get('avg_enabled_reminders'))}\n"
-        f"• Чекины (30д): {int(stats.get('checkins_30d_total') or 0)}\n"
-        f"• Отметки приёма (30д): {int(stats.get('intake_30d_total') or 0)}"
-    )
+    text = await _admin_dashboard_text(conn)
     await show(update, context, text, admin_stats_kb(), route="admin:stats")
 
 

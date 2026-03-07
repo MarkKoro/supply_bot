@@ -2072,6 +2072,34 @@ async def has_any_webapp_access(conn: aiosqlite.Connection, tg_user_id: int) -> 
         return True
     return await is_starter_trial_active(conn, tg_user_id)
 
+async def purge_user_data(conn: aiosqlite.Connection, tg_user_id: int) -> dict:
+    row = await fetchone(conn, "SELECT id FROM users WHERE tg_user_id=?", (int(tg_user_id),))
+    if not row:
+        return {"ok": True, "deleted": False, "tables_touched": 0}
+
+    user_id = int(row["id"])
+    tables = await fetchall(
+        conn,
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+    )
+    touched = 0
+    for item in tables:
+        table = str(item["name"])
+        if table == "users":
+            continue
+        cols = await _table_columns(conn, table)
+        if "tg_user_id" in cols:
+            await conn.execute(f"DELETE FROM {table} WHERE tg_user_id=?", (int(tg_user_id),))
+            touched += 1
+        if "user_id" in cols:
+            await conn.execute(f"DELETE FROM {table} WHERE user_id=?", (user_id,))
+            touched += 1
+
+    await conn.execute("DELETE FROM users WHERE tg_user_id=?", (int(tg_user_id),))
+    await conn.commit()
+    return {"ok": True, "deleted": True, "tables_touched": touched}
+
+
 async def log_payment_paid(
     conn: aiosqlite.Connection,
     tg_user_id: int,

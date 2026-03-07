@@ -1136,7 +1136,7 @@ async def api_stats_summary(x_telegram_init_data: str = Header(default="", alias
         {"slug": str(x.get("slug") or ""), "name_ru": streaks_map.get(str(x.get("slug") or ""), ""), "streak": int(x.get("streak") or 0)}
         for x in list(compact.get("top_streaks") or [])
     ]
-    return JSONResponse({"ok": True, "summary": summary, "date_local": target_date})
+    return JSONResponse({"ok": True, "summary": summary, "date_local": day})
 
 
 @app.get("/api/body_map")

@@ -8,13 +8,61 @@ from pathlib import Path
 from settings import get_settings
 import db
 
-def _read_jsonl(path: str):
+def _iter_slug_chunks(path: str):
+    start_line = 0
+    buffer: list[str] = []
+
+    last_line = 0
     with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
+        for line_no, raw_line in enumerate(f, 1):
+            last_line = line_no
+            line = raw_line.strip()
             if not line:
                 continue
-            yield json.loads(line)
+
+            if line.startswith('{"slug"'):
+                if buffer:
+                    yield "\n".join(buffer), start_line, line_no - 1
+                buffer = [line]
+                start_line = line_no
+            else:
+                if not buffer:
+                    raise ValueError(
+                        f"Invalid JSONL format in {path}: line {line_no} does not start with a slug object"
+                    )
+                buffer.append(line)
+
+    if buffer:
+        yield "\n".join(buffer), start_line, last_line
+
+
+def _read_jsonl(path: str):
+    for chunk, start_line, end_line in _iter_slug_chunks(path):
+        try:
+            item = json.loads(chunk)
+        except json.JSONDecodeError as exc:
+            slug_match = re.search(r'"slug"\s*:\s*"([^"\n]+)"', chunk)
+            slug_hint = slug_match.group(1) if slug_match else "unknown"
+            raise ValueError(
+                f"Invalid JSON object for slug '{slug_hint}' in {path} (lines {start_line}-{end_line}): {exc}"
+            ) from exc
+
+        if not isinstance(item, dict):
+            raise ValueError(
+                f"Invalid JSON object in {path} (lines {start_line}-{end_line}): top-level JSON must be an object"
+            )
+        if not item.get("slug"):
+            raise ValueError(
+                f"Invalid JSON object in {path} (lines {start_line}-{end_line}): missing slug"
+            )
+
+        yield item
+
+
+def _normalize_jsonl(path: str) -> None:
+    objects = list(_read_jsonl(path))
+    normalized = "\n".join(json.dumps(obj, ensure_ascii=False, separators=(",", ":")) for obj in objects)
+    Path(path).write_text(normalized + "\n", encoding="utf-8")
 
 def _build_aliases(item: dict) -> list[str]:
     aliases = []
@@ -338,17 +386,26 @@ def main():
     ap.add_argument("--rich-supplements", default=None)
     ap.add_argument("--curated-stacks", default=None)
     ap.add_argument("--curated-items", default=None)
+    ap.add_argument("--normalize-jsonl", action="append", default=[])
     args = ap.parse_args()
-    asyncio.run(
-        _import(
-            args.supplements,
-            args.interactions,
-            args.rich_supplements,
-            args.curated_stacks,
-            args.curated_items,
+
+    for path in args.normalize_jsonl:
+        _normalize_jsonl(path)
+        print(f"Normalized JSONL: {path}")
+
+    if any((args.supplements, args.interactions, args.rich_supplements, args.curated_stacks, args.curated_items)):
+        asyncio.run(
+            _import(
+                args.supplements,
+                args.interactions,
+                args.rich_supplements,
+                args.curated_stacks,
+                args.curated_items,
+            )
         )
-    )
-    print("Import done.")
+        print("Import done.")
+    elif not args.normalize_jsonl:
+        ap.error("Provide import paths and/or --normalize-jsonl")
 
 if __name__ == "__main__":
     main()

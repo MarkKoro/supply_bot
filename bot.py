@@ -994,7 +994,13 @@ def _parse_ai_json(raw: str) -> dict | None:
     try:
         parsed = json.loads(content)
     except json.JSONDecodeError:
-        return None
+        match = re.search(r"\{[\s\S]*\}", content)
+        if not match:
+            return None
+        try:
+            parsed = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            return None
     return parsed if isinstance(parsed, dict) else None
 
 
@@ -1013,6 +1019,40 @@ def _parse_onboarding_ai_json(raw: str) -> dict | None:
     if not isinstance(questions, list):
         payload["questions_ru"] = []
     return payload
+
+
+async def _resolve_onboarding_candidates(conn, data: dict | None) -> tuple[list[dict], list[str]]:
+    candidates = (data or {}).get("candidates") or []
+    found: list[dict] = []
+    missing: list[str] = []
+    seen_ids: set[int] = set()
+    for cand in candidates:
+        if not isinstance(cand, dict):
+            continue
+        query_variants = []
+        name = str(cand.get("name") or "").strip()
+        name_ru = str(cand.get("name_ru") or "").strip()
+        if name:
+            query_variants.append(name)
+        if name_ru and name_ru not in query_variants:
+            query_variants.append(name_ru)
+        if not query_variants:
+            continue
+        matched_row = None
+        for query in query_variants:
+            rows, _ = await db.search_supplements(conn, query, page=0, page_size=1)
+            if rows:
+                matched_row = rows[0]
+                break
+        if matched_row:
+            supp_id = int(matched_row["id"])
+            if supp_id in seen_ids:
+                continue
+            seen_ids.add(supp_id)
+            found.append({"row": matched_row, "cand": cand})
+        else:
+            missing.append(name_ru or name)
+    return found, missing
 
 async def _render_ai_checkin_results(
     update: Update,
@@ -1152,8 +1192,8 @@ async def _render_ai_suggestions(
             await show(
                 update,
                 context,
-                "Начальный подбор вернул неожиданный формат. Попробуй ещё раз.",
-                back(),
+                "Не удалось обработать ответ подборщика. Попробуй ещё раз или пропусти этап.",
+                InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Попробовать ещё раз", callback_data="onboard:retry")], [InlineKeyboardButton("⏭️ Пропустить", callback_data="onboard:finish")], [InlineKeyboardButton("⬅️ К выбору пояса", callback_data="tz:back")]]),
                 route="onboard:goal",
             )
             format_error_shown = True
@@ -1161,39 +1201,21 @@ async def _render_ai_suggestions(
         await show(update, context, "Начальный подбор не вернул ответ. Попробуй ещё раз.", back(), route="onboard:goal")
 
     if isinstance(data, dict):
-        candidates = data.get("candidates") or []
         warnings = data.get("warnings_ru") or []
         if not isinstance(warnings, list):
             warnings = []
-        found = []
-        missing = []
-        seen_ids: set[int] = set()
-        for cand in candidates:
-            if not isinstance(cand, dict):
-                continue
-            query_variants = []
-            name = str(cand.get("name") or "").strip()
-            name_ru = str(cand.get("name_ru") or "").strip()
-            if name:
-                query_variants.append(name)
-            if name_ru and name_ru not in query_variants:
-                query_variants.append(name_ru)
-            if not query_variants:
-                continue
-            matched_row = None
-            for query in query_variants:
-                rows, _ = await db.search_supplements(conn, query, page=0, page_size=1)
-                if rows:
-                    matched_row = rows[0]
-                    break
-            if matched_row:
-                supp_id = int(matched_row["id"])
-                if supp_id in seen_ids:
-                    continue
-                seen_ids.add(supp_id)
-                found.append({"row": matched_row, "cand": cand})
-            else:
-                missing.append(name_ru or name)
+        found, missing = await _resolve_onboarding_candidates(conn, data)
+        if not found:
+            fallback_rows, _ = await db.search_supplements(conn, goal_text, page=0, page_size=8)
+            for row in fallback_rows:
+                found.append({
+                    "row": row,
+                    "cand": {
+                        "why_ru": "Подобрано по запросу из каталога.",
+                        "dose_ru": "Смотри рекомендованную дозировку в карточке.",
+                        "timing_ru": "Подбери время по описанию и самочувствию.",
+                    },
+                })
 
         lines = [
             "✨ <b>Начальный подбор</b>",
@@ -1256,8 +1278,8 @@ async def _render_ai_suggestions(
                 [InlineKeyboardButton(f"🔎 {row['name']}", callback_data=f"supp:openai:{row['id']}")]
             )
         buttons.append([InlineKeyboardButton("✅ Завершить подбор", callback_data="onboard:finish")])
+        buttons.append([InlineKeyboardButton("⏭️ Пропустить", callback_data="onboard:finish")])
         buttons.append([InlineKeyboardButton("⭐ Почему Premium удобнее", callback_data="premium:about")])
-        buttons.append([InlineKeyboardButton("🏠 В меню", callback_data="menu:home")])
         if save_to_onboarding:
             await db.save_onboarding_results(
                 conn,
@@ -1284,8 +1306,8 @@ async def _render_ai_suggestions(
         await show(
             update,
             context,
-            "Начальный подбор вернул неожиданный формат. Попробуй ещё раз.",
-            back(),
+            "Не удалось обработать ответ подборщика. Попробуй ещё раз или пропусти этап.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Попробовать ещё раз", callback_data="onboard:retry")], [InlineKeyboardButton("⏭️ Пропустить", callback_data="onboard:finish")], [InlineKeyboardButton("⬅️ К выбору пояса", callback_data="tz:back")]]),
             route="onboard:goal",
         )
     return False
@@ -2021,6 +2043,7 @@ async def _start_initial_pick(
     *,
     prefix: str | None = None,
     route: str = "onboard:goal",
+    back_cb: str = "menu:home",
     target_chat_id: int | None = None,
     target_message_id: int | None = None,
 ) -> None:
@@ -2029,7 +2052,7 @@ async def _start_initial_pick(
         update,
         context,
         _initial_pick_prompt_text(prefix),
-        back(),
+        InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=back_cb)]]),
         route=route,
         target_chat_id=target_chat_id,
         target_message_id=target_message_id,
@@ -2351,7 +2374,10 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if data == "onboard:results":
             restored = await _render_onboarding_results(update, context, conn)
             if not restored:
-                await home(update, context)
+                await _start_initial_pick(update, context, prefix="Давай попробуем ещё раз.", back_cb="tz:back")
+            return
+        if data == "onboard:retry":
+            await _start_initial_pick(update, context, prefix="Опиши цель ещё раз — сделаю новый подбор.", back_cb="tz:back")
             return
         if data == "onboard:finish":
             await db.mark_onboarding_done(conn, tg_uid)
@@ -2428,6 +2454,7 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 update,
                 context,
                 prefix="🔄 Начинаем новый подбор. Предыдущий список очищен.",
+                back_cb="menu:settings",
             )
             return
         if data == "menu:settings":
@@ -2634,6 +2661,7 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 update,
                 context,
                 prefix="🔄 Начинаем новый подбор. Предыдущий список очищен.",
+                back_cb="menu:settings",
             )
             return
         if data == "settings:tz":
@@ -4128,7 +4156,7 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     )
                     return
                 await db.start_onboarding_state(conn, tg_uid)
-                await _start_initial_pick(update, context)
+                await _start_initial_pick(update, context, back_cb="tz:back")
                 return
 
             await _show_ai_used_upsell(update, context)
@@ -4549,6 +4577,7 @@ async def on_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                         update,
                         context,
                         prefix=prefix,
+                        back_cb="tz:back",
                     )
                 else:
                     await _show_ai_used_upsell(update, context)
@@ -5254,6 +5283,10 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             pass
         return
     txt = update.message.text.strip()
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
     s = context.application.bot_data["settings"]
     tg_uid = update.effective_user.id
     conn = await db.connect(s.DB_PATH)
@@ -5773,7 +5806,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 sups = await db.list_user_supplements(conn, tg_uid, limit=100)
                 user_supp_text = ", ".join([r["name"] for r in sups]) or "нет"
                 cfg = OpenAIConfig(api_key=s.OPENAI_API_KEY, model=s.OPENAI_MODEL)
-                await show(update, context, "🤖 Думаю…", back(), route="onboard:goal")
+                await show(update, context, "🤖 Думаю…", None, route="onboard:goal")
                 raw = None
                 try:
                     raw = await suggest_stack_v1(cfg, txt, user_supp_text)
@@ -5843,10 +5876,6 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     finally:
         await conn.close()
 
-    try:
-        await update.message.delete()
-    except Exception:
-        pass
 
 async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard_not_banned(update, context):
@@ -6037,6 +6066,11 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if waiting != "initial_pick_goal":
         return
 
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
     conn = await db.connect(s.DB_PATH)
     try:
         user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
@@ -6102,7 +6136,7 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         sups = await db.list_user_supplements(conn, tg_uid, limit=100)
         user_supp_text = ", ".join([r["name"] for r in sups]) or "нет"
         cfg = OpenAIConfig(api_key=s.OPENAI_API_KEY, model=s.OPENAI_MODEL)
-        await show(update, context, "🤖 Думаю…", back(), route="onboard:goal")
+        await show(update, context, "🤖 Думаю…", None, route="onboard:goal")
         raw = None
         try:
             raw = await suggest_stack_v1(cfg, transcription, user_supp_text)
@@ -6123,10 +6157,7 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             context.user_data.pop(WAITING_KEY, None)
     finally:
         await conn.close()
-        try:
-            await update.message.delete()
-        except Exception:
-            pass
+
 
 def _parse_utc_iso(value: str | None) -> datetime | None:
     raw = str(value or "").strip()

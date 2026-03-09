@@ -1021,38 +1021,73 @@ def _parse_onboarding_ai_json(raw: str) -> dict | None:
     return payload
 
 
-async def _resolve_onboarding_candidates(conn, data: dict | None) -> tuple[list[dict], list[str]]:
-    candidates = (data or {}).get("candidates") or []
-    found: list[dict] = []
+def _normalize_onboarding_goals(data: dict | None, fallback_goal: str) -> list[dict]:
+    payload = data or {}
+    goals = payload.get("goals")
+    normalized_goals: list[dict] = []
+
+    if isinstance(goals, list):
+        for item in goals:
+            if not isinstance(item, dict):
+                continue
+            goal_name = str(item.get("goal_ru") or item.get("goal") or "").strip()
+            candidates = item.get("candidates") if isinstance(item.get("candidates"), list) else []
+            if not goal_name:
+                goal_name = fallback_goal
+            normalized_goals.append({"goal_ru": goal_name, "candidates": candidates})
+
+    if not normalized_goals:
+        legacy_candidates = payload.get("candidates") if isinstance(payload.get("candidates"), list) else []
+        normalized_goals = [{"goal_ru": fallback_goal, "candidates": legacy_candidates}]
+
+    return normalized_goals
+
+
+async def _resolve_onboarding_goal_candidates(conn, data: dict | None, fallback_goal: str) -> tuple[list[dict], list[str]]:
+    goal_blocks = _normalize_onboarding_goals(data, fallback_goal)
+    grouped_found: list[dict] = []
     missing: list[str] = []
     seen_ids: set[int] = set()
-    for cand in candidates:
-        if not isinstance(cand, dict):
-            continue
-        query_variants = []
-        name = str(cand.get("name") or "").strip()
-        name_ru = str(cand.get("name_ru") or "").strip()
-        if name:
-            query_variants.append(name)
-        if name_ru and name_ru not in query_variants:
-            query_variants.append(name_ru)
-        if not query_variants:
-            continue
-        matched_row = None
-        for query in query_variants:
-            rows, _ = await db.search_supplements(conn, query, page=0, page_size=1)
-            if rows:
-                matched_row = rows[0]
-                break
-        if matched_row:
-            supp_id = int(matched_row["id"])
-            if supp_id in seen_ids:
+
+    for block in goal_blocks:
+        goal_name = str(block.get("goal_ru") or fallback_goal).strip() or fallback_goal
+        candidates = block.get("candidates") if isinstance(block.get("candidates"), list) else []
+        found: list[dict] = []
+        for cand in candidates:
+            if not isinstance(cand, dict):
                 continue
-            seen_ids.add(supp_id)
-            found.append({"row": matched_row, "cand": cand})
-        else:
-            missing.append(name_ru or name)
-    return found, missing
+            query_variants = []
+            name = str(cand.get("name") or "").strip()
+            name_ru = str(cand.get("name_ru") or "").strip()
+            for variant in [name, name_ru]:
+                if variant and variant not in query_variants:
+                    query_variants.append(variant)
+            if not query_variants:
+                continue
+
+            matched_row = None
+            for query in query_variants:
+                rows, _ = await db.search_supplements(conn, query, page=0, page_size=1)
+                if rows:
+                    matched_row = rows[0]
+                    break
+
+            if matched_row:
+                supp_id = int(matched_row["id"])
+                if supp_id in seen_ids:
+                    continue
+                seen_ids.add(supp_id)
+                found.append({"row": matched_row, "cand": cand, "goal_ru": goal_name})
+            else:
+                missing_name = name_ru or name
+                if missing_name:
+                    missing.append(missing_name)
+
+        if found:
+            grouped_found.append({"goal_ru": goal_name, "items": found})
+
+    return grouped_found, missing
+
 
 async def _render_ai_checkin_results(
     update: Update,
@@ -1204,18 +1239,25 @@ async def _render_ai_suggestions(
         warnings = data.get("warnings_ru") or []
         if not isinstance(warnings, list):
             warnings = []
-        found, missing = await _resolve_onboarding_candidates(conn, data)
-        if not found:
+
+        grouped_found, missing = await _resolve_onboarding_goal_candidates(conn, data, goal_text)
+        if not grouped_found:
             fallback_rows, _ = await db.search_supplements(conn, goal_text, page=0, page_size=8)
-            for row in fallback_rows:
-                found.append({
-                    "row": row,
-                    "cand": {
-                        "why_ru": "Подобрано по запросу из каталога.",
-                        "dose_ru": "Смотри рекомендованную дозировку в карточке.",
-                        "timing_ru": "Подбери время по описанию и самочувствию.",
-                    },
-                })
+            if fallback_rows:
+                grouped_found = [{
+                    "goal_ru": goal_text,
+                    "items": [
+                        {
+                            "row": row,
+                            "cand": {
+                                "why_ru": "Подобрано по запросу из каталога.",
+                                "dose_ru": "Смотри рекомендованную дозировку в карточке.",
+                                "timing_ru": "Подбери время по описанию и самочувствию.",
+                            },
+                        }
+                        for row in fallback_rows
+                    ],
+                }]
 
         lines = [
             "✨ <b>Начальный подбор</b>",
@@ -1224,36 +1266,49 @@ async def _render_ai_suggestions(
         if prefix_line:
             lines.extend([prefix_line, ""])
         lines.extend([
-            f"Цель: <b>{goal_text}</b>",
+            f"Запрос: <b>{goal_text}</b>",
             "",
         ])
-        if found:
-            lines.append("Найдено в каталоге:")
-            for idx, item in enumerate(found, start=1):
-                row = item["row"]
-                cand = item["cand"]
-                dose = str(cand.get("dose_ru") or "").strip()
-                timing = str(cand.get("timing_ru") or "").strip()
-                why = str(cand.get("why_ru") or "").strip()
-                confidence = cand.get("confidence")
-                try:
-                    confidence = int(confidence)
-                except (TypeError, ValueError):
-                    confidence = None
-                detail_bits = []
-                if dose:
-                    detail_bits.append(f"доза: {dose}")
-                if timing:
-                    detail_bits.append(f"время: {timing}")
-                detail = " · ".join(detail_bits)
-                line = f"{idx}) <b>{row['name']}</b>"
-                if detail:
-                    line = f"{line} — {detail}"
-                if why:
-                    line = f"{line}\n{why}"
-                if confidence is not None:
-                    line = f"{line}\nУверенность: {confidence}%"
-                lines.append(line)
+
+        all_found_items: list[dict] = []
+        if grouped_found:
+            lines.append("Подобрал по целям:")
+            for block in grouped_found:
+                goal_name = str(block.get("goal_ru") or goal_text).strip() or goal_text
+                items = block.get("items") if isinstance(block.get("items"), list) else []
+                if not items:
+                    continue
+                lines.append("")
+                lines.append(f"🎯 <b>{goal_name}</b>")
+                for idx, item in enumerate(items, start=1):
+                    row = item["row"]
+                    cand = item["cand"]
+                    all_found_items.append(item)
+                    dose = str(cand.get("dose_ru") or "").strip()
+                    timing = str(cand.get("timing_ru") or "").strip()
+                    why = str(cand.get("why_ru") or "").strip()
+                    confidence = cand.get("confidence")
+                    try:
+                        confidence = int(confidence)
+                    except (TypeError, ValueError):
+                        confidence = None
+                    evidence_grade = str(row.get("evidence_grade") or "").strip().upper()
+                    evidence_line = f"Доказательность: {evidence_grade}" if evidence_grade else "Доказательность: не указана"
+                    detail_bits = []
+                    if dose:
+                        detail_bits.append(f"доза: {dose}")
+                    if timing:
+                        detail_bits.append(f"время: {timing}")
+                    detail = " · ".join(detail_bits)
+                    line = f"{idx}) <b>{row['name']}</b>"
+                    if detail:
+                        line = f"{line} — {detail}"
+                    if why:
+                        line = f"{line}\n{why}"
+                    line = f"{line}\n{evidence_line}"
+                    if confidence is not None:
+                        line = f"{line}\nУверенность: {confidence}%"
+                    lines.append(line)
         else:
             lines.append("Найдено в каталоге: ничего.")
 
@@ -1269,14 +1324,12 @@ async def _render_ai_suggestions(
                 lines.append(f"• {w}")
 
         lines.append("")
-        lines.append("Открой карточку БАДА, чтобы посмотреть детали, и добавляй то, что подходит.")
+        lines.append("Открой карточки БАДов кнопками ниже, чтобы посмотреть детали и добавить в стек.")
 
         buttons = []
-        for item in found:
+        for item in all_found_items:
             row = item["row"]
-            buttons.append(
-                [InlineKeyboardButton(f"🔎 {row['name']}", callback_data=f"supp:openai:{row['id']}")]
-            )
+            buttons.append([InlineKeyboardButton(f"🔎 {row['name']}", callback_data=f"supp:openai:{row['id']}")])
         buttons.append([InlineKeyboardButton("✅ Завершить подбор", callback_data="onboard:finish")])
         buttons.append([InlineKeyboardButton("⏭️ Пропустить", callback_data="onboard:finish")])
         buttons.append([InlineKeyboardButton("⭐ Почему Premium удобнее", callback_data="premium:about")])

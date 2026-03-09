@@ -77,6 +77,7 @@ from keyboards import (
     complex_add_results_kb,
     complex_item_actions_kb,
     complex_schedule_kb,
+    consent_kb,
 )
 import tz
 from openai_client import (
@@ -914,6 +915,9 @@ def build_ai_checkin_prompt(
         "история AI-предложений и ответы в прошлых чек-инах. "
         "Обязательно анализируй динамику в прогрессии, что помогало и что не соблюдалось, "
         f"и на этой основе давай адаптированные предложения только на {target_day_ru}. "
+        "Добавки из текущего стека (base_stack) можно только remove или adjust, но не add. "
+        "Для action=add разрешены только новые добавки из catalog_candidates, которых нет в base_stack. "
+        "Для action=remove и action=adjust разрешены только добавки из base_stack. "
         "Нельзя предлагать добавки вне списка кандидатов и текущего стека. "
         "Не предлагай рецептурные препараты. "
         "Будь консервативным, максимум 6 действий. "
@@ -967,18 +971,48 @@ def build_ai_checkin_prompt(
         {"role": "user", "content": user_msg},
     ]
 
+def _extract_json_content(raw: str) -> str:
+    content = str(raw or "").strip()
+    if not content.startswith("```"):
+        return content
+    lines = content.splitlines()
+    if not lines:
+        return ""
+    first = lines[0].strip().lower()
+    if not first.startswith("```"):
+        return content
+    body = lines[1:]
+    if body and body[-1].strip().startswith("```"):
+        body = body[:-1]
+    return "\n".join(body).strip()
+
+
 def _parse_ai_json(raw: str) -> dict | None:
     if not raw:
         return None
-    content = raw.strip()
-    if content.startswith("```"):
-        content = content.strip("`")
-        content = content.replace("json", "", 1).strip()
+    content = _extract_json_content(raw)
     try:
         parsed = json.loads(content)
     except json.JSONDecodeError:
         return None
     return parsed if isinstance(parsed, dict) else None
+
+
+def _parse_onboarding_ai_json(raw: str) -> dict | None:
+    parsed = _parse_ai_json(raw)
+    if not isinstance(parsed, dict):
+        return None
+    payload = dict(parsed)
+    candidates = payload.get("candidates")
+    if not isinstance(candidates, list):
+        payload["candidates"] = []
+    warnings = payload.get("warnings_ru")
+    if not isinstance(warnings, list):
+        payload["warnings_ru"] = []
+    questions = payload.get("questions_ru")
+    if not isinstance(questions, list):
+        payload["questions_ru"] = []
+    return payload
 
 async def _render_ai_checkin_results(
     update: Update,
@@ -1113,9 +1147,8 @@ async def _render_ai_suggestions(
     data = None
     format_error_shown = False
     if raw:
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError:
+        data = _parse_onboarding_ai_json(raw)
+        if data is None:
             await show(
                 update,
                 context,
@@ -1515,10 +1548,13 @@ async def _finalize_ai_checkin(
         )
         return
 
-    allowed_slugs = {item.get("slug") for item in candidates} | {item.get("slug") for item in stack}
-    allowed_slugs = {slug for slug in allowed_slugs if slug}
+    stack_slugs = {str(item.get("slug") or "").strip() for item in stack}
+    stack_slugs = {slug for slug in stack_slugs if slug}
+    candidate_slugs = {str(item.get("slug") or "").strip() for item in candidates}
+    candidate_slugs = {slug for slug in candidate_slugs if slug}
     actions = data.get("actions") if isinstance(data.get("actions"), list) else []
     clean_actions = []
+    seen_action_keys: set[tuple[str, str]] = set()
     missing_count = 0
     for idx, action in enumerate(actions, start=1):
         if len(clean_actions) >= 6:
@@ -1529,8 +1565,19 @@ async def _finalize_ai_checkin(
         if action_type not in {"add", "remove", "adjust"}:
             continue
         slug = str(action.get("slug") or "").strip()
-        if not slug or (allowed_slugs and slug not in allowed_slugs):
+        if not slug:
             missing_count += 1
+            continue
+        is_valid_action = False
+        if action_type == "add":
+            is_valid_action = slug in candidate_slugs and slug not in stack_slugs
+        elif action_type in {"remove", "adjust"}:
+            is_valid_action = slug in stack_slugs
+        if not is_valid_action:
+            missing_count += 1
+            continue
+        dedup_key = (action_type, slug)
+        if dedup_key in seen_action_keys:
             continue
         row = await db.get_supplement_by_slug(conn, slug)
         if not row:
@@ -1557,6 +1604,7 @@ async def _finalize_ai_checkin(
                 "safety_ru": _truncate_text(action.get("safety_ru"), 160),
             }
         )
+        seen_action_keys.add(dedup_key)
 
     payload = {
         "actions": clean_actions,
@@ -1987,30 +2035,73 @@ async def _start_initial_pick(
         target_message_id=target_message_id,
     )
 
+
+async def _render_consent_screen(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    target_chat_id: int | None = None,
+    target_message_id: int | None = None,
+) -> None:
+    s = context.application.bot_data["settings"]
+    text = (
+        "🔒 <b>Перед началом нужно согласие</b>\n\n"
+        "Продолжая, ты подтверждаешь согласие с офертой и политикой конфиденциальности."
+    )
+    await show(
+        update,
+        context,
+        text,
+        consent_kb(s.OFFER_URL, s.PRIVACY_URL),
+        route="consent:screen",
+        target_chat_id=target_chat_id,
+        target_message_id=target_message_id,
+    )
+
+
+async def _continue_after_consent(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    conn,
+    tg_uid: int,
+) -> None:
+    tz = await db.get_user_tz(conn, tg_uid)
+    if _is_tz_unset(tz):
+        context.user_data.pop("tz_back_data", None)
+        context.user_data["onboarding"] = "tz"
+        await _show_timezone_picker(
+            update,
+            context,
+            0,
+            message_text=(
+                "Выбери свой часовой пояс, чтобы уведомления приходили вовремя.\n"
+                "Пример: Москва — UTC+03."
+            ),
+        )
+        return
+    await home(update, context)
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard_not_banned(update, context):
         return
     s = context.application.bot_data["settings"]
+    tg_uid = update.effective_user.id
     conn = await db.connect(s.DB_PATH)
     try:
-        await db.get_or_create_user(conn, update.effective_user.id, tz_name="")
-        tz = await db.get_user_tz(conn, update.effective_user.id)
-        if _is_tz_unset(tz):
-            context.user_data.pop("tz_back_data", None)
-            context.user_data["onboarding"] = "tz"
-            await _show_timezone_picker(
-                update,
-                context,
-                0,
-                message_text=(
-                    "Выбери свой часовой пояс, чтобы уведомления приходили вовремя.\n"
-                    "Пример: Москва — UTC+03."
-                ),
-            )
+        await db.get_or_create_user(conn, tg_uid, tz_name="")
+        has_consent = await db.has_required_consent(
+            conn,
+            tg_uid,
+            offer_version=s.OFFER_VERSION,
+            privacy_version=s.PRIVACY_VERSION,
+        )
+        if not has_consent:
+            await _render_consent_screen(update, context)
             return
+        await _continue_after_consent(update, context, conn, tg_uid)
     finally:
         await conn.close()
-    await home(update, context)
 
 async def _show_timezone_picker(
     update: Update,
@@ -2210,6 +2301,37 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     conn = await db.connect(s.DB_PATH)
     try:
         await db.get_or_create_user(conn, tg_uid, tz_name="")
+        has_consent = await db.has_required_consent(
+            conn,
+            tg_uid,
+            offer_version=s.OFFER_VERSION,
+            privacy_version=s.PRIVACY_VERSION,
+        )
+
+        if data == "consent:accept":
+            await db.save_user_consent(
+                conn,
+                tg_uid,
+                offer_version=s.OFFER_VERSION,
+                privacy_version=s.PRIVACY_VERSION,
+                source="bot:start",
+            )
+            await _continue_after_consent(update, context, conn, tg_uid)
+            return
+        if data == "consent:decline":
+            await show(
+                update,
+                context,
+                "Без согласия с документами мы не можем продолжить onboarding.\nКогда будешь готов(а), нажми /start.",
+                InlineKeyboardMarkup([[InlineKeyboardButton("🏠 В меню", callback_data="menu:home")]]),
+                route="consent:decline",
+            )
+            return
+
+        if not has_consent:
+            await _render_consent_screen(update, context)
+            return
+
         tz_name = await db.get_user_tz(conn, tg_uid)
         if _is_tz_unset(tz_name):
             context.user_data.pop("tz_back_data", None)
@@ -6293,7 +6415,7 @@ async def _bootstrap() -> Application:
     app.add_handler(CommandHandler("purge_me", purge_me_command))
     app.add_handler(CallbackQueryHandler(
         on_menu,
-        pattern=r"^(main$|menu:|settings:|schedule:|cx:|supplement:|admin:|add_pick:|compat_pick:|cat:|curated:|supp:|card:|mysupp:|today:|intake:|premium:|onboard:|starter:|rem:(home|edit|set:|toggle:))",
+        pattern=r"^(main$|menu:|settings:|schedule:|cx:|supplement:|admin:|add_pick:|compat_pick:|cat:|curated:|supp:|card:|mysupp:|today:|intake:|premium:|onboard:|starter:|consent:|rem:(home|edit|set:|toggle:))",
     ))
     app.add_handler(CallbackQueryHandler(on_ai_add, pattern=r"^aiadd:"))
     app.add_handler(CallbackQueryHandler(on_ai_checkin, pattern=r"^aicheck:"))

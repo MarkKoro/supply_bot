@@ -695,7 +695,7 @@ async def api_settings_get(
         tz_name = await db.get_user_tz(conn, tg_user_id)
     finally:
         await conn.close()
-    return JSONResponse({"ok": True, "tz_name": str(tz_name or "UTC")})
+    return JSONResponse({"ok": True, "tz_name": str(tz_name or "UTC"), "offer_url": s.OFFER_URL, "privacy_url": s.PRIVACY_URL, "offer_version": s.OFFER_VERSION, "privacy_version": s.PRIVACY_VERSION})
 
 
 @app.post("/api/settings/timezone")
@@ -1479,7 +1479,10 @@ async def _ai_recommendations(answers: dict, ctx: dict) -> tuple[list[dict], dic
         "suggested_time обязателен и строго в формате HH:MM. prefer_existing_time всегда true: выбирай из уже существующих слотов пользователя, если возможно. "
         "Консервативный стиль, без медицинских заявлений и без рецептурных препаратов. "
         "Поле answers.note трактуй как приоритетный свободный запрос пользователя и явно учитывай его в причине каждой рекомендации. "
-        "Контекст context.last7 и context.stats содержит историю прошлых и сегодняшних приёмов — обязательно используй её."
+        "Контекст context.last7 и context.stats содержит историю прошлых и сегодняшних приёмов — обязательно используй её. "
+        "Добавки из context.stack можно только remove или adjust, но не add. "
+        "Для action=add разрешены только новые добавки из context.catalog_candidates, которых нет в context.stack. "
+        "Для action=remove и action=adjust разрешены только добавки из context.stack."
     )
     prompt = json.dumps({"answers": answers, "context": ctx}, ensure_ascii=False)
     text = await __import__('asyncio').to_thread(_sync_call, cfg, instructions=instructions, input_text=prompt, max_output_tokens=800, timeout_s=20)
@@ -1489,8 +1492,15 @@ async def _ai_recommendations(answers: dict, ctx: dict) -> tuple[list[dict], dic
     return data, {"model": cfg.model}
 
 
-async def _normalize_recommendations(conn, recs: list[dict]) -> list[dict]:
+async def _normalize_recommendations(
+    conn,
+    recs: list[dict],
+    *,
+    stack_slugs: set[str],
+    candidate_slugs: set[str],
+) -> list[dict]:
     out = []
+    seen_action_keys: set[tuple[str, str]] = set()
     for item in recs:
         slug = str(item.get("slug") or "").strip().lower()
         if not slug:
@@ -1501,6 +1511,16 @@ async def _normalize_recommendations(conn, recs: list[dict]) -> list[dict]:
         action = str(item.get("action") or "add").strip().lower()
         if action not in {"add", "remove", "adjust"}:
             action = "add"
+        is_valid_action = False
+        if action == "add":
+            is_valid_action = slug in candidate_slugs and slug not in stack_slugs
+        elif action in {"remove", "adjust"}:
+            is_valid_action = slug in stack_slugs
+        if not is_valid_action:
+            continue
+        dedup_key = (action, slug)
+        if dedup_key in seen_action_keys:
+            continue
         suggested_time = db._normalize_hhmm(str(item.get("suggested_time") or "").strip())
         suggested_slot_id = str(item.get("suggested_slot_id") or "").strip() or None
         out.append({
@@ -1514,6 +1534,7 @@ async def _normalize_recommendations(conn, recs: list[dict]) -> list[dict]:
             "prefer_existing_time": True,
             "supplement_id": int(row["id"]),
         })
+        seen_action_keys.add(dedup_key)
         if len(out) >= 12:
             break
     return out
@@ -1544,6 +1565,28 @@ async def api_checkin(body: CheckinBody, x_telegram_init_data: str = Header(defa
         target, local_date, now_local = _resolve_target_day(tz_name, target_raw)
         checkin_id = await db.upsert_daily_checkin(conn, tg_user_id, local_date, answers)
         ctx = await db.build_ai_context_compact(conn, tg_user_id, local_date)
+        goal_map = {
+            "brain": "focus",
+            "mood": "mood",
+            "sleep": "sleep",
+            "recovery": "recovery",
+            "gut": "gut",
+            "performance": "training",
+        }
+        mapped_goals: list[str] = []
+        for goal in answers.get("goals") or []:
+            mapped = goal_map.get(str(goal).strip().lower())
+            if mapped and mapped not in mapped_goals:
+                mapped_goals.append(mapped)
+        catalog_candidates = await db.get_catalog_candidates(conn, mapped_goals, limit=60)
+        ctx["catalog_candidates"] = [
+            {
+                "slug": str(item.get("slug") or ""),
+                "name_ru": str(item.get("name_ru") or item.get("name") or ""),
+            }
+            for item in catalog_candidates
+            if str(item.get("slug") or "").strip()
+        ]
         ctx["now_local_hhmm"] = now_local.strftime("%H:%M")
         ctx["target_day"] = target
         if body.client_local_iso:
@@ -1551,7 +1594,22 @@ async def api_checkin(body: CheckinBody, x_telegram_init_data: str = Header(defa
         p_hash = _prompt_hash(answers, ctx)
         try:
             recs_raw, meta = await _ai_recommendations(answers, ctx)
-            recs = await _normalize_recommendations(conn, recs_raw)
+            stack_slugs = {
+                str(item.get("slug") or "").strip().lower()
+                for item in (ctx.get("stack") if isinstance(ctx.get("stack"), list) else [])
+                if str(item.get("slug") or "").strip()
+            }
+            candidate_slugs = {
+                str(item.get("slug") or "").strip().lower()
+                for item in (ctx.get("catalog_candidates") if isinstance(ctx.get("catalog_candidates"), list) else [])
+                if str(item.get("slug") or "").strip()
+            }
+            recs = await _normalize_recommendations(
+                conn,
+                recs_raw,
+                stack_slugs=stack_slugs,
+                candidate_slugs=candidate_slugs,
+            )
             await db.save_ai_result(conn, checkin_id, recs, p_hash)
             return JSONResponse({"ok": True, "checkin_id": checkin_id, "recommendations": recs, "meta": meta, "date_local": local_date, "target": target})
         except Exception:

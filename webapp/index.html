@@ -730,7 +730,7 @@
       duplicateResolveBusy: ""
     },
     settingsUi: { openMySuppBusy: false },
-    settingsData: { tz_name: 'UTC', loading: false }
+    settingsData: { tz_name: 'UTC', loading: false, offer_url: '', privacy_url: '', offer_version: '', privacy_version: '' }
   };
 
   const APP_NAME = "SupplyBot";
@@ -2879,8 +2879,16 @@ function adminField(label, field, value, kind='input') {
     try {
       const res = await api('./api/settings');
       state.settingsData.tz_name = String(res.tz_name || 'UTC');
+      state.settingsData.offer_url = String(res.offer_url || '');
+      state.settingsData.privacy_url = String(res.privacy_url || '');
+      state.settingsData.offer_version = String(res.offer_version || '');
+      state.settingsData.privacy_version = String(res.privacy_version || '');
     } catch {
       state.settingsData.tz_name = 'UTC';
+      state.settingsData.offer_url = '';
+      state.settingsData.privacy_url = '';
+      state.settingsData.offer_version = '';
+      state.settingsData.privacy_version = '';
     } finally {
       state.settingsData.loading = false;
     }
@@ -2995,6 +3003,7 @@ function adminField(label, field, value, kind='input') {
         <div class="muted" style="margin-top:6px"><b>Доступ:</b> ${esc(accessLabel)}</div>
         <div class="muted" style="margin-top:4px">${esc(accessHint)}</div>
         <div class="muted" style="margin-top:4px">После подписки: постоянный доступ к WebApp, AI check-in и удобный ежедневный трекинг.</div>
+        <div class="muted" style="margin-top:6px">Документы: ${state.settingsData?.offer_url ? `<a href="${esc(state.settingsData.offer_url)}" target="_blank" rel="noopener noreferrer">Оферта</a>${state.settingsData?.offer_version ? ` (v${esc(state.settingsData.offer_version)})` : ''}` : 'Оферта недоступна'} · ${state.settingsData?.privacy_url ? `<a href="${esc(state.settingsData.privacy_url)}" target="_blank" rel="noopener noreferrer">Privacy Policy</a>${state.settingsData?.privacy_version ? ` (v${esc(state.settingsData.privacy_version)})` : ''}` : 'Privacy Policy недоступна'}</div>
         <div class="ios-group">
           <details open>
             <summary><span>🕒 Время и расписание</span><span class="ios-arrow">▾</span></summary>

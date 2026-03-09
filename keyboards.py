@@ -104,6 +104,16 @@ def ai_checkin_voice_kb() -> InlineKeyboardMarkup:
         ]
     )
 
+def consent_kb(offer_url: str, privacy_url: str) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if offer_url:
+        rows.append([InlineKeyboardButton("📄 Оферта", url=offer_url)])
+    if privacy_url:
+        rows.append([InlineKeyboardButton("🔒 Политика конфиденциальности", url=privacy_url)])
+    rows.append([InlineKeyboardButton("✅ Я согласен(на)", callback_data="consent:accept")])
+    rows.append([InlineKeyboardButton("❌ Не согласен(на)", callback_data="consent:decline")])
+    return InlineKeyboardMarkup(rows)
+
 def catalog_kb(items: list[dict], page: int, pages: int) -> InlineKeyboardMarkup:
     btns: list[list[InlineKeyboardButton]] = []
     for item in items:

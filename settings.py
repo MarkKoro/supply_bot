@@ -30,6 +30,10 @@ class Settings:
     PREMIUM_PRICES_RUB: dict[str, int]
     PREMIUM_PRICES_STARS: dict[str, int]
     PREMIUM_PLANS: dict[str, int]
+    OFFER_VERSION: str
+    PRIVACY_VERSION: str
+    OFFER_URL: str
+    PRIVACY_URL: str
 
 def _parse_admin_ids(value: str) -> list[int]:
     ids: list[int] = []
@@ -139,4 +143,8 @@ def get_settings() -> Settings:
         PREMIUM_PRICES_RUB=_parse_prices_map(os.getenv("PREMIUM_PRICES_RUB", ""), premium_prices_rub_default),
         PREMIUM_PRICES_STARS=_parse_prices_map(os.getenv("PREMIUM_PRICES_STARS", ""), premium_prices_stars_default),
         PREMIUM_PLANS=_parse_prices_map(os.getenv("PREMIUM_PLANS", ""), premium_plans_default),
+        OFFER_VERSION=os.getenv("OFFER_VERSION", "2026-03-08").strip(),
+        PRIVACY_VERSION=os.getenv("PRIVACY_VERSION", "2026-03-08").strip(),
+        OFFER_URL=os.getenv("OFFER_URL", "https://telegra.ph/Oferta-03-08-3").strip(),
+        PRIVACY_URL=os.getenv("PRIVACY_URL", "https://telegra.ph/Popd-03-08").strip(),
     )

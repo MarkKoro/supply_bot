@@ -123,7 +123,12 @@ CREATE TABLE IF NOT EXISTS users (
   starter_trial_used INTEGER NOT NULL DEFAULT 0,
   starter_trial_started_at_utc TEXT NOT NULL DEFAULT '',
   starter_trial_until_utc TEXT NOT NULL DEFAULT '',
-  starter_trial_source TEXT NOT NULL DEFAULT ''
+  starter_trial_source TEXT NOT NULL DEFAULT '',
+  consent_given INTEGER NOT NULL DEFAULT 0,
+  consent_given_at_utc TEXT NOT NULL DEFAULT '',
+  consent_offer_version TEXT NOT NULL DEFAULT '',
+  consent_privacy_version TEXT NOT NULL DEFAULT '',
+  consent_source TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS supplements (
@@ -469,6 +474,11 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     await _ensure_column(conn, "users", "starter_trial_started_at_utc", "TEXT NOT NULL DEFAULT ''")
     await _ensure_column(conn, "users", "starter_trial_until_utc", "TEXT NOT NULL DEFAULT ''")
     await _ensure_column(conn, "users", "starter_trial_source", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "users", "consent_given", "INTEGER NOT NULL DEFAULT 0")
+    await _ensure_column(conn, "users", "consent_given_at_utc", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "users", "consent_offer_version", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "users", "consent_privacy_version", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "users", "consent_source", "TEXT NOT NULL DEFAULT ''")
     await conn.execute(
         """CREATE TABLE IF NOT EXISTS user_complexes (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -641,6 +651,21 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     )
     await conn.execute(
         "UPDATE users SET starter_trial_source='' WHERE starter_trial_source IS NULL"
+    )
+    await conn.execute(
+        "UPDATE users SET consent_given=0 WHERE consent_given IS NULL"
+    )
+    await conn.execute(
+        "UPDATE users SET consent_given_at_utc='' WHERE consent_given_at_utc IS NULL"
+    )
+    await conn.execute(
+        "UPDATE users SET consent_offer_version='' WHERE consent_offer_version IS NULL"
+    )
+    await conn.execute(
+        "UPDATE users SET consent_privacy_version='' WHERE consent_privacy_version IS NULL"
+    )
+    await conn.execute(
+        "UPDATE users SET consent_source='' WHERE consent_source IS NULL"
     )
     await conn.execute(
         "UPDATE supplements SET rules_tags='' WHERE rules_tags IS NULL"
@@ -1808,6 +1833,85 @@ async def get_user_status(conn: aiosqlite.Connection, tg_user_id: int) -> dict:
         "created_at_utc": str(row["created_at_utc"] or ""),
         "last_seen_utc": str(row["last_seen_utc"] or ""),
     }
+
+
+async def get_user_consent(conn: aiosqlite.Connection, tg_user_id: int) -> dict:
+    await get_or_create_user(conn, int(tg_user_id), tz_name="")
+    row = await fetchone(
+        conn,
+        """SELECT tg_user_id, consent_given, consent_given_at_utc, consent_offer_version, consent_privacy_version, consent_source
+           FROM users
+           WHERE tg_user_id=?""",
+        (int(tg_user_id),),
+    )
+    if not row:
+        return {
+            "tg_user_id": int(tg_user_id),
+            "consent_given": 0,
+            "consent_given_at": "",
+            "offer_version": "",
+            "privacy_version": "",
+            "source": "",
+        }
+    return {
+        "tg_user_id": int(row["tg_user_id"] or tg_user_id),
+        "consent_given": int(row["consent_given"] or 0),
+        "consent_given_at": str(row["consent_given_at_utc"] or ""),
+        "offer_version": str(row["consent_offer_version"] or ""),
+        "privacy_version": str(row["consent_privacy_version"] or ""),
+        "source": str(row["consent_source"] or ""),
+    }
+
+
+async def has_required_consent(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    *,
+    offer_version: str,
+    privacy_version: str,
+) -> bool:
+    row = await fetchone(
+        conn,
+        """SELECT consent_given, consent_offer_version, consent_privacy_version
+           FROM users
+           WHERE tg_user_id=?""",
+        (int(tg_user_id),),
+    )
+    if not row:
+        return False
+    return (
+        int(row["consent_given"] or 0) == 1
+        and str(row["consent_offer_version"] or "") == str(offer_version or "")
+        and str(row["consent_privacy_version"] or "") == str(privacy_version or "")
+    )
+
+
+async def save_user_consent(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    *,
+    offer_version: str,
+    privacy_version: str,
+    source: str,
+) -> None:
+    await get_or_create_user(conn, int(tg_user_id), tz_name="")
+    await conn.execute(
+        """UPDATE users
+           SET consent_given=1,
+               consent_given_at_utc=?,
+               consent_offer_version=?,
+               consent_privacy_version=?,
+               consent_source=?
+           WHERE tg_user_id=?""",
+        (
+            utc_now_iso(),
+            str(offer_version or ""),
+            str(privacy_version or ""),
+            str(source or ""),
+            int(tg_user_id),
+        ),
+    )
+    await conn.commit()
 
 
 async def admin_get_user(conn: aiosqlite.Connection, tg_user_id: int) -> dict | None:

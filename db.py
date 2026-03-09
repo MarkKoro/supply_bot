@@ -2894,7 +2894,7 @@ async def search_supplements(
     total_count = int(total_row["total"]) if total_row else 0
     rows = await fetchall(
         conn,
-        """SELECT id, name, name_ru, name_en, slug
+        """SELECT id, name, name_ru, name_en, slug, COALESCE(evidence_grade, '') AS evidence_grade
            FROM supplements
            WHERE is_active=1 AND search_blob LIKE ?
            ORDER BY CASE WHEN search_blob LIKE ? THEN 0 ELSE 1 END,

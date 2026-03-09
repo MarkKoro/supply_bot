@@ -696,11 +696,18 @@ def supp_tabs_kb(
         add_cb = f"mysupp:add:{supplement_id}:retcat:{return_page}"
         back_cb = f"cat:page:{return_page}"
 
-    primary_label = "⚙️ Управлять" if in_stack else "🟢 Добавить в мои БАДы"
-    primary_cb = f"mysupp:open:{supplement_id}" if in_stack else add_cb
-    btns.append([InlineKeyboardButton(primary_label, callback_data=primary_cb)])
-    btns.append([InlineKeyboardButton("⬅️ Назад", callback_data=back_cb)])
-    btns.append([InlineKeyboardButton("🏠 Меню", callback_data="menu:home")])
+    if return_mode == "onboard_back":
+        if in_stack:
+            btns.append([InlineKeyboardButton("✅ Уже добавлено", callback_data="noop")])
+        else:
+            btns.append([InlineKeyboardButton("🟢 Добавить в мои БАДы", callback_data=add_cb)])
+        btns.append([InlineKeyboardButton("⬅️ Назад", callback_data=back_cb)])
+    else:
+        primary_label = "⚙️ Управлять" if in_stack else "🟢 Добавить в мои БАДы"
+        primary_cb = f"mysupp:open:{supplement_id}" if in_stack else add_cb
+        btns.append([InlineKeyboardButton(primary_label, callback_data=primary_cb)])
+        btns.append([InlineKeyboardButton("⬅️ Назад", callback_data=back_cb)])
+        btns.append([InlineKeyboardButton("🏠 Меню", callback_data="menu:home")])
     if purchase_url:
         btns.append([InlineKeyboardButton("🛒 Где купить", url=purchase_url)])
     return InlineKeyboardMarkup(btns)
@@ -891,7 +898,6 @@ def premium_methods_kb(plan_id: str, stars_enabled: bool, rub_enabled: bool) -> 
     if rub_enabled:
         rows.append([InlineKeyboardButton("Купить за ₽", callback_data=f"premium:buy:{plan_id}:yookassa")])
     rows.append([InlineKeyboardButton("📦 Что входит", callback_data="premium:about")])
-    rows.append([InlineKeyboardButton("🔓 Открыть WebApp", callback_data="menu:webapp")])
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="menu:premium")])
     return InlineKeyboardMarkup(rows)
 
@@ -899,7 +905,6 @@ def premium_methods_kb(plan_id: str, stars_enabled: bool, rub_enabled: bool) -> 
 def premium_upsell_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("⭐ Купить Premium", callback_data="menu:premium")],
-        [InlineKeyboardButton("🔓 Открыть WebApp", callback_data="menu:webapp")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")],
     ])
 

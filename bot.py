@@ -1021,6 +1021,26 @@ def _parse_onboarding_ai_json(raw: str) -> dict | None:
     return payload
 
 
+
+
+def _extract_goal_fragments(goal_text: str) -> list[str]:
+    text = str(goal_text or '').strip()
+    if not text:
+        return []
+    lowered = re.sub(r"[.!?]+", ",", text.lower())
+    lowered = lowered.replace(" и ", ",")
+    parts = [p.strip(" ,;:-") for p in lowered.split(",")]
+    stop = {"хочу", "нужно", "надо", "чтобы", "по чуть чуть", "в целом", "вообще"}
+    out: list[str] = []
+    for part in parts:
+        if not part or len(part) < 3:
+            continue
+        if part in stop:
+            continue
+        if part not in out:
+            out.append(part)
+    return out[:6]
+
 def _normalize_onboarding_goals(data: dict | None, fallback_goal: str) -> list[dict]:
     payload = data or {}
     goals = payload.get("goals")
@@ -1039,6 +1059,14 @@ def _normalize_onboarding_goals(data: dict | None, fallback_goal: str) -> list[d
     if not normalized_goals:
         legacy_candidates = payload.get("candidates") if isinstance(payload.get("candidates"), list) else []
         normalized_goals = [{"goal_ru": fallback_goal, "candidates": legacy_candidates}]
+
+    # Если модель пропустила часть целей, добавляем их из исходного текста как отдельные блоки.
+    extracted = _extract_goal_fragments(fallback_goal)
+    existing = {str(item.get("goal_ru") or "").strip().lower() for item in normalized_goals}
+    for frag in extracted:
+        if frag in existing:
+            continue
+        normalized_goals.append({"goal_ru": frag, "candidates": []})
 
     return normalized_goals
 
@@ -1228,7 +1256,7 @@ async def _render_ai_suggestions(
                 update,
                 context,
                 "Не удалось обработать ответ подборщика. Попробуй ещё раз или пропусти этап.",
-                InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Попробовать ещё раз", callback_data="onboard:retry")], [InlineKeyboardButton("⏭️ Пропустить", callback_data="onboard:finish")], [InlineKeyboardButton("⬅️ К выбору пояса", callback_data="tz:back")]]),
+                InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Попробовать ещё раз", callback_data="onboard:retry")], [InlineKeyboardButton("⏭️ Пропустить", callback_data="onboard:skip")], [InlineKeyboardButton("⬅️ К выбору пояса", callback_data="tz:back")]]),
                 route="onboard:goal",
             )
             format_error_shown = True
@@ -1236,10 +1264,6 @@ async def _render_ai_suggestions(
         await show(update, context, "Начальный подбор не вернул ответ. Попробуй ещё раз.", back(), route="onboard:goal")
 
     if isinstance(data, dict):
-        warnings = data.get("warnings_ru") or []
-        if not isinstance(warnings, list):
-            warnings = []
-
         grouped_found, missing = await _resolve_onboarding_goal_candidates(conn, data, goal_text)
         if not grouped_found:
             fallback_rows, _ = await db.search_supplements(conn, goal_text, page=0, page_size=8)
@@ -1263,12 +1287,6 @@ async def _render_ai_suggestions(
             "✨ <b>Начальный подбор</b>",
             "",
         ]
-        if prefix_line:
-            lines.extend([prefix_line, ""])
-        lines.extend([
-            f"Запрос: <b>{goal_text}</b>",
-            "",
-        ])
 
         all_found_items: list[dict] = []
         if grouped_found:
@@ -1317,12 +1335,6 @@ async def _render_ai_suggestions(
             lines.append("Не нашёл в каталоге:")
             lines.append(", ".join(missing))
 
-        if warnings:
-            lines.append("")
-            lines.append("Предупреждения:")
-            for w in warnings:
-                lines.append(f"• {w}")
-
         lines.append("")
         lines.append("Открой карточки БАДов кнопками ниже, чтобы посмотреть детали и добавить в стек.")
 
@@ -1330,9 +1342,12 @@ async def _render_ai_suggestions(
         for item in all_found_items:
             row = item["row"]
             buttons.append([InlineKeyboardButton(f"🔎 {row['name']}", callback_data=f"supp:openai:{row['id']}")])
-        buttons.append([InlineKeyboardButton("✅ Завершить подбор", callback_data="onboard:finish")])
-        buttons.append([InlineKeyboardButton("⏭️ Пропустить", callback_data="onboard:finish")])
-        buttons.append([InlineKeyboardButton("⭐ Почему Premium удобнее", callback_data="premium:about")])
+        initial_ids = await db.get_user_initial_stack_ids(conn, update.effective_user.id)
+        if initial_ids:
+            buttons.append([InlineKeyboardButton("✅ Завершить подбор", callback_data="onboard:finish")])
+        else:
+            buttons.append([InlineKeyboardButton("⏭️ Пропустить", callback_data="onboard:skip")])
+        buttons.append([InlineKeyboardButton("⬅️ Назад", callback_data="tz:back")])
         if save_to_onboarding:
             await db.save_onboarding_results(
                 conn,
@@ -1360,7 +1375,7 @@ async def _render_ai_suggestions(
             update,
             context,
             "Не удалось обработать ответ подборщика. Попробуй ещё раз или пропусти этап.",
-            InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Попробовать ещё раз", callback_data="onboard:retry")], [InlineKeyboardButton("⏭️ Пропустить", callback_data="onboard:finish")], [InlineKeyboardButton("⬅️ К выбору пояса", callback_data="tz:back")]]),
+            InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Попробовать ещё раз", callback_data="onboard:retry")], [InlineKeyboardButton("⏭️ Пропустить", callback_data="onboard:skip")], [InlineKeyboardButton("⬅️ К выбору пояса", callback_data="tz:back")]]),
             route="onboard:goal",
         )
     return False
@@ -1898,6 +1913,27 @@ async def _show_starter_trial_offer(update: Update, context: ContextTypes.DEFAUL
     await show(update, context, "\n".join(lines), kb, route="starter:offer")
 
 
+async def _complete_onboarding_flow(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    conn,
+    tg_uid: int,
+) -> None:
+    await db.mark_onboarding_done(conn, tg_uid)
+    await db.mark_onboarding_used(conn, tg_uid)
+    has_premium = await db.is_premium_active(conn, tg_uid)
+    starter_used_row = await db.fetchone(
+        conn,
+        "SELECT starter_trial_used FROM users WHERE tg_user_id=?",
+        (int(tg_uid),),
+    )
+    starter_used = int(starter_used_row["starter_trial_used"] or 0) if starter_used_row else 0
+    if not has_premium and starter_used == 0:
+        await _show_starter_trial_offer(update, context)
+        return
+    await home(update, context)
+
+
 async def require_premium_or_upsell(update: Update, context: ContextTypes.DEFAULT_TYPE, feature_name: str) -> bool:
     s = context.application.bot_data["settings"]
     tg_uid = update.effective_user.id if update.effective_user else 0
@@ -2415,6 +2451,24 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await _show_timezone_picker(update, context, 0)
             return
 
+        onboarding_state = await db.get_onboarding_state(conn, tg_uid)
+        onboarding_status = str(onboarding_state.get("onboarding_status") or "")
+        onboarding_raw = str(onboarding_state.get("onboarding_raw_json") or "")
+        onboarding_active = onboarding_status in {"active", "results"} and bool(onboarding_raw)
+        allowed_during_onboarding = {
+            "onboard:results",
+            "onboard:retry",
+            "onboard:skip",
+            "onboard:finish",
+            "tz:back",
+        }
+        if onboarding_active and data.startswith("menu:"):
+            await _render_onboarding_results(update, context, conn)
+            return
+        if onboarding_active and data.startswith("premium:") and data not in allowed_during_onboarding:
+            await _render_onboarding_results(update, context, conn)
+            return
+
         if data == "main":
             await home(update, context)
             return
@@ -2432,20 +2486,11 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if data == "onboard:retry":
             await _start_initial_pick(update, context, prefix="Опиши цель ещё раз — сделаю новый подбор.", back_cb="tz:back")
             return
+        if data == "onboard:skip":
+            await _complete_onboarding_flow(update, context, conn, tg_uid)
+            return
         if data == "onboard:finish":
-            await db.mark_onboarding_done(conn, tg_uid)
-            await db.mark_onboarding_used(conn, tg_uid)
-            has_premium = await db.is_premium_active(conn, tg_uid)
-            starter_used_row = await db.fetchone(
-                conn,
-                "SELECT starter_trial_used FROM users WHERE tg_user_id=?",
-                (int(tg_uid),),
-            )
-            starter_used = int(starter_used_row["starter_trial_used"] or 0) if starter_used_row else 0
-            if not has_premium and starter_used == 0:
-                await _show_starter_trial_offer(update, context)
-                return
-            await home(update, context)
+            await _complete_onboarding_flow(update, context, conn, tg_uid)
             return
         if data == "starter:activate":
             has_premium = await db.is_premium_active(conn, tg_uid)
@@ -2526,10 +2571,19 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await show(
                 update,
                 context,
-                "⭐ <b>Почему Premium удобнее</b>\n\n"
-                "Бесплатно: база добавок, стартовый подбор и работа через кнопки в боте.\n\n"
-                "С Premium удобнее каждый день: Today с быстрыми отметками, карта тела, AI check-in, гибкая настройка стека и напоминаний в WebApp.\n\n"
-                "Итог: меньше ручной рутины, выше шанс стабильно держать план и замечать эффект.",
+                "⭐ <b>Что доступно бесплатно и в Premium</b>\n\n"
+                "Бесплатно:\n"
+                "• база добавок\n"
+                "• стартовый подбор\n"
+                "• напоминания в боте\n\n"
+                "Платно (Premium):\n"
+                "• WebApp\n"
+                "• геймификация\n"
+                "• достижения\n"
+                "• интерактивная карта\n"
+                "• более удобный каталог\n"
+                "• AI check-in\n"
+                "• расширенная настройка стека и напоминаний",
                 premium_upsell_kb(),
                 route="menu:premium",
             )
@@ -3974,6 +4028,7 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     tab = payload_data.get("tab") or "brief"
                     page = int(payload_data.get("page") or 0)
                     await db.add_user_supplement(conn, tg_uid, supplement_id)
+                    await db.add_user_initial_stack_id(conn, tg_uid, supplement_id)
                     await render_supplement_card(
                         update,
                         context,

@@ -643,6 +643,18 @@
     .history-item { border:1px solid rgba(255,255,255,0.14); border-radius:12px; padding:10px; background:rgba(255,255,255,0.05); }
     @media (max-width: 560px) { .survey-actions { grid-template-columns: 1fr; } }
 
+
+    .profile-hero { display:grid; grid-template-columns: 64px 1fr; gap:12px; align-items:center; cursor:pointer; }
+    .profile-avatar { width:64px; height:64px; border-radius:18px; background:linear-gradient(160deg, rgba(125,183,255,.35), rgba(255,255,255,.12)); display:grid; place-items:center; font-size:28px; border:1px solid rgba(255,255,255,.3); }
+    .profile-summary-grid { margin-top:10px; display:grid; gap:6px; grid-template-columns:repeat(2,minmax(0,1fr)); }
+    .profile-stat-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; margin-top:10px; }
+    .profile-stat { border:1px solid rgba(255,255,255,.14); border-radius:12px; padding:8px; background:rgba(255,255,255,.04); }
+    .modal-overlay { position:fixed; inset:0; background:rgba(2,6,18,.64); z-index:40; display:flex; align-items:flex-end; padding:0 10px calc(12px + env(safe-area-inset-bottom)); }
+    .modal-card { width:100%; max-height:82vh; overflow:auto; border-radius:18px; margin:0 auto; max-width:560px; }
+    .field-grid { display:grid; gap:8px; }
+    .field-grid.two { grid-template-columns:repeat(2,minmax(0,1fr)); }
+    .lab-result-row { border:1px solid rgba(255,255,255,.14); border-radius:12px; padding:8px; margin-bottom:8px; background:rgba(255,255,255,.03); }
+
   </style>
 </head>
 <body>
@@ -687,7 +699,8 @@
     profileLabs: { reports: [], loading: false, saving: false },
     profileNutrients: { items: [], loading: false },
     profileOverview: null,
-    nutrientAssistant: { selectedCode: "vitamin_d", preview: null, loadingPreview: false },
+    nutrientAssistant: { selectedCode: "vitamin_d", preview: null, loadingPreview: false, plan: null, loadingPlan: false, plans: [], loadingPlans: false, explanation: null, loadingExplanation: false, explanationMeta: null, currentPlanId: null, reminders: [], loadingReminders: false, dashboard: null, onboarding: null, onboardingStep: 0 },
+    profileUi: { editOpen: false, manualOpen: false, uploadOpen: false, reviewOpen: false, selectedReportId: null, uploading: false, savingManual: false, savingReview: false },
     survey: {
       step: 0,
       loading: false,
@@ -2536,143 +2549,307 @@ function adminField(label, field, value, kind='input') {
   }
 
   const PROFILE_FIELDS = ["sex_at_birth","birth_year","height_cm","weight_kg","country_code","city","pregnancy_status","lactation_status","diet_type","training_sessions_per_week","training_minutes_per_week","work_hours_per_week","sun_exposure_level","smoking_status","alcohol_status","meds_json","conditions_json"];
+  const PROFILE_SELECTS = {
+    sex_at_birth:[['m','Мужской'],['f','Женский'],['na','Не хочу указывать']],
+    pregnancy_status:[['na','Неактуально'],['yes','Да'],['no','Нет']],
+    lactation_status:[['na','Неактуально'],['yes','Да'],['no','Нет']],
+    diet_type:[['regular','Обычное'],['vegetarian','Вегетарианское'],['vegan','Веганское'],['pescetarian','Пескетарианское'],['other','Другое'],['na','Не хочу указывать']],
+    sun_exposure_level:[['low','Почти не бываю на солнце'],['mild','Немного бываю на солнце'],['regular','Регулярно бываю на солнце'],['high','Много солнца круглый год']],
+    smoking_status:[['no','Нет'],['sometimes','Иногда'],['regular','Регулярно'],['na','Не хочу указывать']],
+    alcohol_status:[['no','Нет'],['sometimes','Иногда'],['regular','Регулярно'],['na','Не хочу указывать']],
+    country_code:[['RU','Россия'],['KZ','Казахстан'],['BY','Беларусь'],['UA','Украина'],['AM','Армения'],['UZ','Узбекистан'],['KG','Кыргызстан'],['other','Другая страна']]
+  };
+  const ANALYTE_PRESETS = [
+    {code:'25ohd', title:'Витамин D (25-OH)', units:['ng/mL','nmol/L']},
+    {code:'vitamin_b12', title:'Витамин B12', units:['pg/mL','pmol/L']},
+    {code:'ferritin', title:'Ферритин', units:['ng/mL','µg/L']},
+    {code:'serum_iron', title:'Железо сывороточное', units:['µmol/L','µg/dL']},
+    {code:'folate', title:'Фолат', units:['ng/mL','nmol/L']},
+    {code:'zinc', title:'Цинк', units:['µmol/L','µg/dL']},
+    {code:'magnesium', title:'Магний', units:['mmol/L','mg/dL']},
+    {code:'calcium', title:'Кальций', units:['mmol/L','mg/dL']}
+  ];
+
+  function yearsOptions(selected) {
+    const yearNow = new Date().getFullYear();
+    let out = '<option value="">Не указано</option>';
+    for (let y = yearNow - 100; y <= yearNow - 10; y += 1) out += `<option value="${y}" ${String(selected||'')===String(y)?'selected':''}>${y}</option>`;
+    return out;
+  }
+  function selectOptions(list, selected, placeholder='Не указано') { return `<option value="">${placeholder}</option>` + list.map(([v,t])=>`<option value="${esc(v)}" ${String(selected||'')===String(v)?'selected':''}>${esc(t)}</option>`).join(''); }
+  function parseLinesToJson(txt){ return JSON.stringify(String(txt||'').split('\n').map((x)=>x.trim()).filter(Boolean)); }
+  function parseJsonToLines(raw){ try { const arr=JSON.parse(String(raw||'[]')); return Array.isArray(arr)?arr.join('\n'):''; } catch { return String(raw||''); } }
+  function ageFromBirth(y){ const yy=Number(y); if(!yy) return '—'; const a=(new Date().getFullYear()-yy); return a>0&&a<120?`${a} лет`:'—'; }
+
+  function profileSummary(p){
+    const find=(k,v)=> (PROFILE_SELECTS[k]||[]).find((x)=>x[0]===v)?.[1] || 'Не указано';
+    return [
+      `Пол: ${find('sex_at_birth',p.sex_at_birth)}`,
+      `Возраст: ${ageFromBirth(p.birth_year)}`,
+      `Рост/вес: ${p.height_cm||'—'} см / ${p.weight_kg||'—'} кг`,
+      `Локация: ${find('country_code',p.country_code)}${p.city?`, ${p.city}`:''}`,
+      `Питание: ${find('diet_type',p.diet_type)}`,
+      `Активность: ${p.training_sessions_per_week||0} трен./нед`
+    ];
+  }
 
   async function loadProfileShell(force) {
-    await Promise.all([
-      loadBodyMap(force),
-      loadStatsOnly().catch(()=>null),
-      loadAchievements(force).catch(()=>null),
-      loadProfileData(force),
-      loadProfileLabs(force),
-      loadProfileNutrients(force),
-      loadNutrientOverview(force),
-    ]);
+    await Promise.all([loadBodyMap(force),loadStatsOnly().catch(()=>null),loadAchievements(force).catch(()=>null),loadProfileData(force),loadProfileLabs(force),loadProfileNutrients(force),loadNutrientOverview(force),loadNutrientPlans(force),loadNutrientReminders(force),loadNutrientDashboard(force),loadNutrientOnboarding(force)]);
   }
+  async function loadProfileData(force) { if (state.profile.loading && !force) return; state.profile.loading = true; try { const res = await api('./api/profile'); state.profile.data = res.profile || {}; } catch {} state.profile.loading = false; }
+  async function loadProfileLabs(force) { if (state.profileLabs.loading && !force) return; state.profileLabs.loading = true; try { const res = await api('./api/profile/labs'); state.profileLabs.reports = Array.isArray(res.reports) ? res.reports : []; } catch {} state.profileLabs.loading = false; }
+  async function loadProfileNutrients(force) { if (state.profileNutrients.loading && !force) return; state.profileNutrients.loading = true; try { const res = await api('./api/profile/nutrients'); state.profileNutrients.items = Array.isArray(res.items) ? res.items : []; if (!state.nutrientAssistant.selectedCode && state.profileNutrients.items.length) state.nutrientAssistant.selectedCode = String(state.profileNutrients.items[0].nutrient_code || 'vitamin_d'); } catch {} state.profileNutrients.loading = false; }
+  async function loadNutrientOverview(force) { if (state.profileOverview && !force) return; try { const res = await api('./api/profile/nutrient-assistant/overview'); state.profileOverview = res.overview || null; } catch {} }
+  async function loadNutrientPlans(force) { if (state.nutrientAssistant.loadingPlans && !force) return; state.nutrientAssistant.loadingPlans = true; try { const res = await api('./api/profile/nutrient-assistant/plans?limit=12'); state.nutrientAssistant.plans = Array.isArray(res.items) ? res.items : []; } catch {} state.nutrientAssistant.loadingPlans = false; }
+  async function loadNutrientReminders(force) { if (state.nutrientAssistant.loadingReminders && !force) return; state.nutrientAssistant.loadingReminders = true; try { const res = await api('./api/profile/nutrient-assistant/reminders?limit=50'); state.nutrientAssistant.reminders = Array.isArray(res.items) ? res.items : []; } catch {} state.nutrientAssistant.loadingReminders = false; }
+  async function loadNutrientDashboard(force) { if (state.nutrientAssistant.dashboard && !force) return; try { const res = await api('./api/profile/nutrient-assistant/dashboard'); state.nutrientAssistant.dashboard = res.dashboard || null; } catch {} }
+  async function loadNutrientOnboarding(force) { if (state.nutrientAssistant.onboarding && !force) return; try { const res = await api('./api/profile/nutrient-assistant/onboarding'); state.nutrientAssistant.onboarding = res.onboarding || null; } catch {} }
 
-  async function loadProfileData(force) {
-    if (state.profile.loading && !force) return;
-    state.profile.loading = true;
-    try {
-      const res = await api('./api/profile');
-      state.profile.data = res.profile || {};
-    } catch {}
-    state.profile.loading = false;
+  function renderProfileEditorModal() {
+    if (!state.profileUi.editOpen) return '';
+    const p=state.profile.data||{};
+    return `<div class="modal-overlay" data-close-edit><section class="card modal-card" onclick="event.stopPropagation()"><div class="row"><strong>Редактирование профиля</strong><button class="btn secondary" data-close-edit>Закрыть</button></div>
+      <div class="field-grid" style="margin-top:8px">
+        <label class="muted">Пол<select class="select" data-profile-field="sex_at_birth">${selectOptions(PROFILE_SELECTS.sex_at_birth,p.sex_at_birth)}</select></label>
+        <label class="muted">Год рождения<select class="select" data-profile-field="birth_year">${yearsOptions(p.birth_year)}</select></label>
+        <div class="field-grid two"><label class="muted">Рост, см<input inputmode="numeric" class="input" data-profile-field="height_cm" placeholder="Например, 175" value="${esc(p.height_cm??'')}"/></label><label class="muted">Вес, кг<input inputmode="numeric" class="input" data-profile-field="weight_kg" placeholder="Например, 70" value="${esc(p.weight_kg??'')}"/></label></div>
+        <div class="field-grid two"><label class="muted">Страна<select class="select" data-profile-field="country_code">${selectOptions(PROFILE_SELECTS.country_code,p.country_code)}</select></label><label class="muted">Город<input class="input" data-profile-field="city" value="${esc(p.city||'')}"/></label></div>
+        <label class="muted">Беременность<select class="select" data-profile-field="pregnancy_status">${selectOptions(PROFILE_SELECTS.pregnancy_status,p.pregnancy_status)}</select></label>
+        <label class="muted">Лактация<select class="select" data-profile-field="lactation_status">${selectOptions(PROFILE_SELECTS.lactation_status,p.lactation_status)}</select></label>
+        <label class="muted">Тип питания<select class="select" data-profile-field="diet_type">${selectOptions(PROFILE_SELECTS.diet_type,p.diet_type)}</select></label>
+        <div class="field-grid two"><label class="muted">Тренировок в неделю<input inputmode="numeric" class="input" data-profile-field="training_sessions_per_week" value="${esc(p.training_sessions_per_week??'')}"/></label><label class="muted">Минут тренировок в неделю<input inputmode="numeric" class="input" data-profile-field="training_minutes_per_week" value="${esc(p.training_minutes_per_week??'')}"/></label></div>
+        <label class="muted">Рабочих часов в неделю<input inputmode="numeric" class="input" data-profile-field="work_hours_per_week" value="${esc(p.work_hours_per_week??'')}"/></label>
+        <label class="muted">Уровень пребывания на солнце<select class="select" data-profile-field="sun_exposure_level">${selectOptions(PROFILE_SELECTS.sun_exposure_level,p.sun_exposure_level)}</select></label>
+        <div class="field-grid two"><label class="muted">Курение<select class="select" data-profile-field="smoking_status">${selectOptions(PROFILE_SELECTS.smoking_status,p.smoking_status)}</select></label><label class="muted">Алкоголь<select class="select" data-profile-field="alcohol_status">${selectOptions(PROFILE_SELECTS.alcohol_status,p.alcohol_status)}</select></label></div>
+        <label class="muted">Лекарства (каждую позицию с новой строки)<textarea class="textarea" data-profile-lines="meds_json">${esc(parseJsonToLines(p.meds_json))}</textarea></label>
+        <label class="muted">Состояния и особенности здоровья (каждую позицию с новой строки)<textarea class="textarea" data-profile-lines="conditions_json">${esc(parseJsonToLines(p.conditions_json))}</textarea></label>
+      </div><div class="row" style="margin-top:10px"><button class="btn" data-profile-save>${state.profile.saving?'Сохраняем…':'Сохранить'}</button></div></section></div>`;
   }
+  function analyteOptions(selected){ return ANALYTE_PRESETS.map((a)=>`<option value="${a.code}" ${a.code===selected?'selected':''}>${a.title}</option>`).join(''); }
+  function unitOptions(code, unit){ const item=ANALYTE_PRESETS.find((a)=>a.code===code)||ANALYTE_PRESETS[0]; return (item.units||[]).map((u)=>`<option value="${esc(u)}" ${u===unit?'selected':''}>${esc(u)}</option>`).join(''); }
+  function renderLabRow(idx,row={}){ const code=row.analyte_code||ANALYTE_PRESETS[0].code; return `<div class="lab-result-row" data-lab-row="${idx}"><label class="muted">Показатель<select class="select" data-lab-field="analyte_code" data-idx="${idx}">${analyteOptions(code)}</select></label><div class="field-grid two"><label class="muted">Значение<input class="input" inputmode="decimal" data-lab-field="value_num" data-idx="${idx}" value="${esc(row.value_num??row.value_text??'')}"/></label><label class="muted">Единица<select class="select" data-lab-field="unit" data-idx="${idx}">${unitOptions(code,row.unit||'')}</select></label></div><div class="field-grid two"><label class="muted">Референс от<input class="input" inputmode="decimal" data-lab-field="ref_low" data-idx="${idx}" value="${esc(row.ref_low??'')}"/></label><label class="muted">Референс до<input class="input" inputmode="decimal" data-lab-field="ref_high" data-idx="${idx}" value="${esc(row.ref_high??'')}"/></label></div></div>`; }
 
-  async function loadProfileLabs(force) {
-    if (state.profileLabs.loading && !force) return;
-    state.profileLabs.loading = true;
-    try {
-      const res = await api('./api/profile/labs');
-      state.profileLabs.reports = Array.isArray(res.reports) ? res.reports : [];
-    } catch {}
-    state.profileLabs.loading = false;
+  function labsEmptyState(){ return `<div class="muted">Пока нет добавленных анализов</div><div class="row" style="margin-top:10px; gap:8px"><button class="btn" data-open-upload>Загрузить документ</button><button class="btn secondary" data-open-manual>Ввести вручную</button></div>`; }
+  function renderLabsModal(type){
+    if (!(type==='manual'?state.profileUi.manualOpen:state.profileUi.uploadOpen)) return '';
+    return `<div class="modal-overlay" data-close-${type}><section class="card modal-card" onclick="event.stopPropagation()"><div class="row"><strong>${type==='manual'?'Ручной ввод анализа':'Загрузка документа'}</strong><button class="btn secondary" data-close-${type}>Закрыть</button></div>${type==='manual'?`<div class="field-grid" style="margin-top:10px"><label class="muted">Дата анализа<input type="date" class="input" id="manualReportDate"/></label><label class="muted">Лаборатория (необязательно)<input class="input" id="manualLabName"/></label><label class="muted">Комментарий (необязательно)<textarea class="textarea" id="manualNotes"></textarea></label><div id="manualRows">${renderLabRow(0)}</div><button class="btn secondary" data-add-manual-row>+ Добавить показатель</button><button class="btn" data-save-manual>${state.profileUi.savingManual?'Сохраняем…':'Сохранить анализ'}</button></div>`:`<div class="field-grid" style="margin-top:10px"><label class="muted">Дата анализа<input type="date" class="input" id="uploadReportDate"/></label><label class="muted">Лаборатория (необязательно)<input class="input" id="uploadLabName"/></label><label class="muted">Комментарий (необязательно)<textarea class="textarea" id="uploadNotes"></textarea></label><input type="file" class="input" id="labsFile" accept=".pdf,.jpg,.jpeg,.png,.webp"/><button class="btn" data-upload-labs>${state.profileUi.uploading?'Загружаем…':'Загрузить документ'}</button></div>`}</section></div>`;
   }
-
-  async function loadProfileNutrients(force) {
-    if (state.profileNutrients.loading && !force) return;
-    state.profileNutrients.loading = true;
-    try {
-      const res = await api('./api/profile/nutrients');
-      state.profileNutrients.items = Array.isArray(res.items) ? res.items : [];
-      if (!state.nutrientAssistant.selectedCode && state.profileNutrients.items.length) {
-        state.nutrientAssistant.selectedCode = String(state.profileNutrients.items[0].nutrient_code || 'vitamin_d');
-      }
-    } catch {}
-    state.profileNutrients.loading = false;
-  }
-
-  async function loadNutrientOverview(force) {
-    if (state.profileOverview && !force) return;
-    try {
-      const res = await api('./api/profile/nutrient-assistant/overview');
-      state.profileOverview = res.overview || null;
-    } catch {}
-  }
+  function renderReviewModal(){ if(!state.profileUi.reviewOpen) return ''; const r=(state.profileLabs.reports||[]).find((x)=>String(x.id)===String(state.profileUi.selectedReportId)); if(!r) return ''; return `<div class="modal-overlay" data-close-review><section class="card modal-card" onclick="event.stopPropagation()"><div class="row"><strong>Проверка распознанных данных</strong><button class="btn secondary" data-close-review>Закрыть</button></div><div class="muted" style="margin-top:8px">${r.parse_status==='needs_manual_review'?'Документ загружен, но данные нужно проверить вручную':'Проверьте распознанные значения'}</div><div class="field-grid" style="margin-top:8px"><label class="muted">Дата анализа<input type="date" class="input" id="reviewReportDate" value="${esc(r.report_date||'')}"/></label><label class="muted">Лаборатория<input class="input" id="reviewLabName" value="${esc(r.lab_name||'')}"/></label><label class="muted">Комментарий<textarea class="textarea" id="reviewNotes">${esc(r.notes||'')}</textarea></label><div id="reviewRows">${(r.results||[]).map((row,idx)=>renderLabRow(idx,row)).join('') || renderLabRow(0)}</div><button class="btn" data-save-review>${state.profileUi.savingReview?'Сохраняем…':'Сохранить результат'}</button></div></section></div>`; }
 
   function renderProfile() {
     const p = state.profile.data || {};
     const labs = state.profileLabs.reports || [];
     const nutrients = state.profileNutrients.items || [];
-    const ov = state.profileOverview || {};
     const na = state.nutrientAssistant || {};
+    const dashboard = na.dashboard || {};
+    const onboarding = na.onboarding || {};
     const preview = na.preview || null;
+    const plan = na.plan || null;
     const selectedCode = na.selectedCode || (nutrients[0]?.nutrient_code || 'vitamin_d');
-    const profileInputs = PROFILE_FIELDS.map((f) => `<label class="muted">${f}<input class="input" data-profile-field="${f}" value="${esc(p[f] ?? '')}" /></label>`).join('');
     const nutrientOptions = nutrients.map((n) => `<option value="${esc(n.nutrient_code)}" ${n.nutrient_code === selectedCode ? 'selected' : ''}>${esc(n.title_ru || n.nutrient_code)}</option>`).join('');
-    const previewHtml = !preview ? '<div class="muted" style="margin-top:8px">Выберите нутриент и нажмите «Проверить текущие данные».</div>' : `
-      <div class="muted" style="margin-top:8px">Статус: <strong>${esc(preview.interpreted_status || '—')}</strong> · Уверенность: <strong>${esc(preview.confidence_level || 'low')}</strong></div>
-      <div class="muted">Режим: ${esc(preview.engine_mode || 'limited')}</div>
-      <div class="muted" style="margin-top:6px">Найдено анализов: ${(preview.latest_relevant_labs || []).length}</div>
-      <div class="muted">Совпадения со стеком: ${(preview.current_stack_matches || []).map((x)=>esc(x.name_ru || x.slug)).join(', ') || 'нет'}</div>
-      ${(preview.missing_inputs || []).length ? `<div class="muted" style="margin-top:8px">Чего не хватает: ${(preview.missing_inputs || []).map(esc).join(' · ')}</div>` : ''}
-      ${(preview.physician_flags || []).length ? `<div class="muted" style="margin-top:6px">Physician flags: ${(preview.physician_flags || []).map(esc).join(' · ')}</div>` : ''}
-      ${(preview.safety_flags || []).length ? `<div class="muted" style="margin-top:6px">Safety flags: ${(preview.safety_flags || []).map(esc).join(' · ')}</div>` : ''}
-      <div class="muted" style="margin-top:8px">${esc(preview.ui_notes_ru || '')}</div>
-    `;
+    const summary = profileSummary(p).map((x)=>`<div class="muted">${x}</div>`).join('');
+    const readiness = dashboard.readiness || { steps: [] };
+    const history = dashboard.history || [];
+    const activePlanReminders = (na.reminders||[]).filter((r)=>Number(r.plan_run_id||0)===Number(na.currentPlanId||0) && ['scheduled','snoozed','sent'].includes(String(r.status||'')));
+    const stateTitle = dashboard.assistant_state_title || 'Состояние обновляется';
+    const stateSubtitle = dashboard.assistant_state_subtitle || 'Добавьте данные, чтобы получить персональную оценку.';
+
+    const onboardingCards = [
+      'Помощник помогает разбирать витамины и минералы по вашим данным.',
+      'Сначала заполните профиль и добавьте свежие анализы.',
+      'После этого система собирает план, follow-up и напоминания.',
+      'Точность зависит от данных. Это информационный инструмент, а не медицинская услуга.',
+    ];
+    const onboardingBlock = onboarding.show_onboarding ? `<section class="card fade"><div class="row"><strong>Как работает Нутриентный помощник</strong><button class="btn secondary" data-onboarding-dismiss>Пропустить</button></div><div class="muted" style="margin-top:8px">Шаг ${Math.min(4, (na.onboardingStep || 0) + 1)} из 4</div><div style="margin-top:8px">${esc(onboardingCards[Math.min(3, na.onboardingStep || 0)])}</div><div class="row" style="margin-top:10px;gap:8px"><button class="btn secondary" data-onboarding-prev>Назад</button><button class="btn" data-onboarding-next>${(na.onboardingStep || 0) >= 3 ? 'Завершить' : 'Далее'}</button></div></section>` : '';
+
+    const previewHtml = !preview ? '' : `<div class="card" style="margin-top:10px"><div><strong>${esc(preview.title_ru || selectedCode)}</strong></div><div class="muted">Статус: ${esc(preview.interpreted_status || 'unknown')} · Уверенность: ${esc(preview.confidence_level || 'low')}</div></div>`;
+    const explanation = na.explanation || null;
+    const explanationHtml = !explanation ? '' : `<div class="card" style="margin-top:10px"><div class="row"><strong>${esc(explanation.title_ru || 'Понятное объяснение')}</strong><span class="muted">${esc((na.explanationMeta?.source_type==='fallback') ? 'резервный режим' : 'объяснение')}</span></div><div class="muted" style="margin-top:6px">${esc(explanation.summary_ru || '')}</div>${(explanation.main_points_ru||[]).map((x)=>`<div class="muted">• ${esc(x)}</div>`).join('')}<div style="margin-top:8px"><strong>Почему такая стратегия</strong><div class="muted">${esc(explanation.why_this_plan_ru || '')}</div></div><div style="margin-top:8px"><strong>Что делать сейчас</strong><div class="muted">${esc(explanation.what_to_do_now_ru || '')}</div></div><div class="muted" style="margin-top:8px">Если есть выраженные симптомы, хронические заболевания, беременность, лактация или проблемы с почками/печенью/ЖКТ — приоритет за врачом и свежими анализами.</div></div>`;
+    const planHtml = !plan ? '<div class="muted" style="margin-top:8px">План пока не собран. Начните с оценки данных.</div>' : `<div class="card" style="margin-top:10px"><div class="row"><strong>Текущий план</strong><span class="muted">${esc(plan.confidence_level || 'low')}</span></div><div class="muted" style="margin-top:6px">Режим: ${esc(plan.plan_mode || '-')} · Фаза: ${esc(plan.plan_phase || '-')}</div><div class="muted">Стратегия: ${esc(plan.action_strategy || '-')}</div>${(plan.ui_summary_lines||[]).length?`<div style="margin-top:8px">${plan.ui_summary_lines.map((x)=>`<div class="muted">• ${esc(x)}</div>`).join('')}</div>`:''}<div class="muted" style="margin-top:8px">План носит информационно-аналитический характер и не заменяет консультацию врача.</div><div class="row" style="margin-top:10px; gap:8px"><button class="btn secondary" data-nutrient-explain>${na.loadingExplanation ? 'Формируем…' : 'Понятное объяснение'}</button><button class="btn" data-activate-reminders>${activePlanReminders.length?`Напоминания включены (${activePlanReminders.length})`:'Включить follow-up напоминания'}</button></div>${explanationHtml}</div>`;
+
+    const diff = dashboard.latest_diff_summary;
+    const diffHtml = !diff ? '<div class="muted">Пока нет обновлений для сравнения.</div>' : `<div class="muted">Статус: ${esc(diff.from_status || '—')} → ${esc(diff.to_status || '—')}</div><div class="muted">Фаза: ${esc(diff.from_phase || '—')} → ${esc(diff.to_phase || '—')}</div><div class="muted">Причина: ${esc((diff.reasons || []).join(', ') || 'обновление данных')}</div>`;
+
     return `
-      <section class="card fade"><div class="row"><strong>👤 Профиль пользователя</strong><button class="btn" data-profile-save>${state.profile.saving ? 'Сохраняем…' : 'Сохранить'}</button></div><div style="margin-top:8px; display:grid; gap:8px">${profileInputs}</div></section>
-      ${renderStatsBlock() || ''}
-      <section class="card fade level-mini"><div class="row"><strong>🏆 Уровень и достижения</strong><span class="muted">${Number(state.ach?.level || 1)} уровень</span></div><div class="muted" style="margin-top:8px">Открыто достижений: ${(state.ach?.achievements || []).filter((x)=>x.unlocked).length}</div><div style="margin-top:10px"><button class="btn secondary" data-open-settings-ach>Открыть детально</button></div></section>
-      <section class="card fade"><div class="row"><strong>🧠 Карта тела</strong><button class="btn secondary" data-profile-open-bodymap>Открыть карту тела</button></div></section>
-      <section class="card fade"><div class="row"><strong>🧪 Нутриентный помощник</strong><span class="muted">shell</span></div>
-        <div class="muted" style="margin-top:8px">Мой health profile: ${ov.has_profile ? 'заполнен' : 'пока пусто'}</div>
-        <div class="muted">Мои анализы: ${labs.length}</div>
-        <div class="muted">Поддерживаемые нутриенты: ${nutrients.length}</div>
-        <div class="muted">Будущий персональный план: ${ov.has_plan_inputs ? 'данные готовы для следующего шага' : 'недостаточно данных'}</div>
-        <div style="margin-top:10px; display:grid; gap:8px">
-          <select class="select" id="nutrientPreviewSelect">${nutrientOptions || '<option value="vitamin_d">vitamin_d</option>'}</select>
-          <button class="btn secondary" data-nutrient-preview>${na.loadingPreview ? 'Проверяем…' : 'Проверить текущие данные'}</button>
-        </div>
-        ${previewHtml}
-      </section>
-      <section class="card fade"><div class="row"><strong>📄 Мои анализы</strong></div><div class="muted" style="margin-top:8px">${labs.length ? labs.map((r)=>`${esc(r.report_date || 'без даты')} · ${esc(r.source || 'manual')} · результатов: ${Array.isArray(r.results)?r.results.length:0}`).join('<br/>') : 'Данных пока нет'}</div></section>
-      ${state.activeTab === 'profile_bodymap' ? `<section class="card fade">${renderBodyMap()}</section>` : ''}
+      ${onboardingBlock}
+      <section class="card fade"><div class="row"><strong>🧪 Нутриентный помощник</strong><button class="btn secondary" data-open-onboarding>Как это работает</button></div><div style="margin-top:8px"><strong>${esc(stateTitle)}</strong></div><div class="muted">${esc(stateSubtitle)}</div><div class="row" style="margin-top:10px;gap:8px"><button class="btn" data-dashboard-primary-cta>${esc(dashboard.primary_cta || 'Начать')}</button></div><div class="muted" style="margin-top:10px">${esc(dashboard.trust_copy || 'Помощник не ставит диагнозы. Качество рекомендаций зависит от полноты данных.')}</div></section>
+
+      <section class="card fade"><div class="row"><strong>Готовность данных</strong><span class="muted">${Number(readiness.percent||0)}%</span></div><div style="margin-top:8px">${(readiness.steps||[]).map((s)=>`<div class="item-row"><span>${s.done ? '✓' : '•'} ${esc(s.title||'Шаг')}</span><span class="muted">${s.done ? 'готово' : 'нужно заполнить'}</span></div>`).join('') || '<div class="muted">Данные пока не заполнены.</div>'}</div></section>
+
+      <section class="card fade"><div class="row"><strong>Следующий шаг</strong></div><div class="muted" style="margin-top:8px">${esc(dashboard.primary_cta || 'Открыть помощник')}</div><div style="margin-top:10px; display:grid; gap:8px"><select class="select" id="nutrientPreviewSelect">${nutrientOptions || '<option value="vitamin_d">vitamin_d</option>'}</select><button class="btn secondary" data-nutrient-preview>${na.loadingPreview ? 'Проверяем…' : 'Проверить текущие данные'}</button><button class="btn" data-nutrient-plan>${na.loadingPlan ? 'Собираем…' : 'Собрать план'}</button></div>${previewHtml}${planHtml}</section>
+
+      <section class="card fade"><div class="row"><strong>Последнее обновление плана</strong></div><div style="margin-top:8px">${diffHtml}</div></section>
+
+      <section class="card fade"><div class="row"><strong>История планов</strong></div><div style="margin-top:8px">${history.length ? history.map((x)=>`<button class="item-row" data-open-plan="${x.id}"><span>${esc(x.nutrient_code||'')}</span><span class="muted">${esc(x.status||'версия')}</span></button><div class="muted" style="margin-bottom:8px">${esc(x.summary||'')} ${x.update_reason_human ? `· ${esc(x.update_reason_human)}` : ''}</div>`).join('') : '<div class="muted">История пока пустая. После первой сборки здесь появятся версии планов.</div>'}</div></section>
+
+      <section class="card fade"><div class="row"><strong>🔔 Follow-up и напоминания</strong></div><div style="margin-top:8px">${(na.reminders||[]).length ? (na.reminders.slice(0,10).map((r)=>`<div class="history-item"><div class="row"><strong>${esc(r.nutrient_code||'')}</strong><span class="muted">${esc(r.status||'')}</span></div><div class="muted">${esc(r.reminder_type||'followup')}</div><div class="muted">Дата: ${esc(r.scheduled_for_utc||'')}</div><div class="row" style="margin-top:8px; gap:6px"><button class="btn secondary" data-reminder-open-plan="${r.plan_run_id}">Открыть план</button><button class="btn secondary" data-reminder-done="${r.id}">Готово</button><button class="btn secondary" data-reminder-snooze="${r.id}" data-days="3">Отложить +3д</button></div></div>`).join('')) : '<div class="muted">Активных follow-up напоминаний пока нет.</div>'}</div></section>
+
+      <section class="card fade" data-open-edit><div class="profile-hero"><div class="profile-avatar">👤</div><div><div class="row"><strong>Мой профиль</strong><button class="btn secondary" data-open-edit>Редактировать профиль</button></div><div class="profile-summary-grid">${summary}</div></div></div></section>
+      <section class="card fade"><div class="row"><strong>📄 Мои анализы</strong></div><div class="muted" style="margin-top:8px">Лучше добавлять свежие анализы: со старыми результатами итог может быть менее точным.</div><div style="margin-top:10px">${labs.length?labs.map((r)=>`<button class="item-row" data-open-review="${r.id}"><span>${esc(r.report_date||'без даты')} · ${esc(r.lab_name||'Лаборатория не указана')}</span><span class="muted">${Array.isArray(r.results)?r.results.length:0} показ.</span></button><div class="muted" style="margin-bottom:8px">${r.source==='manual'?'Добавлен вручную':'Загружен из документа'}${r.parse_status==='needs_manual_review'?' · Требует проверки':''}</div>`).join(''):labsEmptyState()}</div><div class="row" style="margin-top:10px; gap:8px"><button class="btn" data-open-upload>Загрузить документ</button><button class="btn secondary" data-open-manual>Ввести вручную</button></div></section>
+      ${renderProfileEditorModal()}${renderLabsModal('manual')}${renderLabsModal('upload')}${renderReviewModal()}
     `;
   }
 
+  function collectLabRows(containerId){ const rows=[]; document.querySelectorAll(`#${containerId} [data-lab-row]`).forEach((rowEl)=>{ const idx=rowEl.dataset.labRow; const analyte_code=document.querySelector(`[data-lab-field="analyte_code"][data-idx="${idx}"]`)?.value||''; const preset=ANALYTE_PRESETS.find((x)=>x.code===analyte_code); const value=document.querySelector(`[data-lab-field="value_num"][data-idx="${idx}"]`)?.value||''; rows.push({ analyte_code, analyte_name:preset?.title||analyte_code, value_text:String(value), value_num:Number(String(value).replace(',','.'))||null, unit:document.querySelector(`[data-lab-field="unit"][data-idx="${idx}"]`)?.value||'', ref_low:Number(document.querySelector(`[data-lab-field="ref_low"][data-idx="${idx}"]`)?.value||'')||null, ref_high:Number(document.querySelector(`[data-lab-field="ref_high"][data-idx="${idx}"]`)?.value||'')||null }); }); return rows.filter((x)=>x.analyte_code); }
+
   function bindProfileEvents() {
+    document.querySelectorAll('[data-open-edit]').forEach((el)=>el.addEventListener('click', ()=>{ state.profileUi.editOpen=true; renderActiveTab(); }));
+    document.querySelectorAll('[data-close-edit]').forEach((el)=>el.addEventListener('click', ()=>{ state.profileUi.editOpen=false; renderActiveTab(); }));
+    document.querySelectorAll('[data-open-manual]').forEach((el)=>el.addEventListener('click', ()=>{ state.profileUi.manualOpen=true; renderActiveTab(); }));
+    document.querySelectorAll('[data-close-manual]').forEach((el)=>el.addEventListener('click', ()=>{ state.profileUi.manualOpen=false; renderActiveTab(); }));
+    document.querySelectorAll('[data-open-upload]').forEach((el)=>el.addEventListener('click', ()=>{ state.profileUi.uploadOpen=true; renderActiveTab(); }));
+    document.querySelectorAll('[data-close-upload]').forEach((el)=>el.addEventListener('click', ()=>{ state.profileUi.uploadOpen=false; renderActiveTab(); }));
+    document.querySelectorAll('[data-close-review]').forEach((el)=>el.addEventListener('click', ()=>{ state.profileUi.reviewOpen=false; renderActiveTab(); }));
+    document.querySelectorAll('[data-open-review]').forEach((el)=>el.addEventListener('click', ()=>{ state.profileUi.selectedReportId=Number(el.dataset.openReview); state.profileUi.reviewOpen=true; renderActiveTab(); }));
+
     document.querySelector('[data-profile-save]')?.addEventListener('click', async () => {
       if (state.profile.saving) return;
       state.profile.saving = true;
       const payload = {};
       document.querySelectorAll('[data-profile-field]').forEach((el) => payload[el.dataset.profileField] = el.value);
+      document.querySelectorAll('[data-profile-lines]').forEach((el)=>payload[el.dataset.profileLines]=parseLinesToJson(el.value));
       try {
+        const by = Number(payload.birth_year||0); if (by && (by<1900 || by>new Date().getFullYear()-10)) throw new Error('Год рождения вне диапазона');
+        const h = Number(payload.height_cm||0); if (h && (h<100 || h>250)) throw new Error('Рост должен быть в диапазоне 100–250 см');
+        const w = Number(payload.weight_kg||0); if (w && (w<30 || w>300)) throw new Error('Вес должен быть в диапазоне 30–300 кг');
         const res = await api('./api/profile', { method:'POST', body: payload });
         state.profile.data = res.profile || payload;
+        state.profileUi.editOpen = false;
         showToast('Профиль сохранён');
-      } catch { showToast('Ошибка сохранения профиля'); }
+      } catch (e) { showToast(e.message || 'Ошибка сохранения профиля'); }
       state.profile.saving = false;
       renderActiveTab();
     });
-    document.querySelector('[data-profile-open-bodymap]')?.addEventListener('click', async () => {
-      await loadBodyMap(true);
-      const target = document.getElementById('tabContent');
-      target.innerHTML += `<section class="card fade">${renderBodyMap()}</section>`;
-      bindBodyMapEvents();
+
+    document.querySelector('[data-add-manual-row]')?.addEventListener('click', ()=>{ const wrap=document.getElementById('manualRows'); const idx=wrap.querySelectorAll('[data-lab-row]').length; wrap.insertAdjacentHTML('beforeend', renderLabRow(idx)); bindProfileEvents(); });
+    document.querySelector('[data-save-manual]')?.addEventListener('click', async ()=>{
+      if(state.profileUi.savingManual) return; state.profileUi.savingManual=true;
+      try {
+        const body={ source:'manual', report_date:document.getElementById('manualReportDate')?.value||'', lab_name:document.getElementById('manualLabName')?.value||'', notes:document.getElementById('manualNotes')?.value||'', results:collectLabRows('manualRows') };
+        await api('./api/profile/labs',{method:'POST',body});
+        state.profileUi.manualOpen=false; showToast('Анализ добавлен'); await loadProfileLabs(true);
+      } catch { showToast('Не удалось сохранить анализ'); }
+      state.profileUi.savingManual=false; renderActiveTab();
     });
-    document.querySelector('[data-open-settings-ach]')?.addEventListener('click', async ()=>{
-      state.activeTab = 'settings';
-      renderMainApp();
+
+    document.querySelector('[data-upload-labs]')?.addEventListener('click', async ()=>{
+      if (state.profileUi.uploading) return;
+      const file = document.getElementById('labsFile')?.files?.[0];
+      if (!file) return showToast('Выберите файл');
+      state.profileUi.uploading = true;
+      try {
+        const form = new FormData();
+        form.append('file', file);
+        form.append('report_date', document.getElementById('uploadReportDate')?.value || '');
+        form.append('lab_name', document.getElementById('uploadLabName')?.value || '');
+        form.append('notes', document.getElementById('uploadNotes')?.value || '');
+        const res = await fetch('./api/profile/labs/upload', { method:'POST', headers: { 'X-Telegram-Init-Data': state.initData }, body: form });
+        const data = await res.json();
+        if (!res.ok || !data.ok) throw new Error(data.error || 'Ошибка загрузки');
+        await loadProfileLabs(true);
+        state.profileUi.uploadOpen = false;
+        state.profileUi.selectedReportId = data.report_id;
+        state.profileUi.reviewOpen = true;
+      } catch (e) { showToast(e.message || 'Не удалось загрузить документ'); }
+      state.profileUi.uploading = false;
+      renderActiveTab();
     });
-    document.getElementById('nutrientPreviewSelect')?.addEventListener('change', (e) => {
-      state.nutrientAssistant.selectedCode = String(e.target.value || 'vitamin_d');
+
+    document.querySelector('[data-save-review]')?.addEventListener('click', async ()=>{
+      if (state.profileUi.savingReview) return;
+      state.profileUi.savingReview=true;
+      const id = state.profileUi.selectedReportId;
+      try {
+        const body={ report_date:document.getElementById('reviewReportDate')?.value||'', lab_name:document.getElementById('reviewLabName')?.value||'', notes:document.getElementById('reviewNotes')?.value||'', parse_status:'manual_reviewed', parse_notes:'Проверено пользователем', results:collectLabRows('reviewRows') };
+        await api(`./api/profile/labs/${id}`,{method:'PUT',body});
+        await loadProfileLabs(true);
+        state.profileUi.reviewOpen=false;
+        showToast('Результаты сохранены');
+      } catch { showToast('Не удалось сохранить проверку'); }
+      state.profileUi.savingReview=false;
+      renderActiveTab();
     });
-    document.querySelector('[data-nutrient-preview]')?.addEventListener('click', async ()=>{
-      if (state.nutrientAssistant.loadingPreview) return;
-      state.nutrientAssistant.loadingPreview = true;
+
+    document.querySelector('[data-profile-open-bodymap]')?.addEventListener('click', async () => { await loadBodyMap(true); const target = document.getElementById('tabContent'); target.innerHTML += `<section class="card fade">${renderBodyMap()}</section>`; bindBodyMapEvents(); });
+    document.querySelector('[data-open-settings-ach]')?.addEventListener('click', async ()=>{ state.activeTab = 'settings'; renderMainApp(); });
+    document.getElementById('nutrientPreviewSelect')?.addEventListener('change', (e) => { state.nutrientAssistant.selectedCode = String(e.target.value || 'vitamin_d'); });
+    document.querySelector('[data-open-onboarding]')?.addEventListener('click', async ()=>{
+      state.nutrientAssistant.onboardingStep = 0;
+      try {
+        await api('./api/profile/nutrient-assistant/onboarding', { method:'POST', body:{ seen:false, dismissed:false } });
+        await loadNutrientOnboarding(true);
+      } catch {}
+      renderActiveTab();
+    });
+    document.querySelector('[data-onboarding-prev]')?.addEventListener('click', ()=>{
+      state.nutrientAssistant.onboardingStep = Math.max(0, Number(state.nutrientAssistant.onboardingStep || 0) - 1);
+      renderActiveTab();
+    });
+    document.querySelector('[data-onboarding-next]')?.addEventListener('click', async ()=>{
+      const step = Number(state.nutrientAssistant.onboardingStep || 0);
+      if (step >= 3) {
+        try { await api('./api/profile/nutrient-assistant/onboarding', { method:'POST', body:{ seen:true, completed:true } }); } catch {}
+        await loadNutrientOnboarding(true);
+        state.nutrientAssistant.onboardingStep = 0;
+      } else {
+        state.nutrientAssistant.onboardingStep = step + 1;
+      }
+      renderActiveTab();
+    });
+    document.querySelector('[data-onboarding-dismiss]')?.addEventListener('click', async ()=>{
+      try { await api('./api/profile/nutrient-assistant/onboarding', { method:'POST', body:{ seen:true, dismissed:true } }); } catch {}
+      await loadNutrientOnboarding(true);
+      renderActiveTab();
+    });
+    document.querySelector('[data-dashboard-primary-cta]')?.addEventListener('click', ()=>{
+      const stateCode = String(state.nutrientAssistant.dashboard?.assistant_state || '');
+      if (stateCode === 'not_configured' || stateCode === 'partial') {
+        state.profileUi.editOpen = true;
+      } else if (stateCode === 'active_plan' || stateCode === 'follow_up') {
+        const first = (state.nutrientAssistant.plans || [])[0];
+        if (first) {
+          document.querySelector(`[data-open-plan="${first.id}"]`)?.click();
+        }
+      }
+      renderActiveTab();
+    });
+    document.querySelector('[data-nutrient-preview]')?.addEventListener('click', async ()=>{ if (state.nutrientAssistant.loadingPreview) return; state.nutrientAssistant.loadingPreview = true; renderActiveTab(); try { const code = state.nutrientAssistant.selectedCode || 'vitamin_d'; const res = await api('./api/profile/nutrient-assistant/preview', { method:'POST', body:{ nutrient_code: code, use_latest: true } }); state.nutrientAssistant.preview = res; } catch { showToast('Пока недостаточно данных для уверенной оценки'); } finally { state.nutrientAssistant.loadingPreview = false; renderActiveTab(); } });
+    document.querySelector('[data-nutrient-plan]')?.addEventListener('click', async ()=>{ if(state.nutrientAssistant.loadingPlan) return; state.nutrientAssistant.loadingPlan=true; renderActiveTab(); try { const code=state.nutrientAssistant.selectedCode||'vitamin_d'; const res=await api('./api/profile/nutrient-assistant/plan',{method:'POST',body:{nutrient_code:code,use_latest:true,save_plan:true}}); state.nutrientAssistant.plan=res.plan||null; state.nutrientAssistant.currentPlanId=res.plan_id||null; state.nutrientAssistant.explanation=null; state.nutrientAssistant.explanationMeta=null; await loadNutrientPlans(true); await loadNutrientDashboard(true); } catch { showToast('Не удалось собрать план'); } finally { state.nutrientAssistant.loadingPlan=false; renderActiveTab(); } });
+    document.querySelectorAll('[data-open-plan]').forEach((el)=>el.addEventListener('click', async ()=>{ try { const res = await api(`./api/profile/nutrient-assistant/plans/${el.dataset.openPlan}`); state.nutrientAssistant.plan = res.item?.plan_snapshot || null; state.nutrientAssistant.currentPlanId = res.item?.id || Number(el.dataset.openPlan); state.nutrientAssistant.explanation = null; state.nutrientAssistant.explanationMeta = null; renderActiveTab(); } catch { showToast('Не удалось открыть план'); } }));
+
+    document.querySelector('[data-activate-reminders]')?.addEventListener('click', async ()=>{
+      const planId = state.nutrientAssistant.currentPlanId;
+      if(!planId){ showToast('Сначала соберите или откройте план'); return; }
+      try {
+        const res = await api(`./api/profile/nutrient-assistant/plan/${planId}/activate-reminders`, { method:'POST', body:{} });
+        await loadNutrientReminders(true); await loadNutrientDashboard(true);
+        showToast(`Активировано: ${res.activated_count||0}`);
+      } catch { showToast('Не удалось активировать напоминания'); }
+      renderActiveTab();
+    });
+    document.querySelectorAll('[data-reminder-done]').forEach((el)=>el.addEventListener('click', async ()=>{ try { await api(`./api/profile/nutrient-assistant/reminders/${el.dataset.reminderDone}/complete`, { method:'POST', body:{} }); await loadNutrientReminders(true); renderActiveTab(); } catch { showToast('Не удалось обновить статус'); } }));
+    document.querySelectorAll('[data-reminder-snooze]').forEach((el)=>el.addEventListener('click', async ()=>{ const days=Number(el.dataset.days||3); try { await api(`./api/profile/nutrient-assistant/reminders/${el.dataset.reminderSnooze}/snooze`, { method:'POST', body:{ days } }); await loadNutrientReminders(true); renderActiveTab(); } catch { showToast('Не удалось отложить'); } }));
+    document.querySelectorAll('[data-reminder-open-plan]').forEach((el)=>el.addEventListener('click', async ()=>{ try { const res = await api(`./api/profile/nutrient-assistant/plans/${el.dataset.reminderOpenPlan}`); state.nutrientAssistant.plan = res.item?.plan_snapshot || null; state.nutrientAssistant.currentPlanId = Number(el.dataset.reminderOpenPlan); state.nutrientAssistant.explanation = null; state.nutrientAssistant.explanationMeta = null; renderActiveTab(); } catch { showToast('Не удалось открыть план'); } }));
+
+    document.querySelector('[data-nutrient-explain]')?.addEventListener('click', async ()=>{
+      if(state.nutrientAssistant.loadingExplanation) return;
+      const planRunId = state.nutrientAssistant.currentPlanId;
+      if(!planRunId){ showToast('Сначала соберите или откройте план'); return; }
+      state.nutrientAssistant.loadingExplanation = true;
       renderActiveTab();
       try {
-        const code = state.nutrientAssistant.selectedCode || 'vitamin_d';
-        const res = await api('./api/profile/nutrient-assistant/preview', { method:'POST', body:{ nutrient_code: code, use_latest: true } });
-        state.nutrientAssistant.preview = res;
+        const res = await api('./api/profile/nutrient-assistant/explain', { method:'POST', body:{ plan_run_id: Number(planRunId) } });
+        state.nutrientAssistant.explanation = res.explanation || null;
+        state.nutrientAssistant.explanationMeta = { source_type: res.source_type || 'fallback', prompt_version: res.prompt_version || 'v1' };
       } catch {
-        showToast('Пока недостаточно данных для уверенной оценки');
+        showToast('Не удалось сформировать объяснение');
       } finally {
-        state.nutrientAssistant.loadingPreview = false;
+        state.nutrientAssistant.loadingExplanation = false;
         renderActiveTab();
       }
     });
+
+    document.querySelectorAll('[data-lab-field="analyte_code"]').forEach((el)=>el.addEventListener('change',(e)=>{ const idx=e.target.dataset.idx; const unitEl=document.querySelector(`[data-lab-field="unit"][data-idx="${idx}"]`); if(unitEl){ unitEl.innerHTML=unitOptions(e.target.value,''); } }));
   }
 
 

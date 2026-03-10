@@ -2252,10 +2252,84 @@ async def _show_timezone_picker(
 def _is_debug_user(settings, tg_uid: int) -> bool:
     return bool(settings.DEBUG or (tg_uid in settings.ADMIN_IDS))
 
+
+def _nutrient_reminder_priority(reminder_type: str) -> int:
+    order = {
+        "physician_review": 100,
+        "retest_due": 80,
+        "followup_review": 60,
+        "pause_due": 40,
+        "seasonal_check": 20,
+    }
+    return order.get(str(reminder_type or ""), 10)
+
+
+def _nutrient_reminder_actions(reminder_id: int, webapp_url: str | None) -> InlineKeyboardMarkup:
+    rows = []
+    if webapp_url:
+        rows.append([InlineKeyboardButton("Открыть план", url=webapp_url)])
+    rows.append([
+        InlineKeyboardButton("✅ Готово", callback_data=f"remnut:done:{reminder_id}"),
+        InlineKeyboardButton("🕒 +3 дня", callback_data=f"remnut:snooze:{reminder_id}:3"),
+    ])
+    rows.append([InlineKeyboardButton("✖️ Скрыть", callback_data=f"remnut:dismiss:{reminder_id}")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def _send_due_nutrient_reminders(context: ContextTypes.DEFAULT_TYPE, conn) -> None:
+    s = context.application.bot_data["settings"]
+    due = await db.list_due_nutrient_followup_reminders(conn)
+    if not due:
+        return
+    by_user: dict[int, list[dict]] = {}
+    for item in due:
+        by_user.setdefault(int(item["user_id"]), []).append(item)
+
+    for tg_user_id, items in by_user.items():
+        tz_name_row = await db.fetchone(conn, "SELECT tz_name FROM users WHERE id=?", (int(tg_user_id),))
+        tz_name = str(tz_name_row["tz_name"] or "") if tz_name_row else "UTC"
+        sent_today = await db.count_nutrient_reminders_sent_today(conn, int(tg_user_id), tz_name)
+        if sent_today >= 2:
+            continue
+        items_sorted = sorted(items, key=lambda x: (_nutrient_reminder_priority(x.get("reminder_type") or ""), str(x.get("scheduled_for_utc") or "")), reverse=True)
+        to_send = items_sorted[: max(0, 2 - sent_today)]
+
+        for item in to_send:
+            rid = int(item["id"])
+            nutrient_code = str(item.get("nutrient_code") or "").strip()
+            rem_type = str(item.get("reminder_type") or "followup_review")
+            payload = item.get("payload") or {}
+            title = {
+                "retest_due": "Пора перепроверить показатели",
+                "pause_due": "Пора оценить паузу и следующий шаг",
+                "seasonal_check": "Сезонная проверка по плану",
+                "followup_review": "Пора вернуться к плану",
+                "physician_review": "Пора обсудить план с врачом",
+            }.get(rem_type, "Пора вернуться к плану")
+            why = payload.get("reason") or payload.get("plan_mode") or rem_type
+            text = (
+                f"🔔 <b>{title}</b>\n"
+                f"Нутриент: <b>{nutrient_code}</b>\n"
+                f"Следующий шаг из вашего follow-up цикла готов к проверке.\n"
+                f"Контекст: {why}."
+            )
+            try:
+                await context.bot.send_message(
+                    chat_id=int(tg_user_id),
+                    text=text,
+                    parse_mode="HTML",
+                    reply_markup=_nutrient_reminder_actions(rid, s.WEBAPP_URL),
+                )
+                await db.mark_nutrient_followup_reminder_sent(conn, rid)
+            except Exception:
+                continue
+
+
 async def reminders_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
     s = context.application.bot_data["settings"]
     conn = await db.connect(s.DB_PATH)
     try:
+        await _send_due_nutrient_reminders(context, conn)
         due = await db.list_due_reminders(conn)
         batches: dict[tuple[int, str, str], list[int]] = {}
         for item in due:
@@ -2713,9 +2787,11 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 await show(
                     update,
                     context,
-                    "WebApp открыт ✅",
+                    "🧪 <b>Нутриентный помощник готов</b>\n\n"
+                    "План по витаминам и минералам на основе профиля, анализов и вашей истории.\n"
+                    "Внутри: статус, следующий шаг, история планов и follow-up.",
                     InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🔓 Открыть WebApp", url=s_cfg.WEBAPP_URL)],
+                        [InlineKeyboardButton("Открыть мой план", url=s_cfg.WEBAPP_URL)],
                         [InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")],
                     ]),
                     route="menu:webapp",
@@ -2725,8 +2801,8 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 await show(
                     update,
                     context,
-                    "🔓 <b>WebApp можно попробовать 3 дня бесплатно</b>\n\n"
-                    "Today • Каталог • Карта • Опрос",
+                    "🔓 <b>Попробуйте Premium WebApp 3 дня бесплатно</b>\n\n"
+                    "Включает Нутриентный помощник: персональный план, историю обновлений и follow-up.",
                     InlineKeyboardMarkup([
                         [InlineKeyboardButton("🎁 Активировать 3 дня", callback_data="starter:activate")],
                         [InlineKeyboardButton("⭐ Купить Premium", callback_data="menu:premium")],
@@ -2739,7 +2815,7 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 update,
                 context,
                 "🔒 WebApp сейчас закрыт.\n\n"
-                "Premium делает ежедневное использование заметно удобнее: быстрые отметки, AI check-in и настройка стека в одном месте.",
+                "В Premium доступен Нутриентный помощник: он собирает план по профилю и анализам, показывает что изменилось и напоминает о follow-up.",
                 InlineKeyboardMarkup([
                     [InlineKeyboardButton("⭐ Купить Premium", callback_data="menu:premium")],
                     [InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")],
@@ -4723,6 +4799,37 @@ async def on_reminder_action(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     await _safe_answer_callback(update)
     data = q.data or ""
+
+    if data.startswith("remnut:"):
+        parts_n = data.split(":")
+        if len(parts_n) < 3:
+            return
+        action_n = parts_n[1]
+        reminder_id = int(parts_n[2])
+        days = int(parts_n[3]) if len(parts_n) >= 4 else 3
+        s = context.application.bot_data["settings"]
+        tg_uid = update.effective_user.id
+        conn = await db.connect(s.DB_PATH)
+        try:
+            if action_n == "done":
+                await db.update_nutrient_followup_reminder_status(conn, tg_uid, reminder_id, "done")
+            elif action_n == "dismiss":
+                await db.update_nutrient_followup_reminder_status(conn, tg_uid, reminder_id, "dismissed")
+            elif action_n == "snooze":
+                if days not in {1,3,7}:
+                    days = 3
+                await db.snooze_nutrient_followup_reminder(conn, tg_uid, reminder_id, days)
+            else:
+                return
+        finally:
+            await conn.close()
+        if q.message:
+            try:
+                await q.message.delete()
+            except Exception:
+                pass
+        return
+
     parts = data.split(":")
     if len(parts) < 2:
         return
@@ -6573,7 +6680,7 @@ async def _bootstrap() -> Application:
     app.add_handler(CallbackQueryHandler(on_ai_checkin, pattern=r"^aicheck:"))
     app.add_handler(CallbackQueryHandler(on_noop, pattern=r"^noop$"))
     app.add_handler(CallbackQueryHandler(on_timezone, pattern=r"^tz:"))
-    app.add_handler(CallbackQueryHandler(on_reminder_action, pattern=r"^rem:(done|skip|snooze|done_all|skip_all|snooze_all)"))
+    app.add_handler(CallbackQueryHandler(on_reminder_action, pattern=r"^(rem:(done|skip|snooze|done_all|skip_all|snooze_all)|remnut:(done|dismiss|snooze):)"))
     app.add_handler(MessageHandler(filters.VOICE, on_voice))
     app.add_handler(PreCheckoutQueryHandler(on_precheckout))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, on_success_payment))

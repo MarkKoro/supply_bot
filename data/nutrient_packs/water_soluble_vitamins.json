@@ -1,0 +1,1487 @@
+{
+  "pack_id": "water_soluble_vitamins",
+  "pack_title_ru": "Водорастворимые витамины",
+  "pack_version": "1.0.0",
+  "pack_category": "water_soluble_vitamins",
+  "rules_version": "nutrient_rules_v2",
+  "source_label": "internal_seed",
+  "curation_status": "draft",
+  "generated_at_utc": "2026-03-10T14:50:40+00:00",
+  "notes_ru": "Группа водорастворимых витаминов и B-комплекс.",
+  "allow_override": true,
+  "items": [
+    {
+      "nutrient_code": "vitamin_c",
+      "title_ru": "Витамин C",
+      "category": "water_soluble_vitamins",
+      "enabled": true,
+      "status_level": "medium",
+      "engine_mode": "limited",
+      "planner_mode": "limited",
+      "explanation_mode": "limited",
+      "readiness_level": "limited_interpretation",
+      "rules_version": "nutrient_rules_v2",
+      "registry_version": "nutrient_registry_v2",
+      "primary_biomarkers": [
+        "ascorbate"
+      ],
+      "secondary_biomarkers": [],
+      "supported_analytes": [
+        "ascorbate"
+      ],
+      "analyte_aliases": {
+        "25ohd": [
+          "25(oh)d",
+          "25-hydroxyvitamin d",
+          "25 hydroxy vitamin d",
+          "vitamin d 25-oh",
+          "calcidiol",
+          "25 oh d",
+          "25ohd",
+          "vitamin_d_25_oh"
+        ],
+        "serum_b12": [
+          "vitamin_b12_serum",
+          "serum_b12",
+          "b12",
+          "cobalamin",
+          "vitamin b12"
+        ],
+        "methylmalonic_acid": [
+          "mma",
+          "methylmalonic_acid",
+          "methylmalonic acid"
+        ],
+        "homocysteine": [
+          "homocysteine",
+          "hcy"
+        ],
+        "ferritin": [
+          "ferritin"
+        ],
+        "serum_iron": [
+          "serum_iron",
+          "iron",
+          "iron_serum"
+        ],
+        "transferrin_saturation": [
+          "transferrin_saturation",
+          "tsat",
+          "transferrin saturation"
+        ],
+        "tibc": [
+          "tibc",
+          "total iron binding capacity"
+        ],
+        "hemoglobin": [
+          "cbc_hgb",
+          "hemoglobin",
+          "hgb"
+        ],
+        "serum_folate": [
+          "serum_folate",
+          "folate",
+          "folic acid"
+        ],
+        "rbc_folate": [
+          "rbc_folate",
+          "rbc folate"
+        ],
+        "serum_zinc": [
+          "serum_zinc",
+          "plasma_zinc",
+          "zinc",
+          "zinc serum",
+          "zinc plasma"
+        ],
+        "magnesium_serum": [
+          "magnesium",
+          "serum_magnesium",
+          "magnesium_serum",
+          "mg_serum"
+        ],
+        "crp": [
+          "crp",
+          "c_reactive_protein",
+          "c reactive protein"
+        ]
+      },
+      "supported_units": {},
+      "canonical_units": {},
+      "unit_conversion_rules": {
+        "nmol/l->ng/ml": 0.40064102564102566,
+        "ng/ml->nmol/l": 2.496,
+        "pmol/l->pg/ml": 1.3550135501355014,
+        "pg/ml->pmol/l": 0.738,
+        "mcg/l->ng/ml": 1.0,
+        "ng/ml->mcg/l": 1.0,
+        "umol/l->umol/l": 1.0,
+        "mcg/dl->mcg/dl": 1.0
+      },
+      "confidence_ceiling": "medium",
+      "confidence_logic": "limited_mode",
+      "interpretation_thresholds": {},
+      "missing_input_rules": [
+        "limited_evidence"
+      ],
+      "unusable_input_rules": [],
+      "physician_flag_rules": [],
+      "safety_flag_rules": [],
+      "profile_modifiers": [],
+      "context_modifiers": [],
+      "seasonal_relevance": "neutral",
+      "geo_relevance": "neutral",
+      "stack_match_slugs": [],
+      "stack_aliases": [],
+      "stack_flags_logic": "simple_match",
+      "plan_templates": {},
+      "retest_windows": {},
+      "pause_windows": {},
+      "followup_templates": [],
+      "reminder_candidate_templates": [],
+      "timing_hints": [],
+      "format_hints": [],
+      "intake_notes": [
+        "Planner не назначает персональные медицинские дозировки."
+      ],
+      "ui_notes_ru": "Зависит от условий забора и хранения крови.",
+      "limitation_note_ru": "Зависит от условий забора и хранения крови.",
+      "trust_copy_ru": "Помощник не ставит диагнозы и не заменяет очную консультацию врача.",
+      "dashboard_copy_ru": "Умеренная уверенность при соблюдении преаналитики.",
+      "history_label_ru": "Витамин C",
+      "profile_trigger_fields": [],
+      "lab_trigger_analytes": [
+        "ascorbate"
+      ],
+      "stack_trigger_slugs": [],
+      "aliases": [
+        "vitamin_c"
+      ],
+      "lab_requirements": [
+        "ascorbate"
+      ],
+      "source_pack_id": "water_soluble_vitamins",
+      "source_pack_version": "1.0.0",
+      "curation_status": "draft",
+      "last_reviewed_at_utc": "2026-03-10T14:50:40+00:00",
+      "notes_internal": ""
+    },
+    {
+      "nutrient_code": "vitamin_b1",
+      "title_ru": "Витамин B1",
+      "category": "water_soluble_vitamins",
+      "enabled": true,
+      "status_level": "medium",
+      "engine_mode": "metadata_only",
+      "planner_mode": "metadata_only",
+      "explanation_mode": "metadata_only",
+      "readiness_level": "metadata_only",
+      "rules_version": "nutrient_rules_v2",
+      "registry_version": "nutrient_registry_v2",
+      "primary_biomarkers": [
+        "thiamine",
+        "tpp"
+      ],
+      "secondary_biomarkers": [],
+      "supported_analytes": [
+        "thiamine",
+        "tpp"
+      ],
+      "analyte_aliases": {
+        "25ohd": [
+          "25(oh)d",
+          "25-hydroxyvitamin d",
+          "25 hydroxy vitamin d",
+          "vitamin d 25-oh",
+          "calcidiol",
+          "25 oh d",
+          "25ohd",
+          "vitamin_d_25_oh"
+        ],
+        "serum_b12": [
+          "vitamin_b12_serum",
+          "serum_b12",
+          "b12",
+          "cobalamin",
+          "vitamin b12"
+        ],
+        "methylmalonic_acid": [
+          "mma",
+          "methylmalonic_acid",
+          "methylmalonic acid"
+        ],
+        "homocysteine": [
+          "homocysteine",
+          "hcy"
+        ],
+        "ferritin": [
+          "ferritin"
+        ],
+        "serum_iron": [
+          "serum_iron",
+          "iron",
+          "iron_serum"
+        ],
+        "transferrin_saturation": [
+          "transferrin_saturation",
+          "tsat",
+          "transferrin saturation"
+        ],
+        "tibc": [
+          "tibc",
+          "total iron binding capacity"
+        ],
+        "hemoglobin": [
+          "cbc_hgb",
+          "hemoglobin",
+          "hgb"
+        ],
+        "serum_folate": [
+          "serum_folate",
+          "folate",
+          "folic acid"
+        ],
+        "rbc_folate": [
+          "rbc_folate",
+          "rbc folate"
+        ],
+        "serum_zinc": [
+          "serum_zinc",
+          "plasma_zinc",
+          "zinc",
+          "zinc serum",
+          "zinc plasma"
+        ],
+        "magnesium_serum": [
+          "magnesium",
+          "serum_magnesium",
+          "magnesium_serum",
+          "mg_serum"
+        ],
+        "crp": [
+          "crp",
+          "c_reactive_protein",
+          "c reactive protein"
+        ]
+      },
+      "supported_units": {},
+      "canonical_units": {},
+      "unit_conversion_rules": {
+        "nmol/l->ng/ml": 0.40064102564102566,
+        "ng/ml->nmol/l": 2.496,
+        "pmol/l->pg/ml": 1.3550135501355014,
+        "pg/ml->pmol/l": 0.738,
+        "mcg/l->ng/ml": 1.0,
+        "ng/ml->mcg/l": 1.0,
+        "umol/l->umol/l": 1.0,
+        "mcg/dl->mcg/dl": 1.0
+      },
+      "confidence_ceiling": "medium",
+      "confidence_logic": "limited_mode",
+      "interpretation_thresholds": {},
+      "missing_input_rules": [
+        "limited_evidence"
+      ],
+      "unusable_input_rules": [],
+      "physician_flag_rules": [],
+      "safety_flag_rules": [],
+      "profile_modifiers": [],
+      "context_modifiers": [],
+      "seasonal_relevance": "neutral",
+      "geo_relevance": "neutral",
+      "stack_match_slugs": [],
+      "stack_aliases": [],
+      "stack_flags_logic": "simple_match",
+      "plan_templates": {},
+      "retest_windows": {},
+      "pause_windows": {},
+      "followup_templates": [],
+      "reminder_candidate_templates": [],
+      "timing_hints": [],
+      "format_hints": [],
+      "intake_notes": [
+        "Planner не назначает персональные медицинские дозировки."
+      ],
+      "ui_notes_ru": "Часть тестов зависит от типа образца.",
+      "limitation_note_ru": "Часть тестов зависит от типа образца.",
+      "trust_copy_ru": "Помощник не ставит диагнозы и не заменяет очную консультацию врача.",
+      "dashboard_copy_ru": "Умеренная уверенность при валидном маркере TPP.",
+      "history_label_ru": "Витамин B1",
+      "profile_trigger_fields": [],
+      "lab_trigger_analytes": [
+        "thiamine",
+        "tpp"
+      ],
+      "stack_trigger_slugs": [],
+      "aliases": [
+        "vitamin_b1"
+      ],
+      "lab_requirements": [
+        "thiamine",
+        "tpp"
+      ],
+      "source_pack_id": "water_soluble_vitamins",
+      "source_pack_version": "1.0.0",
+      "curation_status": "draft",
+      "last_reviewed_at_utc": "2026-03-10T14:50:40+00:00",
+      "notes_internal": ""
+    },
+    {
+      "nutrient_code": "vitamin_b2",
+      "title_ru": "Витамин B2",
+      "category": "water_soluble_vitamins",
+      "enabled": true,
+      "status_level": "weak",
+      "engine_mode": "metadata_only",
+      "planner_mode": "metadata_only",
+      "explanation_mode": "metadata_only",
+      "readiness_level": "metadata_only",
+      "rules_version": "nutrient_rules_v2",
+      "registry_version": "nutrient_registry_v2",
+      "primary_biomarkers": [
+        "riboflavin",
+        "egrac"
+      ],
+      "secondary_biomarkers": [],
+      "supported_analytes": [
+        "riboflavin",
+        "egrac"
+      ],
+      "analyte_aliases": {
+        "25ohd": [
+          "25(oh)d",
+          "25-hydroxyvitamin d",
+          "25 hydroxy vitamin d",
+          "vitamin d 25-oh",
+          "calcidiol",
+          "25 oh d",
+          "25ohd",
+          "vitamin_d_25_oh"
+        ],
+        "serum_b12": [
+          "vitamin_b12_serum",
+          "serum_b12",
+          "b12",
+          "cobalamin",
+          "vitamin b12"
+        ],
+        "methylmalonic_acid": [
+          "mma",
+          "methylmalonic_acid",
+          "methylmalonic acid"
+        ],
+        "homocysteine": [
+          "homocysteine",
+          "hcy"
+        ],
+        "ferritin": [
+          "ferritin"
+        ],
+        "serum_iron": [
+          "serum_iron",
+          "iron",
+          "iron_serum"
+        ],
+        "transferrin_saturation": [
+          "transferrin_saturation",
+          "tsat",
+          "transferrin saturation"
+        ],
+        "tibc": [
+          "tibc",
+          "total iron binding capacity"
+        ],
+        "hemoglobin": [
+          "cbc_hgb",
+          "hemoglobin",
+          "hgb"
+        ],
+        "serum_folate": [
+          "serum_folate",
+          "folate",
+          "folic acid"
+        ],
+        "rbc_folate": [
+          "rbc_folate",
+          "rbc folate"
+        ],
+        "serum_zinc": [
+          "serum_zinc",
+          "plasma_zinc",
+          "zinc",
+          "zinc serum",
+          "zinc plasma"
+        ],
+        "magnesium_serum": [
+          "magnesium",
+          "serum_magnesium",
+          "magnesium_serum",
+          "mg_serum"
+        ],
+        "crp": [
+          "crp",
+          "c_reactive_protein",
+          "c reactive protein"
+        ]
+      },
+      "supported_units": {},
+      "canonical_units": {},
+      "unit_conversion_rules": {
+        "nmol/l->ng/ml": 0.40064102564102566,
+        "ng/ml->nmol/l": 2.496,
+        "pmol/l->pg/ml": 1.3550135501355014,
+        "pg/ml->pmol/l": 0.738,
+        "mcg/l->ng/ml": 1.0,
+        "ng/ml->mcg/l": 1.0,
+        "umol/l->umol/l": 1.0,
+        "mcg/dl->mcg/dl": 1.0
+      },
+      "confidence_ceiling": "medium",
+      "confidence_logic": "limited_mode",
+      "interpretation_thresholds": {},
+      "missing_input_rules": [
+        "limited_evidence"
+      ],
+      "unusable_input_rules": [],
+      "physician_flag_rules": [],
+      "safety_flag_rules": [],
+      "profile_modifiers": [],
+      "context_modifiers": [],
+      "seasonal_relevance": "neutral",
+      "geo_relevance": "neutral",
+      "stack_match_slugs": [],
+      "stack_aliases": [],
+      "stack_flags_logic": "simple_match",
+      "plan_templates": {},
+      "retest_windows": {},
+      "pause_windows": {},
+      "followup_templates": [],
+      "reminder_candidate_templates": [],
+      "timing_hints": [],
+      "format_hints": [],
+      "intake_notes": [
+        "Planner не назначает персональные медицинские дозировки."
+      ],
+      "ui_notes_ru": "Маркер EGRAC редко доступен.",
+      "limitation_note_ru": "Маркер EGRAC редко доступен.",
+      "trust_copy_ru": "Помощник не ставит диагнозы и не заменяет очную консультацию врача.",
+      "dashboard_copy_ru": "Слабая уверенность при ограниченной доступности тестов.",
+      "history_label_ru": "Витамин B2",
+      "profile_trigger_fields": [],
+      "lab_trigger_analytes": [
+        "riboflavin",
+        "egrac"
+      ],
+      "stack_trigger_slugs": [],
+      "aliases": [
+        "vitamin_b2"
+      ],
+      "lab_requirements": [
+        "riboflavin",
+        "egrac"
+      ],
+      "source_pack_id": "water_soluble_vitamins",
+      "source_pack_version": "1.0.0",
+      "curation_status": "draft",
+      "last_reviewed_at_utc": "2026-03-10T14:50:40+00:00",
+      "notes_internal": ""
+    },
+    {
+      "nutrient_code": "vitamin_b3",
+      "title_ru": "Витамин B3",
+      "category": "water_soluble_vitamins",
+      "enabled": true,
+      "status_level": "weak",
+      "engine_mode": "metadata_only",
+      "planner_mode": "metadata_only",
+      "explanation_mode": "metadata_only",
+      "readiness_level": "metadata_only",
+      "rules_version": "nutrient_rules_v2",
+      "registry_version": "nutrient_registry_v2",
+      "primary_biomarkers": [
+        "nad",
+        "nmn"
+      ],
+      "secondary_biomarkers": [],
+      "supported_analytes": [
+        "nad",
+        "nmn"
+      ],
+      "analyte_aliases": {
+        "25ohd": [
+          "25(oh)d",
+          "25-hydroxyvitamin d",
+          "25 hydroxy vitamin d",
+          "vitamin d 25-oh",
+          "calcidiol",
+          "25 oh d",
+          "25ohd",
+          "vitamin_d_25_oh"
+        ],
+        "serum_b12": [
+          "vitamin_b12_serum",
+          "serum_b12",
+          "b12",
+          "cobalamin",
+          "vitamin b12"
+        ],
+        "methylmalonic_acid": [
+          "mma",
+          "methylmalonic_acid",
+          "methylmalonic acid"
+        ],
+        "homocysteine": [
+          "homocysteine",
+          "hcy"
+        ],
+        "ferritin": [
+          "ferritin"
+        ],
+        "serum_iron": [
+          "serum_iron",
+          "iron",
+          "iron_serum"
+        ],
+        "transferrin_saturation": [
+          "transferrin_saturation",
+          "tsat",
+          "transferrin saturation"
+        ],
+        "tibc": [
+          "tibc",
+          "total iron binding capacity"
+        ],
+        "hemoglobin": [
+          "cbc_hgb",
+          "hemoglobin",
+          "hgb"
+        ],
+        "serum_folate": [
+          "serum_folate",
+          "folate",
+          "folic acid"
+        ],
+        "rbc_folate": [
+          "rbc_folate",
+          "rbc folate"
+        ],
+        "serum_zinc": [
+          "serum_zinc",
+          "plasma_zinc",
+          "zinc",
+          "zinc serum",
+          "zinc plasma"
+        ],
+        "magnesium_serum": [
+          "magnesium",
+          "serum_magnesium",
+          "magnesium_serum",
+          "mg_serum"
+        ],
+        "crp": [
+          "crp",
+          "c_reactive_protein",
+          "c reactive protein"
+        ]
+      },
+      "supported_units": {},
+      "canonical_units": {},
+      "unit_conversion_rules": {
+        "nmol/l->ng/ml": 0.40064102564102566,
+        "ng/ml->nmol/l": 2.496,
+        "pmol/l->pg/ml": 1.3550135501355014,
+        "pg/ml->pmol/l": 0.738,
+        "mcg/l->ng/ml": 1.0,
+        "ng/ml->mcg/l": 1.0,
+        "umol/l->umol/l": 1.0,
+        "mcg/dl->mcg/dl": 1.0
+      },
+      "confidence_ceiling": "medium",
+      "confidence_logic": "limited_mode",
+      "interpretation_thresholds": {},
+      "missing_input_rules": [
+        "limited_evidence"
+      ],
+      "unusable_input_rules": [],
+      "physician_flag_rules": [],
+      "safety_flag_rules": [],
+      "profile_modifiers": [],
+      "context_modifiers": [],
+      "seasonal_relevance": "neutral",
+      "geo_relevance": "neutral",
+      "stack_match_slugs": [],
+      "stack_aliases": [],
+      "stack_flags_logic": "simple_match",
+      "plan_templates": {},
+      "retest_windows": {},
+      "pause_windows": {},
+      "followup_templates": [],
+      "reminder_candidate_templates": [],
+      "timing_hints": [],
+      "format_hints": [],
+      "intake_notes": [
+        "Planner не назначает персональные медицинские дозировки."
+      ],
+      "ui_notes_ru": "Нет общепринятого рутинного маркера.",
+      "limitation_note_ru": "Нет общепринятого рутинного маркера.",
+      "trust_copy_ru": "Помощник не ставит диагнозы и не заменяет очную консультацию врача.",
+      "dashboard_copy_ru": "Слабая уверенность, скорее ориентировочная оценка.",
+      "history_label_ru": "Витамин B3",
+      "profile_trigger_fields": [],
+      "lab_trigger_analytes": [
+        "nad",
+        "nmn"
+      ],
+      "stack_trigger_slugs": [],
+      "aliases": [
+        "vitamin_b3"
+      ],
+      "lab_requirements": [
+        "nad",
+        "nmn"
+      ],
+      "source_pack_id": "water_soluble_vitamins",
+      "source_pack_version": "1.0.0",
+      "curation_status": "draft",
+      "last_reviewed_at_utc": "2026-03-10T14:50:40+00:00",
+      "notes_internal": ""
+    },
+    {
+      "nutrient_code": "vitamin_b5",
+      "title_ru": "Витамин B5",
+      "category": "water_soluble_vitamins",
+      "enabled": true,
+      "status_level": "weak",
+      "engine_mode": "metadata_only",
+      "planner_mode": "metadata_only",
+      "explanation_mode": "metadata_only",
+      "readiness_level": "metadata_only",
+      "rules_version": "nutrient_rules_v2",
+      "registry_version": "nutrient_registry_v2",
+      "primary_biomarkers": [
+        "pantothenic_acid"
+      ],
+      "secondary_biomarkers": [],
+      "supported_analytes": [
+        "pantothenic_acid"
+      ],
+      "analyte_aliases": {
+        "25ohd": [
+          "25(oh)d",
+          "25-hydroxyvitamin d",
+          "25 hydroxy vitamin d",
+          "vitamin d 25-oh",
+          "calcidiol",
+          "25 oh d",
+          "25ohd",
+          "vitamin_d_25_oh"
+        ],
+        "serum_b12": [
+          "vitamin_b12_serum",
+          "serum_b12",
+          "b12",
+          "cobalamin",
+          "vitamin b12"
+        ],
+        "methylmalonic_acid": [
+          "mma",
+          "methylmalonic_acid",
+          "methylmalonic acid"
+        ],
+        "homocysteine": [
+          "homocysteine",
+          "hcy"
+        ],
+        "ferritin": [
+          "ferritin"
+        ],
+        "serum_iron": [
+          "serum_iron",
+          "iron",
+          "iron_serum"
+        ],
+        "transferrin_saturation": [
+          "transferrin_saturation",
+          "tsat",
+          "transferrin saturation"
+        ],
+        "tibc": [
+          "tibc",
+          "total iron binding capacity"
+        ],
+        "hemoglobin": [
+          "cbc_hgb",
+          "hemoglobin",
+          "hgb"
+        ],
+        "serum_folate": [
+          "serum_folate",
+          "folate",
+          "folic acid"
+        ],
+        "rbc_folate": [
+          "rbc_folate",
+          "rbc folate"
+        ],
+        "serum_zinc": [
+          "serum_zinc",
+          "plasma_zinc",
+          "zinc",
+          "zinc serum",
+          "zinc plasma"
+        ],
+        "magnesium_serum": [
+          "magnesium",
+          "serum_magnesium",
+          "magnesium_serum",
+          "mg_serum"
+        ],
+        "crp": [
+          "crp",
+          "c_reactive_protein",
+          "c reactive protein"
+        ]
+      },
+      "supported_units": {},
+      "canonical_units": {},
+      "unit_conversion_rules": {
+        "nmol/l->ng/ml": 0.40064102564102566,
+        "ng/ml->nmol/l": 2.496,
+        "pmol/l->pg/ml": 1.3550135501355014,
+        "pg/ml->pmol/l": 0.738,
+        "mcg/l->ng/ml": 1.0,
+        "ng/ml->mcg/l": 1.0,
+        "umol/l->umol/l": 1.0,
+        "mcg/dl->mcg/dl": 1.0
+      },
+      "confidence_ceiling": "medium",
+      "confidence_logic": "limited_mode",
+      "interpretation_thresholds": {},
+      "missing_input_rules": [
+        "limited_evidence"
+      ],
+      "unusable_input_rules": [],
+      "physician_flag_rules": [],
+      "safety_flag_rules": [],
+      "profile_modifiers": [],
+      "context_modifiers": [],
+      "seasonal_relevance": "neutral",
+      "geo_relevance": "neutral",
+      "stack_match_slugs": [],
+      "stack_aliases": [],
+      "stack_flags_logic": "simple_match",
+      "plan_templates": {},
+      "retest_windows": {},
+      "pause_windows": {},
+      "followup_templates": [],
+      "reminder_candidate_templates": [],
+      "timing_hints": [],
+      "format_hints": [],
+      "intake_notes": [
+        "Planner не назначает персональные медицинские дозировки."
+      ],
+      "ui_notes_ru": "Ограниченная доказательная база для рутинной интерпретации.",
+      "limitation_note_ru": "Ограниченная доказательная база для рутинной интерпретации.",
+      "trust_copy_ru": "Помощник не ставит диагнозы и не заменяет очную консультацию врача.",
+      "dashboard_copy_ru": "Слабая уверенность.",
+      "history_label_ru": "Витамин B5",
+      "profile_trigger_fields": [],
+      "lab_trigger_analytes": [
+        "pantothenic_acid"
+      ],
+      "stack_trigger_slugs": [],
+      "aliases": [
+        "vitamin_b5"
+      ],
+      "lab_requirements": [
+        "pantothenic_acid"
+      ],
+      "source_pack_id": "water_soluble_vitamins",
+      "source_pack_version": "1.0.0",
+      "curation_status": "draft",
+      "last_reviewed_at_utc": "2026-03-10T14:50:40+00:00",
+      "notes_internal": ""
+    },
+    {
+      "nutrient_code": "vitamin_b6",
+      "title_ru": "Витамин B6",
+      "category": "water_soluble_vitamins",
+      "enabled": true,
+      "status_level": "medium",
+      "engine_mode": "limited",
+      "planner_mode": "limited",
+      "explanation_mode": "limited",
+      "readiness_level": "limited_interpretation",
+      "rules_version": "nutrient_rules_v2",
+      "registry_version": "nutrient_registry_v2",
+      "primary_biomarkers": [
+        "plp"
+      ],
+      "secondary_biomarkers": [
+        "homocysteine"
+      ],
+      "supported_analytes": [
+        "plp"
+      ],
+      "analyte_aliases": {
+        "25ohd": [
+          "25(oh)d",
+          "25-hydroxyvitamin d",
+          "25 hydroxy vitamin d",
+          "vitamin d 25-oh",
+          "calcidiol",
+          "25 oh d",
+          "25ohd",
+          "vitamin_d_25_oh"
+        ],
+        "serum_b12": [
+          "vitamin_b12_serum",
+          "serum_b12",
+          "b12",
+          "cobalamin",
+          "vitamin b12"
+        ],
+        "methylmalonic_acid": [
+          "mma",
+          "methylmalonic_acid",
+          "methylmalonic acid"
+        ],
+        "homocysteine": [
+          "homocysteine",
+          "hcy"
+        ],
+        "ferritin": [
+          "ferritin"
+        ],
+        "serum_iron": [
+          "serum_iron",
+          "iron",
+          "iron_serum"
+        ],
+        "transferrin_saturation": [
+          "transferrin_saturation",
+          "tsat",
+          "transferrin saturation"
+        ],
+        "tibc": [
+          "tibc",
+          "total iron binding capacity"
+        ],
+        "hemoglobin": [
+          "cbc_hgb",
+          "hemoglobin",
+          "hgb"
+        ],
+        "serum_folate": [
+          "serum_folate",
+          "folate",
+          "folic acid"
+        ],
+        "rbc_folate": [
+          "rbc_folate",
+          "rbc folate"
+        ],
+        "serum_zinc": [
+          "serum_zinc",
+          "plasma_zinc",
+          "zinc",
+          "zinc serum",
+          "zinc plasma"
+        ],
+        "magnesium_serum": [
+          "magnesium",
+          "serum_magnesium",
+          "magnesium_serum",
+          "mg_serum"
+        ],
+        "crp": [
+          "crp",
+          "c_reactive_protein",
+          "c reactive protein"
+        ]
+      },
+      "supported_units": {},
+      "canonical_units": {},
+      "unit_conversion_rules": {
+        "nmol/l->ng/ml": 0.40064102564102566,
+        "ng/ml->nmol/l": 2.496,
+        "pmol/l->pg/ml": 1.3550135501355014,
+        "pg/ml->pmol/l": 0.738,
+        "mcg/l->ng/ml": 1.0,
+        "ng/ml->mcg/l": 1.0,
+        "umol/l->umol/l": 1.0,
+        "mcg/dl->mcg/dl": 1.0
+      },
+      "confidence_ceiling": "medium",
+      "confidence_logic": "limited_mode",
+      "interpretation_thresholds": {},
+      "missing_input_rules": [
+        "limited_evidence"
+      ],
+      "unusable_input_rules": [],
+      "physician_flag_rules": [],
+      "safety_flag_rules": [],
+      "profile_modifiers": [],
+      "context_modifiers": [],
+      "seasonal_relevance": "neutral",
+      "geo_relevance": "neutral",
+      "stack_match_slugs": [],
+      "stack_aliases": [],
+      "stack_flags_logic": "simple_match",
+      "plan_templates": {},
+      "retest_windows": {},
+      "pause_windows": {},
+      "followup_templates": [],
+      "reminder_candidate_templates": [],
+      "timing_hints": [],
+      "format_hints": [],
+      "intake_notes": [
+        "Planner не назначает персональные медицинские дозировки."
+      ],
+      "ui_notes_ru": "Влияют воспаление и функции почек.",
+      "limitation_note_ru": "Влияют воспаление и функции почек.",
+      "trust_copy_ru": "Помощник не ставит диагнозы и не заменяет очную консультацию врача.",
+      "dashboard_copy_ru": "Умеренная уверенность при PLP.",
+      "history_label_ru": "Витамин B6",
+      "profile_trigger_fields": [],
+      "lab_trigger_analytes": [
+        "plp"
+      ],
+      "stack_trigger_slugs": [],
+      "aliases": [
+        "vitamin_b6"
+      ],
+      "lab_requirements": [
+        "plp"
+      ],
+      "source_pack_id": "water_soluble_vitamins",
+      "source_pack_version": "1.0.0",
+      "curation_status": "draft",
+      "last_reviewed_at_utc": "2026-03-10T14:50:40+00:00",
+      "notes_internal": ""
+    },
+    {
+      "nutrient_code": "vitamin_b7",
+      "title_ru": "Витамин B7",
+      "category": "water_soluble_vitamins",
+      "enabled": true,
+      "status_level": "weak",
+      "engine_mode": "metadata_only",
+      "planner_mode": "metadata_only",
+      "explanation_mode": "metadata_only",
+      "readiness_level": "metadata_only",
+      "rules_version": "nutrient_rules_v2",
+      "registry_version": "nutrient_registry_v2",
+      "primary_biomarkers": [
+        "biotin"
+      ],
+      "secondary_biomarkers": [],
+      "supported_analytes": [
+        "biotin"
+      ],
+      "analyte_aliases": {
+        "25ohd": [
+          "25(oh)d",
+          "25-hydroxyvitamin d",
+          "25 hydroxy vitamin d",
+          "vitamin d 25-oh",
+          "calcidiol",
+          "25 oh d",
+          "25ohd",
+          "vitamin_d_25_oh"
+        ],
+        "serum_b12": [
+          "vitamin_b12_serum",
+          "serum_b12",
+          "b12",
+          "cobalamin",
+          "vitamin b12"
+        ],
+        "methylmalonic_acid": [
+          "mma",
+          "methylmalonic_acid",
+          "methylmalonic acid"
+        ],
+        "homocysteine": [
+          "homocysteine",
+          "hcy"
+        ],
+        "ferritin": [
+          "ferritin"
+        ],
+        "serum_iron": [
+          "serum_iron",
+          "iron",
+          "iron_serum"
+        ],
+        "transferrin_saturation": [
+          "transferrin_saturation",
+          "tsat",
+          "transferrin saturation"
+        ],
+        "tibc": [
+          "tibc",
+          "total iron binding capacity"
+        ],
+        "hemoglobin": [
+          "cbc_hgb",
+          "hemoglobin",
+          "hgb"
+        ],
+        "serum_folate": [
+          "serum_folate",
+          "folate",
+          "folic acid"
+        ],
+        "rbc_folate": [
+          "rbc_folate",
+          "rbc folate"
+        ],
+        "serum_zinc": [
+          "serum_zinc",
+          "plasma_zinc",
+          "zinc",
+          "zinc serum",
+          "zinc plasma"
+        ],
+        "magnesium_serum": [
+          "magnesium",
+          "serum_magnesium",
+          "magnesium_serum",
+          "mg_serum"
+        ],
+        "crp": [
+          "crp",
+          "c_reactive_protein",
+          "c reactive protein"
+        ]
+      },
+      "supported_units": {},
+      "canonical_units": {},
+      "unit_conversion_rules": {
+        "nmol/l->ng/ml": 0.40064102564102566,
+        "ng/ml->nmol/l": 2.496,
+        "pmol/l->pg/ml": 1.3550135501355014,
+        "pg/ml->pmol/l": 0.738,
+        "mcg/l->ng/ml": 1.0,
+        "ng/ml->mcg/l": 1.0,
+        "umol/l->umol/l": 1.0,
+        "mcg/dl->mcg/dl": 1.0
+      },
+      "confidence_ceiling": "medium",
+      "confidence_logic": "limited_mode",
+      "interpretation_thresholds": {},
+      "missing_input_rules": [
+        "limited_evidence"
+      ],
+      "unusable_input_rules": [],
+      "physician_flag_rules": [],
+      "safety_flag_rules": [],
+      "profile_modifiers": [],
+      "context_modifiers": [],
+      "seasonal_relevance": "neutral",
+      "geo_relevance": "neutral",
+      "stack_match_slugs": [],
+      "stack_aliases": [],
+      "stack_flags_logic": "simple_match",
+      "plan_templates": {},
+      "retest_windows": {},
+      "pause_windows": {},
+      "followup_templates": [],
+      "reminder_candidate_templates": [],
+      "timing_hints": [],
+      "format_hints": [],
+      "intake_notes": [
+        "Planner не назначает персональные медицинские дозировки."
+      ],
+      "ui_notes_ru": "Лабораторные помехи и редкость теста.",
+      "limitation_note_ru": "Лабораторные помехи и редкость теста.",
+      "trust_copy_ru": "Помощник не ставит диагнозы и не заменяет очную консультацию врача.",
+      "dashboard_copy_ru": "Слабая уверенность.",
+      "history_label_ru": "Витамин B7",
+      "profile_trigger_fields": [],
+      "lab_trigger_analytes": [
+        "biotin"
+      ],
+      "stack_trigger_slugs": [],
+      "aliases": [
+        "vitamin_b7"
+      ],
+      "lab_requirements": [
+        "biotin"
+      ],
+      "source_pack_id": "water_soluble_vitamins",
+      "source_pack_version": "1.0.0",
+      "curation_status": "draft",
+      "last_reviewed_at_utc": "2026-03-10T14:50:40+00:00",
+      "notes_internal": ""
+    },
+    {
+      "nutrient_code": "vitamin_b9",
+      "title_ru": "Витамин B9",
+      "category": "water_soluble_vitamins",
+      "enabled": true,
+      "status_level": "strong",
+      "engine_mode": "limited",
+      "planner_mode": "limited",
+      "explanation_mode": "limited",
+      "readiness_level": "limited_interpretation",
+      "rules_version": "nutrient_rules_v2",
+      "registry_version": "nutrient_registry_v2",
+      "primary_biomarkers": [
+        "folate",
+        "rbc_folate"
+      ],
+      "secondary_biomarkers": [
+        "homocysteine"
+      ],
+      "supported_analytes": [
+        "folate",
+        "rbc_folate"
+      ],
+      "analyte_aliases": {
+        "25ohd": [
+          "25(oh)d",
+          "25-hydroxyvitamin d",
+          "25 hydroxy vitamin d",
+          "vitamin d 25-oh",
+          "calcidiol",
+          "25 oh d",
+          "25ohd",
+          "vitamin_d_25_oh"
+        ],
+        "serum_b12": [
+          "vitamin_b12_serum",
+          "serum_b12",
+          "b12",
+          "cobalamin",
+          "vitamin b12"
+        ],
+        "methylmalonic_acid": [
+          "mma",
+          "methylmalonic_acid",
+          "methylmalonic acid"
+        ],
+        "homocysteine": [
+          "homocysteine",
+          "hcy"
+        ],
+        "ferritin": [
+          "ferritin"
+        ],
+        "serum_iron": [
+          "serum_iron",
+          "iron",
+          "iron_serum"
+        ],
+        "transferrin_saturation": [
+          "transferrin_saturation",
+          "tsat",
+          "transferrin saturation"
+        ],
+        "tibc": [
+          "tibc",
+          "total iron binding capacity"
+        ],
+        "hemoglobin": [
+          "cbc_hgb",
+          "hemoglobin",
+          "hgb"
+        ],
+        "serum_folate": [
+          "serum_folate",
+          "folate",
+          "folic acid"
+        ],
+        "rbc_folate": [
+          "rbc_folate",
+          "rbc folate"
+        ],
+        "serum_zinc": [
+          "serum_zinc",
+          "plasma_zinc",
+          "zinc",
+          "zinc serum",
+          "zinc plasma"
+        ],
+        "magnesium_serum": [
+          "magnesium",
+          "serum_magnesium",
+          "magnesium_serum",
+          "mg_serum"
+        ],
+        "crp": [
+          "crp",
+          "c_reactive_protein",
+          "c reactive protein"
+        ]
+      },
+      "supported_units": {},
+      "canonical_units": {},
+      "unit_conversion_rules": {
+        "nmol/l->ng/ml": 0.40064102564102566,
+        "ng/ml->nmol/l": 2.496,
+        "pmol/l->pg/ml": 1.3550135501355014,
+        "pg/ml->pmol/l": 0.738,
+        "mcg/l->ng/ml": 1.0,
+        "ng/ml->mcg/l": 1.0,
+        "umol/l->umol/l": 1.0,
+        "mcg/dl->mcg/dl": 1.0
+      },
+      "confidence_ceiling": "medium",
+      "confidence_logic": "limited_mode",
+      "interpretation_thresholds": {},
+      "missing_input_rules": [
+        "limited_evidence"
+      ],
+      "unusable_input_rules": [],
+      "physician_flag_rules": [],
+      "safety_flag_rules": [],
+      "profile_modifiers": [],
+      "context_modifiers": [],
+      "seasonal_relevance": "neutral",
+      "geo_relevance": "neutral",
+      "stack_match_slugs": [],
+      "stack_aliases": [],
+      "stack_flags_logic": "simple_match",
+      "plan_templates": {},
+      "retest_windows": {},
+      "pause_windows": {},
+      "followup_templates": [],
+      "reminder_candidate_templates": [],
+      "timing_hints": [],
+      "format_hints": [],
+      "intake_notes": [
+        "Planner не назначает персональные медицинские дозировки."
+      ],
+      "ui_notes_ru": "Сывороточный фолат вариабелен по питанию.",
+      "limitation_note_ru": "Сывороточный фолат вариабелен по питанию.",
+      "trust_copy_ru": "Помощник не ставит диагнозы и не заменяет очную консультацию врача.",
+      "dashboard_copy_ru": "Высокая уверенность при RBC folate.",
+      "history_label_ru": "Витамин B9",
+      "profile_trigger_fields": [],
+      "lab_trigger_analytes": [
+        "folate",
+        "rbc_folate"
+      ],
+      "stack_trigger_slugs": [],
+      "aliases": [
+        "vitamin_b9"
+      ],
+      "lab_requirements": [
+        "folate",
+        "rbc_folate"
+      ],
+      "source_pack_id": "water_soluble_vitamins",
+      "source_pack_version": "1.0.0",
+      "curation_status": "draft",
+      "last_reviewed_at_utc": "2026-03-10T14:50:40+00:00",
+      "notes_internal": ""
+    },
+    {
+      "nutrient_code": "vitamin_b12",
+      "title_ru": "Витамин B12",
+      "category": "water_soluble_vitamins",
+      "enabled": true,
+      "status_level": "strong",
+      "engine_mode": "deterministic_v1",
+      "planner_mode": "deterministic",
+      "explanation_mode": "full",
+      "readiness_level": "deterministic_v1",
+      "rules_version": "nutrient_rules_v2",
+      "registry_version": "nutrient_registry_v2",
+      "primary_biomarkers": [
+        "serum_b12"
+      ],
+      "secondary_biomarkers": [
+        "methylmalonic_acid",
+        "homocysteine"
+      ],
+      "supported_analytes": [
+        "b12",
+        "holotranscobalamin"
+      ],
+      "analyte_aliases": {
+        "25ohd": [
+          "25(oh)d",
+          "25-hydroxyvitamin d",
+          "25 hydroxy vitamin d",
+          "vitamin d 25-oh",
+          "calcidiol",
+          "25 oh d",
+          "25ohd",
+          "vitamin_d_25_oh"
+        ],
+        "serum_b12": [
+          "vitamin_b12_serum",
+          "serum_b12",
+          "b12",
+          "cobalamin",
+          "vitamin b12"
+        ],
+        "methylmalonic_acid": [
+          "mma",
+          "methylmalonic_acid",
+          "methylmalonic acid"
+        ],
+        "homocysteine": [
+          "homocysteine",
+          "hcy"
+        ],
+        "ferritin": [
+          "ferritin"
+        ],
+        "serum_iron": [
+          "serum_iron",
+          "iron",
+          "iron_serum"
+        ],
+        "transferrin_saturation": [
+          "transferrin_saturation",
+          "tsat",
+          "transferrin saturation"
+        ],
+        "tibc": [
+          "tibc",
+          "total iron binding capacity"
+        ],
+        "hemoglobin": [
+          "cbc_hgb",
+          "hemoglobin",
+          "hgb"
+        ],
+        "serum_folate": [
+          "serum_folate",
+          "folate",
+          "folic acid"
+        ],
+        "rbc_folate": [
+          "rbc_folate",
+          "rbc folate"
+        ],
+        "serum_zinc": [
+          "serum_zinc",
+          "plasma_zinc",
+          "zinc",
+          "zinc serum",
+          "zinc plasma"
+        ],
+        "magnesium_serum": [
+          "magnesium",
+          "serum_magnesium",
+          "magnesium_serum",
+          "mg_serum"
+        ],
+        "crp": [
+          "crp",
+          "c_reactive_protein",
+          "c reactive protein"
+        ]
+      },
+      "supported_units": {
+        "serum_b12": [
+          "pg/ml",
+          "pmol/l"
+        ],
+        "methylmalonic_acid": [
+          "umol/l"
+        ],
+        "homocysteine": [
+          "umol/l"
+        ]
+      },
+      "canonical_units": {
+        "serum_b12": "pg/ml",
+        "methylmalonic_acid": "umol/l",
+        "homocysteine": "umol/l"
+      },
+      "unit_conversion_rules": {
+        "nmol/l->ng/ml": 0.40064102564102566,
+        "ng/ml->nmol/l": 2.496,
+        "pmol/l->pg/ml": 1.3550135501355014,
+        "pg/ml->pmol/l": 0.738,
+        "mcg/l->ng/ml": 1.0,
+        "ng/ml->mcg/l": 1.0,
+        "umol/l->umol/l": 1.0,
+        "mcg/dl->mcg/dl": 1.0
+      },
+      "confidence_ceiling": "high",
+      "confidence_logic": "b12_plus_mma_if_possible",
+      "interpretation_thresholds": {
+        "low_b12": 200,
+        "borderline_high": 400,
+        "mma_high": 0.271
+      },
+      "missing_input_rules": [
+        "need_b12",
+        "mma_for_confirmation"
+      ],
+      "unusable_input_rules": [],
+      "physician_flag_rules": [
+        "kidney_condition",
+        "pregnancy_or_lactation"
+      ],
+      "safety_flag_rules": [],
+      "profile_modifiers": [
+        "diet_type",
+        "conditions_json",
+        "pregnancy_status",
+        "lactation_status"
+      ],
+      "context_modifiers": [],
+      "seasonal_relevance": "neutral",
+      "geo_relevance": "neutral",
+      "stack_match_slugs": [
+        "vitamin-b12",
+        "methylcobalamin",
+        "cyanocobalamin",
+        "b-complex"
+      ],
+      "stack_aliases": [],
+      "stack_flags_logic": "simple_match",
+      "plan_templates": {},
+      "retest_windows": {},
+      "pause_windows": {},
+      "followup_templates": [],
+      "reminder_candidate_templates": [],
+      "timing_hints": [],
+      "format_hints": [],
+      "intake_notes": [
+        "Planner не назначает персональные медицинские дозировки."
+      ],
+      "ui_notes_ru": "MMA — сильный уточняющий маркёр, гомоцистеин используется только как secondary hint.",
+      "limitation_note_ru": "Желательна проверка функциональных маркеров.",
+      "trust_copy_ru": "Помощник не ставит диагнозы и не заменяет очную консультацию врача.",
+      "dashboard_copy_ru": "Высокая уверенность при сочетании B12 и MMA/гомоцистеина.",
+      "history_label_ru": "Витамин B12",
+      "profile_trigger_fields": [
+        "diet_type",
+        "conditions_json",
+        "pregnancy_status",
+        "lactation_status"
+      ],
+      "lab_trigger_analytes": [
+        "b12",
+        "holotranscobalamin"
+      ],
+      "stack_trigger_slugs": [
+        "vitamin-b12",
+        "methylcobalamin",
+        "cyanocobalamin",
+        "b-complex"
+      ],
+      "aliases": [
+        "b12",
+        "vitamin b12"
+      ],
+      "lab_requirements": [
+        "serum_b12"
+      ],
+      "source_pack_id": "water_soluble_vitamins",
+      "source_pack_version": "1.0.0",
+      "curation_status": "curated",
+      "last_reviewed_at_utc": "2026-03-10T14:50:40+00:00",
+      "notes_internal": ""
+    }
+  ]
+}

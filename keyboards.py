@@ -10,7 +10,7 @@ def main_menu(*, is_admin: bool = False, show_complexes: bool = False) -> Inline
         [InlineKeyboardButton("📚 Каталог БАДов", callback_data="menu:catalog")],
         [InlineKeyboardButton("📝 Ежедневный опрос", callback_data="menu:checkin_ai")],
         [InlineKeyboardButton("📈 Статистика", callback_data="menu:stats")],
-        [InlineKeyboardButton("🔓 Открыть WebApp", callback_data="menu:webapp")],
+        [InlineKeyboardButton("🧪 Нутриентный помощник (WebApp)", callback_data="menu:webapp")],
         [InlineKeyboardButton("⭐ Премиум", callback_data="menu:premium")],
     ]
     if show_complexes:

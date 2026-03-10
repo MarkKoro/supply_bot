@@ -257,6 +257,31 @@ def _parse_json_dict(raw: str) -> dict | None:
         return None
     return data if isinstance(data, dict) else None
 
+
+async def explain_plan_json(
+    cfg: Optional[OpenAIConfig],
+    *,
+    instructions: str,
+    payload_text: str,
+    max_output_tokens: int = 900,
+    timeout_s: float = 25,
+) -> tuple[dict | None, str]:
+    if not cfg:
+        return None, ""
+    try:
+        raw = await asyncio.to_thread(
+            _sync_call,
+            cfg,
+            instructions=instructions,
+            input_text=payload_text,
+            max_output_tokens=max_output_tokens,
+            timeout_s=timeout_s,
+        )
+    except Exception:
+        log.exception("OpenAI plan explanation failed")
+        return None, cfg.model
+    return _parse_json_dict(raw), cfg.model
+
 async def extract_checkin_from_text(
     text_ru: str,
     cfg: Optional[OpenAIConfig] = None,

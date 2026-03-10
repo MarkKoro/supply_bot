@@ -28,6 +28,13 @@ NUTRIENT_PROTOCOL_DEFS = [
     {"nutrient_code": "manganese", "title_ru": "Марганец", "category": "trace_elements", "status_level": "weak", "metadata": {"supported_analytes": ["manganese_blood"], "supported_units": ["µg/L"], "primary_biomarker": "manganese_blood", "secondary_biomarkers": [], "limitation_note_ru": "Ограниченная клиническая применимость рутинных тестов.", "ui_confidence_note_ru": "Слабая уверенность."}},
     {"nutrient_code": "chromium", "title_ru": "Хром", "category": "trace_elements", "status_level": "weak", "metadata": {"supported_analytes": ["chromium_serum"], "supported_units": ["µg/L"], "primary_biomarker": "chromium_serum", "secondary_biomarkers": [], "limitation_note_ru": "Низкая стандартизация лабораторных методик.", "ui_confidence_note_ru": "Слабая уверенность."}},
     {"nutrient_code": "molybdenum", "title_ru": "Молибден", "category": "trace_elements", "status_level": "weak", "metadata": {"supported_analytes": ["molybdenum_serum"], "supported_units": ["µg/L"], "primary_biomarker": "molybdenum_serum", "secondary_biomarkers": [], "limitation_note_ru": "Редкий анализ, ограниченные референсные данные.", "ui_confidence_note_ru": "Слабая уверенность."}},
+    {"nutrient_code": "chloride", "title_ru": "Хлорид", "category": "macro_minerals", "status_level": "medium", "metadata": {"supported_analytes": ["serum_chloride"], "supported_units": ["mmol/L", "mEq/L"], "primary_biomarker": "serum_chloride", "secondary_biomarkers": ["sodium", "potassium"], "limitation_note_ru": "Требует интерпретации в контексте водно-электролитного баланса.", "ui_confidence_note_ru": "Умеренная уверенность при наличии электролитной панели."}},
+    {"nutrient_code": "choline", "title_ru": "Холин", "category": "vitamin_like_essentials", "status_level": "medium", "metadata": {"supported_analytes": ["plasma_choline", "serum_choline"], "supported_units": ["µmol/L"], "primary_biomarker": "plasma_choline", "secondary_biomarkers": [], "limitation_note_ru": "Рутинные референсы вариабельны, интерпретация ограничена.", "ui_confidence_note_ru": "Умеренная/ограниченная уверенность."}},
+    {"nutrient_code": "fluoride", "title_ru": "Фторид", "category": "trace_elements", "status_level": "weak", "metadata": {"supported_analytes": ["serum_fluoride", "urinary_fluoride"], "supported_units": ["µmol/L", "µg/24h"], "primary_biomarker": "serum_fluoride", "secondary_biomarkers": ["urinary_fluoride"], "limitation_note_ru": "Чаще используется как вспомогательный маркёр экспозиции.", "ui_confidence_note_ru": "Слабая уверенность, преимущественно metadata режим."}},
+    {"nutrient_code": "boron", "title_ru": "Бор", "category": "trace_elements", "status_level": "weak", "metadata": {"supported_analytes": ["serum_boron"], "supported_units": ["µg/L"], "primary_biomarker": "serum_boron", "secondary_biomarkers": [], "limitation_note_ru": "Ограниченная клиническая валидность рутинного мониторинга.", "ui_confidence_note_ru": "Слабая уверенность."}},
+    {"nutrient_code": "silicon", "title_ru": "Кремний", "category": "trace_elements", "status_level": "weak", "metadata": {"supported_analytes": ["serum_silicon"], "supported_units": ["µg/L"], "primary_biomarker": "serum_silicon", "secondary_biomarkers": [], "limitation_note_ru": "Ограниченная практическая интерпретация для персональных выводов.", "ui_confidence_note_ru": "Слабая уверенность."}},
+    {"nutrient_code": "vanadium", "title_ru": "Ванадий", "category": "trace_elements", "status_level": "weak", "metadata": {"supported_analytes": ["serum_vanadium"], "supported_units": ["µg/L"], "primary_biomarker": "serum_vanadium", "secondary_biomarkers": [], "limitation_note_ru": "Редко используемый анализ с ограниченной клинической значимостью.", "ui_confidence_note_ru": "Слабая уверенность."}},
+    {"nutrient_code": "nickel", "title_ru": "Никель", "category": "trace_elements", "status_level": "weak", "metadata": {"supported_analytes": ["serum_nickel"], "supported_units": ["µg/L"], "primary_biomarker": "serum_nickel", "secondary_biomarkers": [], "limitation_note_ru": "Маркер чаще отражает экспозицию, чем нутритивный статус.", "ui_confidence_note_ru": "Слабая уверенность."}},
 ]
 
 NUTRIENT_DEF_BY_CODE = {item["nutrient_code"]: item for item in NUTRIENT_PROTOCOL_DEFS}
@@ -210,3 +217,33 @@ for item in NUTRIENT_PROTOCOL_DEFS:
             "physician_flag_rules": [],
             "ui_notes_ru": str((item.get("metadata") or {}).get("limitation_note_ru") or "Полноценная интерпретация для этого нутриента будет добавлена позже."),
         }
+
+# --- Orchestration impact maps (planner rebuild targeting) ---
+PROFILE_IMPACT_MAP = {
+    "sun_exposure_level": ["vitamin_d"],
+    "country_code": ["vitamin_d"],
+    "city": ["vitamin_d"],
+    "diet_type": ["vitamin_b12", "iron", "folate", "zinc"],
+    "pregnancy_status": ["iron", "folate", "vitamin_d", "vitamin_b12"],
+    "lactation_status": ["iron", "folate", "vitamin_d", "vitamin_b12"],
+    "conditions_json": ["vitamin_d", "vitamin_b12", "iron", "folate", "zinc"],
+    "meds_json": ["vitamin_d", "vitamin_b12", "iron", "folate", "zinc"],
+    "sex_at_birth": ["iron", "vitamin_d", "vitamin_b12", "folate"],
+    "birth_year": ["iron", "vitamin_d", "vitamin_b12", "folate"],
+}
+
+LAB_ANALYTE_IMPACT_MAP = {
+    "25ohd": ["vitamin_d"],
+    "serum_b12": ["vitamin_b12"],
+    "methylmalonic_acid": ["vitamin_b12"],
+    "homocysteine": ["vitamin_b12", "folate"],
+    "ferritin": ["iron"],
+    "serum_iron": ["iron"],
+    "transferrin_saturation": ["iron"],
+    "hemoglobin": ["iron"],
+    "cbc_hgb": ["iron"],
+    "serum_folate": ["folate"],
+    "rbc_folate": ["folate"],
+    "serum_zinc": ["zinc"],
+    "plasma_zinc": ["zinc"],
+}

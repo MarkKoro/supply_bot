@@ -5,8 +5,10 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 import json
 import re
+from typing import Any
 import aiosqlite
 from nutrient_rules import NUTRIENT_PROTOCOL_DEFS
+from nutrient_registry import get_all_nutrient_rules
 
 def utc_now_iso() -> str:
     return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
@@ -121,6 +123,11 @@ CREATE TABLE IF NOT EXISTS users (
   onboarding_free_pick_used INTEGER NOT NULL DEFAULT 0,
   onboarding_started_at_utc TEXT NOT NULL DEFAULT '',
   onboarding_completed_at_utc TEXT NOT NULL DEFAULT '',
+  assistant_onboarding_seen INTEGER NOT NULL DEFAULT 0,
+  assistant_onboarding_completed_at_utc TEXT NOT NULL DEFAULT '',
+  assistant_onboarding_dismissed_at_utc TEXT NOT NULL DEFAULT '',
+  assistant_last_home_state TEXT NOT NULL DEFAULT '',
+  assistant_last_opened_at_utc TEXT NOT NULL DEFAULT '',
   starter_trial_used INTEGER NOT NULL DEFAULT 0,
   starter_trial_started_at_utc TEXT NOT NULL DEFAULT '',
   starter_trial_until_utc TEXT NOT NULL DEFAULT '',
@@ -471,6 +478,11 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     await _ensure_column(conn, "users", "onboarding_free_pick_used", "INTEGER NOT NULL DEFAULT 0")
     await _ensure_column(conn, "users", "onboarding_started_at_utc", "TEXT NOT NULL DEFAULT ''")
     await _ensure_column(conn, "users", "onboarding_completed_at_utc", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "users", "assistant_onboarding_seen", "INTEGER NOT NULL DEFAULT 0")
+    await _ensure_column(conn, "users", "assistant_onboarding_completed_at_utc", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "users", "assistant_onboarding_dismissed_at_utc", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "users", "assistant_last_home_state", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "users", "assistant_last_opened_at_utc", "TEXT NOT NULL DEFAULT ''")
     await _ensure_column(conn, "users", "starter_trial_used", "INTEGER NOT NULL DEFAULT 0")
     await _ensure_column(conn, "users", "starter_trial_started_at_utc", "TEXT NOT NULL DEFAULT ''")
     await _ensure_column(conn, "users", "starter_trial_until_utc", "TEXT NOT NULL DEFAULT ''")
@@ -641,6 +653,15 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     await conn.execute(
         "UPDATE users SET onboarding_completed_at_utc='' WHERE onboarding_completed_at_utc IS NULL"
     )
+    await conn.execute("UPDATE users SET assistant_onboarding_seen=0 WHERE assistant_onboarding_seen IS NULL")
+    await conn.execute(
+        "UPDATE users SET assistant_onboarding_completed_at_utc='' WHERE assistant_onboarding_completed_at_utc IS NULL"
+    )
+    await conn.execute(
+        "UPDATE users SET assistant_onboarding_dismissed_at_utc='' WHERE assistant_onboarding_dismissed_at_utc IS NULL"
+    )
+    await conn.execute("UPDATE users SET assistant_last_home_state='' WHERE assistant_last_home_state IS NULL")
+    await conn.execute("UPDATE users SET assistant_last_opened_at_utc='' WHERE assistant_last_opened_at_utc IS NULL")
     await conn.execute(
         "UPDATE users SET starter_trial_used=0 WHERE starter_trial_used IS NULL"
     )
@@ -771,7 +792,13 @@ async def _ensure_profile_foundation_tables(conn: aiosqlite.Connection) -> None:
           lab_name TEXT,
           report_date TEXT,
           notes TEXT,
-          created_at_utc TEXT
+          source_filename TEXT,
+          mime_type TEXT,
+          parse_status TEXT NOT NULL DEFAULT 'manual',
+          parse_notes TEXT,
+          source_file_path TEXT,
+          created_at_utc TEXT,
+          updated_at_utc TEXT
         )"""
     )
     await conn.execute(
@@ -798,6 +825,11 @@ async def _ensure_profile_foundation_tables(conn: aiosqlite.Connection) -> None:
           category TEXT NOT NULL,
           status_level TEXT NOT NULL,
           is_enabled INTEGER NOT NULL DEFAULT 1,
+          rules_version TEXT NOT NULL DEFAULT '',
+          readiness_level TEXT NOT NULL DEFAULT 'metadata_only',
+          source_pack_id TEXT NOT NULL DEFAULT '',
+          source_pack_version TEXT NOT NULL DEFAULT '',
+          curation_status TEXT NOT NULL DEFAULT 'draft',
           metadata_json TEXT NOT NULL,
           created_at_utc TEXT,
           updated_at_utc TEXT
@@ -806,6 +838,133 @@ async def _ensure_profile_foundation_tables(conn: aiosqlite.Connection) -> None:
     await conn.execute("CREATE INDEX IF NOT EXISTS idx_lab_results_user_analyte ON lab_results(user_id, analyte_code)")
     await conn.execute("CREATE INDEX IF NOT EXISTS idx_lab_results_user_measured ON lab_results(user_id, measured_at)")
     await conn.execute("CREATE INDEX IF NOT EXISTS idx_lab_results_report ON lab_results(report_id)")
+    await conn.execute(
+        """CREATE TABLE IF NOT EXISTS nutrient_plan_runs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id INTEGER NOT NULL,
+          nutrient_code TEXT NOT NULL,
+          source_report_id INTEGER,
+          preview_snapshot_json TEXT NOT NULL,
+          plan_snapshot_json TEXT NOT NULL,
+          plan_mode TEXT NOT NULL,
+          plan_phase TEXT NOT NULL,
+          confidence_level TEXT NOT NULL,
+          freshness_status TEXT NOT NULL DEFAULT 'fresh',
+          stale_reason_codes_json TEXT,
+          based_on_profile_updated_at_utc TEXT,
+          based_on_latest_lab_at_utc TEXT,
+          based_on_stack_updated_at_utc TEXT,
+          last_rebuild_at_utc TEXT,
+          created_at_utc TEXT NOT NULL,
+          updated_at_utc TEXT NOT NULL,
+          is_active INTEGER NOT NULL DEFAULT 1
+        )"""
+    )
+    await conn.execute(
+        """CREATE TABLE IF NOT EXISTS nutrient_followup_items (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          plan_run_id INTEGER NOT NULL,
+          user_id INTEGER NOT NULL,
+          nutrient_code TEXT NOT NULL,
+          item_type TEXT NOT NULL,
+          title_ru TEXT NOT NULL,
+          details_json TEXT,
+          due_date_utc TEXT,
+          status TEXT NOT NULL DEFAULT 'planned',
+          created_at_utc TEXT NOT NULL,
+          updated_at_utc TEXT NOT NULL
+        )"""
+    )
+    await conn.execute(
+        """CREATE TABLE IF NOT EXISTS nutrient_reminder_candidates (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          plan_run_id INTEGER NOT NULL,
+          user_id INTEGER NOT NULL,
+          nutrient_code TEXT NOT NULL,
+          candidate_type TEXT NOT NULL,
+          trigger_date_utc TEXT,
+          payload_json TEXT,
+          created_at_utc TEXT NOT NULL
+        )"""
+    )
+    await conn.execute(
+        """CREATE TABLE IF NOT EXISTS nutrient_plan_explanations (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id INTEGER NOT NULL,
+          plan_run_id INTEGER NOT NULL,
+          nutrient_code TEXT NOT NULL,
+          explanation_json TEXT NOT NULL,
+          model_name TEXT,
+          prompt_version TEXT NOT NULL,
+          source_type TEXT NOT NULL,
+          created_at_utc TEXT NOT NULL,
+          updated_at_utc TEXT NOT NULL,
+          is_active INTEGER NOT NULL DEFAULT 1
+        )"""
+    )
+    await conn.execute(
+        """CREATE TABLE IF NOT EXISTS nutrient_followup_reminders (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id INTEGER NOT NULL,
+          plan_run_id INTEGER NOT NULL,
+          followup_item_id INTEGER,
+          nutrient_code TEXT NOT NULL,
+          reminder_type TEXT NOT NULL,
+          source_type TEXT NOT NULL DEFAULT 'nutrient_assistant',
+          scheduled_for_utc TEXT NOT NULL,
+          delivered_at_utc TEXT,
+          status TEXT NOT NULL,
+          payload_json TEXT,
+          created_at_utc TEXT NOT NULL,
+          updated_at_utc TEXT NOT NULL
+        )"""
+    )
+    await conn.execute(
+        """CREATE TABLE IF NOT EXISTS nutrient_plan_rebuild_jobs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id INTEGER NOT NULL,
+          nutrient_code TEXT NOT NULL,
+          trigger_type TEXT NOT NULL,
+          trigger_payload_json TEXT,
+          status TEXT NOT NULL,
+          priority INTEGER NOT NULL DEFAULT 50,
+          created_at_utc TEXT NOT NULL,
+          updated_at_utc TEXT NOT NULL,
+          started_at_utc TEXT,
+          finished_at_utc TEXT,
+          error_text TEXT
+        )"""
+    )
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_nutrient_plan_runs_user_code_active ON nutrient_plan_runs(user_id, nutrient_code, is_active)")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_nutrient_followup_plan ON nutrient_followup_items(plan_run_id)")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_nutrient_reminder_plan ON nutrient_reminder_candidates(plan_run_id)")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_nutrient_expl_plan_prompt_active ON nutrient_plan_explanations(plan_run_id, prompt_version, is_active)")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_nutrient_followup_rem_due ON nutrient_followup_reminders(status, scheduled_for_utc)")
+    await conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_nutrient_followup_rem_dedupe ON nutrient_followup_reminders(user_id, plan_run_id, reminder_type, scheduled_for_utc)")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_nutrient_rebuild_jobs_status_priority ON nutrient_plan_rebuild_jobs(status, priority, created_at_utc)")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_nutrient_rebuild_jobs_user_code ON nutrient_plan_rebuild_jobs(user_id, nutrient_code)")
+    await _ensure_column(conn, "lab_reports", "source_filename", "TEXT")
+    await _ensure_column(conn, "lab_reports", "mime_type", "TEXT")
+    await _ensure_column(conn, "lab_reports", "parse_status", "TEXT NOT NULL DEFAULT 'manual'")
+    await _ensure_column(conn, "lab_reports", "parse_notes", "TEXT")
+    await _ensure_column(conn, "lab_reports", "source_file_path", "TEXT")
+    await _ensure_column(conn, "lab_reports", "updated_at_utc", "TEXT")
+    await _ensure_column(conn, "nutrient_protocol_defs", "rules_version", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "nutrient_protocol_defs", "readiness_level", "TEXT NOT NULL DEFAULT 'metadata_only'")
+    await _ensure_column(conn, "nutrient_protocol_defs", "source_pack_id", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "nutrient_protocol_defs", "source_pack_version", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "nutrient_protocol_defs", "curation_status", "TEXT NOT NULL DEFAULT 'draft'")
+    await _ensure_column(conn, "nutrient_plan_runs", "source_report_id", "INTEGER")
+    await _ensure_column(conn, "nutrient_plan_runs", "is_active", "INTEGER NOT NULL DEFAULT 1")
+    await _ensure_column(conn, "nutrient_plan_runs", "freshness_status", "TEXT NOT NULL DEFAULT 'fresh'")
+    await _ensure_column(conn, "nutrient_plan_runs", "stale_reason_codes_json", "TEXT")
+    await _ensure_column(conn, "nutrient_plan_runs", "based_on_profile_updated_at_utc", "TEXT")
+    await _ensure_column(conn, "nutrient_plan_runs", "based_on_latest_lab_at_utc", "TEXT")
+    await _ensure_column(conn, "nutrient_plan_runs", "based_on_stack_updated_at_utc", "TEXT")
+    await _ensure_column(conn, "nutrient_plan_runs", "last_rebuild_at_utc", "TEXT")
+    await _ensure_column(conn, "nutrient_plan_explanations", "is_active", "INTEGER NOT NULL DEFAULT 1")
+    await _ensure_column(conn, "nutrient_followup_reminders", "source_type", "TEXT NOT NULL DEFAULT 'nutrient_assistant'")
+    await _ensure_column(conn, "nutrient_plan_rebuild_jobs", "status", "TEXT NOT NULL DEFAULT 'queued'")
 
 async def _ensure_achievements_tables(conn: aiosqlite.Connection) -> None:
     await conn.execute(
@@ -4853,7 +5012,8 @@ async def add_user_supplement(conn: aiosqlite.Connection, tg_user_id: int, suppl
         "UPDATE user_schedules SET slot_id='morning' WHERE user_id=? AND supplement_id=? AND (slot_id IS NULL OR slot_id='')",
         (user_id, supplement_id),
     )
-    await conn.commit()
+    slug = await get_supplement_slug_by_id(conn, supplement_id)
+    await enqueue_stack_change_rebuilds(conn, tg_user_id, [slug] if slug else [])
 
 async def add_user_supp(conn: aiosqlite.Connection, user_id: int, supplement_id: int) -> None:
     await add_user_supplement(conn, user_id, supplement_id)
@@ -4868,7 +5028,8 @@ async def remove_user_supplement(conn: aiosqlite.Connection, tg_user_id: int, su
         "DELETE FROM reminders WHERE user_id=? AND supplement_id=?",
         (tg_user_id, supplement_id),
     )
-    await conn.commit()
+    slug = await get_supplement_slug_by_id(conn, supplement_id)
+    await enqueue_stack_change_rebuilds(conn, tg_user_id, [slug] if slug else [])
 
 async def remove_user_supp(conn: aiosqlite.Connection, user_id: int, supplement_id: int) -> None:
     await remove_user_supplement(conn, user_id, supplement_id)
@@ -4893,7 +5054,9 @@ async def remove_user_supplements_bulk(
         f"DELETE FROM reminders WHERE user_id=? AND supplement_id IN ({placeholders})",
         (tg_user_id, *cleaned),
     )
-    await conn.commit()
+    slugs_rows = await fetchall(conn, f"SELECT slug FROM supplements WHERE id IN ({placeholders})", tuple(cleaned))
+    slugs = [str(r["slug"] or "") for r in slugs_rows]
+    await enqueue_stack_change_rebuilds(conn, tg_user_id, slugs)
 
 
 async def get_user_supplement_intake_history(
@@ -5142,6 +5305,9 @@ async def set_user_supp_enabled(conn: aiosqlite.Connection, user_id: int, supp_i
         (1 if int(enabled) else 0, int(user_id), int(supp_id)),
     )
     await conn.commit()
+    if (cur.rowcount or 0) > 0:
+        slug = await get_supplement_slug_by_id(conn, int(supp_id))
+        await enqueue_stack_change_rebuilds(conn, int(user_id), [slug] if slug else [])
     return (cur.rowcount or 0) > 0
 
 
@@ -5171,6 +5337,9 @@ async def set_user_supp_fields(
         (str(dose_text or "").strip(), utc_now_iso(), user_id, int(supplement_id)),
     )
     await conn.commit()
+    if (cur.rowcount or 0) > 0:
+        slug = await get_supplement_slug_by_id(conn, int(supp_id))
+        await enqueue_stack_change_rebuilds(conn, int(user_id), [slug] if slug else [])
     return (cur.rowcount or 0) > 0
 
 async def list_user_stack_details(conn: aiosqlite.Connection, tg_user_id: int, local_date: str | None = None):
@@ -7928,9 +8097,11 @@ async def get_user_health_profile(conn: aiosqlite.Connection, tg_user_id: int) -
         out[k] = None
     for k in ("height_cm", "weight_kg"):
         out[k] = None
+    out["updated_at_utc"] = ""
     if row:
         for key in PROFILE_FIELDS:
             out[key] = row[key]
+        out["updated_at_utc"] = str(row["updated_at_utc"] or "")
     return out
 
 
@@ -7978,8 +8149,25 @@ async def create_lab_report(conn: aiosqlite.Connection, tg_user_id: int, report:
     user_id = await get_or_create_user(conn, int(tg_user_id))
     now = utc_now_iso()
     cur = await conn.execute(
-        "INSERT INTO lab_reports(user_id, source, lab_name, report_date, notes, created_at_utc) VALUES(?,?,?,?,?,?)",
-        (user_id, str(report.get("source") or "manual"), str(report.get("lab_name") or ""), str(report.get("report_date") or ""), str(report.get("notes") or ""), now),
+        """INSERT INTO lab_reports(
+            user_id, source, lab_name, report_date, notes,
+            source_filename, mime_type, parse_status, parse_notes, source_file_path,
+            created_at_utc, updated_at_utc
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            user_id,
+            str(report.get("source") or "manual"),
+            str(report.get("lab_name") or ""),
+            str(report.get("report_date") or ""),
+            str(report.get("notes") or ""),
+            str(report.get("source_filename") or ""),
+            str(report.get("mime_type") or ""),
+            str(report.get("parse_status") or "manual"),
+            str(report.get("parse_notes") or ""),
+            str(report.get("source_file_path") or ""),
+            now,
+            now,
+        ),
     )
     return int(cur.lastrowid)
 
@@ -8012,7 +8200,16 @@ async def add_lab_results_batch(conn: aiosqlite.Connection, tg_user_id: int, rep
 
 async def get_user_lab_reports(conn: aiosqlite.Connection, tg_user_id: int) -> list[dict]:
     user_id = await get_or_create_user(conn, int(tg_user_id))
-    rows = await fetchall(conn, "SELECT id, source, lab_name, report_date, notes, created_at_utc FROM lab_reports WHERE user_id=? ORDER BY COALESCE(report_date,'' ) DESC, id DESC", (user_id,))
+    rows = await fetchall(
+        conn,
+        """SELECT id, source, lab_name, report_date, notes,
+                  source_filename, mime_type, parse_status, parse_notes,
+                  source_file_path, created_at_utc, updated_at_utc
+           FROM lab_reports
+           WHERE user_id=?
+           ORDER BY COALESCE(report_date,'' ) DESC, id DESC""",
+        (user_id,),
+    )
     return [dict(row) for row in rows]
 
 
@@ -8020,6 +8217,679 @@ async def get_lab_results_by_report_id(conn: aiosqlite.Connection, tg_user_id: i
     user_id = await get_or_create_user(conn, int(tg_user_id))
     rows = await fetchall(conn, "SELECT id, report_id, analyte_code, analyte_name, value_text, value_num, unit, ref_low, ref_high, raw_json, measured_at, created_at_utc FROM lab_results WHERE user_id=? AND report_id=? ORDER BY id ASC", (user_id, int(report_id)))
     return [dict(row) for row in rows]
+
+
+async def get_lab_report_by_id(conn: aiosqlite.Connection, tg_user_id: int, report_id: int) -> dict | None:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    row = await fetchone(
+        conn,
+        """SELECT id, source, lab_name, report_date, notes,
+                  source_filename, mime_type, parse_status, parse_notes,
+                  source_file_path, created_at_utc, updated_at_utc
+           FROM lab_reports WHERE user_id=? AND id=? LIMIT 1""",
+        (user_id, int(report_id)),
+    )
+    if not row:
+        return None
+    return dict(row)
+
+
+async def replace_lab_results(conn: aiosqlite.Connection, tg_user_id: int, report_id: int, results: list[dict]) -> int:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    await conn.execute("DELETE FROM lab_results WHERE user_id=? AND report_id=?", (user_id, int(report_id)))
+    return await add_lab_results_batch(conn, tg_user_id, int(report_id), results)
+
+
+async def update_lab_report_meta(conn: aiosqlite.Connection, tg_user_id: int, report_id: int, payload: dict) -> dict | None:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    row = await fetchone(conn, "SELECT id FROM lab_reports WHERE id=? AND user_id=? LIMIT 1", (int(report_id), user_id))
+    if not row:
+        return None
+    now = utc_now_iso()
+    await conn.execute(
+        """UPDATE lab_reports
+           SET lab_name=?, report_date=?, notes=?, parse_status=?, parse_notes=?, updated_at_utc=?
+           WHERE id=? AND user_id=?""",
+        (
+            str(payload.get("lab_name") or ""),
+            str(payload.get("report_date") or ""),
+            str(payload.get("notes") or ""),
+            str(payload.get("parse_status") or "manual"),
+            str(payload.get("parse_notes") or ""),
+            now,
+            int(report_id),
+            user_id,
+        ),
+    )
+    return await get_lab_report_by_id(conn, tg_user_id, int(report_id))
+
+
+async def deactivate_active_nutrient_plans(conn: aiosqlite.Connection, tg_user_id: int, nutrient_code: str) -> int:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    cur = await conn.execute(
+        "UPDATE nutrient_plan_runs SET is_active=0, freshness_status='superseded', updated_at_utc=? WHERE user_id=? AND nutrient_code=? AND is_active=1",
+        (utc_now_iso(), user_id, str(nutrient_code or "").lower()),
+    )
+    return int(cur.rowcount or 0)
+
+
+async def create_nutrient_plan_run(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    nutrient_code: str,
+    source_report_id: int | None,
+    preview_snapshot: dict,
+    plan_snapshot: dict,
+) -> int:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    now = utc_now_iso()
+    await deactivate_active_nutrient_plans(conn, tg_user_id, nutrient_code)
+    cur = await conn.execute(
+        """INSERT INTO nutrient_plan_runs(
+            user_id, nutrient_code, source_report_id, preview_snapshot_json, plan_snapshot_json,
+            plan_mode, plan_phase, confidence_level,
+            freshness_status, stale_reason_codes_json,
+            based_on_profile_updated_at_utc, based_on_latest_lab_at_utc, based_on_stack_updated_at_utc,
+            last_rebuild_at_utc, created_at_utc, updated_at_utc, is_active
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)""",
+        (
+            user_id,
+            str(nutrient_code or "").lower(),
+            int(source_report_id) if source_report_id is not None else None,
+            json.dumps(preview_snapshot or {}, ensure_ascii=False),
+            json.dumps(plan_snapshot or {}, ensure_ascii=False),
+            str(plan_snapshot.get("plan_mode") or "no_plan"),
+            str(plan_snapshot.get("plan_phase") or "initial_review"),
+            str(plan_snapshot.get("confidence_level") or "low"),
+            "fresh",
+            json.dumps([], ensure_ascii=False),
+            str((preview_snapshot.get("profile_snapshot") or {}).get("updated_at_utc") or ""),
+            str(preview_snapshot.get("latest_lab_at_utc") or ""),
+            str(preview_snapshot.get("stack_updated_at_utc") or ""),
+            now,
+            now,
+            now,
+        ),
+    )
+    return int(cur.lastrowid)
+
+
+async def save_nutrient_followup_items(conn: aiosqlite.Connection, tg_user_id: int, plan_run_id: int, nutrient_code: str, items: list[dict]) -> int:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    now = utc_now_iso()
+    count = 0
+    for item in list(items or []):
+        await conn.execute(
+            """INSERT INTO nutrient_followup_items(
+                plan_run_id, user_id, nutrient_code, item_type, title_ru, details_json,
+                due_date_utc, status, created_at_utc, updated_at_utc
+            ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+            (
+                int(plan_run_id),
+                user_id,
+                str(nutrient_code or "").lower(),
+                str(item.get("item_type") or "followup_review"),
+                str(item.get("title_ru") or "Follow-up"),
+                json.dumps(item.get("details") or {}, ensure_ascii=False),
+                str(item.get("due_date_utc") or ""),
+                str(item.get("status") or "planned"),
+                now,
+                now,
+            ),
+        )
+        count += 1
+    return count
+
+
+async def save_nutrient_reminder_candidates(conn: aiosqlite.Connection, tg_user_id: int, plan_run_id: int, nutrient_code: str, candidates: list[dict]) -> int:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    now = utc_now_iso()
+    count = 0
+    for item in list(candidates or []):
+        await conn.execute(
+            """INSERT INTO nutrient_reminder_candidates(
+                plan_run_id, user_id, nutrient_code, candidate_type, trigger_date_utc, payload_json, created_at_utc
+            ) VALUES(?,?,?,?,?,?,?)""",
+            (
+                int(plan_run_id),
+                user_id,
+                str(nutrient_code or "").lower(),
+                str(item.get("candidate_type") or "followup_review"),
+                str(item.get("trigger_date_utc") or ""),
+                json.dumps(item.get("payload") or {}, ensure_ascii=False),
+                now,
+            ),
+        )
+        count += 1
+    return count
+
+
+def _decode_json_or_default(raw: str | None, default: Any) -> Any:
+    txt = str(raw or "").strip()
+    if not txt:
+        return default
+    try:
+        val = json.loads(txt)
+        return val
+    except Exception:
+        return default
+
+
+async def get_latest_active_nutrient_plan(conn: aiosqlite.Connection, tg_user_id: int, nutrient_code: str) -> dict | None:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    row = await fetchone(
+        conn,
+        """SELECT id, nutrient_code, source_report_id, plan_mode, plan_phase, confidence_level,
+                  freshness_status, stale_reason_codes_json,
+                  based_on_profile_updated_at_utc, based_on_latest_lab_at_utc, based_on_stack_updated_at_utc,
+                  last_rebuild_at_utc,
+                  preview_snapshot_json, plan_snapshot_json, created_at_utc, updated_at_utc, is_active
+           FROM nutrient_plan_runs
+           WHERE user_id=? AND nutrient_code=? AND is_active=1
+           ORDER BY id DESC LIMIT 1""",
+        (user_id, str(nutrient_code or "").lower()),
+    )
+    if not row:
+        return None
+    out = dict(row)
+    out["preview_snapshot"] = _decode_json_or_default(out.pop("preview_snapshot_json", "{}"), {})
+    out["plan_snapshot"] = _decode_json_or_default(out.pop("plan_snapshot_json", "{}"), {})
+    out["stale_reason_codes"] = _decode_json_or_default(out.get("stale_reason_codes_json", "[]"), [])
+    return out
+
+
+async def list_user_nutrient_plans(conn: aiosqlite.Connection, tg_user_id: int, limit: int = 30) -> list[dict]:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    rows = await fetchall(
+        conn,
+        """SELECT id, nutrient_code, source_report_id, plan_mode, plan_phase, confidence_level,
+                  freshness_status, stale_reason_codes_json, last_rebuild_at_utc,
+                  created_at_utc, updated_at_utc, is_active
+           FROM nutrient_plan_runs WHERE user_id=? ORDER BY id DESC LIMIT ?""",
+        (user_id, int(limit)),
+    )
+    return [dict(x) for x in rows]
+
+
+async def get_user_nutrient_plan_by_id(conn: aiosqlite.Connection, tg_user_id: int, plan_id: int) -> dict | None:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    row = await fetchone(
+        conn,
+        """SELECT id, nutrient_code, source_report_id, plan_mode, plan_phase, confidence_level,
+                  freshness_status, stale_reason_codes_json,
+                  based_on_profile_updated_at_utc, based_on_latest_lab_at_utc, based_on_stack_updated_at_utc,
+                  last_rebuild_at_utc,
+                  preview_snapshot_json, plan_snapshot_json, created_at_utc, updated_at_utc, is_active
+           FROM nutrient_plan_runs WHERE user_id=? AND id=? LIMIT 1""",
+        (user_id, int(plan_id)),
+    )
+    if not row:
+        return None
+    out = dict(row)
+    out["preview_snapshot"] = _decode_json_or_default(out.pop("preview_snapshot_json", "{}"), {})
+    out["plan_snapshot"] = _decode_json_or_default(out.pop("plan_snapshot_json", "{}"), {})
+
+    frows = await fetchall(
+        conn,
+        "SELECT id, item_type, title_ru, details_json, due_date_utc, status, created_at_utc, updated_at_utc FROM nutrient_followup_items WHERE plan_run_id=? ORDER BY id ASC",
+        (int(plan_id),),
+    )
+    out["followup_items"] = [
+        {
+            **dict(r),
+            "details": _decode_json_or_default(r["details_json"], {}),
+        }
+        for r in frows
+    ]
+    crows = await fetchall(
+        conn,
+        "SELECT id, candidate_type, trigger_date_utc, payload_json, created_at_utc FROM nutrient_reminder_candidates WHERE plan_run_id=? ORDER BY id ASC",
+        (int(plan_id),),
+    )
+    out["reminder_candidates"] = [
+        {
+            **dict(r),
+            "payload": _decode_json_or_default(r["payload_json"], {}),
+        }
+        for r in crows
+    ]
+    return out
+
+
+async def deactivate_plan_explanations(conn: aiosqlite.Connection, tg_user_id: int, plan_run_id: int) -> int:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    cur = await conn.execute(
+        "UPDATE nutrient_plan_explanations SET is_active=0, updated_at_utc=? WHERE user_id=? AND plan_run_id=? AND is_active=1",
+        (utc_now_iso(), user_id, int(plan_run_id)),
+    )
+    return int(cur.rowcount or 0)
+
+
+async def save_plan_explanation(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    plan_run_id: int,
+    nutrient_code: str,
+    explanation: dict,
+    model_name: str | None,
+    prompt_version: str,
+    source_type: str,
+) -> int:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    now = utc_now_iso()
+    await deactivate_plan_explanations(conn, tg_user_id, int(plan_run_id))
+    cur = await conn.execute(
+        """INSERT INTO nutrient_plan_explanations(
+            user_id, plan_run_id, nutrient_code, explanation_json, model_name,
+            prompt_version, source_type, created_at_utc, updated_at_utc, is_active
+        ) VALUES(?,?,?,?,?,?,?,?,?,1)""",
+        (
+            user_id,
+            int(plan_run_id),
+            str(nutrient_code or "").lower(),
+            json.dumps(explanation or {}, ensure_ascii=False),
+            str(model_name or ""),
+            str(prompt_version or "v1"),
+            str(source_type or "fallback"),
+            now,
+            now,
+        ),
+    )
+    return int(cur.lastrowid)
+
+
+async def get_active_plan_explanation(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    plan_run_id: int,
+    prompt_version: str | None = None,
+) -> dict | None:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    params: list[Any] = [user_id, int(plan_run_id)]
+    q = (
+        "SELECT id, plan_run_id, nutrient_code, explanation_json, model_name, prompt_version, source_type, created_at_utc, updated_at_utc, is_active "
+        "FROM nutrient_plan_explanations WHERE user_id=? AND plan_run_id=? AND is_active=1"
+    )
+    if prompt_version:
+        q += " AND prompt_version=?"
+        params.append(str(prompt_version))
+    q += " ORDER BY id DESC LIMIT 1"
+    row = await fetchone(conn, q, tuple(params))
+    if not row:
+        return None
+    out = dict(row)
+    out["explanation"] = _decode_json_or_default(out.pop("explanation_json", "{}"), {})
+    return out
+
+
+async def list_plan_explanations(conn: aiosqlite.Connection, tg_user_id: int, limit: int = 40) -> list[dict]:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    rows = await fetchall(
+        conn,
+        """SELECT id, plan_run_id, nutrient_code, model_name, prompt_version, source_type, created_at_utc, updated_at_utc, is_active
+           FROM nutrient_plan_explanations WHERE user_id=? ORDER BY id DESC LIMIT ?""",
+        (user_id, int(limit)),
+    )
+    return [dict(r) for r in rows]
+
+
+def _parse_iso_utc_or_none(value: str | None) -> datetime | None:
+    raw = str(value or "").strip().replace("Z", "+00:00")
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw)
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt
+
+
+async def activate_nutrient_reminders_for_plan(conn: aiosqlite.Connection, tg_user_id: int, plan_run_id: int) -> list[dict]:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    plan = await fetchone(
+        conn,
+        "SELECT id, nutrient_code FROM nutrient_plan_runs WHERE user_id=? AND id=? LIMIT 1",
+        (user_id, int(plan_run_id)),
+    )
+    if not plan:
+        return []
+    nutrient_code = str(plan["nutrient_code"] or "").lower()
+    now = utc_now_iso()
+
+    await conn.execute(
+        """UPDATE nutrient_followup_reminders
+           SET status='obsolete', updated_at_utc=?
+           WHERE user_id=? AND nutrient_code=? AND plan_run_id!=? AND status IN ('scheduled','sent','snoozed')""",
+        (now, user_id, nutrient_code, int(plan_run_id)),
+    )
+
+    candidates = await fetchall(
+        conn,
+        "SELECT id, candidate_type, trigger_date_utc, payload_json FROM nutrient_reminder_candidates WHERE user_id=? AND plan_run_id=? ORDER BY id ASC",
+        (user_id, int(plan_run_id)),
+    )
+    activated: list[dict] = []
+    for row in candidates:
+        reminder_type = str(row["candidate_type"] or "followup_review")
+        scheduled = str(row["trigger_date_utc"] or "").strip()
+        if not scheduled:
+            scheduled = (datetime.now(timezone.utc) + timedelta(days=1)).replace(microsecond=0).isoformat()
+        payload = _decode_json_or_default(row["payload_json"], {})
+        before = conn.total_changes
+        await conn.execute(
+            """INSERT OR IGNORE INTO nutrient_followup_reminders(
+                user_id, plan_run_id, followup_item_id, nutrient_code, reminder_type, source_type,
+                scheduled_for_utc, delivered_at_utc, status, payload_json, created_at_utc, updated_at_utc
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                user_id,
+                int(plan_run_id),
+                None,
+                nutrient_code,
+                reminder_type,
+                "nutrient_assistant",
+                scheduled,
+                "",
+                "scheduled",
+                json.dumps(payload, ensure_ascii=False),
+                now,
+                now,
+            ),
+        )
+        if conn.total_changes > before:
+            rid_row = await fetchone(conn, "SELECT id FROM nutrient_followup_reminders WHERE user_id=? AND plan_run_id=? AND reminder_type=? AND scheduled_for_utc=? ORDER BY id DESC LIMIT 1", (user_id, int(plan_run_id), reminder_type, scheduled))
+            if rid_row:
+                activated.append({
+                    "id": int(rid_row["id"]),
+                    "plan_run_id": int(plan_run_id),
+                    "nutrient_code": nutrient_code,
+                    "reminder_type": reminder_type,
+                    "scheduled_for_utc": scheduled,
+                    "status": "scheduled",
+                })
+    await conn.commit()
+    return activated
+
+
+async def list_nutrient_followup_reminders(conn: aiosqlite.Connection, tg_user_id: int, limit: int = 60) -> list[dict]:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    rows = await fetchall(
+        conn,
+        """SELECT id, plan_run_id, followup_item_id, nutrient_code, reminder_type, source_type,
+                  scheduled_for_utc, delivered_at_utc, status, payload_json, created_at_utc, updated_at_utc
+           FROM nutrient_followup_reminders
+           WHERE user_id=?
+           ORDER BY scheduled_for_utc ASC, id DESC
+           LIMIT ?""",
+        (user_id, int(limit)),
+    )
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["payload"] = _decode_json_or_default(d.pop("payload_json", "{}"), {})
+        out.append(d)
+    return out
+
+
+async def get_nutrient_followup_reminder_by_id(conn: aiosqlite.Connection, tg_user_id: int, reminder_id: int) -> dict | None:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    row = await fetchone(
+        conn,
+        """SELECT id, plan_run_id, followup_item_id, nutrient_code, reminder_type, source_type,
+                  scheduled_for_utc, delivered_at_utc, status, payload_json, created_at_utc, updated_at_utc
+           FROM nutrient_followup_reminders WHERE user_id=? AND id=? LIMIT 1""",
+        (user_id, int(reminder_id)),
+    )
+    if not row:
+        return None
+    d = dict(row)
+    d["payload"] = _decode_json_or_default(d.pop("payload_json", "{}"), {})
+    return d
+
+
+async def update_nutrient_followup_reminder_status(conn: aiosqlite.Connection, tg_user_id: int, reminder_id: int, status: str) -> bool:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    st = str(status or "").strip().lower()
+    if st not in {"scheduled", "sent", "done", "dismissed", "snoozed", "obsolete", "skipped"}:
+        raise ValueError("invalid_reminder_status")
+    cur = await conn.execute(
+        "UPDATE nutrient_followup_reminders SET status=?, updated_at_utc=? WHERE user_id=? AND id=?",
+        (st, utc_now_iso(), user_id, int(reminder_id)),
+    )
+    await conn.commit()
+    return int(cur.rowcount or 0) > 0
+
+
+async def snooze_nutrient_followup_reminder(conn: aiosqlite.Connection, tg_user_id: int, reminder_id: int, days: int) -> dict | None:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    row = await fetchone(conn, "SELECT scheduled_for_utc FROM nutrient_followup_reminders WHERE user_id=? AND id=? LIMIT 1", (user_id, int(reminder_id)))
+    if not row:
+        return None
+    base = _parse_iso_utc_or_none(row["scheduled_for_utc"]) or datetime.now(timezone.utc)
+    next_dt = (base + timedelta(days=max(1, int(days)))).replace(microsecond=0)
+    await conn.execute(
+        "UPDATE nutrient_followup_reminders SET status='snoozed', scheduled_for_utc=?, updated_at_utc=? WHERE user_id=? AND id=?",
+        (next_dt.isoformat(), utc_now_iso(), user_id, int(reminder_id)),
+    )
+    await conn.commit()
+    return await get_nutrient_followup_reminder_by_id(conn, tg_user_id, int(reminder_id))
+
+
+async def list_due_nutrient_followup_reminders(conn: aiosqlite.Connection) -> list[dict]:
+    rows = await fetchall(
+        conn,
+        """SELECT nfr.*, u.tz_name
+           FROM nutrient_followup_reminders nfr
+           JOIN users u ON u.id=nfr.user_id
+           WHERE nfr.status IN ('scheduled','snoozed')
+           ORDER BY nfr.scheduled_for_utc ASC, nfr.id ASC""",
+    )
+    now_utc = datetime.now(timezone.utc)
+    due = []
+    for row in rows:
+        sched = _parse_iso_utc_or_none(row["scheduled_for_utc"])
+        if not sched or sched > now_utc:
+            continue
+        local_dt = datetime.now(parse_utc_tz(str(row["tz_name"] or "")))
+        if local_dt.hour < 9 or local_dt.hour >= 22:
+            continue
+        item = dict(row)
+        item["payload"] = _decode_json_or_default(item.pop("payload_json", "{}"), {})
+        due.append(item)
+    return due
+
+
+async def mark_nutrient_followup_reminder_sent(conn: aiosqlite.Connection, reminder_id: int) -> bool:
+    cur = await conn.execute(
+        "UPDATE nutrient_followup_reminders SET status='sent', delivered_at_utc=?, updated_at_utc=? WHERE id=? AND status IN ('scheduled','snoozed')",
+        (utc_now_iso(), utc_now_iso(), int(reminder_id)),
+    )
+    await conn.commit()
+    return int(cur.rowcount or 0) > 0
+
+
+async def count_nutrient_reminders_sent_today(conn: aiosqlite.Connection, tg_user_id: int, tz_name: str | None) -> int:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    local_day = get_local_date_str(tz_name or None)
+    start_local = datetime.fromisoformat(local_day + "T00:00:00")
+    end_local = start_local + timedelta(days=1)
+    tzinfo = parse_utc_tz(tz_name)
+    start_utc = start_local.replace(tzinfo=tzinfo).astimezone(timezone.utc)
+    end_utc = end_local.replace(tzinfo=tzinfo).astimezone(timezone.utc)
+    row = await fetchone(
+        conn,
+        """SELECT COUNT(*) AS c FROM nutrient_followup_reminders
+           WHERE user_id=? AND status='sent' AND delivered_at_utc>=? AND delivered_at_utc<?""",
+        (user_id, start_utc.replace(microsecond=0).isoformat(), end_utc.replace(microsecond=0).isoformat()),
+    )
+    return int(row["c"] or 0) if row else 0
+
+
+def _impact_nutrients_for_slug(slug: str) -> list[str]:
+    low = str(slug or "").lower()
+    out = []
+    for code, profile in get_all_nutrient_rules().items():
+        tokens = [str(x).lower() for x in (profile.get("stack_match_slugs") or [])]
+        if any(tok and tok in low for tok in tokens):
+            out.append(code)
+    return sorted(set(out))
+
+
+async def mark_active_plans_stale(conn: aiosqlite.Connection, tg_user_id: int, nutrient_codes: list[str], reason_codes: list[str]) -> int:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    clean_n = [str(x).lower() for x in nutrient_codes if str(x).strip()]
+    if not clean_n:
+        return 0
+    placeholders = ",".join(["?"] * len(clean_n))
+    plan_rows = await fetchall(
+        conn,
+        f"SELECT id FROM nutrient_plan_runs WHERE user_id=? AND is_active=1 AND nutrient_code IN ({placeholders})",
+        (user_id, *clean_n),
+    )
+    plan_ids = [int(r["id"]) for r in plan_rows]
+
+    reasons_json = json.dumps(sorted(set(str(x) for x in reason_codes if str(x).strip())), ensure_ascii=False)
+    cur = await conn.execute(
+        f"""UPDATE nutrient_plan_runs
+              SET freshness_status='stale', stale_reason_codes_json=?, updated_at_utc=?
+              WHERE user_id=? AND is_active=1 AND nutrient_code IN ({placeholders})
+                AND freshness_status!='rebuilding'""",
+        (reasons_json, utc_now_iso(), user_id, *clean_n),
+    )
+
+    if plan_ids:
+        ph = ",".join(["?"] * len(plan_ids))
+        await conn.execute(
+            f"UPDATE nutrient_plan_explanations SET is_active=0, updated_at_utc=? WHERE user_id=? AND is_active=1 AND plan_run_id IN ({ph})",
+            (utc_now_iso(), user_id, *plan_ids),
+        )
+        await conn.execute(
+            f"UPDATE nutrient_followup_reminders SET status='obsolete', updated_at_utc=? WHERE user_id=? AND plan_run_id IN ({ph}) AND status IN ('scheduled','snoozed','sent')",
+            (utc_now_iso(), user_id, *plan_ids),
+        )
+
+    await conn.commit()
+    return int(cur.rowcount or 0)
+
+
+async def enqueue_nutrient_rebuild_job(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    nutrient_code: str,
+    *,
+    trigger_type: str,
+    trigger_payload: dict,
+    priority: int = 50,
+) -> bool:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    code = str(nutrient_code or "").lower()
+    existing = await fetchone(
+        conn,
+        "SELECT id FROM nutrient_plan_rebuild_jobs WHERE user_id=? AND nutrient_code=? AND status IN ('queued','processing') LIMIT 1",
+        (user_id, code),
+    )
+    if existing:
+        return False
+    now = utc_now_iso()
+    await conn.execute(
+        """INSERT INTO nutrient_plan_rebuild_jobs(
+            user_id, nutrient_code, trigger_type, trigger_payload_json, status, priority,
+            created_at_utc, updated_at_utc, started_at_utc, finished_at_utc, error_text
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+        (user_id, code, str(trigger_type or "manual_refresh"), json.dumps(trigger_payload or {}, ensure_ascii=False), "queued", int(priority), now, now, "", "", ""),
+    )
+    await conn.commit()
+    return True
+
+
+async def get_pending_nutrient_rebuild_jobs(conn: aiosqlite.Connection, limit: int = 10) -> list[dict]:
+    rows = await fetchall(
+        conn,
+        """SELECT j.*, u.tg_user_id
+           FROM nutrient_plan_rebuild_jobs j
+           JOIN users u ON u.id=j.user_id
+           WHERE j.status='queued'
+           ORDER BY j.priority DESC, j.created_at_utc ASC
+           LIMIT ?""",
+        (int(limit),),
+    )
+    return [dict(r) for r in rows]
+
+
+async def set_nutrient_rebuild_job_processing(conn: aiosqlite.Connection, job_id: int) -> None:
+    now = utc_now_iso()
+    await conn.execute(
+        "UPDATE nutrient_plan_rebuild_jobs SET status='processing', started_at_utc=?, updated_at_utc=?, error_text='' WHERE id=?",
+        (now, now, int(job_id)),
+    )
+    await conn.commit()
+
+
+async def set_nutrient_rebuild_job_done(conn: aiosqlite.Connection, job_id: int) -> None:
+    now = utc_now_iso()
+    await conn.execute(
+        "UPDATE nutrient_plan_rebuild_jobs SET status='done', finished_at_utc=?, updated_at_utc=? WHERE id=?",
+        (now, now, int(job_id)),
+    )
+    await conn.commit()
+
+
+async def set_nutrient_rebuild_job_failed(conn: aiosqlite.Connection, job_id: int, error_text: str) -> None:
+    now = utc_now_iso()
+    await conn.execute(
+        "UPDATE nutrient_plan_rebuild_jobs SET status='failed', finished_at_utc=?, updated_at_utc=?, error_text=? WHERE id=?",
+        (now, now, str(error_text or "")[:500], int(job_id)),
+    )
+    await conn.commit()
+
+
+async def list_user_nutrient_rebuild_jobs(conn: aiosqlite.Connection, tg_user_id: int, limit: int = 60) -> list[dict]:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    rows = await fetchall(
+        conn,
+        """SELECT id, nutrient_code, trigger_type, status, priority, created_at_utc, updated_at_utc, started_at_utc, finished_at_utc, error_text
+           FROM nutrient_plan_rebuild_jobs WHERE user_id=? ORDER BY id DESC LIMIT ?""",
+        (user_id, int(limit)),
+    )
+    out = []
+    for r in rows:
+        out.append(dict(r))
+    return out
+
+
+async def has_active_nutrient_reminders_for_nutrient(conn: aiosqlite.Connection, tg_user_id: int, nutrient_code: str, exclude_plan_run_id: int | None = None) -> bool:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    q = "SELECT 1 AS x FROM nutrient_followup_reminders WHERE user_id=? AND nutrient_code=? AND status IN ('scheduled','snoozed','sent')"
+    params: list[Any] = [user_id, str(nutrient_code or "").lower()]
+    if exclude_plan_run_id is not None:
+        q += " AND plan_run_id!=?"
+        params.append(int(exclude_plan_run_id))
+    q += " LIMIT 1"
+    row = await fetchone(conn, q, tuple(params))
+    return bool(row)
+
+
+async def get_supplement_slug_by_id(conn: aiosqlite.Connection, supplement_id: int) -> str:
+    row = await fetchone(conn, "SELECT slug FROM supplements WHERE id=? LIMIT 1", (int(supplement_id),))
+    return str(row["slug"] or "") if row else ""
+
+
+async def enqueue_stack_change_rebuilds(conn: aiosqlite.Connection, tg_user_id: int, changed_slugs: list[str]) -> int:
+    affected: set[str] = set()
+    for slug in changed_slugs:
+        affected.update(_impact_nutrients_for_slug(slug))
+    if not affected:
+        return 0
+    await mark_active_plans_stale(conn, tg_user_id, sorted(affected), ["stack_changed"])
+    created = 0
+    for code in sorted(affected):
+        if await enqueue_nutrient_rebuild_job(conn, tg_user_id, code, trigger_type="stack_changed", trigger_payload={"slugs": changed_slugs}, priority=60):
+            created += 1
+    return created
 
 
 async def get_latest_results_by_analyte(conn: aiosqlite.Connection, tg_user_id: int) -> list[dict]:
@@ -8038,29 +8908,53 @@ async def get_latest_results_by_analyte(conn: aiosqlite.Connection, tg_user_id: 
 
 
 async def list_enabled_nutrient_protocol_defs(conn: aiosqlite.Connection) -> list[dict]:
-    rows = await fetchall(conn, "SELECT nutrient_code, title_ru, category, status_level, metadata_json FROM nutrient_protocol_defs WHERE is_enabled=1 ORDER BY category, title_ru")
+    rows = await fetchall(
+        conn,
+        """SELECT nutrient_code, title_ru, category, status_level, rules_version,
+                  readiness_level, source_pack_id, source_pack_version, curation_status, metadata_json
+           FROM nutrient_protocol_defs WHERE is_enabled=1 ORDER BY category, title_ru""",
+    )
     return [dict(row) for row in rows]
 
 
 async def bootstrap_nutrient_protocol_defs(conn: aiosqlite.Connection) -> None:
+    from nutrient_registry import get_all_nutrient_rules
+
     now = utc_now_iso()
-    for item in NUTRIENT_PROTOCOL_DEFS:
+    by_code = {str(x.get("nutrient_code") or ""): x for x in NUTRIENT_PROTOCOL_DEFS}
+    for code, rule in get_all_nutrient_rules().items():
+        proto = by_code.get(code) or {}
+        md = dict(proto.get("metadata") or {})
+        md["registry_rule"] = rule
         await conn.execute(
-            """INSERT INTO nutrient_protocol_defs(nutrient_code, title_ru, category, status_level, is_enabled, metadata_json, created_at_utc, updated_at_utc)
-               VALUES(?,?,?,?,?,?,?,?)
+            """INSERT INTO nutrient_protocol_defs(
+                    nutrient_code, title_ru, category, status_level, is_enabled,
+                    rules_version, readiness_level, source_pack_id, source_pack_version, curation_status,
+                    metadata_json, created_at_utc, updated_at_utc
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(nutrient_code) DO UPDATE SET
                  title_ru=excluded.title_ru,
                  category=excluded.category,
                  status_level=excluded.status_level,
+                 rules_version=excluded.rules_version,
+                 readiness_level=excluded.readiness_level,
+                 source_pack_id=excluded.source_pack_id,
+                 source_pack_version=excluded.source_pack_version,
+                 curation_status=excluded.curation_status,
                  metadata_json=excluded.metadata_json,
                  updated_at_utc=excluded.updated_at_utc""",
             (
-                str(item.get("nutrient_code") or ""),
-                str(item.get("title_ru") or ""),
-                str(item.get("category") or ""),
-                str(item.get("status_level") or "weak"),
-                1,
-                json.dumps(item.get("metadata") or {}, ensure_ascii=False),
+                str(code),
+                str(rule.get("title_ru") or proto.get("title_ru") or code),
+                str(rule.get("category") or proto.get("category") or "other"),
+                str(rule.get("status_level") or proto.get("status_level") or "weak"),
+                1 if bool(rule.get("enabled", True)) else 0,
+                str(rule.get("rules_version") or ""),
+                str(rule.get("readiness_level") or "metadata_only"),
+                str(rule.get("source_pack_id") or ""),
+                str(rule.get("source_pack_version") or ""),
+                str(rule.get("curation_status") or "draft"),
+                json.dumps(md, ensure_ascii=False),
                 now,
                 now,
             ),
@@ -8083,6 +8977,235 @@ async def get_nutrient_assistant_overview(conn: aiosqlite.Connection, tg_user_id
         "total_lab_results": total_lab_results,
         "supported_nutrients": supported_nutrients,
         "has_plan_inputs": has_plan_inputs,
+    }
+
+
+def _is_profile_ready(profile: dict | None) -> bool:
+    p = profile or {}
+    core = 0
+    if str(p.get("sex_at_birth") or "").strip():
+        core += 1
+    if p.get("birth_year"):
+        core += 1
+    if p.get("weight_kg"):
+        core += 1
+    if p.get("diet_type"):
+        core += 1
+    return core >= 2
+
+
+def _assistant_primary_cta(assistant_state: str) -> str:
+    mapping = {
+        "not_configured": "Заполнить профиль",
+        "partial": "Добавить недостающие данные",
+        "ready": "Собрать первый план",
+        "active_plan": "Открыть мой план",
+        "stale": "Обновить план",
+        "rebuilding": "Проверить статус обновления",
+        "follow_up": "Проверить follow-up",
+    }
+    return mapping.get(str(assistant_state or ""), "Открыть помощник")
+
+
+def _assistant_state_title(assistant_state: str) -> str:
+    mapping = {
+        "not_configured": "Не настроен",
+        "partial": "Частично настроен",
+        "ready": "Готов к первой оценке",
+        "active_plan": "План активен",
+        "stale": "План требует обновления",
+        "rebuilding": "Идёт обновление",
+        "follow_up": "Есть follow-up",
+    }
+    return mapping.get(str(assistant_state or ""), "В работе")
+
+
+def _human_stale_reasons(codes: list[str]) -> list[str]:
+    out: list[str] = []
+    for code in codes or []:
+        c = str(code or "").strip().lower()
+        if c in {"stack_changed", "stack"}:
+            out.append("изменился стек добавок")
+        elif c.startswith("profile:"):
+            out.append("обновлён профиль")
+        elif c.startswith("lab:"):
+            out.append("добавлены или обновлены анализы")
+    return sorted(set(out))
+
+
+async def get_nutrient_assistant_onboarding_state(conn: aiosqlite.Connection, tg_user_id: int) -> dict:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    row = await fetchone(
+        conn,
+        """SELECT assistant_onboarding_seen, assistant_onboarding_completed_at_utc,
+                  assistant_onboarding_dismissed_at_utc, assistant_last_home_state, assistant_last_opened_at_utc
+           FROM users WHERE id=? LIMIT 1""",
+        (user_id,),
+    )
+    if not row:
+        return {
+            "assistant_onboarding_seen": 0,
+            "assistant_onboarding_completed_at_utc": "",
+            "assistant_onboarding_dismissed_at_utc": "",
+            "assistant_last_home_state": "",
+            "assistant_last_opened_at_utc": "",
+            "show_onboarding": True,
+        }
+    seen = int(row["assistant_onboarding_seen"] or 0)
+    completed = str(row["assistant_onboarding_completed_at_utc"] or "")
+    dismissed = str(row["assistant_onboarding_dismissed_at_utc"] or "")
+    return {
+        "assistant_onboarding_seen": seen,
+        "assistant_onboarding_completed_at_utc": completed,
+        "assistant_onboarding_dismissed_at_utc": dismissed,
+        "assistant_last_home_state": str(row["assistant_last_home_state"] or ""),
+        "assistant_last_opened_at_utc": str(row["assistant_last_opened_at_utc"] or ""),
+        "show_onboarding": seen == 0 and not completed and not dismissed,
+    }
+
+
+async def update_nutrient_assistant_onboarding_state(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    *,
+    seen: bool | None = None,
+    completed: bool | None = None,
+    dismissed: bool | None = None,
+    last_home_state: str | None = None,
+    last_opened_touch: bool = False,
+) -> dict:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    now = utc_now_iso()
+    if seen is not None:
+        await conn.execute("UPDATE users SET assistant_onboarding_seen=? WHERE id=?", (1 if seen else 0, user_id))
+    if completed:
+        await conn.execute("UPDATE users SET assistant_onboarding_seen=1, assistant_onboarding_completed_at_utc=? WHERE id=?", (now, user_id))
+    if dismissed:
+        await conn.execute("UPDATE users SET assistant_onboarding_seen=1, assistant_onboarding_dismissed_at_utc=? WHERE id=?", (now, user_id))
+    if last_home_state is not None:
+        await conn.execute("UPDATE users SET assistant_last_home_state=? WHERE id=?", (str(last_home_state or ""), user_id))
+    if last_opened_touch:
+        await conn.execute("UPDATE users SET assistant_last_opened_at_utc=? WHERE id=?", (now, user_id))
+    await conn.commit()
+    return await get_nutrient_assistant_onboarding_state(conn, tg_user_id)
+
+
+async def get_nutrient_assistant_dashboard(conn: aiosqlite.Connection, tg_user_id: int) -> dict:
+    profile = await get_user_health_profile(conn, tg_user_id)
+    overview = await get_nutrient_assistant_overview(conn, tg_user_id)
+    plans = await list_user_nutrient_plans(conn, tg_user_id, limit=8)
+    reminders = await list_nutrient_followup_reminders(conn, tg_user_id, limit=100)
+    jobs = await list_user_nutrient_rebuild_jobs(conn, tg_user_id, limit=20)
+    onboarding = await get_nutrient_assistant_onboarding_state(conn, tg_user_id)
+
+    active_plan = next((x for x in plans if int(x.get("is_active") or 0) == 1), None)
+    latest_plan = plans[0] if plans else None
+    active_reminders = [r for r in reminders if str(r.get("status") or "") in {"scheduled", "snoozed", "sent"}]
+    processing_jobs = [j for j in jobs if str(j.get("status") or "") in {"queued", "processing"}]
+
+    profile_ready = _is_profile_ready(profile)
+    labs_ready = int(overview.get("total_lab_results") or 0) > 0
+    has_plan = active_plan is not None
+    has_followup = len(active_reminders) > 0
+
+    if processing_jobs:
+        assistant_state = "rebuilding"
+    elif has_plan and str(active_plan.get("freshness_status") or "") == "stale":
+        assistant_state = "stale"
+    elif has_followup:
+        assistant_state = "follow_up"
+    elif has_plan:
+        assistant_state = "active_plan"
+    elif profile_ready and labs_ready:
+        assistant_state = "ready"
+    elif not profile_ready and not labs_ready:
+        assistant_state = "not_configured"
+    else:
+        assistant_state = "partial"
+
+    readiness_steps = [
+        {"key": "profile", "title": "Профиль заполнен", "done": bool(profile_ready)},
+        {"key": "labs", "title": "Анализы добавлены", "done": bool(labs_ready)},
+        {"key": "plan", "title": "Есть актуальный план", "done": bool(has_plan)},
+        {"key": "followup", "title": "Включён follow-up", "done": bool(has_followup)},
+    ]
+    readiness_done = sum(1 for item in readiness_steps if item["done"])
+
+    history = []
+    for item in plans[:6]:
+        reasons = _decode_json_or_default(item.get("stale_reason_codes_json") or "[]", [])
+        history.append(
+            {
+                "id": int(item.get("id") or 0),
+                "nutrient_code": str(item.get("nutrient_code") or ""),
+                "date": str(item.get("created_at_utc") or ""),
+                "status": "актуальный" if int(item.get("is_active") or 0) == 1 else "предыдущая версия",
+                "freshness_status": str(item.get("freshness_status") or ""),
+                "plan_phase": str(item.get("plan_phase") or ""),
+                "plan_mode": str(item.get("plan_mode") or ""),
+                "summary": f"{str(item.get('plan_mode') or 'режим не задан')} · {str(item.get('plan_phase') or 'фаза не задана')}",
+                "update_reason_human": ", ".join(_human_stale_reasons(reasons)),
+            }
+        )
+
+    latest_diff_summary = None
+    if len(plans) >= 2:
+        new = plans[0]
+        old = plans[1]
+        new_reasons = _decode_json_or_default(new.get("stale_reason_codes_json") or "[]", [])
+        latest_diff_summary = {
+            "from_status": _assistant_state_title("active_plan" if str(old.get("freshness_status") or "") == "fresh" else "stale"),
+            "to_status": _assistant_state_title("active_plan" if str(new.get("freshness_status") or "") == "fresh" else "stale"),
+            "from_phase": str(old.get("plan_phase") or ""),
+            "to_phase": str(new.get("plan_phase") or ""),
+            "reasons": _human_stale_reasons(new_reasons),
+        }
+
+    primary_cta = _assistant_primary_cta(assistant_state)
+    await update_nutrient_assistant_onboarding_state(
+        conn,
+        tg_user_id,
+        last_home_state=assistant_state,
+        last_opened_touch=True,
+    )
+
+    return {
+        "assistant_state": assistant_state,
+        "assistant_state_title": _assistant_state_title(assistant_state),
+        "assistant_state_subtitle": {
+            "not_configured": "Начните с профиля и первых анализов, чтобы получить персональный план.",
+            "partial": "Есть часть данных — добавьте недостающее, чтобы повысить точность.",
+            "ready": "Данные готовы: можно собрать первую персональную оценку.",
+            "active_plan": "План актуален и готов к использованию.",
+            "stale": "Появились новые данные — лучше обновить план.",
+            "rebuilding": "Мы пересобираем рекомендации на основе последних изменений.",
+            "follow_up": "Есть активные follow-up шаги, чтобы поддерживать прогресс.",
+        }.get(assistant_state, "Состояние обновляется"),
+        "primary_cta": primary_cta,
+        "readiness": {
+            "done": readiness_done,
+            "total": len(readiness_steps),
+            "percent": int(round((readiness_done / max(1, len(readiness_steps))) * 100)),
+            "steps": readiness_steps,
+        },
+        "counts": {
+            "lab_reports": int(overview.get("lab_reports_count") or 0),
+            "lab_results": int(overview.get("total_lab_results") or 0),
+            "active_reminders": len(active_reminders),
+            "history_items": len(history),
+        },
+        "latest_plan": latest_plan,
+        "active_plan": active_plan,
+        "latest_diff_summary": latest_diff_summary,
+        "history": history,
+        "onboarding": onboarding,
+        "trust_copy": "Помощник не ставит диагнозы и не заменяет врача. Он помогает ориентироваться в данных: чем точнее профиль и анализы, тем полезнее результат.",
+        "premium_value": [
+            "Собирает план по профилю, анализам и текущему стеку.",
+            "Показывает, когда план устарел и почему.",
+            "Ведёт follow-up и напоминания без перегруза.",
+            "Сохраняет историю изменений, чтобы видеть динамику.",
+        ],
     }
 
 

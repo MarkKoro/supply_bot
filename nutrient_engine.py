@@ -1,17 +1,45 @@
 from __future__ import annotations
 
 from datetime import datetime
+from functools import lru_cache
 from typing import Any
 
-from nutrient_rules import (
-    ANALYTE_ALIASES,
-    NUTRIENT_DEF_BY_CODE,
-    NUTRIENT_RULE_PROFILES,
-    UNIT_ALIASES,
-    UNIT_CONVERSIONS,
-)
+from nutrient_registry import get_all_nutrient_rules, get_analyte_alias_map
+from nutrient_rules import NUTRIENT_DEF_BY_CODE
 
 
+
+
+def _rules() -> dict[str, dict]:
+    return get_all_nutrient_rules()
+
+
+@lru_cache(maxsize=1)
+def _unit_aliases_from_rules() -> dict[str, list[str]]:
+    out: dict[str, list[str]] = {}
+    for rule in _rules().values():
+        for canonical, vals in (rule.get("supported_units") or {}).items():
+            c = str(canonical or "").lower()
+            out.setdefault(c, [])
+            for v in vals or []:
+                low = str(v or "").lower()
+                if low and low not in out[c]:
+                    out[c].append(low)
+    return out
+
+
+@lru_cache(maxsize=1)
+def _unit_conversions_from_rules() -> dict[tuple[str, str], float]:
+    out: dict[tuple[str, str], float] = {}
+    for rule in _rules().values():
+        conv = rule.get("unit_conversion_rules") or {}
+        for key, factor in conv.items():
+            try:
+                src, dst = str(key).split("->", 1)
+                out[(src.strip().lower(), dst.strip().lower())] = float(factor)
+            except Exception:
+                continue
+    return out
 def _norm_text(value: str | None) -> str:
     if not value:
         return ""
@@ -26,7 +54,7 @@ def normalize_analyte_code(code: str | None, name: str | None = None) -> str:
     blob = f"{_norm_text(code)} {_norm_text(name)}".strip()
     if not blob:
         return ""
-    for canonical, aliases in ANALYTE_ALIASES.items():
+    for canonical, aliases in get_analyte_alias_map().items():
         options = {_norm_text(canonical), *(_norm_text(x) for x in aliases)}
         if blob in options:
             return canonical
@@ -39,7 +67,7 @@ def normalize_unit(unit: str | None) -> str:
     src = _norm_text(unit).replace(" ", "")
     if not src:
         return ""
-    for canonical, aliases in UNIT_ALIASES.items():
+    for canonical, aliases in _unit_aliases_from_rules().items():
         options = {x.lower().replace(" ", "") for x in aliases}
         if src == canonical or src in options:
             return canonical
@@ -51,7 +79,7 @@ def convert_value_to_supported_unit(value: float | None, from_unit: str, to_unit
         return None, "missing_value"
     if from_unit == to_unit:
         return float(value), None
-    factor = UNIT_CONVERSIONS.get((from_unit, to_unit))
+    factor = _unit_conversions_from_rules().get((from_unit, to_unit))
     if factor is None:
         return None, "unusable_unit"
     return float(value) * factor, None
@@ -162,7 +190,7 @@ def evaluate_nutrient(
 ) -> dict[str, Any]:
     code = str(nutrient_code or "").strip().lower()
     definition = NUTRIENT_DEF_BY_CODE.get(code)
-    rule = NUTRIENT_RULE_PROFILES.get(code)
+    rule = _rules().get(code)
     if not definition or not rule:
         return {
             "nutrient_code": code,
@@ -183,6 +211,9 @@ def evaluate_nutrient(
             "retest_hint": "Проверьте код нутриента.",
             "evidence_basis": "nutrient_not_in_catalog",
             "ui_notes_ru": "Этот нутриент пока не поддерживается в preview-движке.",
+            "readiness_level": "metadata_only",
+            "rules_version": "",
+            "capabilities": {"can_preview": False, "can_plan": False, "can_explain": True, "can_followup": False},
         }
 
     profile_ctx = build_profile_context(profile)
@@ -390,4 +421,14 @@ def evaluate_nutrient(
         "retest_hint": "При недостатке данных можно повторить анализ с корректной единицей и датой.",
         "evidence_basis": evidence_basis,
         "ui_notes_ru": rule.get("ui_notes_ru") or ((definition.get("metadata") or {}).get("limitation_note_ru") or ""),
+        "trust_copy_ru": rule.get("trust_copy_ru") or "",
+        "dashboard_copy_ru": rule.get("dashboard_copy_ru") or "",
+        "rules_version": rule.get("rules_version") or "",
+        "readiness_level": rule.get("readiness_level") or ("deterministic_v1" if rule.get("engine_mode")=="deterministic_v1" else "limited_interpretation"),
+        "capabilities": {
+            "can_preview": str(rule.get("engine_mode") or "") in {"deterministic_v1", "limited"},
+            "can_plan": str(rule.get("planner_mode") or "") in {"deterministic", "limited"},
+            "can_explain": str(rule.get("explanation_mode") or "") in {"full", "limited"},
+            "can_followup": str(rule.get("planner_mode") or "") in {"deterministic", "limited"},
+        },
     }

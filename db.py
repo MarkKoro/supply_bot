@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 import json
 import re
 import aiosqlite
+from nutrient_rules import NUTRIENT_PROTOCOL_DEFS
 
 def utc_now_iso() -> str:
     return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
@@ -732,7 +733,79 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     await _backfill_aliases_json(conn)
     await _backfill_search_blob(conn)
     await _backfill_supplement_evidence(conn)
+    await _ensure_profile_foundation_tables(conn)
+    await bootstrap_nutrient_protocol_defs(conn)
     await bootstrap_achievements(conn)
+
+
+async def _ensure_profile_foundation_tables(conn: aiosqlite.Connection) -> None:
+    await conn.execute(
+        """CREATE TABLE IF NOT EXISTS user_health_profile (
+          user_id INTEGER PRIMARY KEY,
+          sex_at_birth TEXT,
+          birth_year INTEGER,
+          height_cm REAL,
+          weight_kg REAL,
+          country_code TEXT,
+          city TEXT,
+          pregnancy_status TEXT,
+          lactation_status TEXT,
+          diet_type TEXT,
+          training_sessions_per_week INTEGER,
+          training_minutes_per_week INTEGER,
+          work_hours_per_week INTEGER,
+          sun_exposure_level TEXT,
+          smoking_status TEXT,
+          alcohol_status TEXT,
+          meds_json TEXT,
+          conditions_json TEXT,
+          created_at_utc TEXT,
+          updated_at_utc TEXT
+        )"""
+    )
+    await conn.execute(
+        """CREATE TABLE IF NOT EXISTS lab_reports (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id INTEGER NOT NULL,
+          source TEXT NOT NULL,
+          lab_name TEXT,
+          report_date TEXT,
+          notes TEXT,
+          created_at_utc TEXT
+        )"""
+    )
+    await conn.execute(
+        """CREATE TABLE IF NOT EXISTS lab_results (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          report_id INTEGER NOT NULL,
+          user_id INTEGER NOT NULL,
+          analyte_code TEXT NOT NULL,
+          analyte_name TEXT NOT NULL,
+          value_text TEXT,
+          value_num REAL,
+          unit TEXT,
+          ref_low REAL,
+          ref_high REAL,
+          raw_json TEXT,
+          measured_at TEXT,
+          created_at_utc TEXT
+        )"""
+    )
+    await conn.execute(
+        """CREATE TABLE IF NOT EXISTS nutrient_protocol_defs (
+          nutrient_code TEXT PRIMARY KEY,
+          title_ru TEXT NOT NULL,
+          category TEXT NOT NULL,
+          status_level TEXT NOT NULL,
+          is_enabled INTEGER NOT NULL DEFAULT 1,
+          metadata_json TEXT NOT NULL,
+          created_at_utc TEXT,
+          updated_at_utc TEXT
+        )"""
+    )
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_lab_results_user_analyte ON lab_results(user_id, analyte_code)")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_lab_results_user_measured ON lab_results(user_id, measured_at)")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_lab_results_report ON lab_results(report_id)")
 
 async def _ensure_achievements_tables(conn: aiosqlite.Connection) -> None:
     await conn.execute(
@@ -7838,3 +7911,206 @@ async def run_diagnostics(conn: aiosqlite.Connection, apply: bool = False) -> di
         raise
 
     return {"ok": True, "apply": bool(apply), "issues": issues, "details": details}
+
+PROFILE_FIELDS = [
+    "sex_at_birth", "birth_year", "height_cm", "weight_kg", "country_code", "city",
+    "pregnancy_status", "lactation_status", "diet_type", "training_sessions_per_week",
+    "training_minutes_per_week", "work_hours_per_week", "sun_exposure_level", "smoking_status",
+    "alcohol_status", "meds_json", "conditions_json",
+]
+
+
+async def get_user_health_profile(conn: aiosqlite.Connection, tg_user_id: int) -> dict:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    row = await fetchone(conn, "SELECT * FROM user_health_profile WHERE user_id=?", (user_id,))
+    out = {k: "" for k in PROFILE_FIELDS}
+    for k in ("birth_year", "training_sessions_per_week", "training_minutes_per_week", "work_hours_per_week"):
+        out[k] = None
+    for k in ("height_cm", "weight_kg"):
+        out[k] = None
+    if row:
+        for key in PROFILE_FIELDS:
+            out[key] = row[key]
+    return out
+
+
+async def upsert_user_health_profile(conn: aiosqlite.Connection, tg_user_id: int, payload: dict) -> dict:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    now = utc_now_iso()
+    clean = {k: payload.get(k) for k in PROFILE_FIELDS}
+    await conn.execute(
+        """INSERT INTO user_health_profile(
+            user_id, sex_at_birth, birth_year, height_cm, weight_kg, country_code, city,
+            pregnancy_status, lactation_status, diet_type, training_sessions_per_week,
+            training_minutes_per_week, work_hours_per_week, sun_exposure_level, smoking_status,
+            alcohol_status, meds_json, conditions_json, created_at_utc, updated_at_utc
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(user_id) DO UPDATE SET
+            sex_at_birth=excluded.sex_at_birth,
+            birth_year=excluded.birth_year,
+            height_cm=excluded.height_cm,
+            weight_kg=excluded.weight_kg,
+            country_code=excluded.country_code,
+            city=excluded.city,
+            pregnancy_status=excluded.pregnancy_status,
+            lactation_status=excluded.lactation_status,
+            diet_type=excluded.diet_type,
+            training_sessions_per_week=excluded.training_sessions_per_week,
+            training_minutes_per_week=excluded.training_minutes_per_week,
+            work_hours_per_week=excluded.work_hours_per_week,
+            sun_exposure_level=excluded.sun_exposure_level,
+            smoking_status=excluded.smoking_status,
+            alcohol_status=excluded.alcohol_status,
+            meds_json=excluded.meds_json,
+            conditions_json=excluded.conditions_json,
+            updated_at_utc=excluded.updated_at_utc""",
+        (
+            user_id, clean["sex_at_birth"], clean["birth_year"], clean["height_cm"], clean["weight_kg"], clean["country_code"], clean["city"],
+            clean["pregnancy_status"], clean["lactation_status"], clean["diet_type"], clean["training_sessions_per_week"],
+            clean["training_minutes_per_week"], clean["work_hours_per_week"], clean["sun_exposure_level"], clean["smoking_status"],
+            clean["alcohol_status"], clean["meds_json"], clean["conditions_json"], now, now,
+        ),
+    )
+    return await get_user_health_profile(conn, int(tg_user_id))
+
+
+async def create_lab_report(conn: aiosqlite.Connection, tg_user_id: int, report: dict) -> int:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    now = utc_now_iso()
+    cur = await conn.execute(
+        "INSERT INTO lab_reports(user_id, source, lab_name, report_date, notes, created_at_utc) VALUES(?,?,?,?,?,?)",
+        (user_id, str(report.get("source") or "manual"), str(report.get("lab_name") or ""), str(report.get("report_date") or ""), str(report.get("notes") or ""), now),
+    )
+    return int(cur.lastrowid)
+
+
+async def add_lab_results_batch(conn: aiosqlite.Connection, tg_user_id: int, report_id: int, results: list[dict]) -> int:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    now = utc_now_iso()
+    count = 0
+    for item in list(results or []):
+        await conn.execute(
+            """INSERT INTO lab_results(report_id, user_id, analyte_code, analyte_name, value_text, value_num, unit, ref_low, ref_high, raw_json, measured_at, created_at_utc)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                int(report_id), user_id,
+                str(item.get("analyte_code") or ""),
+                str(item.get("analyte_name") or item.get("analyte_code") or ""),
+                str(item.get("value_text") or ""),
+                item.get("value_num"),
+                str(item.get("unit") or ""),
+                item.get("ref_low"),
+                item.get("ref_high"),
+                json.dumps(item.get("raw_json") if item.get("raw_json") is not None else {}, ensure_ascii=False),
+                str(item.get("measured_at") or ""),
+                now,
+            ),
+        )
+        count += 1
+    return count
+
+
+async def get_user_lab_reports(conn: aiosqlite.Connection, tg_user_id: int) -> list[dict]:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    rows = await fetchall(conn, "SELECT id, source, lab_name, report_date, notes, created_at_utc FROM lab_reports WHERE user_id=? ORDER BY COALESCE(report_date,'' ) DESC, id DESC", (user_id,))
+    return [dict(row) for row in rows]
+
+
+async def get_lab_results_by_report_id(conn: aiosqlite.Connection, tg_user_id: int, report_id: int) -> list[dict]:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    rows = await fetchall(conn, "SELECT id, report_id, analyte_code, analyte_name, value_text, value_num, unit, ref_low, ref_high, raw_json, measured_at, created_at_utc FROM lab_results WHERE user_id=? AND report_id=? ORDER BY id ASC", (user_id, int(report_id)))
+    return [dict(row) for row in rows]
+
+
+async def get_latest_results_by_analyte(conn: aiosqlite.Connection, tg_user_id: int) -> list[dict]:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    rows = await fetchall(
+        conn,
+        """SELECT lr.* FROM lab_results lr
+           JOIN (
+              SELECT analyte_code, MAX(COALESCE(NULLIF(measured_at,''), created_at_utc)) AS mx
+              FROM lab_results WHERE user_id=? GROUP BY analyte_code
+           ) t ON t.analyte_code=lr.analyte_code AND COALESCE(NULLIF(lr.measured_at,''), lr.created_at_utc)=t.mx
+           WHERE lr.user_id=? ORDER BY lr.analyte_code ASC""",
+        (user_id, user_id),
+    )
+    return [dict(row) for row in rows]
+
+
+async def list_enabled_nutrient_protocol_defs(conn: aiosqlite.Connection) -> list[dict]:
+    rows = await fetchall(conn, "SELECT nutrient_code, title_ru, category, status_level, metadata_json FROM nutrient_protocol_defs WHERE is_enabled=1 ORDER BY category, title_ru")
+    return [dict(row) for row in rows]
+
+
+async def bootstrap_nutrient_protocol_defs(conn: aiosqlite.Connection) -> None:
+    now = utc_now_iso()
+    for item in NUTRIENT_PROTOCOL_DEFS:
+        await conn.execute(
+            """INSERT INTO nutrient_protocol_defs(nutrient_code, title_ru, category, status_level, is_enabled, metadata_json, created_at_utc, updated_at_utc)
+               VALUES(?,?,?,?,?,?,?,?)
+               ON CONFLICT(nutrient_code) DO UPDATE SET
+                 title_ru=excluded.title_ru,
+                 category=excluded.category,
+                 status_level=excluded.status_level,
+                 metadata_json=excluded.metadata_json,
+                 updated_at_utc=excluded.updated_at_utc""",
+            (
+                str(item.get("nutrient_code") or ""),
+                str(item.get("title_ru") or ""),
+                str(item.get("category") or ""),
+                str(item.get("status_level") or "weak"),
+                1,
+                json.dumps(item.get("metadata") or {}, ensure_ascii=False),
+                now,
+                now,
+            ),
+        )
+
+
+async def get_nutrient_assistant_overview(conn: aiosqlite.Connection, tg_user_id: int) -> dict:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    profile_exists = await fetchone(conn, "SELECT 1 FROM user_health_profile WHERE user_id=? LIMIT 1", (user_id,))
+    reports_count_row = await fetchone(conn, "SELECT COUNT(*) AS c FROM lab_reports WHERE user_id=?", (user_id,))
+    results_count_row = await fetchone(conn, "SELECT COUNT(*) AS c FROM lab_results WHERE user_id=?", (user_id,))
+    nutrients_count_row = await fetchone(conn, "SELECT COUNT(*) AS c FROM nutrient_protocol_defs WHERE is_enabled=1")
+    lab_reports_count = int(reports_count_row["c"] or 0)
+    total_lab_results = int(results_count_row["c"] or 0)
+    supported_nutrients = int(nutrients_count_row["c"] or 0)
+    has_plan_inputs = bool(profile_exists) and total_lab_results > 0
+    return {
+        "has_profile": bool(profile_exists),
+        "lab_reports_count": lab_reports_count,
+        "total_lab_results": total_lab_results,
+        "supported_nutrients": supported_nutrients,
+        "has_plan_inputs": has_plan_inputs,
+    }
+
+
+async def get_recent_lab_results_for_user(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    report_id: int | None = None,
+    limit: int = 120,
+) -> list[dict]:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    if report_id is not None:
+        rows = await fetchall(
+            conn,
+            """SELECT id, report_id, analyte_code, analyte_name, value_text, value_num, unit, ref_low, ref_high, raw_json, measured_at, created_at_utc
+               FROM lab_results
+               WHERE user_id=? AND report_id=?
+               ORDER BY COALESCE(NULLIF(measured_at,''), created_at_utc) DESC, id DESC
+               LIMIT ?""",
+            (user_id, int(report_id), int(limit)),
+        )
+    else:
+        rows = await fetchall(
+            conn,
+            """SELECT id, report_id, analyte_code, analyte_name, value_text, value_num, unit, ref_low, ref_high, raw_json, measured_at, created_at_utc
+               FROM lab_results
+               WHERE user_id=?
+               ORDER BY COALESCE(NULLIF(measured_at,''), created_at_utc) DESC, id DESC
+               LIMIT ?""",
+            (user_id, int(limit)),
+        )
+    return [dict(row) for row in rows]

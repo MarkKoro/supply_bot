@@ -1045,16 +1045,29 @@ def _normalize_onboarding_goals(data: dict | None, fallback_goal: str) -> list[d
     payload = data or {}
     goals = payload.get("goals")
     normalized_goals: list[dict] = []
+    pending_without_candidates: list[str] = []
 
     if isinstance(goals, list):
         for item in goals:
             if not isinstance(item, dict):
                 continue
             goal_name = str(item.get("goal_ru") or item.get("goal") or "").strip()
-            candidates = item.get("candidates") if isinstance(item.get("candidates"), list) else []
             if not goal_name:
                 goal_name = fallback_goal
-            normalized_goals.append({"goal_ru": goal_name, "candidates": candidates})
+            raw_candidates = item.get("candidates")
+            if isinstance(raw_candidates, list):
+                normalized_goals.append({"goal_ru": goal_name, "candidates": raw_candidates})
+            else:
+                pending_without_candidates.append(goal_name)
+
+    if normalized_goals and pending_without_candidates:
+        existing = {str(item.get("goal_ru") or "").strip().lower() for item in normalized_goals}
+        for goal_name in pending_without_candidates:
+            key = goal_name.strip().lower()
+            if not key or key in existing:
+                continue
+            normalized_goals.append({"goal_ru": goal_name, "candidates": []})
+            existing.add(key)
 
     if not normalized_goals:
         legacy_candidates = payload.get("candidates") if isinstance(payload.get("candidates"), list) else []

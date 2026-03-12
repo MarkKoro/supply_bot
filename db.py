@@ -2626,7 +2626,7 @@ async def log_payment_paid(
                    project_key, payment_kind, plan_id, finalized_at_utc,
                    receipt_email, receipt_email_status, receipt_email_source, receipt_email_collected_at,
                    receipt_status, receipt_sent_at, receipt_note
-               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 user_id,
                 provider,

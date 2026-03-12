@@ -1622,8 +1622,22 @@ async def _ensure_payments_table(conn: aiosqlite.Connection) -> None:
               telegram_payment_charge_id TEXT,
               provider_payment_charge_id TEXT,
               status TEXT NOT NULL,
-              created_at_utc TEXT NOT NULL
+              created_at_utc TEXT NOT NULL,
+              project_key TEXT,
+              payment_kind TEXT,
+              plan_id TEXT,
+              finalized_at_utc TEXT
             )"""
+        )
+        await conn.execute(
+            """CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_tg_charge_unique
+               ON payments(telegram_payment_charge_id)
+               WHERE telegram_payment_charge_id IS NOT NULL AND telegram_payment_charge_id != ''"""
+        )
+        await conn.execute(
+            """CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_provider_charge_unique
+               ON payments(provider_payment_charge_id)
+               WHERE provider_payment_charge_id IS NOT NULL AND provider_payment_charge_id != ''"""
         )
         return
 
@@ -1636,10 +1650,19 @@ async def _ensure_payments_table(conn: aiosqlite.Connection) -> None:
     await _ensure_column(conn, "payments", "provider_payment_charge_id", "TEXT")
     await _ensure_column(conn, "payments", "status", "TEXT NOT NULL DEFAULT ''")
     await _ensure_column(conn, "payments", "created_at_utc", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "payments", "project_key", "TEXT")
+    await _ensure_column(conn, "payments", "payment_kind", "TEXT")
+    await _ensure_column(conn, "payments", "plan_id", "TEXT")
+    await _ensure_column(conn, "payments", "finalized_at_utc", "TEXT")
     await conn.execute(
         """CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_tg_charge_unique
            ON payments(telegram_payment_charge_id)
            WHERE telegram_payment_charge_id IS NOT NULL AND telegram_payment_charge_id != ''"""
+    )
+    await conn.execute(
+        """CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_provider_charge_unique
+           ON payments(provider_payment_charge_id)
+           WHERE provider_payment_charge_id IS NOT NULL AND provider_payment_charge_id != ''"""
     )
 
 
@@ -2445,6 +2468,10 @@ async def log_payment_paid(
     payload: str,
     telegram_payment_charge_id: str | None = None,
     provider_payment_charge_id: str | None = None,
+    project_key: str | None = None,
+    payment_kind: str | None = None,
+    plan_id: str | None = None,
+    finalized_at_utc: str | None = None,
 ) -> bool:
     created = utc_now_iso()
     if telegram_payment_charge_id:
@@ -2455,13 +2482,22 @@ async def log_payment_paid(
         )
         if existing:
             return False
+    if provider_payment_charge_id:
+        existing = await fetchone(
+            conn,
+            "SELECT id FROM payments WHERE provider_payment_charge_id=?",
+            (provider_payment_charge_id,),
+        )
+        if existing:
+            return False
     user_id = await get_or_create_user(conn, tg_user_id)
     try:
         await conn.execute(
             """INSERT INTO payments(
                    user_id, provider, currency, amount, payload,
-                   telegram_payment_charge_id, provider_payment_charge_id, status, created_at_utc
-               ) VALUES(?,?,?,?,?,?,?,?,?)""",
+                   telegram_payment_charge_id, provider_payment_charge_id, status, created_at_utc,
+                   project_key, payment_kind, plan_id, finalized_at_utc
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 user_id,
                 provider,
@@ -2472,12 +2508,16 @@ async def log_payment_paid(
                 provider_payment_charge_id,
                 "paid",
                 created,
+                project_key,
+                payment_kind,
+                plan_id,
+                finalized_at_utc,
             ),
         )
         await conn.commit()
         return True
     except aiosqlite.IntegrityError:
-        if telegram_payment_charge_id:
+        if telegram_payment_charge_id or provider_payment_charge_id:
             return False
         raise
 

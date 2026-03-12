@@ -748,7 +748,8 @@
       duplicateResolveBusy: ""
     },
     settingsUi: { openMySuppBusy: false },
-    settingsData: { tz_name: 'UTC', loading: false, offer_url: '', privacy_url: '', offer_version: '', privacy_version: '' }
+    settingsData: { tz_name: 'UTC', loading: false, offer_url: '', privacy_url: '', offer_version: '', privacy_version: '' },
+    payment: { pending: null, checking: false, lastStatus: '', modalOpen: false, success: false }
   };
 
   const APP_NAME = "SupplyBot";
@@ -797,6 +798,92 @@
 
   const themeText = tg?.themeParams?.text_color || "#eef2ff";
   document.documentElement.style.setProperty("--text", themeText);
+
+  function currentProjectBasePath() {
+    const path = window.location.pathname || "/";
+    if (path === "/supply" || path === "/supply/") return "/supply/";
+    if (path.startsWith("/supply/")) return "/supply/";
+    return "/";
+  }
+
+  function projectUrl(rel) {
+    const cleanRel = String(rel || "").replace(/^\/+/, "");
+    return currentProjectBasePath() + cleanRel;
+  }
+
+  function normalizeApiPath(path) {
+    const raw = String(path || "").trim();
+    if (!raw) return projectUrl("");
+    if (/^https?:\/\//i.test(raw)) return raw;
+    let clean = raw.replace(/^\.\/+/, "");
+    clean = clean.replace(/^\/+/, "");
+    if (clean.startsWith("api/")) return projectUrl(clean);
+    if (clean.startsWith("assets/")) return projectUrl(clean);
+    if (clean === "") return projectUrl("");
+    return projectUrl(clean);
+  }
+
+  function parseScreenParams() {
+    const qp = new URLSearchParams(window.location.search || "");
+    return {
+      screen: String(qp.get("screen") || "").trim(),
+      kind: String(qp.get("kind") || "").trim(),
+      plan_id: String(qp.get("plan_id") || "").trim(),
+    };
+  }
+
+  function paymentScreenUrl(planId) {
+    return `?screen=payment&kind=subscription&plan_id=${encodeURIComponent(String(planId || ''))}`;
+  }
+
+  function openPaymentScreen(planId) {
+    window.location.href = paymentScreenUrl(planId);
+  }
+
+  function openExternalPayment(confirmationUrl) {
+    const url = String(confirmationUrl || "").trim();
+    if (!url) return;
+    if (tg?.openLink) tg.openLink(url);
+    else window.open(url, "_blank", "noopener");
+  }
+
+  function savePendingPayment(payload) {
+    const data = payload || {};
+    localStorage.setItem("pending_payment_id", String(data.payment_id || ""));
+    localStorage.setItem("pending_payment_kind", String(data.kind || "subscription"));
+    localStorage.setItem("pending_payment_plan_id", String(data.plan_id || ""));
+    localStorage.setItem("pending_payment_created_at", String(data.created_at || ""));
+    localStorage.setItem("pending_project_key", String(data.project_key || ""));
+    localStorage.setItem("pending_confirmation_url", String(data.confirmation_url || ""));
+  }
+
+  function loadPendingPayment() {
+    const payment_id = localStorage.getItem("pending_payment_id") || "";
+    if (!payment_id) return null;
+    return {
+      payment_id,
+      kind: localStorage.getItem("pending_payment_kind") || "subscription",
+      plan_id: localStorage.getItem("pending_payment_plan_id") || "",
+      created_at: localStorage.getItem("pending_payment_created_at") || "",
+      project_key: localStorage.getItem("pending_project_key") || "",
+      confirmation_url: localStorage.getItem("pending_confirmation_url") || "",
+    };
+  }
+
+  function clearPendingPayment() {
+    ["pending_payment_id", "pending_payment_kind", "pending_payment_plan_id", "pending_payment_created_at", "pending_project_key", "pending_confirmation_url"].forEach((k) => localStorage.removeItem(k));
+    state.payment.pending = null;
+  }
+
+  function isPendingForCurrentProject() {
+    const p = loadPendingPayment();
+    return !!(p && p.project_key === "supply_bot");
+  }
+
+  function planMeta(planId) {
+    const plans = Array.isArray(state.me?.plans) ? state.me.plans : [];
+    return plans.find((p) => String(p.plan_id || "") === String(planId || "")) || null;
+  }
 
   function haptic() {
     tg?.HapticFeedback?.impactOccurred?.("light");
@@ -998,7 +1085,7 @@
   }
 
   async function api(path, { method = "GET", body } = {}) {
-    const res = await fetch(path, {
+    const res = await fetch(normalizeApiPath(path), {
       method,
       headers: {
         "Content-Type": "application/json",
@@ -1041,7 +1128,7 @@
   }
 
   async function apiText(path, textBody) {
-    const res = await fetch(path, {
+    const res = await fetch(normalizeApiPath(path), {
       method: "POST",
       headers: {
         "Content-Type": "text/plain; charset=utf-8",
@@ -1071,14 +1158,23 @@
 
   async function boot() {
     try {
-      const me = await api("./api/me");
+      const me = await api("api/me");
       state.me = me;
+      state.payment.pending = loadPendingPayment();
       applyCosmetics(me.cosmetics || {});
       state.userId = tg?.initDataUnsafe?.user?.id || me?.tg_user_id || me?.id || "anon";
       if (me.banned) {
         showBannedScreen(me.banned_reason || "");
         return;
       }
+      const sp = parseScreenParams();
+      const canOpenPaymentScreen = sp.screen === "payment" && sp.kind === "subscription" && sp.plan_id && !!planMeta(sp.plan_id);
+      if (canOpenPaymentScreen) {
+        renderPaymentScreen(sp.plan_id);
+        await checkPendingPaymentStatus({ silent: true });
+        return;
+      }
+      await checkPendingPaymentStatus({ silent: true });
       if (!me.webapp_access) {
         renderPaywall();
       } else {
@@ -1171,6 +1267,10 @@
 
   async function purchase(planId, method, btnEl) {
     haptic();
+    if (method === "yookassa") {
+      openPaymentScreen(planId);
+      return;
+    }
     if (!tg?.openInvoice) {
       showToast("Оплата доступна только в Telegram");
       return;
@@ -1179,7 +1279,7 @@
     btnEl.textContent = "Создаю счёт...";
     btnEl.disabled = true;
     try {
-      const data = await api("./api/billing/create_invoice_link", {
+      const data = await api("api/billing/create_invoice_link", {
         method: "POST",
         body: { plan_id: planId, method }
       });
@@ -1188,7 +1288,7 @@
         if (["paid", "success"].includes(status)) {
           showToast("Оплата успешна, обновляю доступ...");
           try {
-            state.me = await api("./api/me");
+            state.me = await api("api/me");
             if (state.me.webapp_access) {
               renderMainApp();
               await loadToday();
@@ -1210,6 +1310,105 @@
       btnEl.textContent = prevText;
       btnEl.disabled = false;
     }
+  }
+
+
+  async function prepareRedirectPayment(planId, btnEl) {
+    const prev = btnEl?.textContent || "";
+    if (btnEl) {
+      btnEl.disabled = true;
+      btnEl.textContent = "Подготавливаю...";
+    }
+    try {
+      const data = await api("api/payments/redirect/create", {
+        method: "POST",
+        body: { kind: "subscription", plan_id: planId }
+      });
+      savePendingPayment(data);
+      state.payment.pending = loadPendingPayment();
+      showToast("Платёж подготовлен");
+      renderPaymentScreen(planId);
+    } catch (e) {
+      showToast("Не удалось подготовить платёж");
+    } finally {
+      if (btnEl) {
+        btnEl.disabled = false;
+        btnEl.textContent = prev;
+      }
+    }
+  }
+
+  async function checkPendingPaymentStatus(options = {}) {
+    if (state.payment.checking) return;
+    const pending = loadPendingPayment();
+    if (!pending) return;
+    if (!isPendingForCurrentProject()) return;
+    state.payment.pending = pending;
+    state.payment.checking = true;
+    try {
+      const res = await api(`api/payments/yookassa/status?payment_id=${encodeURIComponent(pending.payment_id)}`);
+      state.payment.lastStatus = String(res.status || "");
+      if (res.status === "succeeded") {
+        clearPendingPayment();
+        state.payment.success = true;
+        state.me = await api("api/me");
+        showToast("Оплата подтверждена");
+        if (state.me.webapp_access && parseScreenParams().screen !== "payment") {
+          renderMainApp();
+          await loadToday();
+        } else if (parseScreenParams().screen === "payment") {
+          renderPaymentScreen(res.plan_id || pending.plan_id);
+        }
+      } else if (res.status === "canceled") {
+        clearPendingPayment();
+        showToast("Платёж отменён");
+      } else if (!options.silent) {
+        showToast("Платёж ещё обрабатывается");
+      }
+    } catch (e) {
+      if (!options.silent) showToast("Не удалось проверить статус");
+    } finally {
+      state.payment.checking = false;
+    }
+  }
+
+  function renderPaymentScreen(planId) {
+    const meta = planMeta(planId);
+    const pending = loadPendingPayment();
+    const pendingForPlan = pending && String(pending.plan_id || "") === String(planId || "") && isPendingForCurrentProject();
+    const priceRub = Number(meta?.price_rub || 0) / 100;
+    appEl.innerHTML = `
+      <div class="main-content">
+        <div class="card fade">
+          <h2 style="margin:0 0 8px">Оплата Premium</h2>
+          <div class="muted">Тариф: <b>${esc(planId)}</b> · ${priceRub.toFixed(2)} ₽</div>
+          <ul class="muted" style="margin-top:10px; padding-left:18px;">
+            <li>постоянный доступ к WebApp</li>
+            <li>AI check-in</li>
+            <li>удобный ежедневный трекинг</li>
+            <li>карта / today / настройка стека / напоминания</li>
+          </ul>
+          <div class="muted" style="margin-top:10px">RUB-оплата откроется на безопасной внешней странице YooKassa во внешнем браузере.</div>
+          <div class="row" style="margin-top:12px; gap:8px; flex-wrap:wrap;">
+            <button class="btn" id="prepareRedirectPaymentBtn">Подготовить оплату</button>
+            ${pendingForPlan ? `<button class="btn secondary" id="openExternalPaymentBtn">Открыть оплату в браузере</button>` : ''}
+            <button class="btn secondary" id="backFromPaymentBtn">Назад</button>
+          </div>
+          ${pendingForPlan ? `<div class="muted" style="margin-top:8px">После оплаты вернитесь в Telegram.</div>` : ''}
+          ${state.payment.success ? `<div class="chip" style="margin-top:10px">✅ Доступ активирован</div>` : ''}
+        </div>
+      </div>
+    `;
+    document.getElementById('prepareRedirectPaymentBtn')?.addEventListener('click', (e) => prepareRedirectPayment(planId, e.currentTarget));
+    document.getElementById('openExternalPaymentBtn')?.addEventListener('click', () => openExternalPayment(pending?.confirmation_url || ''));
+    document.getElementById('backFromPaymentBtn')?.addEventListener('click', () => {
+      if (state.me?.webapp_access) {
+        renderMainApp();
+        loadToday();
+      } else {
+        window.location.href = "./";
+      }
+    });
   }
 
   function renderTabs(isLocked) {
@@ -2435,7 +2634,7 @@ function adminField(label, field, value, kind='input') {
     if (state.organSvgs[key]) return state.organSvgs[key];
     const fallback = `<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="icon"><circle cx="12" cy="12" r="7" fill="none" stroke="currentColor" stroke-width="2"/></svg>`;
     try {
-      const res = await fetch(`./assets/icons/organs/${key}.svg`);
+      const res = await fetch(normalizeApiPath(`assets/icons/organs/${key}.svg`));
       state.organSvgs[key] = res.ok ? await res.text() : fallback;
     } catch {
       state.organSvgs[key] = fallback;
@@ -2743,7 +2942,7 @@ function adminField(label, field, value, kind='input') {
         form.append('report_date', document.getElementById('uploadReportDate')?.value || '');
         form.append('lab_name', document.getElementById('uploadLabName')?.value || '');
         form.append('notes', document.getElementById('uploadNotes')?.value || '');
-        const res = await fetch('./api/profile/labs/upload', { method:'POST', headers: { 'X-Telegram-Init-Data': state.initData }, body: form });
+        const res = await fetch(normalizeApiPath('api/profile/labs/upload'), { method:'POST', headers: { 'X-Telegram-Init-Data': state.initData }, body: form });
         const data = await res.json();
         if (!res.ok || !data.ok) throw new Error(data.error || 'Ошибка загрузки');
         await loadProfileLabs(true);
@@ -3326,6 +3525,15 @@ function adminField(label, field, value, kind='input') {
         <div class="muted" style="margin-top:4px">${esc(accessHint)}</div>
         <div class="muted" style="margin-top:4px">После подписки: постоянный доступ к WebApp, AI check-in и удобный ежедневный трекинг.</div>
         <div class="muted" style="margin-top:6px">Документы: ${state.settingsData?.offer_url ? `<a href="${esc(state.settingsData.offer_url)}" target="_blank" rel="noopener noreferrer">Оферта</a>${state.settingsData?.offer_version ? ` (v${esc(state.settingsData.offer_version)})` : ''}` : 'Оферта недоступна'} · ${state.settingsData?.privacy_url ? `<a href="${esc(state.settingsData.privacy_url)}" target="_blank" rel="noopener noreferrer">Privacy Policy</a>${state.settingsData?.privacy_version ? ` (v${esc(state.settingsData.privacy_version)})` : ''}` : 'Privacy Policy недоступна'}</div>
+        <details class="card" style="margin-top:10px"><summary><strong>💳 Подписка</strong></summary>
+          <div class="muted" style="margin-top:8px">${me.premium ? `Активна до ${esc(String(me.premium_until_utc || '').slice(0, 10) || '—')}` : 'Не активна'}</div>
+          <div class="muted" style="margin-top:6px">Преимущества: доступ к WebApp, AI check-in, удобный ежедневный трекинг, карта/today/настройка стека/напоминания.</div>
+          <div class="row" style="gap:8px; flex-wrap:wrap; margin-top:8px;">
+            ${(me.plans || []).map((p) => p.stars_enabled ? `<button class="btn" data-settings-open-premium-plan-stars="${esc(p.plan_id)}">⭐ ${esc(p.plan_id)}</button>` : '').join('')}
+            ${(me.plans || []).map((p) => p.rub_enabled ? `<button class="btn secondary" data-settings-open-premium-plan-rub="${esc(p.plan_id)}">₽ ${esc(p.plan_id)}</button>` : '').join('')}
+          </div>
+          <div style="margin-top:8px"><button class="btn" data-settings-open-premium-main>${me.premium ? 'Продлить Premium' : 'Оформить Premium'}</button></div>
+        </details>
         <div class="ios-group">
           <details open>
             <summary><span>🕒 Время и расписание</span><span class="ios-arrow">▾</span></summary>
@@ -3424,6 +3632,18 @@ function adminField(label, field, value, kind='input') {
       state.mySupplements.open = true;
       renderMainApp();
       await loadMySupplements(true);
+    });
+    document.querySelectorAll('[data-settings-open-premium-plan-stars]').forEach((el) => {
+      el.addEventListener('click', () => purchase(el.dataset.settingsOpenPremiumPlanStars, 'stars', el));
+    });
+    document.querySelectorAll('[data-settings-open-premium-plan-rub]').forEach((el) => {
+      el.addEventListener('click', () => openPaymentScreen(el.dataset.settingsOpenPremiumPlanRub));
+    });
+    document.querySelectorAll('[data-settings-open-premium-main]').forEach((el) => {
+      el.addEventListener('click', () => {
+        const firstPlan = (state.me?.plans || [])[0]?.plan_id || 'm1';
+        openPaymentScreen(firstPlan);
+      });
     });
 
     const applyPatch = async () => {
@@ -3915,6 +4135,11 @@ function adminField(label, field, value, kind='input') {
     const rowsHtml = rows.length ? rows.map((row)=>`<div class="history-item"><strong>${esc(row.day || '—')} · ${esc(row.status_label || '—')}</strong><div class="muted" style="margin-top:4px">Доза: ${esc(row.dose_text || 'не указана')} · Время: ${esc(row.time_hint || '—')}</div></div>`).join('') : '<div class="muted">Пока нет записей о приёме этой добавки.</div>';
     return `${summaryHtml}${rowsHtml}`;
   }
+
+  window.addEventListener('focus', () => { checkPendingPaymentStatus({ silent: true }); });
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') checkPendingPaymentStatus({ silent: true });
+  });
 
   boot();
 })();

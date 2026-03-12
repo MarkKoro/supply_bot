@@ -2923,7 +2923,7 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if data == "admin:paychecks":
             if not await _require_admin(update, context, "payments_view"):
                 return
-            await _show_admin_paychecks(update, context, conn, filter_code="ready", index=0)
+            await _show_admin_paychecks(update, context, conn, filter_code="wants_receipt", index=0)
             return
 
         if data.startswith("admin:paychecks:"):
@@ -2937,7 +2937,7 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 payload_data = {}
             if not isinstance(payload_data, dict):
                 payload_data = {}
-            filter_code = str(payload_data.get("filter") or "ready")
+            filter_code = str(payload_data.get("filter") or "wants_receipt")
             index = int(payload_data.get("index") or 0)
             payment_id = int(payload_data.get("payment_id") or 0)
             if data.startswith("admin:paychecks:filter:"):
@@ -6480,7 +6480,7 @@ def _payment_user_line(row: dict) -> str:
     return f"{mention} · {uname} · <code>{tg_user_id}</code>"
 
 
-async def _show_admin_paychecks(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, *, filter_code: str = "ready", index: int = 0) -> None:
+async def _show_admin_paychecks(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, *, filter_code: str = "wants_receipt", index: int = 0) -> None:
     rows = await db.admin_list_receipt_payments(conn, filter_code=filter_code, limit=500)
     total = len(rows)
     if total <= 0:
@@ -6643,7 +6643,7 @@ async def paychecks_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         if role == db.ROLE_NONE or not perms.get("payments_view", False):
             await (update.effective_message or update.message).reply_text("Недостаточно прав для просмотра оплат.")
             return
-        await _show_admin_paychecks(update, context, conn, filter_code="ready", index=0)
+        await _show_admin_paychecks(update, context, conn, filter_code="wants_receipt", index=0)
     finally:
         await conn.close()
 

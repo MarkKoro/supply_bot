@@ -139,7 +139,8 @@ CREATE TABLE IF NOT EXISTS users (
   consent_source TEXT NOT NULL DEFAULT '',
   receipt_email TEXT NOT NULL DEFAULT '',
   receipt_email_status TEXT NOT NULL DEFAULT 'missing',
-  receipt_email_collected_at TEXT NOT NULL DEFAULT ''
+  receipt_email_collected_at TEXT NOT NULL DEFAULT '',
+  wants_receipt INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS supplements (
@@ -509,6 +510,7 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     await _ensure_column(conn, "users", "receipt_email", "TEXT NOT NULL DEFAULT ''")
     await _ensure_column(conn, "users", "receipt_email_status", "TEXT NOT NULL DEFAULT 'missing'")
     await _ensure_column(conn, "users", "receipt_email_collected_at", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "users", "wants_receipt", "INTEGER NOT NULL DEFAULT 0")
     await conn.execute(
         """CREATE TABLE IF NOT EXISTS user_complexes (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -714,6 +716,9 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     )
     await conn.execute(
         "UPDATE users SET receipt_email_collected_at='' WHERE receipt_email_collected_at IS NULL"
+    )
+    await conn.execute(
+        "UPDATE users SET wants_receipt=0 WHERE wants_receipt IS NULL"
     )
     await conn.execute(
         "UPDATE supplements SET rules_tags='' WHERE rules_tags IS NULL"
@@ -1657,6 +1662,7 @@ async def _ensure_payments_table(conn: aiosqlite.Connection) -> None:
               receipt_email_status TEXT NOT NULL DEFAULT 'missing',
               receipt_email_source TEXT NOT NULL DEFAULT '',
               receipt_email_collected_at TEXT NOT NULL DEFAULT '',
+              wants_receipt INTEGER NOT NULL DEFAULT 0,
               receipt_status TEXT NOT NULL DEFAULT 'pending',
               receipt_sent_at TEXT,
               receipt_note TEXT NOT NULL DEFAULT ''
@@ -1691,6 +1697,7 @@ async def _ensure_payments_table(conn: aiosqlite.Connection) -> None:
     await _ensure_column(conn, "payments", "receipt_email_status", "TEXT NOT NULL DEFAULT 'missing'")
     await _ensure_column(conn, "payments", "receipt_email_source", "TEXT NOT NULL DEFAULT ''")
     await _ensure_column(conn, "payments", "receipt_email_collected_at", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "payments", "wants_receipt", "INTEGER NOT NULL DEFAULT 0")
     await _ensure_column(conn, "payments", "receipt_status", "TEXT NOT NULL DEFAULT 'pending'")
     await _ensure_column(conn, "payments", "receipt_sent_at", "TEXT")
     await _ensure_column(conn, "payments", "receipt_note", "TEXT NOT NULL DEFAULT ''")
@@ -1698,6 +1705,7 @@ async def _ensure_payments_table(conn: aiosqlite.Connection) -> None:
     await conn.execute("UPDATE payments SET receipt_email_status='missing' WHERE receipt_email_status IS NULL OR receipt_email_status=''")
     await conn.execute("UPDATE payments SET receipt_email_source='' WHERE receipt_email_source IS NULL")
     await conn.execute("UPDATE payments SET receipt_email_collected_at='' WHERE receipt_email_collected_at IS NULL")
+    await conn.execute("UPDATE payments SET wants_receipt=0 WHERE wants_receipt IS NULL")
     await conn.execute("UPDATE payments SET receipt_status='pending' WHERE receipt_status IS NULL OR receipt_status=''")
     await conn.execute("UPDATE payments SET receipt_note='' WHERE receipt_note IS NULL")
     await conn.execute(
@@ -2125,7 +2133,7 @@ async def get_user_receipt_email(conn: aiosqlite.Connection, tg_user_id: int) ->
     await get_or_create_user(conn, int(tg_user_id), tz_name="")
     row = await fetchone(
         conn,
-        "SELECT receipt_email, receipt_email_status, receipt_email_collected_at FROM users WHERE tg_user_id=?",
+        "SELECT receipt_email, receipt_email_status, receipt_email_collected_at, COALESCE(wants_receipt,0) AS wants_receipt FROM users WHERE tg_user_id=?",
         (int(tg_user_id),),
     )
     email = str((row["receipt_email"] if row else "") or "").strip()
@@ -2135,11 +2143,13 @@ async def get_user_receipt_email(conn: aiosqlite.Connection, tg_user_id: int) ->
         status = "provided"
     if not email:
         status = "missing"
+    wants_receipt = bool(int((row["wants_receipt"] if row else 0) or 0))
     return {
         "email": email,
         "status": status,
         "collected_at": collected_at,
         "has_email": bool(email and status == "provided"),
+        "wants_receipt": wants_receipt,
     }
 
 
@@ -2175,6 +2185,17 @@ async def upsert_user_receipt_email(
         "collected_at": now,
         "source": str(source or "webapp"),
     }
+
+
+async def set_user_wants_receipt(conn: aiosqlite.Connection, tg_user_id: int, wants_receipt: bool) -> dict:
+    await get_or_create_user(conn, int(tg_user_id), tz_name="")
+    normalized = 1 if bool(wants_receipt) else 0
+    await conn.execute(
+        "UPDATE users SET wants_receipt=? WHERE tg_user_id=?",
+        (normalized, int(tg_user_id)),
+    )
+    await conn.commit()
+    return {"ok": True, "wants_receipt": bool(normalized)}
 
 
 async def get_user_status(conn: aiosqlite.Connection, tg_user_id: int) -> dict:
@@ -2590,6 +2611,7 @@ async def log_payment_paid(
     receipt_email_status: str | None = None,
     receipt_email_source: str | None = None,
     receipt_email_collected_at: str | None = None,
+    wants_receipt: bool | None = None,
 ) -> bool:
     created = utc_now_iso()
     if telegram_payment_charge_id:
@@ -2618,15 +2640,16 @@ async def log_payment_paid(
         resolved_status = "missing"
     resolved_source = str(receipt_email_source or ("webapp" if resolved_email else "")).strip().lower()
     resolved_collected_at = str(receipt_email_collected_at or profile.get("collected_at") or "").strip()
+    resolved_wants_receipt = bool(profile.get("wants_receipt")) if wants_receipt is None else bool(wants_receipt)
     try:
         await conn.execute(
             """INSERT INTO payments(
                    user_id, provider, currency, amount, payload,
                    telegram_payment_charge_id, provider_payment_charge_id, status, created_at_utc,
                    project_key, payment_kind, plan_id, finalized_at_utc,
-                   receipt_email, receipt_email_status, receipt_email_source, receipt_email_collected_at,
+                   receipt_email, receipt_email_status, receipt_email_source, receipt_email_collected_at, wants_receipt,
                    receipt_status, receipt_sent_at, receipt_note
-               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 user_id,
                 provider,
@@ -2645,6 +2668,7 @@ async def log_payment_paid(
                 resolved_status,
                 resolved_source,
                 resolved_collected_at,
+                1 if resolved_wants_receipt else 0,
                 "pending",
                 None,
                 "",
@@ -2667,8 +2691,8 @@ async def admin_count_payments_for_receipts(conn: aiosqlite.Connection, filters:
     return int(row["c"] or 0) if row else 0
 
 
-async def admin_list_receipt_payments(conn: aiosqlite.Connection, filter_code: str = "ready", limit: int = 200) -> list[dict]:
-    safe_filter = str(filter_code or "ready").strip().lower()
+async def admin_list_receipt_payments(conn: aiosqlite.Connection, filter_code: str = "wants_receipt", limit: int = 200) -> list[dict]:
+    safe_filter = str(filter_code or "wants_receipt").strip().lower()
     filters = ["p.status='paid'", "UPPER(COALESCE(p.currency,''))='RUB'"]
     params: list[object] = []
     if safe_filter == "missing_email":
@@ -2679,9 +2703,8 @@ async def admin_list_receipt_payments(conn: aiosqlite.Connection, filter_code: s
         filters.append("COALESCE(p.receipt_status,'pending')='pending'")
     elif safe_filter == "receipt_sent":
         filters.append("COALESCE(p.receipt_status,'pending')='sent'")
-    elif safe_filter == "ready":
-        filters.append("COALESCE(p.receipt_email,'')!=''")
-        filters.append("COALESCE(p.receipt_status,'pending')='pending'")
+    elif safe_filter in {"ready", "wants_receipt"}:
+        filters.append("COALESCE(p.wants_receipt,0)=1")
     where = " AND ".join(filters)
     rows = await fetchall(
         conn,

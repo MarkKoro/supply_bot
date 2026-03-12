@@ -1,5 +1,6 @@
 from __future__ import annotations
 import asyncio
+import html
 import json
 import logging
 import os
@@ -2919,6 +2920,48 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await show(update, context, "Модерация пользователей доступна в WebApp разделе Admin.", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="admin:home")]]), route="admin:home")
             return
 
+        if data == "admin:paychecks":
+            if not await _require_admin(update, context, "payments_view"):
+                return
+            await _show_admin_paychecks(update, context, conn, filter_code="ready", index=0)
+            return
+
+        if data.startswith("admin:paychecks:"):
+            if not await _require_admin(update, context, "payments_view"):
+                return
+            _, _, ui_payload = await db.get_ui_state(conn, tg_uid)
+            payload_data = {}
+            try:
+                payload_data = json.loads(ui_payload) if ui_payload else {}
+            except json.JSONDecodeError:
+                payload_data = {}
+            if not isinstance(payload_data, dict):
+                payload_data = {}
+            filter_code = str(payload_data.get("filter") or "ready")
+            index = int(payload_data.get("index") or 0)
+            payment_id = int(payload_data.get("payment_id") or 0)
+            if data.startswith("admin:paychecks:filter:"):
+                filter_code = data.split(":", 3)[-1]
+                index = 0
+            elif data.startswith("admin:paychecks:nav:"):
+                nav = data.split(":")[-1]
+                rows = await db.admin_list_receipt_payments(conn, filter_code=filter_code, limit=500)
+                total = len(rows)
+                if nav == "first":
+                    index = 0
+                elif nav == "last":
+                    index = max(0, total - 1)
+                elif nav == "prev":
+                    index = max(0, index - 1)
+                elif nav == "next":
+                    index = min(max(0, total - 1), index + 1)
+            elif data.endswith("mark_sent") and payment_id > 0:
+                await db.admin_set_payment_receipt_status(conn, payment_id, status="sent")
+            elif data.endswith("mark_pending") and payment_id > 0:
+                await db.admin_set_payment_receipt_status(conn, payment_id, status="pending")
+            await _show_admin_paychecks(update, context, conn, filter_code=filter_code, index=index)
+            return
+
         if data == "admin:diag":
             if not await _require_admin(update, context, "system_diag"):
                 return
@@ -2986,6 +3029,8 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 required_perm = "roles_manage"
             elif data.startswith("admin:users"):
                 required_perm = "users_view"
+            elif data.startswith("admin:paychecks"):
+                required_perm = "payments_view"
             elif data.startswith("admin:diag"):
                 required_perm = "system_diag"
             if required_perm and not perms.get(required_perm, False):
@@ -6416,6 +6461,71 @@ def _fixed_rows(rows: list[tuple[str, str]]) -> str:
     return "\n".join(f"{k.ljust(width)}  {v}" for k, v in rows)
 
 
+def _payment_subject_from_row(row: dict) -> tuple[str, str]:
+    payload = str(row.get("payload") or "")
+    parts = payload.split(":")
+    if len(parts) >= 4 and parts[0] == "sub":
+        plan_id = str(parts[1] or "")
+        return "subscription", f"Premium {plan_id}"
+    kind = str(row.get("payment_kind") or "").strip() or "payment"
+    return kind, payload[:60] if payload else "—"
+
+
+def _payment_user_line(row: dict) -> str:
+    tg_user_id = int(row.get("tg_user_id") or 0)
+    username = str(row.get("tg_username") or "").strip()
+    full_name = (f"{str(row.get('tg_first_name') or '').strip()} {str(row.get('tg_last_name') or '').strip()}").strip() or "—"
+    mention = f'<a href="tg://user?id={tg_user_id}">{html.escape(full_name)}</a>' if tg_user_id > 0 else html.escape(full_name)
+    uname = f"@{username}" if username else "—"
+    return f"{mention} · {uname} · <code>{tg_user_id}</code>"
+
+
+async def _show_admin_paychecks(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, *, filter_code: str = "ready", index: int = 0) -> None:
+    rows = await db.admin_list_receipt_payments(conn, filter_code=filter_code, limit=500)
+    total = len(rows)
+    if total <= 0:
+        await show(
+            update,
+            context,
+            "💳 <b>Чеки / RUB-оплаты</b>\nПо выбранному фильтру платежей нет.",
+            admin_paychecks_kb(index=0, total=1, filter_code=filter_code, current_receipt_status="pending"),
+            route="admin:paychecks",
+            payload={"filter": filter_code, "index": 0},
+        )
+        return
+    safe_index = max(0, min(int(index), total - 1))
+    row = rows[safe_index]
+    kind, subject = _payment_subject_from_row(row)
+    amount_rub = int(row.get("amount") or 0) / 100
+    paid_at = str(row.get("finalized_at_utc") or row.get("created_at_utc") or "")
+    email = str(row.get("receipt_email") or "").strip() or "—"
+    email_status = str(row.get("receipt_email_status") or "missing")
+    receipt_status = str(row.get("receipt_status") or "pending")
+    provider_pid = str(row.get("provider_payment_charge_id") or "") or "—"
+    lines = [
+        "💳 <b>Чек / успешный RUB-платёж</b>",
+        f"#{safe_index + 1} из {total}",
+        f"Оплачен: <code>{paid_at or '—'}</code>",
+        f"Payment record id: <code>{int(row.get('id') or 0)}</code>",
+        f"Provider payment id: <code>{provider_pid}</code>",
+        f"Сумма: <b>{amount_rub:.2f}</b> {str(row.get('currency') or 'RUB')}",
+        f"Что куплено: {html.escape(subject)}",
+        f"product_kind: <code>{html.escape(kind)}</code>",
+        f"Пользователь: {_payment_user_line(row)}",
+        f"Email: <code>{html.escape(email)}</code>",
+        f"email_status: <code>{html.escape(email_status)}</code>",
+        f"receipt_status: <code>{html.escape(receipt_status)}</code>",
+    ]
+    await show(
+        update,
+        context,
+        "\n".join(lines),
+        admin_paychecks_kb(index=safe_index, total=total, filter_code=filter_code, current_receipt_status=receipt_status),
+        route="admin:paychecks",
+        payload={"filter": filter_code, "index": safe_index, "payment_id": int(row.get("id") or 0)},
+    )
+
+
 async def _admin_dashboard_text(conn) -> str:
     base = await db.admin_get_global_stats(conn)
     now_iso = db.utc_now_iso()
@@ -6517,6 +6627,25 @@ async def _ensure_admin_for_command(update: Update, context: ContextTypes.DEFAUL
         return True
     await (update.effective_message or update.message).reply_text("Эта команда доступна только администратору.")
     return False
+
+
+async def paychecks_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard_not_banned(update, context):
+        return
+    if not await _ensure_admin_for_command(update, context):
+        return
+    user = update.effective_user
+    if not user:
+        return
+    conn = await db.connect(context.application.bot_data["settings"].DB_PATH)
+    try:
+        role, perms = await _get_role_perms_ctx(context, user.id)
+        if role == db.ROLE_NONE or not perms.get("payments_view", False):
+            await (update.effective_message or update.message).reply_text("Недостаточно прав для просмотра оплат.")
+            return
+        await _show_admin_paychecks(update, context, conn, filter_code="ready", index=0)
+    finally:
+        await conn.close()
 
 
 async def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -6672,6 +6801,7 @@ async def _bootstrap() -> Application:
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("premium", premium_command))
     app.add_handler(CommandHandler("stats", admin_stats_command))
+    app.add_handler(CommandHandler("paychecks", paychecks_command))
     app.add_handler(CommandHandler("grant", grant_command))
     app.add_handler(CommandHandler("degrant", degrant_command))
     app.add_handler(CommandHandler("purge_me", purge_me_command))

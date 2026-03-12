@@ -773,7 +773,7 @@
     },
     settingsUi: { openMySuppBusy: false, premiumOpen: false },
     settingsData: { tz_name: 'UTC', loading: false, offer_url: '', privacy_url: '', offer_version: '', privacy_version: '' },
-    payment: { pending: null, checking: false, lastStatus: '', modalOpen: false, success: false, successInfo: null }
+    payment: { pending: null, checking: false, lastStatus: '', modalOpen: false, success: false, successInfo: null, receiptEmail: null, savingEmail: false, emailInput: '', emailError: '' }
   };
 
   const APP_NAME = "SupplyBot";
@@ -930,6 +930,42 @@
     wrap.innerHTML = `<div class="toast fade">${text}</div>`;
     clearTimeout(state.toastTimer);
     state.toastTimer = setTimeout(() => { wrap.innerHTML = ""; }, 2200);
+  }
+
+  function isValidEmail(v) {
+    return /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/.test(String(v || '').trim());
+  }
+
+  async function ensureReceiptEmailState() {
+    if (state.payment.receiptEmail) return state.payment.receiptEmail;
+    const data = await api('api/receipt-email');
+    state.payment.receiptEmail = data;
+    if (data && data.email && !state.payment.emailInput) state.payment.emailInput = String(data.email || '');
+    return data;
+  }
+
+  async function saveReceiptEmail(inputEl) {
+    const value = String((inputEl?.value || state.payment.emailInput || '')).trim().toLowerCase();
+    state.payment.emailInput = value;
+    if (!isValidEmail(value)) {
+      state.payment.emailError = 'Введите корректный email.';
+      renderPaymentScreen(parseScreenParams().plan_id || '');
+      return;
+    }
+    state.payment.savingEmail = true;
+    state.payment.emailError = '';
+    renderPaymentScreen(parseScreenParams().plan_id || '');
+    try {
+      const res = await api('api/receipt-email', { method: 'POST', body: JSON.stringify({ email: value }) });
+      state.payment.receiptEmail = { email: res.email, status: 'provided', collected_at: res.collected_at, has_email: true };
+      state.payment.emailInput = String(res.email || '');
+      showToast('Email для чека сохранён');
+    } catch (e) {
+      state.payment.emailError = 'Не удалось сохранить email.';
+    } finally {
+      state.payment.savingEmail = false;
+      renderPaymentScreen(parseScreenParams().plan_id || '');
+    }
   }
 
   function formatUtcShort(iso) {
@@ -1244,6 +1280,9 @@
       const sp = parseScreenParams();
       const canOpenPaymentScreen = sp.screen === "payment" && sp.kind === "subscription" && sp.plan_id && !!planMeta(sp.plan_id);
       if (canOpenPaymentScreen) {
+        try { await ensureReceiptEmailState(); } catch (e) {}
+      }
+      if (canOpenPaymentScreen) {
         renderPaymentScreen(sp.plan_id);
         await checkPendingPaymentStatus({ silent: true });
         return;
@@ -1454,6 +1493,10 @@
     const pending = loadPendingPayment();
     const pendingForPlan = pending && String(pending.plan_id || "") === String(planId || "") && isPendingForCurrentProject();
     const priceRub = Number(meta?.price_rub || 0) / 100;
+    const receipt = state.payment.receiptEmail || state.me?.receipt_email || null;
+    const hasReceiptEmail = !!(receipt && receipt.has_email && String(receipt.email || '').trim());
+    const receiptEmail = String(receipt?.email || '').trim();
+    const canPrepare = hasReceiptEmail && !state.payment.savingEmail;
     appEl.innerHTML = `
       <div class="main-content">
         <div class="card fade">
@@ -1466,11 +1509,24 @@
             <li>карта / today / настройка стека / напоминания</li>
           </ul>
           <div class="muted" style="margin-top:10px">RUB-оплата откроется на безопасной внешней странице YooKassa во внешнем браузере.</div>
+          <div class="card" style="margin-top:12px; padding:12px; border:1px solid var(--line);">
+            <div><b>Email для чека</b></div>
+            ${hasReceiptEmail ? `<div class="muted" style="margin-top:6px">Сохранён: <code>${esc(receiptEmail)}</code></div>
+              <button class="btn secondary" id="changeReceiptEmailBtn" style="margin-top:8px">Изменить email</button>` : `
+              <div class="muted" style="margin-top:6px">Укажите email для отправки чека.</div>
+              <div class="row" style="margin-top:8px; gap:8px; flex-wrap:wrap; align-items:center;">
+                <input id="receiptEmailInput" type="email" placeholder="example@mail.com" value="${esc(state.payment.emailInput || '')}" style="flex:1; min-width:220px; padding:10px; border-radius:10px; border:1px solid var(--line); background:var(--bg-soft); color:var(--text);" />
+                <button class="btn secondary" id="saveReceiptEmailBtn" ${state.payment.savingEmail ? 'disabled' : ''}>${state.payment.savingEmail ? 'Сохранение…' : 'Сохранить email'}</button>
+              </div>
+              ${state.payment.emailError ? `<div class="muted" style="margin-top:6px; color:#ff6b6b">${esc(state.payment.emailError)}</div>` : ''}
+            `}
+          </div>
           <div class="row" style="margin-top:12px; gap:8px; flex-wrap:wrap;">
-            <button class="btn" id="prepareRedirectPaymentBtn">Подготовить оплату</button>
+            <button class="btn" id="prepareRedirectPaymentBtn" ${canPrepare ? '' : 'disabled'}>Подготовить оплату</button>
             ${pendingForPlan ? `<button class="btn secondary" id="openExternalPaymentBtn">Открыть оплату в браузере</button>` : ''}
             <button class="btn secondary" id="backFromPaymentBtn">Назад</button>
           </div>
+          ${!hasReceiptEmail ? `<div class="muted" style="margin-top:8px">Без email подготовка RUB-платежа недоступна.</div>` : ''}
           ${pendingForPlan ? `<div class="muted" style="margin-top:8px">После оплаты вернитесь в Telegram.</div>` : ''}
           ${state.payment.success ? `<div class="chip" style="margin-top:10px">✅ Доступ активирован</div>` : ''}
         </div>
@@ -1478,6 +1534,12 @@
     `;
     document.getElementById('prepareRedirectPaymentBtn')?.addEventListener('click', (e) => prepareRedirectPayment(planId, e.currentTarget));
     document.getElementById('openExternalPaymentBtn')?.addEventListener('click', () => openExternalPayment(pending?.confirmation_url || ''));
+    document.getElementById('saveReceiptEmailBtn')?.addEventListener('click', () => saveReceiptEmail(document.getElementById('receiptEmailInput')));
+    document.getElementById('changeReceiptEmailBtn')?.addEventListener('click', () => {
+      state.payment.receiptEmail = { email: '', status: 'missing', has_email: false };
+      state.payment.emailInput = receiptEmail;
+      renderPaymentScreen(planId);
+    });
     document.getElementById('backFromPaymentBtn')?.addEventListener('click', () => {
       const source = parseScreenParams().source;
       if (state.me?.webapp_access && source === 'settings') {
@@ -1494,6 +1556,7 @@
       }
     });
   }
+
 
   function renderTabs(isLocked) {
     const list = activeTabs();

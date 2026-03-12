@@ -83,11 +83,6 @@ class BillingInvoiceBody(BaseModel):
     method: str
 
 
-class RedirectCreateBody(BaseModel):
-    plan_id: str
-    kind: str = "subscription"
-
-
 class CatalogToggleBody(BaseModel):
     supplement_id: int
     action: str
@@ -360,94 +355,11 @@ def _plans_payload() -> list[dict]:
                 "months": int(months),
                 "price_rub": int(s.PREMIUM_PRICES_RUB.get(plan_id, 0) or 0),
                 "price_stars": int(s.PREMIUM_PRICES_STARS.get(plan_id, 0) or 0),
-                "rub_enabled": bool(s.BILLING_ENABLED_RUB),
+                "rub_enabled": bool(s.BILLING_ENABLED_RUB and s.YOOKASSA_PROVIDER_TOKEN),
                 "stars_enabled": bool(s.BILLING_ENABLED_STARS),
             }
         )
     return rows
-
-
-def _yookassa_guard() -> None:
-    if not s.YOOKASSA_SHOP_ID or not s.YOOKASSA_SECRET_KEY:
-        raise HTTPException(status_code=503, detail="YooKassa credentials are not configured")
-
-
-def _minor_to_rub_value(minor: int) -> str:
-    return f"{(int(minor) / 100):.2f}"
-
-
-def _subscription_title_description(plan_id: str) -> tuple[str, str, int, int]:
-    months = int(s.PREMIUM_PLANS.get(plan_id, 0) or 0)
-    if months <= 0:
-        raise HTTPException(status_code=400, detail="Unknown plan")
-    title = f"Premium на {months} {'месяц' if months == 1 else ('месяца' if months in {2,3,4} else 'месяцев')}"
-    description = f"Premium подписка на {months} {'месяц' if months == 1 else ('месяца' if months in {2,3,4} else 'месяцев')}"
-    price_minor = int(s.PREMIUM_PRICES_RUB.get(plan_id, 0) or 0)
-    return title, description, months, price_minor
-
-
-def _yookassa_headers(idem_key: str) -> dict[str, str]:
-    return {
-        "Content-Type": "application/json",
-        "Idempotence-Key": idem_key,
-    }
-
-
-async def _finalize_redirect_subscription_payment(payment: dict) -> dict:
-    payment_id = str(payment.get("id") or "").strip()
-    if not payment_id:
-        raise HTTPException(status_code=400, detail="Missing payment id")
-    metadata = payment.get("metadata") or {}
-    if str(metadata.get("project_key") or "") != s.PROJECT_KEY:
-        raise HTTPException(status_code=403, detail="Payment project mismatch")
-    if str(metadata.get("kind") or "") != "subscription":
-        raise HTTPException(status_code=400, detail="Unsupported payment kind")
-    user_id_raw = str(metadata.get("user_id") or "").strip()
-    plan_id = str(metadata.get("plan_id") or "").strip()
-    if not user_id_raw or not plan_id:
-        raise HTTPException(status_code=400, detail="Missing payment metadata")
-    if plan_id not in s.PREMIUM_PLANS:
-        raise HTTPException(status_code=400, detail="Unknown plan in payment")
-    months = int(s.PREMIUM_PLANS.get(plan_id, 0) or 0)
-    amount_obj = payment.get("amount") or {}
-    amount_value = float(str(amount_obj.get("value") or "0").strip() or "0")
-    amount_minor = int(round(amount_value * 100))
-    tg_user_id = int(user_id_raw)
-
-    conn = await db.connect(s.DB_PATH)
-    try:
-        finalized_at = db.utc_now_iso()
-        inserted = await db.log_payment_paid(
-            conn=conn,
-            tg_user_id=tg_user_id,
-            provider="yookassa_redirect",
-            currency="RUB",
-            amount=amount_minor,
-            payload=f"sub:{plan_id}:redirect:{payment_id}",
-            telegram_payment_charge_id=None,
-            provider_payment_charge_id=payment_id,
-            project_key=s.PROJECT_KEY,
-            payment_kind="subscription",
-            plan_id=plan_id,
-            finalized_at_utc=finalized_at,
-        )
-        if not inserted:
-            return {
-                "finalized": False,
-                "already_finalized": True,
-                "plan_id": plan_id,
-                "kind": "subscription",
-            }
-        until_iso = await db.extend_premium(conn, tg_user_id, months, source="yookassa_redirect", plan_id=plan_id)
-        return {
-            "finalized": True,
-            "already_finalized": False,
-            "premium_until_utc": until_iso,
-            "plan_id": plan_id,
-            "kind": "subscription",
-        }
-    finally:
-        await conn.close()
 
 
 async def _build_newly_unlocked_details(conn, newly_keys: list[str]) -> list[dict]:
@@ -498,25 +410,6 @@ def health():
 def index():
     p = WEBAPP_DIR / "index.html"
     return p.read_text(encoding="utf-8")
-
-
-@app.get("/payment-return.html", response_class=HTMLResponse)
-def payment_return_page():
-    p = WEBAPP_DIR / "payment-return.html"
-    return p.read_text(encoding="utf-8")
-
-
-@app.get("/api/config")
-def api_config():
-    return JSONResponse(
-        {
-            "ok": True,
-            "project_key": s.PROJECT_KEY,
-            "bot_username": s.BOT_USERNAME,
-            "webapp_public_path": s.WEBAPP_PUBLIC_PATH,
-            "payments_external_only": bool(s.PAYMENTS_EXTERNAL_ONLY),
-        }
-    )
 
 
 @app.post("/api/telegram/verify")
@@ -965,9 +858,6 @@ async def api_billing_create_invoice_link(
     if method not in {"stars", "yookassa"}:
         raise HTTPException(status_code=400, detail="Unknown method")
 
-    if method == "yookassa":
-        raise HTTPException(status_code=400, detail="Use redirect flow")
-
     payload = f"sub:{plan_id}:{method}:{db.utc_now_iso()}"
     req = {
         "title": "Premium подписка",
@@ -975,12 +865,19 @@ async def api_billing_create_invoice_link(
         "payload": payload,
         "need_shipping_address": False,
         "is_flexible": False,
-        "currency": "XTR",
-        "provider_token": "",
-        "prices": [{"label": "Premium", "amount": int(s.PREMIUM_PRICES_STARS.get(plan_id, 0) or 0)}],
     }
-    if not s.BILLING_ENABLED_STARS:
-        raise HTTPException(status_code=400, detail="Stars disabled")
+    if method == "stars":
+        if not s.BILLING_ENABLED_STARS:
+            raise HTTPException(status_code=400, detail="Stars disabled")
+        req["currency"] = "XTR"
+        req["provider_token"] = ""
+        req["prices"] = [{"label": "Premium", "amount": int(s.PREMIUM_PRICES_STARS.get(plan_id, 0) or 0)}]
+    else:
+        if not s.BILLING_ENABLED_RUB or not s.YOOKASSA_PROVIDER_TOKEN:
+            raise HTTPException(status_code=400, detail="RUB disabled")
+        req["currency"] = "RUB"
+        req["provider_token"] = s.YOOKASSA_PROVIDER_TOKEN
+        req["prices"] = [{"label": "Premium", "amount": int(s.PREMIUM_PRICES_RUB.get(plan_id, 0) or 0)}]
 
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/createInvoiceLink"
     async with httpx.AsyncClient(timeout=15.0) as client:
@@ -989,128 +886,6 @@ async def api_billing_create_invoice_link(
     if not data.get("ok"):
         raise HTTPException(status_code=400, detail=str(data))
     return JSONResponse({"ok": True, "invoice_link": data.get("result")})
-
-
-@app.post("/api/payments/redirect/create")
-async def api_payments_redirect_create(
-    body: RedirectCreateBody,
-    x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
-):
-    tg_user_id = await _auth_user_id(x_telegram_init_data)
-    _yookassa_guard()
-    if not s.BILLING_ENABLED_RUB:
-        raise HTTPException(status_code=400, detail="RUB disabled")
-    if str(body.kind or "") != "subscription":
-        raise HTTPException(status_code=400, detail="Unsupported kind")
-
-    plan_id = str(body.plan_id or "").strip()
-    if plan_id not in s.PREMIUM_PLANS:
-        raise HTTPException(status_code=400, detail="Unknown plan")
-
-    title, description, _, price_minor = _subscription_title_description(plan_id)
-    if price_minor <= 0:
-        raise HTTPException(status_code=400, detail="Plan is not purchasable")
-
-    metadata = {
-        "project_key": s.PROJECT_KEY,
-        "bot_username": s.BOT_USERNAME,
-        "user_id": str(tg_user_id),
-        "kind": "subscription",
-        "source": "telegram_webapp",
-        "plan_id": plan_id,
-    }
-    yookassa_payload = {
-        "amount": {"value": _minor_to_rub_value(price_minor), "currency": "RUB"},
-        "capture": True,
-        "confirmation": {"type": "redirect", "return_url": s.YOOKASSA_RETURN_URL},
-        "description": description,
-        "metadata": metadata,
-    }
-    idem_key = str(uuid.uuid4())
-    async with httpx.AsyncClient(
-        timeout=20.0,
-        auth=(s.YOOKASSA_SHOP_ID, s.YOOKASSA_SECRET_KEY),
-    ) as client:
-        resp = await client.post(
-            "https://api.yookassa.ru/v3/payments",
-            headers=_yookassa_headers(idem_key),
-            json=yookassa_payload,
-        )
-    try:
-        data = resp.json()
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail="YooKassa invalid response") from exc
-    confirmation_url = str((data.get("confirmation") or {}).get("confirmation_url") or "")
-    payment_id = str(data.get("id") or "")
-    if not resp.is_success or not confirmation_url or not payment_id:
-        raise HTTPException(status_code=502, detail=f"YooKassa create failed: {data}")
-
-    return JSONResponse(
-        {
-            "ok": True,
-            "payment_id": payment_id,
-            "confirmation_url": confirmation_url,
-            "amount_rub": price_minor / 100,
-            "amount_minor": price_minor,
-            "title": title,
-            "project_key": s.PROJECT_KEY,
-            "kind": "subscription",
-            "plan_id": plan_id,
-            "created_at": db.utc_now_iso(),
-        }
-    )
-
-
-@app.get("/api/payments/yookassa/status")
-async def api_payments_yookassa_status(
-    payment_id: str,
-    x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
-):
-    tg_user_id = await _auth_user_id(x_telegram_init_data)
-    _yookassa_guard()
-    payment_id = str(payment_id or "").strip()
-    if not payment_id:
-        raise HTTPException(status_code=400, detail="Missing payment_id")
-
-    async with httpx.AsyncClient(
-        timeout=20.0,
-        auth=(s.YOOKASSA_SHOP_ID, s.YOOKASSA_SECRET_KEY),
-    ) as client:
-        resp = await client.get(f"https://api.yookassa.ru/v3/payments/{payment_id}")
-    try:
-        payment = resp.json()
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail="YooKassa invalid response") from exc
-    if not resp.is_success:
-        raise HTTPException(status_code=502, detail=f"YooKassa status failed: {payment}")
-
-    metadata = payment.get("metadata") or {}
-    if str(metadata.get("project_key") or "") != s.PROJECT_KEY:
-        raise HTTPException(status_code=403, detail="Payment project mismatch")
-    if str(metadata.get("user_id") or "") != str(tg_user_id):
-        raise HTTPException(status_code=403, detail="Payment user mismatch")
-
-    status = str(payment.get("status") or "")
-    if status in {"pending", "waiting_for_capture"}:
-        return JSONResponse({"ok": True, "status": status, "finalized": False})
-    if status == "canceled":
-        return JSONResponse({"ok": True, "status": "canceled", "finalized": False})
-    if status != "succeeded":
-        return JSONResponse({"ok": True, "status": status, "finalized": False})
-
-    result = await _finalize_redirect_subscription_payment(payment)
-    return JSONResponse(
-        {
-            "ok": True,
-            "status": "succeeded",
-            "finalized": True,
-            "already_finalized": bool(result.get("already_finalized")),
-            "premium_until_utc": result.get("premium_until_utc"),
-            "project_key": s.PROJECT_KEY,
-            "plan_id": result.get("plan_id"),
-            "kind": "subscription",
-        }
-    )
 
 
 async def _today_payload(tg_user_id: int) -> dict:

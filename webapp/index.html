@@ -956,7 +956,7 @@
     state.payment.emailError = '';
     renderPaymentScreen(parseScreenParams().plan_id || '');
     try {
-      const res = await api('api/receipt-email', { method: 'POST', body: JSON.stringify({ email: value }) });
+      const res = await api('api/receipt-email', { method: 'POST', body: { email: value } });
       state.payment.receiptEmail = { email: res.email, status: 'provided', collected_at: res.collected_at, has_email: true };
       state.payment.emailInput = String(res.email || '');
       showToast('Email для чека сохранён');
@@ -1515,7 +1515,7 @@
               <button class="btn secondary" id="changeReceiptEmailBtn" style="margin-top:8px">Изменить email</button>` : `
               <div class="muted" style="margin-top:6px">Укажите email для отправки чека.</div>
               <div class="row" style="margin-top:8px; gap:8px; flex-wrap:wrap; align-items:center;">
-                <input id="receiptEmailInput" type="email" placeholder="example@mail.com" value="${esc(state.payment.emailInput || '')}" style="flex:1; min-width:220px; padding:10px; border-radius:10px; border:1px solid var(--line); background:var(--bg-soft); color:var(--text);" />
+                <input id="receiptEmailInput" type="email" placeholder="example@mail.com" value="${esc(state.payment.emailInput || '')}" style="flex:1; min-width:220px; padding:10px; border-radius:10px; border:1px solid var(--accent); background:var(--bg-soft); color:var(--text); box-shadow:0 0 0 1px rgba(125,183,255,0.25);" />
                 <button class="btn secondary" id="saveReceiptEmailBtn" ${state.payment.savingEmail ? 'disabled' : ''}>${state.payment.savingEmail ? 'Сохранение…' : 'Сохранить email'}</button>
               </div>
               ${state.payment.emailError ? `<div class="muted" style="margin-top:6px; color:#ff6b6b">${esc(state.payment.emailError)}</div>` : ''}

@@ -948,7 +948,7 @@ def admin_paychecks_kb(*, index: int, total: int, filter_code: str, current_rece
         ("С email", "has_email"),
         ("Чек не отправлен", "receipt_pending"),
         ("Чек отправлен", "receipt_sent"),
-        ("Готово к чеку", "ready"),
+        ("Хочет чека", "wants_receipt"),
     ]
     for label, code in filters:
         mark = "✅ " if safe_filter == code else ""

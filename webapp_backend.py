@@ -92,6 +92,10 @@ class ReceiptEmailBody(BaseModel):
     email: str
 
 
+class ReceiptPreferenceBody(BaseModel):
+    wants_receipt: bool
+
+
 class CatalogToggleBody(BaseModel):
     supplement_id: int
     action: str
@@ -406,6 +410,7 @@ async def _finalize_redirect_subscription_payment(payment: dict) -> dict:
     metadata = payment.get("metadata") or {}
     receipt_email = str(metadata.get("receipt_email") or "").strip().lower()
     receipt_collected_at = str(metadata.get("receipt_email_collected_at") or "").strip()
+    wants_receipt = str(metadata.get("wants_receipt") or "0").strip() in {"1", "true", "True"}
     if str(metadata.get("project_key") or "") != s.PROJECT_KEY:
         raise HTTPException(status_code=403, detail="Project mismatch")
     if str(metadata.get("kind") or "") != "subscription":
@@ -445,6 +450,7 @@ async def _finalize_redirect_subscription_payment(payment: dict) -> dict:
             receipt_email_status="provided" if receipt_email else "missing",
             receipt_email_source="webapp" if receipt_email else "",
             receipt_email_collected_at=receipt_collected_at,
+            wants_receipt=wants_receipt,
         )
         if not inserted:
             return {
@@ -1002,6 +1008,20 @@ async def api_receipt_email_set(
     return JSONResponse({"ok": True, **result})
 
 
+@app.post("/api/receipt-preference")
+async def api_receipt_preference_set(
+    body: ReceiptPreferenceBody,
+    x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
+):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    conn = await db.connect(s.DB_PATH)
+    try:
+        result = await db.set_user_wants_receipt(conn, tg_user_id, bool(body.wants_receipt))
+    finally:
+        await conn.close()
+    return JSONResponse(result)
+
+
 @app.post("/api/billing/create_invoice_link")
 async def api_billing_create_invoice_link(
     body: BillingInvoiceBody,
@@ -1074,6 +1094,7 @@ async def api_payments_redirect_create(
 
     metadata["receipt_email"] = str(receipt_email_state.get("email") or "")
     metadata["receipt_email_collected_at"] = str(receipt_email_state.get("collected_at") or "")
+    metadata["wants_receipt"] = "1" if bool(receipt_email_state.get("wants_receipt")) else "0"
 
     yookassa_payload = {
         "amount": {"value": _minor_to_rub_value(price_minor), "currency": "RUB"},
@@ -1133,6 +1154,7 @@ async def api_payments_yookassa_status(
     metadata = payment.get("metadata") or {}
     receipt_email = str(metadata.get("receipt_email") or "").strip().lower()
     receipt_collected_at = str(metadata.get("receipt_email_collected_at") or "").strip()
+    wants_receipt = str(metadata.get("wants_receipt") or "0").strip() in {"1", "true", "True"}
     if str(metadata.get("project_key") or "") != s.PROJECT_KEY:
         raise HTTPException(status_code=403, detail="Project mismatch")
     if str(metadata.get("user_id") or "") != str(tg_user_id):

@@ -880,28 +880,34 @@ def supplement_time_kb(supplement_id: int, slots: list[dict]) -> InlineKeyboardM
     return InlineKeyboardMarkup(rows)
 
 
-def premium_plans_kb(plans: list[dict]) -> InlineKeyboardMarkup:
+def premium_plans_kb(plans: list[dict], webapp_base_url: str) -> InlineKeyboardMarkup:
+    clean = str(webapp_base_url or "").rstrip("/")
     rows: list[list[InlineKeyboardButton]] = []
     for plan in plans:
         plan_id = str(plan.get("plan_id") or "")
         title = str(plan.get("title") or plan_id)
-        rows.append([InlineKeyboardButton(title, callback_data=f"premium:plan:{plan_id}")])
+        if clean:
+            url = f"{clean}/?screen=payment&kind=subscription&plan_id={plan_id}&source=bot_premium"
+            rows.append([InlineKeyboardButton(title, web_app=WebAppInfo(url=url))])
+        else:
+            rows.append([InlineKeyboardButton(title, callback_data=f"premium:buy:{plan_id}:yookassa")])
+    rows.append([InlineKeyboardButton("⭐ Купить в звездах", callback_data="premium:stars_menu")])
     rows.append([InlineKeyboardButton("📦 Что входит", callback_data="premium:about")])
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")])
     return InlineKeyboardMarkup(rows)
 
 
-def premium_methods_kb(plan_id: str, stars_enabled: bool, rub_enabled: bool) -> InlineKeyboardMarkup:
+def premium_stars_kb(plans: list[dict], back_cb: str = "menu:premium") -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
-    if stars_enabled:
-        rows.append([InlineKeyboardButton("Купить за ⭐", callback_data=f"premium:buy:{plan_id}:stars")])
-    if rub_enabled:
-        rows.append([InlineKeyboardButton("Купить за ₽", callback_data=f"premium:buy:{plan_id}:yookassa")])
-    rows.append([InlineKeyboardButton("📦 Что входит", callback_data="premium:about")])
-    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="menu:premium")])
+    for plan in plans:
+        plan_id = str(plan.get("plan_id") or "")
+        stars = int(plan.get("stars") or 0)
+        if stars <= 0:
+            continue
+        title = str(plan.get("stars_title") or f"{plan_id} · {stars} ⭐")
+        rows.append([InlineKeyboardButton(title, callback_data=f"premium:buy:{plan_id}:stars")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=back_cb)])
     return InlineKeyboardMarkup(rows)
-
-
 
 
 def premium_webapp_checkout_kb(payment_url: str) -> InlineKeyboardMarkup:

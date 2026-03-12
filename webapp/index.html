@@ -2,7 +2,7 @@
 <html lang="ru">
 <head>
   <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"/>
   <title>SupplyBot WebApp</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
@@ -649,11 +649,35 @@
     .profile-summary-grid { margin-top:10px; display:grid; gap:6px; grid-template-columns:repeat(2,minmax(0,1fr)); }
     .profile-stat-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; margin-top:10px; }
     .profile-stat { border:1px solid rgba(255,255,255,.14); border-radius:12px; padding:8px; background:rgba(255,255,255,.04); }
-    .modal-overlay { position:fixed; inset:0; background:rgba(2,6,18,.64); z-index:40; display:flex; align-items:flex-end; padding:0 10px calc(12px + env(safe-area-inset-bottom)); }
-    .modal-card { width:100%; max-height:82vh; overflow:auto; border-radius:18px; margin:0 auto; max-width:560px; }
+    .modal-overlay { position:fixed; inset:0; background:rgba(2,6,18,.64); z-index:40; display:flex; align-items:flex-end; padding:0 10px calc(92px + env(safe-area-inset-bottom)); }
+    .modal-card { width:100%; max-height:calc(100vh - 130px - env(safe-area-inset-bottom)); overflow:auto; border-radius:18px; margin:0 auto; max-width:560px; }
     .field-grid { display:grid; gap:8px; }
     .field-grid.two { grid-template-columns:repeat(2,minmax(0,1fr)); }
     .lab-result-row { border:1px solid rgba(255,255,255,.14); border-radius:12px; padding:8px; margin-bottom:8px; background:rgba(255,255,255,.03); }
+    .profile-module-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; margin-bottom:10px; }
+    .profile-module-btn { min-height:90px; border-radius:16px; text-align:left; padding:10px; display:grid; gap:6px; align-content:space-between; }
+    .profile-module-btn .muted { font-size:12px; }
+    .profile-module-btn.active { box-shadow:0 0 0 1px rgba(190,220,255,.65) inset, 0 10px 20px rgba(4,10,30,.45); }
+
+    .payment-success-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 62;
+      background: rgba(4, 8, 20, 0.56);
+      display: flex;
+      align-items: flex-end;
+      justify-content: center;
+      padding: 0 12px calc(92px + env(safe-area-inset-bottom));
+    }
+    .payment-success-card {
+      width: 100%;
+      max-width: 520px;
+      border-radius: 18px;
+      padding: 14px;
+      border: 1px solid rgba(255,255,255,.25);
+      background: linear-gradient(180deg, rgba(26,68,124,.96), rgba(15,28,56,.98));
+      box-shadow: 0 24px 38px rgba(0,0,0,.45), 0 1px 0 rgba(255,255,255,.22) inset;
+    }
 
   </style>
 </head>
@@ -700,7 +724,7 @@
     profileNutrients: { items: [], loading: false },
     profileOverview: null,
     nutrientAssistant: { selectedCode: "vitamin_d", preview: null, loadingPreview: false, plan: null, loadingPlan: false, plans: [], loadingPlans: false, explanation: null, loadingExplanation: false, explanationMeta: null, currentPlanId: null, reminders: [], loadingReminders: false, dashboard: null, onboarding: null, onboardingStep: 0 },
-    profileUi: { editOpen: false, manualOpen: false, uploadOpen: false, reviewOpen: false, selectedReportId: null, uploading: false, savingManual: false, savingReview: false },
+    profileUi: { editOpen: false, manualOpen: false, uploadOpen: false, reviewOpen: false, selectedReportId: null, uploading: false, savingManual: false, savingReview: false, activeModule: "assistant" },
     survey: {
       step: 0,
       loading: false,
@@ -747,9 +771,9 @@
       duplicatesLoading: false,
       duplicateResolveBusy: ""
     },
-    settingsUi: { openMySuppBusy: false },
+    settingsUi: { openMySuppBusy: false, premiumOpen: false },
     settingsData: { tz_name: 'UTC', loading: false, offer_url: '', privacy_url: '', offer_version: '', privacy_version: '' },
-    payment: { pending: null, checking: false, lastStatus: '', modalOpen: false, success: false }
+    payment: { pending: null, checking: false, lastStatus: '', modalOpen: false, success: false, successInfo: null }
   };
 
   const APP_NAME = "SupplyBot";
@@ -829,15 +853,16 @@
       screen: String(qp.get("screen") || "").trim(),
       kind: String(qp.get("kind") || "").trim(),
       plan_id: String(qp.get("plan_id") || "").trim(),
+      source: String(qp.get("source") || "").trim(),
     };
   }
 
-  function paymentScreenUrl(planId) {
-    return `?screen=payment&kind=subscription&plan_id=${encodeURIComponent(String(planId || ''))}`;
+  function paymentScreenUrl(planId, source = 'paywall') {
+    return `?screen=payment&kind=subscription&plan_id=${encodeURIComponent(String(planId || ''))}&source=${encodeURIComponent(String(source || 'paywall'))}`;
   }
 
-  function openPaymentScreen(planId) {
-    window.location.href = paymentScreenUrl(planId);
+  function openPaymentScreen(planId, source = 'paywall') {
+    window.location.href = paymentScreenUrl(planId, source);
   }
 
   function openExternalPayment(confirmationUrl) {
@@ -878,6 +903,17 @@
   function isPendingForCurrentProject() {
     const p = loadPendingPayment();
     return !!(p && p.project_key === "supply_bot");
+  }
+
+  function planNameRu(planId, monthsHint) {
+    const byId = { m1: '1 месяц', m3: '3 месяца', m6: '6 месяцев', m12: '12 месяцев' };
+    const id = String(planId || '').trim();
+    if (byId[id]) return byId[id];
+    const months = Number(monthsHint || 0);
+    if (!months) return id || 'Тариф';
+    if (months === 1) return '1 месяц';
+    if (months >= 2 && months <= 4) return `${months} месяца`;
+    return `${months} месяцев`;
   }
 
   function planMeta(planId) {
@@ -1156,6 +1192,44 @@
     return data;
   }
 
+  function closePaymentSuccessModal() {
+    state.payment.successInfo = null;
+    renderMainApp();
+  }
+
+  function renderPaymentSuccessModal() {
+    const info = state.payment.successInfo;
+    if (!info) return "";
+    const planName = String(info.plan_id || 'Premium').trim() || 'Premium';
+    const untilIso = String(info.premium_until_utc || state.me?.premium_until_utc || '').trim();
+    const untilLabel = untilIso ? new Date(untilIso.replace(' ', 'T')).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric' }) : '—';
+    return `
+      <div class="payment-success-overlay" data-payment-success-overlay>
+        <section class="payment-success-card">
+          <h3 style="margin:0 0 8px">🎉 Оплата прошла успешно</h3>
+          <div class="muted">Вы активировали тариф <strong>${esc(planName)}</strong>.</div>
+          <div class="muted" style="margin-top:6px">Подписка активна до: <strong>${esc(untilLabel)}</strong>.</div>
+          <div style="margin-top:12px" class="row">
+            <button class="btn" data-payment-success-close>Отлично</button>
+          </div>
+        </section>
+      </div>
+    `;
+  }
+
+  function bindPaymentSuccessEvents() {
+    document.querySelectorAll('[data-payment-success-close]').forEach((btn) => btn.addEventListener('click', () => {
+      haptic();
+      closePaymentSuccessModal();
+    }));
+    document.querySelectorAll('[data-payment-success-overlay]').forEach((overlay) => {
+      overlay.addEventListener('click', (e) => {
+        if (e.target === overlay) closePaymentSuccessModal();
+      });
+    });
+  }
+
+
   async function boot() {
     try {
       const me = await api("api/me");
@@ -1219,18 +1293,15 @@
     const plans = state.me?.plans || [];
     const plansHtml = plans.map((p) => {
       const rub = p.price_rub ? Math.round(p.price_rub / 100) : null;
+      const planLabel = planNameRu(p.plan_id, p.months);
       return `
         <div class="card fade">
           <div class="row">
-            <strong>${p.months} мес.</strong>
-            <span class="muted">${p.plan_id}</span>
+            <strong>${planLabel}</strong>
           </div>
-          <div class="muted" style="margin-top:6px;">
-            ${p.price_stars || "—"} ⭐ ${rub !== null ? `• ${rub} ₽` : ""}
-          </div>
-          <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
-            ${p.stars_enabled ? `<button class="btn" data-plan="${p.plan_id}" data-method="stars">Купить за ⭐</button>` : ""}
-            ${p.rub_enabled ? `<button class="btn secondary" data-plan="${p.plan_id}" data-method="yookassa">Купить за ₽</button>` : ""}
+          <div style="margin-top:8px; display:grid; gap:8px;">
+            ${p.rub_enabled ? `<button class="btn secondary" data-plan="${p.plan_id}" data-method="yookassa" data-source="paywall">${rub !== null ? `${rub} ₽` : 'Купить в рублях'}</button>` : ""}
+            ${p.stars_enabled ? `<button class="btn" data-plan="${p.plan_id}" data-method="stars">${p.price_stars || "—"} ⭐</button>` : ""}
           </div>
         </div>
       `;
@@ -1243,8 +1314,8 @@
           <div class="muted">База добавок, базовый стек и стартовый подбор уже доступны.</div>
         </div>
         <div class="card fade">
-          <h2 style="margin:0 0 4px">Premium — про удобство каждый день</h2>
-          <div class="muted">Today • Каталог • Карта • AI check-in • настройка стека и напоминаний</div>
+          <h2 style="margin:0 0 4px">Premium — всё важное в одном месте</h2>
+          <div class="muted">Today • Каталог • Карта органов • Нутриентный помощник • AI check-in</div>
         </div>
 
         <div class="preview-grid">
@@ -1268,7 +1339,8 @@
   async function purchase(planId, method, btnEl) {
     haptic();
     if (method === "yookassa") {
-      openPaymentScreen(planId);
+      const source = btnEl?.dataset?.source || (state.activeTab === 'settings' ? 'settings' : 'paywall');
+      openPaymentScreen(planId, source);
       return;
     }
     if (!tg?.openInvoice) {
@@ -1352,8 +1424,13 @@
         clearPendingPayment();
         state.payment.success = true;
         state.me = await api("api/me");
+        state.payment.successInfo = {
+          plan_id: res.plan_id || pending.plan_id || "Premium",
+          premium_until_utc: res.premium_until_utc || state.me?.premium_until_utc || ""
+        };
+        state.activeTab = "today";
         showToast("Оплата подтверждена");
-        if (state.me.webapp_access && parseScreenParams().screen !== "payment") {
+        if (state.me.webapp_access) {
           renderMainApp();
           await loadToday();
         } else if (parseScreenParams().screen === "payment") {
@@ -1381,7 +1458,7 @@
       <div class="main-content">
         <div class="card fade">
           <h2 style="margin:0 0 8px">Оплата Premium</h2>
-          <div class="muted">Тариф: <b>${esc(planId)}</b> · ${priceRub.toFixed(2)} ₽</div>
+          <div class="muted">Тариф: <b>${esc(planNameRu(planId, meta?.months))}</b> · ${priceRub.toFixed(2)} ₽</div>
           <ul class="muted" style="margin-top:10px; padding-left:18px;">
             <li>постоянный доступ к WebApp</li>
             <li>AI check-in</li>
@@ -1402,6 +1479,13 @@
     document.getElementById('prepareRedirectPaymentBtn')?.addEventListener('click', (e) => prepareRedirectPayment(planId, e.currentTarget));
     document.getElementById('openExternalPaymentBtn')?.addEventListener('click', () => openExternalPayment(pending?.confirmation_url || ''));
     document.getElementById('backFromPaymentBtn')?.addEventListener('click', () => {
+      const source = parseScreenParams().source;
+      if (state.me?.webapp_access && source === 'settings') {
+        state.activeTab = 'settings';
+        state.settingsUi = { ...(state.settingsUi || {}), premiumOpen: true };
+        renderMainApp();
+        return;
+      }
       if (state.me?.webapp_access) {
         renderMainApp();
         loadToday();
@@ -1436,10 +1520,12 @@
       </div>
       ${renderTabs(false)}
       ${renderUnlockToastCard()}
+      ${renderPaymentSuccessModal()}
     `;
 
     bindMainEvents();
     bindUnlockToastEvents();
+    bindPaymentSuccessEvents();
     renderActiveTab();
   }
 
@@ -2835,6 +2921,47 @@ function adminField(label, field, value, kind='input') {
   }
   function renderReviewModal(){ if(!state.profileUi.reviewOpen) return ''; const r=(state.profileLabs.reports||[]).find((x)=>String(x.id)===String(state.profileUi.selectedReportId)); if(!r) return ''; return `<div class="modal-overlay" data-close-review><section class="card modal-card" onclick="event.stopPropagation()"><div class="row"><strong>Проверка распознанных данных</strong><button class="btn secondary" data-close-review>Закрыть</button></div><div class="muted" style="margin-top:8px">${r.parse_status==='needs_manual_review'?'Документ загружен, но данные нужно проверить вручную':'Проверьте распознанные значения'}</div><div class="field-grid" style="margin-top:8px"><label class="muted">Дата анализа<input type="date" class="input" id="reviewReportDate" value="${esc(r.report_date||'')}"/></label><label class="muted">Лаборатория<input class="input" id="reviewLabName" value="${esc(r.lab_name||'')}"/></label><label class="muted">Комментарий<textarea class="textarea" id="reviewNotes">${esc(r.notes||'')}</textarea></label><div id="reviewRows">${(r.results||[]).map((row,idx)=>renderLabRow(idx,row)).join('') || renderLabRow(0)}</div><button class="btn" data-save-review>${state.profileUi.savingReview?'Сохраняем…':'Сохранить результат'}</button></div></section></div>`; }
 
+  function renderProfileModulesGrid() {
+    const active = String(state.profileUi.activeModule || 'assistant');
+    const modules = [
+      { id: 'assistant', title: '🧪 Нутриентный помощник', hint: 'Планы, напоминания и контроль данных' },
+      { id: 'organs', title: '🫀 Карта органов', hint: 'Влияние добавок на системы организма' },
+      { id: 'achievements', title: '🏆 Достижения', hint: 'Прогресс и новые открытия' },
+      { id: 'cosmetics', title: '🎨 Косметика', hint: 'Тема, таб-меню и бейдж' }
+    ];
+    return `<section class="card fade"><div class="profile-module-grid">${modules.map((m)=>`<button class="btn profile-module-btn ${active===m.id?'active':''}" data-profile-module="${m.id}"><div><strong>${m.title}</strong></div><div class="muted">${m.hint}</div></button>`).join('')}</div></section>`;
+  }
+
+  function renderProfileAchievementsModule() {
+    const ach = state.ach || {};
+    const items = Array.isArray(ach.achievements) ? ach.achievements : [];
+    const unlocked = items.filter((x) => x.unlocked);
+    const locked = items.filter((x) => !x.unlocked);
+    const recent = Array.isArray(ach.recent_achievements) ? ach.recent_achievements : [];
+    const next = (Array.isArray(ach.next_up) ? ach.next_up : []).filter((item) => Number(item?.pct || 0) > 0 && Number(item?.pct || 0) < 100);
+    return `<section class="card fade"><div class="row"><strong>🏆 Достижения</strong><span class="muted">Открыто: ${unlocked.length} · Закрыто: ${locked.length}</span></div>
+      <div class="ios-group" style="margin-top:10px">
+        <details open><summary><span>🎯 Дальше по плану</span><span class="ios-arrow">▾</span></summary><div class="ios-content">${next.length ? next.map((item)=>`<div class="ach-item"><div><strong>${esc(item.title_ru || '')}</strong></div><div class="muted">Прогресс: ${Math.max(0, Math.min(100, Number(item.pct || 0)))}%</div>${item.hint_ru ? `<div class="muted">${esc(item.hint_ru)}</div>` : ''}</div>`).join('') : '<div class="muted">Сейчас нет актуальных шагов.</div>'}</div></details>
+        <details><summary><span>🕒 Последние открытия</span><span class="ios-arrow">▾</span></summary><div class="ios-content">${recent.length ? recent.slice(0,8).map((item)=>`<div class="ach-item"><div><strong>${esc(item.title_ru || '')}</strong></div><div class="muted">${esc(formatUtcShort(item.unlocked_at_utc || ''))}</div></div>`).join('') : '<div class="muted">Пока нет новых открытий.</div>'}</div></details>
+      </div></section>`;
+  }
+
+  function renderProfileCosmeticsModule() {
+    const ach = state.ach || {};
+    const allowed = ach.allowed_cosmetics || { themes:["base"], tab_skins:["classic"], badges:["none"] };
+    const catalogs = ach.catalogs || { themes:[], tab_skins:[], badges:[] };
+    const cosmetics = ach.cosmetics || state.me?.cosmetics || { theme_id:"base", tab_skin_id:"classic", badge_id:"none" };
+    const options = (items, allowedIds, current) => (items||[]).filter((x)=>allowedIds.includes(x.id)).map((x)=>`<option value="${esc(x.id)}" ${x.id===current?'selected':''}>${esc(x.emoji||'')} ${esc(x.title_ru||x.id)}</option>`).join('');
+    return `<section class="card fade"><div class="row"><strong>🎨 Косметика</strong></div>
+      <div class="field-grid" style="margin-top:10px">
+        <div><label class="muted">Тема</label><select class="select" id="cosTheme">${options(catalogs.themes, allowed.themes || ["base"], cosmetics.theme_id || "base")}</select></div>
+        <div><label class="muted">Таб-меню</label><select class="select" id="cosTab">${options(catalogs.tab_skins, allowed.tab_skins || ["classic"], cosmetics.tab_skin_id || "classic")}</select></div>
+        <div><label class="muted">Бейдж</label><select class="select" id="cosBadge">${options(catalogs.badges, allowed.badges || ["none"], cosmetics.badge_id || "none")}</select></div>
+        <button class="btn" data-cos-save>Сохранить стиль</button>
+      </div>
+    </section>`;
+  }
+
   function renderProfile() {
     const p = state.profile.data || {};
     const labs = state.profileLabs.reports || [];
@@ -2852,6 +2979,7 @@ function adminField(label, field, value, kind='input') {
     const activePlanReminders = (na.reminders||[]).filter((r)=>Number(r.plan_run_id||0)===Number(na.currentPlanId||0) && ['scheduled','snoozed','sent'].includes(String(r.status||'')));
     const stateTitle = dashboard.assistant_state_title || 'Состояние обновляется';
     const stateSubtitle = dashboard.assistant_state_subtitle || 'Добавьте данные, чтобы получить персональную оценку.';
+    const ach = state.ach || {};
 
     const onboardingCards = [
       'Помощник помогает разбирать витамины и минералы по вашим данным.',
@@ -2863,28 +2991,35 @@ function adminField(label, field, value, kind='input') {
 
     const previewHtml = !preview ? '' : `<div class="card" style="margin-top:10px"><div><strong>${esc(preview.title_ru || selectedCode)}</strong></div><div class="muted">Статус: ${esc(preview.interpreted_status || 'unknown')} · Уверенность: ${esc(preview.confidence_level || 'low')}</div></div>`;
     const explanation = na.explanation || null;
-    const explanationHtml = !explanation ? '' : `<div class="card" style="margin-top:10px"><div class="row"><strong>${esc(explanation.title_ru || 'Понятное объяснение')}</strong><span class="muted">${esc((na.explanationMeta?.source_type==='fallback') ? 'резервный режим' : 'объяснение')}</span></div><div class="muted" style="margin-top:6px">${esc(explanation.summary_ru || '')}</div>${(explanation.main_points_ru||[]).map((x)=>`<div class="muted">• ${esc(x)}</div>`).join('')}<div style="margin-top:8px"><strong>Почему такая стратегия</strong><div class="muted">${esc(explanation.why_this_plan_ru || '')}</div></div><div style="margin-top:8px"><strong>Что делать сейчас</strong><div class="muted">${esc(explanation.what_to_do_now_ru || '')}</div></div><div class="muted" style="margin-top:8px">Если есть выраженные симптомы, хронические заболевания, беременность, лактация или проблемы с почками/печенью/ЖКТ — приоритет за врачом и свежими анализами.</div></div>`;
-    const planHtml = !plan ? '<div class="muted" style="margin-top:8px">План пока не собран. Начните с оценки данных.</div>' : `<div class="card" style="margin-top:10px"><div class="row"><strong>Текущий план</strong><span class="muted">${esc(plan.confidence_level || 'low')}</span></div><div class="muted" style="margin-top:6px">Режим: ${esc(plan.plan_mode || '-')} · Фаза: ${esc(plan.plan_phase || '-')}</div><div class="muted">Стратегия: ${esc(plan.action_strategy || '-')}</div>${(plan.ui_summary_lines||[]).length?`<div style="margin-top:8px">${plan.ui_summary_lines.map((x)=>`<div class="muted">• ${esc(x)}</div>`).join('')}</div>`:''}<div class="muted" style="margin-top:8px">План носит информационно-аналитический характер и не заменяет консультацию врача.</div><div class="row" style="margin-top:10px; gap:8px"><button class="btn secondary" data-nutrient-explain>${na.loadingExplanation ? 'Формируем…' : 'Понятное объяснение'}</button><button class="btn" data-activate-reminders>${activePlanReminders.length?`Напоминания включены (${activePlanReminders.length})`:'Включить follow-up напоминания'}</button></div>${explanationHtml}</div>`;
+    const explanationHtml = !explanation ? '' : `<div class="card" style="margin-top:10px"><div class="row"><strong>${esc(explanation.title_ru || 'Понятное объяснение')}</strong><span class="muted">${esc((na.explanationMeta?.source_type==='fallback') ? 'резервный режим' : 'объяснение')}</span></div><div class="muted" style="margin-top:6px">${esc(explanation.summary_ru || '')}</div>${(explanation.main_points_ru||[]).map((x)=>`<div class="muted">• ${esc(x)}</div>`).join('')}</div>`;
+    const planHtml = !plan ? '<div class="muted" style="margin-top:8px">План пока не собран. Начните с оценки данных.</div>' : `<div class="card" style="margin-top:10px"><div class="row"><strong>Текущий план</strong><span class="muted">${esc(plan.confidence_level || 'low')}</span></div><div class="muted" style="margin-top:6px">Режим: ${esc(plan.plan_mode || '-')} · Фаза: ${esc(plan.plan_phase || '-')}</div><div style="margin-top:8px"><button class="btn secondary" data-nutrient-explain>${na.loadingExplanation ? 'Формируем…' : 'Понятное объяснение'}</button> <button class="btn" data-activate-reminders>${activePlanReminders.length?`Напоминания включены (${activePlanReminders.length})`:'Включить follow-up напоминания'}</button></div>${explanationHtml}</div>`;
 
     const diff = dashboard.latest_diff_summary;
-    const diffHtml = !diff ? '<div class="muted">Пока нет обновлений для сравнения.</div>' : `<div class="muted">Статус: ${esc(diff.from_status || '—')} → ${esc(diff.to_status || '—')}</div><div class="muted">Фаза: ${esc(diff.from_phase || '—')} → ${esc(diff.to_phase || '—')}</div><div class="muted">Причина: ${esc((diff.reasons || []).join(', ') || 'обновление данных')}</div>`;
+    const diffHtml = !diff ? '<div class="muted">Пока нет обновлений для сравнения.</div>' : `<div class="muted">Статус: ${esc(diff.from_status || '—')} → ${esc(diff.to_status || '—')}</div><div class="muted">Фаза: ${esc(diff.from_phase || '—')} → ${esc(diff.to_phase || '—')}</div>`;
+    const level = Number(ach.level || 1);
+    const levelTitle = String(ach.level_title_ru || 'Новичок');
+    const levelPct = Math.max(0, Math.min(100, Number(ach.level_progress_pct || 0)));
+
+    const activeModule = String(state.profileUi.activeModule || 'assistant');
+    let moduleHtml = '';
+    if (activeModule === 'organs') moduleHtml = `<section class="card fade">${renderBodyMap()}</section>`;
+    if (activeModule === 'achievements') moduleHtml = renderProfileAchievementsModule();
+    if (activeModule === 'cosmetics') moduleHtml = renderProfileCosmeticsModule();
+    if (!moduleHtml) moduleHtml = `
+      ${onboardingBlock}
+      <section class="card fade"><div class="row"><strong>🧪 Нутриентный помощник</strong><button class="btn secondary" data-open-onboarding>Как это работает</button></div><div style="margin-top:8px"><strong>${esc(stateTitle)}</strong></div><div class="muted">${esc(stateSubtitle)}</div><div class="row" style="margin-top:10px;gap:8px"><button class="btn" data-dashboard-primary-cta>${esc(dashboard.primary_cta || 'Начать')}</button></div></section>
+      <section class="card fade"><div class="row"><strong>Готовность данных</strong><span class="muted">${Number(readiness.percent||0)}%</span></div><div style="margin-top:8px">${(readiness.steps||[]).map((s)=>`<div class="item-row"><span>${s.done ? '✓' : '•'} ${esc(s.title||'Шаг')}</span><span class="muted">${s.done ? 'готово' : 'нужно заполнить'}</span></div>`).join('') || '<div class="muted">Данные пока не заполнены.</div>'}</div></section>
+      <section class="card fade"><div class="row"><strong>Следующий шаг</strong></div><div style="margin-top:10px; display:grid; gap:8px"><select class="select" id="nutrientPreviewSelect">${nutrientOptions || '<option value="vitamin_d">vitamin_d</option>'}</select><button class="btn secondary" data-nutrient-preview>${na.loadingPreview ? 'Проверяем…' : 'Проверить текущие данные'}</button><button class="btn" data-nutrient-plan>${na.loadingPlan ? 'Собираем…' : 'Собрать план'}</button></div>${previewHtml}${planHtml}</section>
+      <section class="card fade"><div class="row"><strong>Последнее обновление плана</strong></div><div style="margin-top:8px">${diffHtml}</div></section>
+      <section class="card fade"><div class="row"><strong>История планов</strong></div><div style="margin-top:8px">${history.length ? history.map((x)=>`<button class="item-row" data-open-plan="${x.id}"><span>${esc(x.nutrient_code||'')}</span><span class="muted">${esc(x.status||'версия')}</span></button>`).join('') : '<div class="muted">История пока пустая.</div>'}</div></section>
+      <section class="card fade"><div class="row"><strong>🔔 Follow-up и напоминания</strong></div><div style="margin-top:8px">${(na.reminders||[]).length ? (na.reminders.slice(0,10).map((r)=>`<div class="history-item"><div class="row"><strong>${esc(r.nutrient_code||'')}</strong><span class="muted">${esc(r.status||'')}</span></div><div class="row" style="margin-top:8px; gap:6px"><button class="btn secondary" data-reminder-open-plan="${r.plan_run_id}">Открыть план</button><button class="btn secondary" data-reminder-done="${r.id}">Готово</button><button class="btn secondary" data-reminder-snooze="${r.id}" data-days="3">Отложить +3д</button></div></div>`).join('')) : '<div class="muted">Активных follow-up напоминаний пока нет.</div>'}</div></section>
+      <section class="card fade" data-open-edit><div class="profile-hero"><div class="profile-avatar">👤</div><div><div class="row"><strong>Мой профиль</strong><button class="btn secondary" data-open-edit>Редактировать профиль</button></div><div class="profile-summary-grid">${summary}</div></div></div></section>
+      <section class="card fade"><div class="row"><strong>📄 Мои анализы</strong></div><div style="margin-top:10px">${labs.length?labs.map((r)=>`<button class="item-row" data-open-review="${r.id}"><span>${esc(r.report_date||'без даты')} · ${esc(r.lab_name||'Лаборатория не указана')}</span><span class="muted">${Array.isArray(r.results)?r.results.length:0} показ.</span></button>`).join(''):labsEmptyState()}</div><div class="row" style="margin-top:10px; gap:8px"><button class="btn" data-open-upload>Загрузить документ</button><button class="btn secondary" data-open-manual>Ввести вручную</button></div></section>`;
 
     return `
-      ${onboardingBlock}
-      <section class="card fade"><div class="row"><strong>🧪 Нутриентный помощник</strong><button class="btn secondary" data-open-onboarding>Как это работает</button></div><div style="margin-top:8px"><strong>${esc(stateTitle)}</strong></div><div class="muted">${esc(stateSubtitle)}</div><div class="row" style="margin-top:10px;gap:8px"><button class="btn" data-dashboard-primary-cta>${esc(dashboard.primary_cta || 'Начать')}</button></div><div class="muted" style="margin-top:10px">${esc(dashboard.trust_copy || 'Помощник не ставит диагнозы. Качество рекомендаций зависит от полноты данных.')}</div></section>
-
-      <section class="card fade"><div class="row"><strong>Готовность данных</strong><span class="muted">${Number(readiness.percent||0)}%</span></div><div style="margin-top:8px">${(readiness.steps||[]).map((s)=>`<div class="item-row"><span>${s.done ? '✓' : '•'} ${esc(s.title||'Шаг')}</span><span class="muted">${s.done ? 'готово' : 'нужно заполнить'}</span></div>`).join('') || '<div class="muted">Данные пока не заполнены.</div>'}</div></section>
-
-      <section class="card fade"><div class="row"><strong>Следующий шаг</strong></div><div class="muted" style="margin-top:8px">${esc(dashboard.primary_cta || 'Открыть помощник')}</div><div style="margin-top:10px; display:grid; gap:8px"><select class="select" id="nutrientPreviewSelect">${nutrientOptions || '<option value="vitamin_d">vitamin_d</option>'}</select><button class="btn secondary" data-nutrient-preview>${na.loadingPreview ? 'Проверяем…' : 'Проверить текущие данные'}</button><button class="btn" data-nutrient-plan>${na.loadingPlan ? 'Собираем…' : 'Собрать план'}</button></div>${previewHtml}${planHtml}</section>
-
-      <section class="card fade"><div class="row"><strong>Последнее обновление плана</strong></div><div style="margin-top:8px">${diffHtml}</div></section>
-
-      <section class="card fade"><div class="row"><strong>История планов</strong></div><div style="margin-top:8px">${history.length ? history.map((x)=>`<button class="item-row" data-open-plan="${x.id}"><span>${esc(x.nutrient_code||'')}</span><span class="muted">${esc(x.status||'версия')}</span></button><div class="muted" style="margin-bottom:8px">${esc(x.summary||'')} ${x.update_reason_human ? `· ${esc(x.update_reason_human)}` : ''}</div>`).join('') : '<div class="muted">История пока пустая. После первой сборки здесь появятся версии планов.</div>'}</div></section>
-
-      <section class="card fade"><div class="row"><strong>🔔 Follow-up и напоминания</strong></div><div style="margin-top:8px">${(na.reminders||[]).length ? (na.reminders.slice(0,10).map((r)=>`<div class="history-item"><div class="row"><strong>${esc(r.nutrient_code||'')}</strong><span class="muted">${esc(r.status||'')}</span></div><div class="muted">${esc(r.reminder_type||'followup')}</div><div class="muted">Дата: ${esc(r.scheduled_for_utc||'')}</div><div class="row" style="margin-top:8px; gap:6px"><button class="btn secondary" data-reminder-open-plan="${r.plan_run_id}">Открыть план</button><button class="btn secondary" data-reminder-done="${r.id}">Готово</button><button class="btn secondary" data-reminder-snooze="${r.id}" data-days="3">Отложить +3д</button></div></div>`).join('')) : '<div class="muted">Активных follow-up напоминаний пока нет.</div>'}</div></section>
-
-      <section class="card fade" data-open-edit><div class="profile-hero"><div class="profile-avatar">👤</div><div><div class="row"><strong>Мой профиль</strong><button class="btn secondary" data-open-edit>Редактировать профиль</button></div><div class="profile-summary-grid">${summary}</div></div></div></section>
-      <section class="card fade"><div class="row"><strong>📄 Мои анализы</strong></div><div class="muted" style="margin-top:8px">Лучше добавлять свежие анализы: со старыми результатами итог может быть менее точным.</div><div style="margin-top:10px">${labs.length?labs.map((r)=>`<button class="item-row" data-open-review="${r.id}"><span>${esc(r.report_date||'без даты')} · ${esc(r.lab_name||'Лаборатория не указана')}</span><span class="muted">${Array.isArray(r.results)?r.results.length:0} показ.</span></button><div class="muted" style="margin-bottom:8px">${r.source==='manual'?'Добавлен вручную':'Загружен из документа'}${r.parse_status==='needs_manual_review'?' · Требует проверки':''}</div>`).join(''):labsEmptyState()}</div><div class="row" style="margin-top:10px; gap:8px"><button class="btn" data-open-upload>Загрузить документ</button><button class="btn secondary" data-open-manual>Ввести вручную</button></div></section>
+      <section class="card fade"><div class="row"><strong>Уровень и прогресс</strong><span class="muted">Level ${level}</span></div><div style="margin-top:8px"><strong>${esc(levelTitle)}</strong></div><div class="progress"><i style="width:${levelPct}%"></i></div></section>
+      ${renderProfileModulesGrid()}
+      ${moduleHtml}
       ${renderProfileEditorModal()}${renderLabsModal('manual')}${renderLabsModal('upload')}${renderReviewModal()}
     `;
   }
@@ -2892,6 +3027,15 @@ function adminField(label, field, value, kind='input') {
   function collectLabRows(containerId){ const rows=[]; document.querySelectorAll(`#${containerId} [data-lab-row]`).forEach((rowEl)=>{ const idx=rowEl.dataset.labRow; const analyte_code=document.querySelector(`[data-lab-field="analyte_code"][data-idx="${idx}"]`)?.value||''; const preset=ANALYTE_PRESETS.find((x)=>x.code===analyte_code); const value=document.querySelector(`[data-lab-field="value_num"][data-idx="${idx}"]`)?.value||''; rows.push({ analyte_code, analyte_name:preset?.title||analyte_code, value_text:String(value), value_num:Number(String(value).replace(',','.'))||null, unit:document.querySelector(`[data-lab-field="unit"][data-idx="${idx}"]`)?.value||'', ref_low:Number(document.querySelector(`[data-lab-field="ref_low"][data-idx="${idx}"]`)?.value||'')||null, ref_high:Number(document.querySelector(`[data-lab-field="ref_high"][data-idx="${idx}"]`)?.value||'')||null }); }); return rows.filter((x)=>x.analyte_code); }
 
   function bindProfileEvents() {
+    document.querySelectorAll('[data-profile-module]').forEach((el)=>el.addEventListener('click', async ()=>{
+      const next = String(el.dataset.profileModule || 'assistant');
+      state.profileUi.activeModule = next;
+      renderActiveTab();
+      if (next === 'organs') {
+        await loadBodyMap(true);
+        bindBodyMapEvents();
+      }
+    }));
     document.querySelectorAll('[data-open-edit]').forEach((el)=>el.addEventListener('click', ()=>{ state.profileUi.editOpen=true; renderActiveTab(); }));
     document.querySelectorAll('[data-close-edit]').forEach((el)=>el.addEventListener('click', ()=>{ state.profileUi.editOpen=false; renderActiveTab(); }));
     document.querySelectorAll('[data-open-manual]').forEach((el)=>el.addEventListener('click', ()=>{ state.profileUi.manualOpen=true; renderActiveTab(); }));
@@ -3048,7 +3192,28 @@ function adminField(label, field, value, kind='input') {
       }
     });
 
+    document.querySelector('[data-cos-save]')?.addEventListener('click', async () => {
+      try {
+        const patch = {
+          theme_id: document.getElementById("cosTheme")?.value || "base",
+          tab_skin_id: document.getElementById("cosTab")?.value || "classic",
+          badge_id: document.getElementById("cosBadge")?.value || "none",
+        };
+        const res = await api("./api/cosmetics/set", { method: "POST", body: patch });
+        state.ach = state.ach || {};
+        state.ach.cosmetics = res.cosmetics;
+        state.me = { ...(state.me || {}), cosmetics: res.cosmetics };
+        applyCosmetics(res.cosmetics);
+        showToast('Косметика сохранена');
+        renderMainApp();
+      } catch {
+        showToast('Не удалось сохранить косметику');
+      }
+    });
+
     document.querySelectorAll('[data-lab-field="analyte_code"]').forEach((el)=>el.addEventListener('change',(e)=>{ const idx=e.target.dataset.idx; const unitEl=document.querySelector(`[data-lab-field="unit"][data-idx="${idx}"]`); if(unitEl){ unitEl.innerHTML=unitOptions(e.target.value,''); } }));
+
+    if (String(state.profileUi.activeModule || 'assistant') === 'organs') bindBodyMapEvents();
   }
 
 
@@ -3525,12 +3690,12 @@ function adminField(label, field, value, kind='input') {
         <div class="muted" style="margin-top:4px">${esc(accessHint)}</div>
         <div class="muted" style="margin-top:4px">После подписки: постоянный доступ к WebApp, AI check-in и удобный ежедневный трекинг.</div>
         <div class="muted" style="margin-top:6px">Документы: ${state.settingsData?.offer_url ? `<a href="${esc(state.settingsData.offer_url)}" target="_blank" rel="noopener noreferrer">Оферта</a>${state.settingsData?.offer_version ? ` (v${esc(state.settingsData.offer_version)})` : ''}` : 'Оферта недоступна'} · ${state.settingsData?.privacy_url ? `<a href="${esc(state.settingsData.privacy_url)}" target="_blank" rel="noopener noreferrer">Privacy Policy</a>${state.settingsData?.privacy_version ? ` (v${esc(state.settingsData.privacy_version)})` : ''}` : 'Privacy Policy недоступна'}</div>
-        <details class="card" style="margin-top:10px"><summary><strong>💳 Подписка</strong></summary>
+        <details class="card" style="margin-top:10px" ${state.settingsUi?.premiumOpen ? 'open' : ''}><summary><strong>💳 Подписка</strong></summary>
           <div class="muted" style="margin-top:8px">${me.premium ? `Активна до ${esc(String(me.premium_until_utc || '').slice(0, 10) || '—')}` : 'Не активна'}</div>
           <div class="muted" style="margin-top:6px">Преимущества: доступ к WebApp, AI check-in, удобный ежедневный трекинг, карта/today/настройка стека/напоминания.</div>
           <div class="row" style="gap:8px; flex-wrap:wrap; margin-top:8px;">
-            ${(me.plans || []).map((p) => p.stars_enabled ? `<button class="btn" data-settings-open-premium-plan-stars="${esc(p.plan_id)}">⭐ ${esc(p.plan_id)}</button>` : '').join('')}
-            ${(me.plans || []).map((p) => p.rub_enabled ? `<button class="btn secondary" data-settings-open-premium-plan-rub="${esc(p.plan_id)}">₽ ${esc(p.plan_id)}</button>` : '').join('')}
+            ${(me.plans || []).map((p) => p.rub_enabled ? `<button class="btn secondary" data-settings-open-premium-plan-rub="${esc(p.plan_id)}">${esc(planNameRu(p.plan_id, p.months))} · ${Math.round(Number(p.price_rub || 0) / 100)} ₽</button>` : '').join('')}
+            ${(me.plans || []).map((p) => p.stars_enabled ? `<button class="btn" data-settings-open-premium-plan-stars="${esc(p.plan_id)}">${esc(planNameRu(p.plan_id, p.months))} · ${Number(p.price_stars || 0)} ⭐</button>` : '').join('')}
           </div>
           <div style="margin-top:8px"><button class="btn" data-settings-open-premium-main>${me.premium ? 'Продлить Premium' : 'Оформить Premium'}</button></div>
         </details>
@@ -3634,15 +3799,16 @@ function adminField(label, field, value, kind='input') {
       await loadMySupplements(true);
     });
     document.querySelectorAll('[data-settings-open-premium-plan-stars]').forEach((el) => {
-      el.addEventListener('click', () => purchase(el.dataset.settingsOpenPremiumPlanStars, 'stars', el));
+      el.addEventListener('click', () => { state.settingsUi = { ...(state.settingsUi || {}), premiumOpen: true }; purchase(el.dataset.settingsOpenPremiumPlanStars, 'stars', el); });
     });
     document.querySelectorAll('[data-settings-open-premium-plan-rub]').forEach((el) => {
-      el.addEventListener('click', () => openPaymentScreen(el.dataset.settingsOpenPremiumPlanRub));
+      el.addEventListener('click', () => { state.settingsUi = { ...(state.settingsUi || {}), premiumOpen: true }; openPaymentScreen(el.dataset.settingsOpenPremiumPlanRub, 'settings'); });
     });
     document.querySelectorAll('[data-settings-open-premium-main]').forEach((el) => {
       el.addEventListener('click', () => {
+        state.settingsUi = { ...(state.settingsUi || {}), premiumOpen: true };
         const firstPlan = (state.me?.plans || [])[0]?.plan_id || 'm1';
-        openPaymentScreen(firstPlan);
+        openPaymentScreen(firstPlan, 'settings');
       });
     });
 

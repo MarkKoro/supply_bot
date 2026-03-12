@@ -53,7 +53,7 @@ from keyboards import (
     today_slots_kb,
     slot_intake_kb,
     premium_plans_kb,
-    premium_methods_kb,
+    premium_stars_kb,
     premium_upsell_kb,
     premium_webapp_checkout_kb,
     intake_pick_kb,
@@ -1847,12 +1847,17 @@ def _premium_plans_payload(s) -> list[dict]:
     for plan_id, months in s.PREMIUM_PLANS.items():
         rub_kop = int(s.PREMIUM_PRICES_RUB.get(plan_id, 0) or 0)
         stars = int(s.PREMIUM_PRICES_STARS.get(plan_id, 0) or 0)
-        title = f"{labels.get(plan_id, plan_id)}"
-        if rub_kop > 0:
-            title += f" · {rub_kop / 100:.0f} ₽"
-        if stars > 0:
-            title += f" / {stars}⭐"
-        plans.append({"plan_id": plan_id, "months": int(months), "title": title})
+        period = labels.get(plan_id, f"{int(months)} мес.")
+        rub_title = f"{period} · {rub_kop / 100:.0f} ₽" if rub_kop > 0 else period
+        stars_title = f"{period} · {stars} ⭐" if stars > 0 else period
+        plans.append({
+            "plan_id": plan_id,
+            "months": int(months),
+            "title": rub_title,
+            "stars_title": stars_title,
+            "rub": rub_kop,
+            "stars": stars,
+        })
     return plans
 
 
@@ -1901,13 +1906,10 @@ async def _show_premium_hub(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     plans = _premium_plans_payload(s)
     text = (
         "⭐ <b>Premium</b>\n\n"
-        "В боте уже можно читать базу и собрать основу стека.\n\n"
-        "Premium нужен не ради «закрытого клуба», а ради удобства: Today с быстрыми отметками, карта тела, AI check-in и нормальная настройка стека/напоминаний в WebApp.\n\n"
-        "Практический выигрыш — меньше хаоса в трекинге и понятнее, что реально работает для тебя.\n\n"
-        "Выбери тариф:"
+        "С Premium открывается полный WebApp: удобный Today, карта органов, Нутриентный помощник, AI check-in и гибкая настройка напоминаний.\n\n"
+        "Выберите срок — кнопка сразу откроет оплату в WebApp."
     )
-    await show(update, context, text, premium_plans_kb(plans), route="menu:premium")
-
+    await show(update, context, text, premium_plans_kb(plans, s.WEBAPP_URL), route="menu:premium")
 
 async def _show_starter_trial_offer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     lines = [
@@ -2664,31 +2666,26 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await show(
                 update,
                 context,
-                "⭐ <b>Что доступно бесплатно и в Premium</b>\n\n"
-                "Бесплатно:\n"
-                "• база добавок\n"
-                "• стартовый подбор\n"
-                "• напоминания в боте\n\n"
-                "Платно (Premium):\n"
-                "• WebApp\n"
-                "• геймификация\n"
-                "• достижения\n"
-                "• интерактивная карта\n"
-                "• более удобный каталог\n"
-                "• AI check-in\n"
-                "• расширенная настройка стека и напоминаний",
+                "⭐ <b>Что входит в Premium</b>\n\n"
+                "• полный доступ к WebApp\n"
+                "• Нутриентный помощник\n"
+                "• карта органов с деталями по системам\n"
+                "• AI check-in и подсказки по самочувствию\n"
+                "• удобный трекинг приёма и напоминаний\n"
+                "• достижения и персонализация интерфейса\n\n"
+                "База добавок и стартовый подбор по-прежнему доступны бесплатно.",
                 premium_upsell_kb(),
                 route="menu:premium",
             )
             return
-        if data.startswith("premium:plan:"):
-            plan_id = data.split(":", 2)[2]
+        if data == "premium:stars_menu":
             s_cfg = context.application.bot_data["settings"]
+            plans = _premium_plans_payload(s_cfg)
             await show(
                 update,
                 context,
-                "Выбери способ оплаты:",
-                premium_methods_kb(plan_id, s_cfg.BILLING_ENABLED_STARS, s_cfg.BILLING_ENABLED_RUB),
+                "⭐ <b>Оплата в звёздах</b>\n\nВыберите срок подписки:",
+                premium_stars_kb(plans, back_cb="menu:premium"),
                 route="menu:premium",
             )
             return

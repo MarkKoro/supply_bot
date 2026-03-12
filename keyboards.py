@@ -1,5 +1,5 @@
 from __future__ import annotations
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 
 import tz
 
@@ -906,6 +906,13 @@ def premium_upsell_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("⭐ Купить Premium", callback_data="menu:premium")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")],
+    ])
+
+
+def premium_webapp_checkout_kb(payment_url: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("💳 Открыть оплату", web_app=WebAppInfo(url=str(payment_url or "").strip()))],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="menu:premium")],
     ])
 
 

@@ -24,7 +24,16 @@ class Settings:
     ADMIN_TG_IDS: set[int]
     OWNER_TG_ID: int
     WEBAPP_URL: str
+    PUBLIC_BASE_URL: str
+    PROJECT_KEY: str
+    WEBAPP_PUBLIC_PATH: str
+    YOOKASSA_RETURN_URL: str
+    BOT_USERNAME: str
+    PAYMENTS_EXTERNAL_ONLY: bool
     YOOKASSA_PROVIDER_TOKEN: str
+    YOOKASSA_SHOP_ID: str
+    YOOKASSA_SECRET_KEY: str
+    YOOKASSA_WIDGET_ENABLED: bool
     BILLING_ENABLED_RUB: bool
     BILLING_ENABLED_STARS: bool
     PREMIUM_PRICES_RUB: dict[str, int]
@@ -106,6 +115,21 @@ def get_settings() -> Settings:
         "m12": 12,
     }
     yookassa_provider_token = os.getenv("YOOKASSA_PROVIDER_TOKEN", "").strip()
+    yookassa_shop_id = os.getenv("YOOKASSA_SHOP_ID", "").strip()
+    yookassa_secret_key = os.getenv("YOOKASSA_SECRET_KEY", "").strip()
+    public_base_url = os.getenv("PUBLIC_BASE_URL", "").strip()
+    project_key = os.getenv("PROJECT_KEY", "supply_bot").strip() or "supply_bot"
+    webapp_public_path = os.getenv("WEBAPP_PUBLIC_PATH", "/supply").strip() or "/supply"
+    if not webapp_public_path.startswith("/"):
+        webapp_public_path = f"/{webapp_public_path}"
+    yookassa_return_url = os.getenv("YOOKASSA_RETURN_URL", "").strip()
+    if not yookassa_return_url:
+        yookassa_return_url = (
+            public_base_url.rstrip("/")
+            + webapp_public_path.rstrip("/")
+            + "/payment-return.html"
+        )
+    rub_default_enabled = "1" if (yookassa_shop_id and yookassa_secret_key) else "0"
 
     admin_ids = _parse_admin_ids(os.getenv("ADMIN_IDS", ""))
     admin_tg_ids = get_admin_ids() or set(admin_ids)
@@ -137,8 +161,17 @@ def get_settings() -> Settings:
         ADMIN_TG_IDS=admin_tg_ids,
         OWNER_TG_ID=owner_tg_id,
         WEBAPP_URL=os.getenv("WEBAPP_URL", "").strip(),
+        PUBLIC_BASE_URL=public_base_url,
+        PROJECT_KEY=project_key,
+        WEBAPP_PUBLIC_PATH=webapp_public_path,
+        YOOKASSA_RETURN_URL=yookassa_return_url,
+        BOT_USERNAME=os.getenv("BOT_USERNAME", "").strip(),
+        PAYMENTS_EXTERNAL_ONLY=_parse_bool(os.getenv("PAYMENTS_EXTERNAL_ONLY", "0")),
         YOOKASSA_PROVIDER_TOKEN=yookassa_provider_token,
-        BILLING_ENABLED_RUB=_parse_bool(os.getenv("BILLING_ENABLED_RUB", "1" if yookassa_provider_token else "0")),
+        YOOKASSA_SHOP_ID=yookassa_shop_id,
+        YOOKASSA_SECRET_KEY=yookassa_secret_key,
+        YOOKASSA_WIDGET_ENABLED=_parse_bool(os.getenv("YOOKASSA_WIDGET_ENABLED", "0")),
+        BILLING_ENABLED_RUB=_parse_bool(os.getenv("BILLING_ENABLED_RUB", rub_default_enabled)),
         BILLING_ENABLED_STARS=_parse_bool(os.getenv("BILLING_ENABLED_STARS", "1")),
         PREMIUM_PRICES_RUB=_parse_prices_map(os.getenv("PREMIUM_PRICES_RUB", ""), premium_prices_rub_default),
         PREMIUM_PRICES_STARS=_parse_prices_map(os.getenv("PREMIUM_PRICES_STARS", ""), premium_prices_stars_default),

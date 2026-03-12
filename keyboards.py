@@ -505,6 +505,8 @@ def admin_hub_kb(*, perms: dict[str, bool] | None = None) -> InlineKeyboardMarku
         rows.append([InlineKeyboardButton("📦 Bulk операции", callback_data="admin:bulk_stub")])
     if perms.get("users_view", False) or perms.get("users_ban", False):
         rows.append([InlineKeyboardButton("👤 Пользователи", callback_data="admin:users_stub")])
+    if perms.get("payments_view", False):
+        rows.append([InlineKeyboardButton("💳 Чеки", callback_data="admin:paychecks")])
     if perms.get("roles_manage", False):
         rows.append([InlineKeyboardButton("🛡 Роли", callback_data="admin:roles")])
     if perms.get("system_diag", False):
@@ -935,3 +937,35 @@ def admin_diag_confirm_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("✅ Да, починить", callback_data="admin:diag:apply:confirm")],
         [InlineKeyboardButton("⬅️ Отмена", callback_data="admin:diag")],
     ])
+
+
+def admin_paychecks_kb(*, index: int, total: int, filter_code: str, current_receipt_status: str = "pending") -> InlineKeyboardMarkup:
+    safe_filter = str(filter_code or "all")
+    rows: list[list[InlineKeyboardButton]] = []
+    filters = [
+        ("Все", "all"),
+        ("Без email", "missing_email"),
+        ("С email", "has_email"),
+        ("Чек не отправлен", "receipt_pending"),
+        ("Чек отправлен", "receipt_sent"),
+        ("Готово к чеку", "ready"),
+    ]
+    for label, code in filters:
+        mark = "✅ " if safe_filter == code else ""
+        rows.append([InlineKeyboardButton(f"{mark}{label}", callback_data=f"admin:paychecks:filter:{code}")])
+
+    nav = [
+        InlineKeyboardButton("⏮", callback_data="admin:paychecks:nav:first"),
+        InlineKeyboardButton("◀️", callback_data="admin:paychecks:nav:prev"),
+        InlineKeyboardButton(f"{max(0, index) + 1}/{max(1, total)}", callback_data="noop"),
+        InlineKeyboardButton("▶️", callback_data="admin:paychecks:nav:next"),
+        InlineKeyboardButton("⏭", callback_data="admin:paychecks:nav:last"),
+    ]
+    rows.append(nav)
+
+    if str(current_receipt_status or "pending") == "sent":
+        rows.append([InlineKeyboardButton("↩️ Сбросить статус чека", callback_data="admin:paychecks:mark_pending")])
+    else:
+        rows.append([InlineKeyboardButton("✅ Пометить чек отправленным", callback_data="admin:paychecks:mark_sent")])
+    rows.append([InlineKeyboardButton("↩️ В админ-хаб", callback_data="admin:home")])
+    return InlineKeyboardMarkup(rows)

@@ -136,7 +136,10 @@ CREATE TABLE IF NOT EXISTS users (
   consent_given_at_utc TEXT NOT NULL DEFAULT '',
   consent_offer_version TEXT NOT NULL DEFAULT '',
   consent_privacy_version TEXT NOT NULL DEFAULT '',
-  consent_source TEXT NOT NULL DEFAULT ''
+  consent_source TEXT NOT NULL DEFAULT '',
+  receipt_email TEXT NOT NULL DEFAULT '',
+  receipt_email_status TEXT NOT NULL DEFAULT 'missing',
+  receipt_email_collected_at TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS supplements (
@@ -402,7 +405,18 @@ CREATE TABLE IF NOT EXISTS payments (
   telegram_payment_charge_id TEXT,
   provider_payment_charge_id TEXT,
   status TEXT NOT NULL,
-  created_at_utc TEXT NOT NULL
+  created_at_utc TEXT NOT NULL,
+  project_key TEXT,
+  payment_kind TEXT,
+  plan_id TEXT,
+  finalized_at_utc TEXT,
+  receipt_email TEXT NOT NULL DEFAULT '',
+  receipt_email_status TEXT NOT NULL DEFAULT 'missing',
+  receipt_email_source TEXT NOT NULL DEFAULT '',
+  receipt_email_collected_at TEXT NOT NULL DEFAULT '',
+  receipt_status TEXT NOT NULL DEFAULT 'pending',
+  receipt_sent_at TEXT,
+  receipt_note TEXT NOT NULL DEFAULT ''
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_tg_charge_unique
   ON payments(telegram_payment_charge_id)
@@ -492,6 +506,9 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     await _ensure_column(conn, "users", "consent_offer_version", "TEXT NOT NULL DEFAULT ''")
     await _ensure_column(conn, "users", "consent_privacy_version", "TEXT NOT NULL DEFAULT ''")
     await _ensure_column(conn, "users", "consent_source", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "users", "receipt_email", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "users", "receipt_email_status", "TEXT NOT NULL DEFAULT 'missing'")
+    await _ensure_column(conn, "users", "receipt_email_collected_at", "TEXT NOT NULL DEFAULT ''")
     await conn.execute(
         """CREATE TABLE IF NOT EXISTS user_complexes (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -688,6 +705,15 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     )
     await conn.execute(
         "UPDATE users SET consent_source='' WHERE consent_source IS NULL"
+    )
+    await conn.execute(
+        "UPDATE users SET receipt_email='' WHERE receipt_email IS NULL"
+    )
+    await conn.execute(
+        "UPDATE users SET receipt_email_status='missing' WHERE receipt_email_status IS NULL OR receipt_email_status=''"
+    )
+    await conn.execute(
+        "UPDATE users SET receipt_email_collected_at='' WHERE receipt_email_collected_at IS NULL"
     )
     await conn.execute(
         "UPDATE supplements SET rules_tags='' WHERE rules_tags IS NULL"
@@ -1626,7 +1652,14 @@ async def _ensure_payments_table(conn: aiosqlite.Connection) -> None:
               project_key TEXT,
               payment_kind TEXT,
               plan_id TEXT,
-              finalized_at_utc TEXT
+              finalized_at_utc TEXT,
+              receipt_email TEXT NOT NULL DEFAULT '',
+              receipt_email_status TEXT NOT NULL DEFAULT 'missing',
+              receipt_email_source TEXT NOT NULL DEFAULT '',
+              receipt_email_collected_at TEXT NOT NULL DEFAULT '',
+              receipt_status TEXT NOT NULL DEFAULT 'pending',
+              receipt_sent_at TEXT,
+              receipt_note TEXT NOT NULL DEFAULT ''
             )"""
         )
         await conn.execute(
@@ -1654,6 +1687,19 @@ async def _ensure_payments_table(conn: aiosqlite.Connection) -> None:
     await _ensure_column(conn, "payments", "payment_kind", "TEXT")
     await _ensure_column(conn, "payments", "plan_id", "TEXT")
     await _ensure_column(conn, "payments", "finalized_at_utc", "TEXT")
+    await _ensure_column(conn, "payments", "receipt_email", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "payments", "receipt_email_status", "TEXT NOT NULL DEFAULT 'missing'")
+    await _ensure_column(conn, "payments", "receipt_email_source", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "payments", "receipt_email_collected_at", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "payments", "receipt_status", "TEXT NOT NULL DEFAULT 'pending'")
+    await _ensure_column(conn, "payments", "receipt_sent_at", "TEXT")
+    await _ensure_column(conn, "payments", "receipt_note", "TEXT NOT NULL DEFAULT ''")
+    await conn.execute("UPDATE payments SET receipt_email='' WHERE receipt_email IS NULL")
+    await conn.execute("UPDATE payments SET receipt_email_status='missing' WHERE receipt_email_status IS NULL OR receipt_email_status=''")
+    await conn.execute("UPDATE payments SET receipt_email_source='' WHERE receipt_email_source IS NULL")
+    await conn.execute("UPDATE payments SET receipt_email_collected_at='' WHERE receipt_email_collected_at IS NULL")
+    await conn.execute("UPDATE payments SET receipt_status='pending' WHERE receipt_status IS NULL OR receipt_status=''")
+    await conn.execute("UPDATE payments SET receipt_note='' WHERE receipt_note IS NULL")
     await conn.execute(
         """CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_tg_charge_unique
            ON payments(telegram_payment_charge_id)
@@ -2061,6 +2107,74 @@ async def touch_user(
 
     await conn.commit()
     return int(user_id)
+
+
+def is_valid_receipt_email(value: str | None) -> bool:
+    email = str(value or "").strip().lower()
+    if not email or len(email) > 254:
+        return False
+    if "@" not in email or email.count("@") != 1:
+        return False
+    local, domain = email.split("@", 1)
+    if not local or not domain or "." not in domain:
+        return False
+    return bool(re.fullmatch(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}", email))
+
+
+async def get_user_receipt_email(conn: aiosqlite.Connection, tg_user_id: int) -> dict:
+    await get_or_create_user(conn, int(tg_user_id), tz_name="")
+    row = await fetchone(
+        conn,
+        "SELECT receipt_email, receipt_email_status, receipt_email_collected_at FROM users WHERE tg_user_id=?",
+        (int(tg_user_id),),
+    )
+    email = str((row["receipt_email"] if row else "") or "").strip()
+    status = str((row["receipt_email_status"] if row else "missing") or "missing").strip().lower()
+    collected_at = str((row["receipt_email_collected_at"] if row else "") or "").strip()
+    if email and status not in {"provided", "invalid"}:
+        status = "provided"
+    if not email:
+        status = "missing"
+    return {
+        "email": email,
+        "status": status,
+        "collected_at": collected_at,
+        "has_email": bool(email and status == "provided"),
+    }
+
+
+async def upsert_user_receipt_email(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    email: str,
+    *,
+    source: str = "webapp",
+) -> dict:
+    safe_email = str(email or "").strip().lower()
+    if not is_valid_receipt_email(safe_email):
+        await get_or_create_user(conn, int(tg_user_id), tz_name="")
+        await conn.execute(
+            "UPDATE users SET receipt_email_status='invalid' WHERE tg_user_id=?",
+            (int(tg_user_id),),
+        )
+        await conn.commit()
+        return {"ok": False, "status": "invalid", "email": safe_email}
+    now = utc_now_iso()
+    await get_or_create_user(conn, int(tg_user_id), tz_name="")
+    await conn.execute(
+        """UPDATE users
+           SET receipt_email=?, receipt_email_status='provided', receipt_email_collected_at=?
+           WHERE tg_user_id=?""",
+        (safe_email, now, int(tg_user_id)),
+    )
+    await conn.commit()
+    return {
+        "ok": True,
+        "status": "provided",
+        "email": safe_email,
+        "collected_at": now,
+        "source": str(source or "webapp"),
+    }
 
 
 async def get_user_status(conn: aiosqlite.Connection, tg_user_id: int) -> dict:
@@ -2472,6 +2586,10 @@ async def log_payment_paid(
     payment_kind: str | None = None,
     plan_id: str | None = None,
     finalized_at_utc: str | None = None,
+    receipt_email: str | None = None,
+    receipt_email_status: str | None = None,
+    receipt_email_source: str | None = None,
+    receipt_email_collected_at: str | None = None,
 ) -> bool:
     created = utc_now_iso()
     if telegram_payment_charge_id:
@@ -2491,13 +2609,24 @@ async def log_payment_paid(
         if existing:
             return False
     user_id = await get_or_create_user(conn, tg_user_id)
+    profile = await get_user_receipt_email(conn, int(tg_user_id))
+    resolved_email = str((receipt_email if receipt_email is not None else profile.get("email")) or "").strip().lower()
+    resolved_status = str((receipt_email_status if receipt_email_status is not None else profile.get("status")) or "missing").strip().lower()
+    if resolved_email and resolved_status not in {"provided", "invalid"}:
+        resolved_status = "provided"
+    if not resolved_email:
+        resolved_status = "missing"
+    resolved_source = str(receipt_email_source or ("webapp" if resolved_email else "")).strip().lower()
+    resolved_collected_at = str(receipt_email_collected_at or profile.get("collected_at") or "").strip()
     try:
         await conn.execute(
             """INSERT INTO payments(
                    user_id, provider, currency, amount, payload,
                    telegram_payment_charge_id, provider_payment_charge_id, status, created_at_utc,
-                   project_key, payment_kind, plan_id, finalized_at_utc
-               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   project_key, payment_kind, plan_id, finalized_at_utc,
+                   receipt_email, receipt_email_status, receipt_email_source, receipt_email_collected_at,
+                   receipt_status, receipt_sent_at, receipt_note
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 user_id,
                 provider,
@@ -2512,6 +2641,13 @@ async def log_payment_paid(
                 payment_kind,
                 plan_id,
                 finalized_at_utc,
+                resolved_email,
+                resolved_status,
+                resolved_source,
+                resolved_collected_at,
+                "pending",
+                None,
+                "",
             ),
         )
         await conn.commit()
@@ -2520,6 +2656,63 @@ async def log_payment_paid(
         if telegram_payment_charge_id or provider_payment_charge_id:
             return False
         raise
+
+async def admin_count_payments_for_receipts(conn: aiosqlite.Connection, filters: list[str], params: list[object]) -> int:
+    where = " AND ".join(filters) if filters else "1=1"
+    row = await fetchone(
+        conn,
+        f"SELECT COUNT(*) AS c FROM payments p WHERE {where}",
+        tuple(params),
+    )
+    return int(row["c"] or 0) if row else 0
+
+
+async def admin_list_receipt_payments(conn: aiosqlite.Connection, filter_code: str = "ready", limit: int = 200) -> list[dict]:
+    safe_filter = str(filter_code or "ready").strip().lower()
+    filters = ["p.status='paid'", "UPPER(COALESCE(p.currency,''))='RUB'"]
+    params: list[object] = []
+    if safe_filter == "missing_email":
+        filters.append("COALESCE(p.receipt_email,'')=''")
+    elif safe_filter == "has_email":
+        filters.append("COALESCE(p.receipt_email,'')!=''")
+    elif safe_filter == "receipt_pending":
+        filters.append("COALESCE(p.receipt_status,'pending')='pending'")
+    elif safe_filter == "receipt_sent":
+        filters.append("COALESCE(p.receipt_status,'pending')='sent'")
+    elif safe_filter == "ready":
+        filters.append("COALESCE(p.receipt_email,'')!=''")
+        filters.append("COALESCE(p.receipt_status,'pending')='pending'")
+    where = " AND ".join(filters)
+    rows = await fetchall(
+        conn,
+        f"""SELECT p.*, u.tg_user_id, u.tg_username, u.tg_first_name, u.tg_last_name
+            FROM payments p
+            LEFT JOIN users u ON u.id=p.user_id
+            WHERE {where}
+            ORDER BY COALESCE(p.finalized_at_utc, p.created_at_utc) DESC, p.id DESC
+            LIMIT ?""",
+        tuple(params + [max(1, min(int(limit), 1000))]),
+    )
+    return [dict(r) for r in rows]
+
+
+async def admin_set_payment_receipt_status(
+    conn: aiosqlite.Connection,
+    payment_id: int,
+    *,
+    status: str,
+    note: str | None = None,
+) -> bool:
+    safe = str(status or "pending").strip().lower()
+    if safe not in {"pending", "sent"}:
+        return False
+    sent_at = utc_now_iso() if safe == "sent" else None
+    await conn.execute(
+        "UPDATE payments SET receipt_status=?, receipt_sent_at=?, receipt_note=COALESCE(?, receipt_note) WHERE id=?",
+        (safe, sent_at, note, int(payment_id)),
+    )
+    await conn.commit()
+    return True
 
 async def set_user_last_view(
     conn: aiosqlite.Connection,

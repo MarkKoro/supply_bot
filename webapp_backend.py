@@ -88,6 +88,10 @@ class RedirectCreateBody(BaseModel):
     kind: str = "subscription"
 
 
+class ReceiptEmailBody(BaseModel):
+    email: str
+
+
 class CatalogToggleBody(BaseModel):
     supplement_id: int
     action: str
@@ -400,6 +404,8 @@ async def _finalize_redirect_subscription_payment(payment: dict) -> dict:
     if not payment_id:
         raise HTTPException(status_code=400, detail="Missing payment id")
     metadata = payment.get("metadata") or {}
+    receipt_email = str(metadata.get("receipt_email") or "").strip().lower()
+    receipt_collected_at = str(metadata.get("receipt_email_collected_at") or "").strip()
     if str(metadata.get("project_key") or "") != s.PROJECT_KEY:
         raise HTTPException(status_code=403, detail="Project mismatch")
     if str(metadata.get("kind") or "") != "subscription":
@@ -435,6 +441,10 @@ async def _finalize_redirect_subscription_payment(payment: dict) -> dict:
             payment_kind="subscription",
             plan_id=plan_id,
             finalized_at_utc=db.utc_now_iso(),
+            receipt_email=receipt_email,
+            receipt_email_status="provided" if receipt_email else "missing",
+            receipt_email_source="webapp" if receipt_email else "",
+            receipt_email_collected_at=receipt_collected_at,
         )
         if not inserted:
             return {
@@ -558,6 +568,7 @@ async def api_me(x_telegram_init_data: str = Header(default="", alias="X-Telegra
         premium_until = None if is_admin else await db.get_premium_until(conn, tg_user_id)
         status = await db.get_user_status(conn, tg_user_id)
         cosmetics = await db.get_user_cosmetics(conn, tg_user_id)
+        receipt_email = await db.get_user_receipt_email(conn, tg_user_id)
     finally:
         await conn.close()
     return JSONResponse({
@@ -575,6 +586,7 @@ async def api_me(x_telegram_init_data: str = Header(default="", alias="X-Telegra
         "banned": bool(int(status.get("is_banned") or 0) or str(status.get("deleted_at_utc") or "").strip()),
         "banned_reason": str(status.get("banned_reason") or ""),
         "cosmetics": cosmetics,
+        "receipt_email": receipt_email,
     })
 
 
@@ -963,6 +975,33 @@ async def api_settings_timezone_set(
 
 
 
+@app.get("/api/receipt-email")
+async def api_receipt_email_get(x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    conn = await db.connect(s.DB_PATH)
+    try:
+        data = await db.get_user_receipt_email(conn, tg_user_id)
+    finally:
+        await conn.close()
+    return JSONResponse({"ok": True, **data})
+
+
+@app.post("/api/receipt-email")
+async def api_receipt_email_set(
+    body: ReceiptEmailBody,
+    x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
+):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    conn = await db.connect(s.DB_PATH)
+    try:
+        result = await db.upsert_user_receipt_email(conn, tg_user_id, body.email, source="webapp")
+        if not result.get("ok"):
+            return JSONResponse({"ok": False, "code": "INVALID_EMAIL", "message": "Введите корректный email для чека."}, status_code=400)
+    finally:
+        await conn.close()
+    return JSONResponse({"ok": True, **result})
+
+
 @app.post("/api/billing/create_invoice_link")
 async def api_billing_create_invoice_link(
     body: BillingInvoiceBody,
@@ -1025,6 +1064,17 @@ async def api_payments_redirect_create(
         "source": "telegram_webapp",
         "plan_id": plan_id,
     }
+    conn = await db.connect(s.DB_PATH)
+    try:
+        receipt_email_state = await db.get_user_receipt_email(conn, tg_user_id)
+    finally:
+        await conn.close()
+    if not receipt_email_state.get("has_email"):
+        raise HTTPException(status_code=400, detail={"ok": False, "code": "RECEIPT_EMAIL_REQUIRED", "message": "Укажите email для отправки чека."})
+
+    metadata["receipt_email"] = str(receipt_email_state.get("email") or "")
+    metadata["receipt_email_collected_at"] = str(receipt_email_state.get("collected_at") or "")
+
     yookassa_payload = {
         "amount": {"value": _minor_to_rub_value(price_minor), "currency": "RUB"},
         "capture": True,
@@ -1081,6 +1131,8 @@ async def api_payments_yookassa_status(
         raise HTTPException(status_code=502, detail=f"YooKassa status error: {resp.text[:300]}")
     payment = resp.json()
     metadata = payment.get("metadata") or {}
+    receipt_email = str(metadata.get("receipt_email") or "").strip().lower()
+    receipt_collected_at = str(metadata.get("receipt_email_collected_at") or "").strip()
     if str(metadata.get("project_key") or "") != s.PROJECT_KEY:
         raise HTTPException(status_code=403, detail="Project mismatch")
     if str(metadata.get("user_id") or "") != str(tg_user_id):

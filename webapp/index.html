@@ -122,6 +122,18 @@
 
     .btn.secondary { opacity: 0.88; }
     .btn[disabled] { opacity: .45; cursor: not-allowed; }
+    .btn.cta-active {
+      border-color: rgba(125,183,255,0.95);
+      box-shadow:
+        0 12px 24px rgba(0,0,0,0.34),
+        0 0 0 1px rgba(125,183,255,0.55) inset,
+        0 0 0 3px rgba(125,183,255,0.2);
+    }
+
+    .input-cta-active {
+      border-color: rgba(125,183,255,0.95) !important;
+      box-shadow: 0 0 0 1px rgba(125,183,255,0.58), 0 0 0 3px rgba(125,183,255,0.18) !important;
+    }
 
     .card {
       border-radius: 20px;
@@ -1497,6 +1509,7 @@
     const hasReceiptEmail = !!(receipt && receipt.has_email && String(receipt.email || '').trim());
     const receiptEmail = String(receipt?.email || '').trim();
     const canPrepare = hasReceiptEmail && !state.payment.savingEmail;
+    const activeStep = pendingForPlan ? 'open' : (hasReceiptEmail ? 'prepare' : 'email');
     appEl.innerHTML = `
       <div class="main-content">
         <div class="card fade">
@@ -1515,15 +1528,15 @@
               <button class="btn secondary" id="changeReceiptEmailBtn" style="margin-top:8px">Изменить email</button>` : `
               <div class="muted" style="margin-top:6px">Укажите email для отправки чека.</div>
               <div class="row" style="margin-top:8px; gap:8px; flex-wrap:wrap; align-items:center;">
-                <input id="receiptEmailInput" type="email" placeholder="example@mail.com" value="${esc(state.payment.emailInput || '')}" style="flex:1; min-width:220px; padding:10px; border-radius:10px; border:1px solid var(--accent); background:var(--bg-soft); color:var(--text); box-shadow:0 0 0 1px rgba(125,183,255,0.25);" />
-                <button class="btn secondary" id="saveReceiptEmailBtn" ${state.payment.savingEmail ? 'disabled' : ''}>${state.payment.savingEmail ? 'Сохранение…' : 'Сохранить email'}</button>
+                <input id="receiptEmailInput" type="email" placeholder="example@mail.com" value="${esc(state.payment.emailInput || '')}" class="${activeStep === 'email' ? 'input-cta-active' : ''}" style="flex:1; min-width:220px; padding:10px; border-radius:10px; border:1px solid var(--accent); background:var(--bg-soft); color:var(--text); box-shadow:0 0 0 1px rgba(125,183,255,0.25);" />
+                <button class="btn secondary ${activeStep === 'email' ? 'cta-active' : ''}" id="saveReceiptEmailBtn" ${state.payment.savingEmail ? 'disabled' : ''}>${state.payment.savingEmail ? 'Сохранение…' : 'Сохранить email'}</button>
               </div>
               ${state.payment.emailError ? `<div class="muted" style="margin-top:6px; color:#ff6b6b">${esc(state.payment.emailError)}</div>` : ''}
             `}
           </div>
           <div class="row" style="margin-top:12px; gap:8px; flex-wrap:wrap;">
-            <button class="btn" id="prepareRedirectPaymentBtn" ${canPrepare ? '' : 'disabled'}>Подготовить оплату</button>
-            ${pendingForPlan ? `<button class="btn secondary" id="openExternalPaymentBtn">Открыть оплату в браузере</button>` : ''}
+            <button class="btn ${activeStep === 'prepare' ? 'cta-active' : ''}" id="prepareRedirectPaymentBtn" ${canPrepare ? '' : 'disabled'}>Подготовить оплату</button>
+            ${pendingForPlan ? `<button class="btn secondary ${activeStep === 'open' ? 'cta-active' : ''}" id="openExternalPaymentBtn">Открыть оплату в браузере</button>` : ''}
             <button class="btn secondary" id="backFromPaymentBtn">Назад</button>
           </div>
           ${!hasReceiptEmail ? `<div class="muted" style="margin-top:8px">Без email подготовка RUB-платежа недоступна.</div>` : ''}

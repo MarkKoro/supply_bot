@@ -55,6 +55,7 @@ from keyboards import (
     premium_plans_kb,
     premium_methods_kb,
     premium_upsell_kb,
+    premium_webapp_checkout_kb,
     intake_pick_kb,
     admin_stats_kb,
     admin_stacks_kb,
@@ -1969,6 +1970,12 @@ async def require_premium_or_upsell(update: Update, context: ContextTypes.DEFAUL
     return False
 
 
+
+
+def build_webapp_payment_url(base_url: str, plan_id: str) -> str:
+    clean = str(base_url or "").rstrip("/")
+    return f"{clean}/?screen=payment&kind=subscription&plan_id={plan_id}"
+
 async def _send_subscription_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE, plan_id: str, method: str) -> None:
     s = context.application.bot_data["settings"]
     chat_id = update.effective_chat.id if update.effective_chat else (update.effective_user.id if update.effective_user else 0)
@@ -1995,20 +2002,19 @@ async def _send_subscription_invoice(update: Update, context: ContextTypes.DEFAU
         )
         return
     if method == "yookassa":
-        if not s.BILLING_ENABLED_RUB or not s.YOOKASSA_PROVIDER_TOKEN:
+        if not s.BILLING_ENABLED_RUB:
             await show(update, context, "Оплата картой временно недоступна.", premium_upsell_kb(), route="menu:premium")
             return
-        amount = int(s.PREMIUM_PRICES_RUB.get(plan_id, 0) or 0)
-        await context.bot.send_invoice(
-            chat_id=chat_id,
-            title="Premium подписка",
-            description="Доступ к WebApp + AI + расширенным функциям",
-            payload=payload,
-            provider_token=s.YOOKASSA_PROVIDER_TOKEN,
-            currency="RUB",
-            prices=[LabeledPrice(label="Premium", amount=amount)],
-            need_shipping_address=False,
-            is_flexible=False,
+        if not s.WEBAPP_URL:
+            await show(update, context, "WEBAPP_URL не настроен. Обратитесь в поддержку.", premium_upsell_kb(), route="menu:premium")
+            return
+        payment_url = build_webapp_payment_url(s.WEBAPP_URL, plan_id)
+        await show(
+            update,
+            context,
+            "Оплата в рублях откроется в WebApp, а затем переведёт на безопасную внешнюю страницу YooKassa.",
+            premium_webapp_checkout_kb(payment_url),
+            route="menu:premium",
         )
         return
     await show(update, context, "Неизвестный метод оплаты.", premium_upsell_kb(), route="menu:premium")

@@ -1234,11 +1234,13 @@
     }
 
     const data = await res.json().catch(() => ({}));
-    if (!res.ok || data.ok === false) {
-      const err = new Error(data.message || data.error || data.code || `HTTP_${res.status}`);
-      if (data && typeof data === 'object') {
-        if (data.code) err.code = String(data.code);
-        if (data.message) err.serverMessage = String(data.message);
+    const detail = (data && typeof data.detail === 'object' && data.detail !== null) ? data.detail : null;
+    const errPayload = detail || data;
+    if (!res.ok || data.ok === false || (detail && detail.ok === false)) {
+      const err = new Error(errPayload?.message || errPayload?.error || errPayload?.code || data?.message || data?.error || data?.code || `HTTP_${res.status}`);
+      if (errPayload && typeof errPayload === 'object') {
+        if (errPayload.code) err.code = String(errPayload.code);
+        if (errPayload.message) err.serverMessage = String(errPayload.message);
       }
       throw err;
     }
@@ -1486,7 +1488,13 @@
       showToast("Платёж подготовлен");
       renderPaymentScreen(planId);
     } catch (e) {
-      showToast("Не удалось подготовить платёж");
+      if (e?.code === 'RECEIPT_EMAIL_REQUIRED') {
+        state.payment.emailError = 'Чтобы получить чек на почту, сначала укажите email.';
+        showToast('Добавьте email для чека');
+        renderPaymentScreen(planId);
+      } else {
+        showToast("Не удалось подготовить платёж");
+      }
     } finally {
       if (btnEl) {
         btnEl.disabled = false;
@@ -1543,8 +1551,9 @@
     const hasReceiptEmail = !!(receipt && receipt.has_email && String(receipt.email || '').trim());
     const receiptEmail = String(receipt?.email || '').trim();
     const wantsReceipt = !!receipt?.wants_receipt;
-    const canPrepare = hasReceiptEmail && !state.payment.savingEmail;
-    const activeStep = pendingForPlan ? 'open' : (hasReceiptEmail ? 'prepare' : 'email');
+    const needsEmailForReceipt = wantsReceipt && !hasReceiptEmail;
+    const canPrepare = !state.payment.savingEmail && !state.payment.savingReceiptPref && (!wantsReceipt || hasReceiptEmail);
+    const activeStep = pendingForPlan ? 'open' : (needsEmailForReceipt ? 'email' : 'prepare');
     appEl.innerHTML = `
       <div class="main-content">
         <div class="card fade">
@@ -1557,28 +1566,28 @@
             <li>карта / today / настройка стека / напоминания</li>
           </ul>
           <div class="muted" style="margin-top:10px">RUB-оплата откроется на безопасной внешней странице YooKassa во внешнем браузере.</div>
-          <div class="card" style="margin-top:12px; padding:12px; border:1px solid var(--line);">
+          <label style="display:flex; align-items:flex-start; gap:8px; margin-top:10px; cursor:pointer;">
+            <input id="receiptWantedCheckbox" type="checkbox" ${wantsReceipt ? 'checked' : ''} ${state.payment.savingReceiptPref ? 'disabled' : ''} style="margin-top:2px;" />
+            <span class="muted" style="line-height:1.35">Хочу получить чек на почту</span>
+          </label>
+          ${wantsReceipt ? `<div class="card" style="margin-top:12px; padding:12px; border:1px solid var(--line);">
             <div><b>Email для чека</b></div>
             ${hasReceiptEmail ? `<div class="muted" style="margin-top:6px">Сохранён: <code>${esc(receiptEmail)}</code></div>
               <button class="btn secondary" id="changeReceiptEmailBtn" style="margin-top:8px">Изменить email</button>` : `
-              <div class="muted" style="margin-top:6px">Укажите email для отправки чека.</div>
+              <div class="muted" style="margin-top:6px">Чтобы получить чек на почту, укажите email.</div>
               <div class="row" style="margin-top:8px; gap:8px; flex-wrap:wrap; align-items:center;">
                 <input id="receiptEmailInput" type="email" placeholder="example@mail.com" value="${esc(state.payment.emailInput || '')}" class="${activeStep === 'email' ? 'input-cta-active' : ''}" style="flex:1; min-width:220px; padding:10px; border-radius:10px; border:1px solid var(--accent); background:var(--bg-soft); color:var(--text); box-shadow:0 0 0 1px rgba(125,183,255,0.25);" />
                 <button class="btn secondary ${activeStep === 'email' ? 'cta-active' : ''}" id="saveReceiptEmailBtn" ${state.payment.savingEmail ? 'disabled' : ''}>${state.payment.savingEmail ? 'Сохранение…' : 'Сохранить email'}</button>
               </div>
               ${state.payment.emailError ? `<div class="muted" style="margin-top:6px; color:#ff6b6b">${esc(state.payment.emailError)}</div>` : ''}
             `}
-          </div>
-          <label style="display:flex; align-items:flex-start; gap:8px; margin-top:10px; cursor:pointer;">
-            <input id="receiptWantedCheckbox" type="checkbox" ${wantsReceipt ? 'checked' : ''} ${hasReceiptEmail ? '' : 'disabled'} ${state.payment.savingReceiptPref ? 'disabled' : ''} style="margin-top:2px;" />
-            <span class="muted" style="line-height:1.35">Хочу получить чек на почту</span>
-          </label>
+          </div>` : ''}
           <div class="row" style="margin-top:12px; gap:8px; flex-wrap:wrap;">
             <button class="btn ${activeStep === 'prepare' ? 'cta-active' : ''}" id="prepareRedirectPaymentBtn" ${canPrepare ? '' : 'disabled'}>Подготовить оплату</button>
             ${pendingForPlan ? `<button class="btn secondary ${activeStep === 'open' ? 'cta-active' : ''}" id="openExternalPaymentBtn">Открыть оплату в браузере</button>` : ''}
             <button class="btn secondary" id="backFromPaymentBtn">Назад</button>
           </div>
-          ${!hasReceiptEmail ? `<div class="muted" style="margin-top:8px">Без email подготовка RUB-платежа недоступна.</div>` : ''}
+          ${needsEmailForReceipt ? `<div class="muted" style="margin-top:8px">Добавьте email, чтобы получить чек на почту. Без галочки оплата доступна и без email.</div>` : ''}
           ${pendingForPlan ? `<div class="muted" style="margin-top:8px">После оплаты вернитесь в Telegram.</div>` : ''}
           ${state.payment.success ? `<div class="chip" style="margin-top:10px">✅ Доступ активирован</div>` : ''}
         </div>
@@ -1593,7 +1602,9 @@
       renderPaymentScreen(planId);
     });
     document.getElementById('receiptWantedCheckbox')?.addEventListener('change', (e) => {
-      saveReceiptPreference(!!e?.target?.checked, planId);
+      const checked = !!e?.target?.checked;
+      if (checked) state.payment.emailError = '';
+      saveReceiptPreference(checked, planId);
     });
     document.getElementById('backFromPaymentBtn')?.addEventListener('click', () => {
       const source = parseScreenParams().source;

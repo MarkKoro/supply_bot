@@ -74,6 +74,7 @@ from keyboards import (
     admin_supp_audit_back_kb,
     admin_diag_kb,
     admin_diag_confirm_kb,
+    admin_paychecks_kb,
     complexes_hub_kb,
     complex_open_kb,
     complex_add_results_kb,

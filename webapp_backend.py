@@ -1089,12 +1089,14 @@ async def api_payments_redirect_create(
         receipt_email_state = await db.get_user_receipt_email(conn, tg_user_id)
     finally:
         await conn.close()
-    if not receipt_email_state.get("has_email"):
-        raise HTTPException(status_code=400, detail={"ok": False, "code": "RECEIPT_EMAIL_REQUIRED", "message": "Укажите email для отправки чека."})
+    wants_receipt = bool(receipt_email_state.get("wants_receipt"))
+    has_receipt_email = bool(receipt_email_state.get("has_email"))
+    if wants_receipt and not has_receipt_email:
+        raise HTTPException(status_code=400, detail={"ok": False, "code": "RECEIPT_EMAIL_REQUIRED", "message": "Чтобы получить чек на почту, укажите email."})
 
-    metadata["receipt_email"] = str(receipt_email_state.get("email") or "")
-    metadata["receipt_email_collected_at"] = str(receipt_email_state.get("collected_at") or "")
-    metadata["wants_receipt"] = "1" if bool(receipt_email_state.get("wants_receipt")) else "0"
+    metadata["receipt_email"] = str(receipt_email_state.get("email") or "") if has_receipt_email else ""
+    metadata["receipt_email_collected_at"] = str(receipt_email_state.get("collected_at") or "") if has_receipt_email else ""
+    metadata["wants_receipt"] = "1" if wants_receipt else "0"
 
     yookassa_payload = {
         "amount": {"value": _minor_to_rub_value(price_minor), "currency": "RUB"},

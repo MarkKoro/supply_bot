@@ -7,8 +7,23 @@ import json
 import re
 from typing import Any
 import aiosqlite
-from nutrient_rules import NUTRIENT_PROTOCOL_DEFS
-from nutrient_registry import get_all_nutrient_rules
+
+
+
+def _safe_nutrient_protocol_defs() -> list[dict]:
+    try:
+        from nutrient_rules import NUTRIENT_PROTOCOL_DEFS as defs  # type: ignore
+        return list(defs or [])
+    except Exception:
+        return []
+
+
+def _safe_get_all_nutrient_rules() -> dict[str, dict]:
+    try:
+        from nutrient_registry import get_all_nutrient_rules as loader  # type: ignore
+        return dict(loader() or {})
+    except Exception:
+        return {}
 
 def utc_now_iso() -> str:
     return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
@@ -5268,8 +5283,6 @@ async def add_user_supplement(conn: aiosqlite.Connection, tg_user_id: int, suppl
         "UPDATE user_schedules SET slot_id='morning' WHERE user_id=? AND supplement_id=? AND (slot_id IS NULL OR slot_id='')",
         (user_id, supplement_id),
     )
-    slug = await get_supplement_slug_by_id(conn, supplement_id)
-    await enqueue_stack_change_rebuilds(conn, tg_user_id, [slug] if slug else [])
 
 async def add_user_supp(conn: aiosqlite.Connection, user_id: int, supplement_id: int) -> None:
     await add_user_supplement(conn, user_id, supplement_id)
@@ -5284,8 +5297,6 @@ async def remove_user_supplement(conn: aiosqlite.Connection, tg_user_id: int, su
         "DELETE FROM reminders WHERE user_id=? AND supplement_id=?",
         (tg_user_id, supplement_id),
     )
-    slug = await get_supplement_slug_by_id(conn, supplement_id)
-    await enqueue_stack_change_rebuilds(conn, tg_user_id, [slug] if slug else [])
 
 async def remove_user_supp(conn: aiosqlite.Connection, user_id: int, supplement_id: int) -> None:
     await remove_user_supplement(conn, user_id, supplement_id)
@@ -5310,9 +5321,6 @@ async def remove_user_supplements_bulk(
         f"DELETE FROM reminders WHERE user_id=? AND supplement_id IN ({placeholders})",
         (tg_user_id, *cleaned),
     )
-    slugs_rows = await fetchall(conn, f"SELECT slug FROM supplements WHERE id IN ({placeholders})", tuple(cleaned))
-    slugs = [str(r["slug"] or "") for r in slugs_rows]
-    await enqueue_stack_change_rebuilds(conn, tg_user_id, slugs)
 
 
 async def get_user_supplement_intake_history(
@@ -5561,9 +5569,6 @@ async def set_user_supp_enabled(conn: aiosqlite.Connection, user_id: int, supp_i
         (1 if int(enabled) else 0, int(user_id), int(supp_id)),
     )
     await conn.commit()
-    if (cur.rowcount or 0) > 0:
-        slug = await get_supplement_slug_by_id(conn, int(supp_id))
-        await enqueue_stack_change_rebuilds(conn, int(user_id), [slug] if slug else [])
     return (cur.rowcount or 0) > 0
 
 
@@ -5593,9 +5598,6 @@ async def set_user_supp_fields(
         (str(dose_text or "").strip(), utc_now_iso(), user_id, int(supplement_id)),
     )
     await conn.commit()
-    if (cur.rowcount or 0) > 0:
-        slug = await get_supplement_slug_by_id(conn, int(supp_id))
-        await enqueue_stack_change_rebuilds(conn, int(user_id), [slug] if slug else [])
     return (cur.rowcount or 0) > 0
 
 async def list_user_stack_details(conn: aiosqlite.Connection, tg_user_id: int, local_date: str | None = None):
@@ -9174,11 +9176,9 @@ async def list_enabled_nutrient_protocol_defs(conn: aiosqlite.Connection) -> lis
 
 
 async def bootstrap_nutrient_protocol_defs(conn: aiosqlite.Connection) -> None:
-    from nutrient_registry import get_all_nutrient_rules
-
     now = utc_now_iso()
-    by_code = {str(x.get("nutrient_code") or ""): x for x in NUTRIENT_PROTOCOL_DEFS}
-    for code, rule in get_all_nutrient_rules().items():
+    by_code = {str(x.get("nutrient_code") or ""): x for x in _safe_nutrient_protocol_defs()}
+    for code, rule in _safe_get_all_nutrient_rules().items():
         proto = by_code.get(code) or {}
         md = dict(proto.get("metadata") or {})
         md["registry_rule"] = rule

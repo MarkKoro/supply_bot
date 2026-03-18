@@ -16,13 +16,9 @@ from pydantic import BaseModel
 from telegram_webapp_auth import verify_init_data
 import db
 import engine
-import nutrient_engine
-import nutrient_planner
-import nutrient_explainer
 from settings import get_settings
 from openai_client import OpenAIConfig, _sync_call
 from achievements import THEMES, TAB_SKINS, BADGES
-from nutrient_registry import get_nutrient_rule, get_enabled_nutrients, registry_summary, list_loaded_packs, get_pack_detail, coverage_report
 
 BASE_DIR = Path(__file__).resolve().parent
 WEBAPP_DIR = BASE_DIR / "webapp"
@@ -223,36 +219,6 @@ class LabReportUpdateBody(BaseModel):
     parse_status: str | None = "manual_reviewed"
     parse_notes: str | None = ""
     results: list[dict] = []
-
-
-class NutrientPreviewBody(BaseModel):
-    nutrient_code: str
-    report_id: int | None = None
-    use_latest: bool = True
-
-
-class NutrientPlanBody(BaseModel):
-    nutrient_code: str
-    report_id: int | None = None
-    use_latest: bool = True
-    save_plan: bool = True
-
-
-class NutrientExplainBody(BaseModel):
-    plan_run_id: int | None = None
-    nutrient_code: str | None = None
-    use_latest_plan: bool = True
-
-
-class NutrientReminderActionBody(BaseModel):
-    days: int | None = 3
-
-
-class NutrientAssistantOnboardingBody(BaseModel):
-    seen: bool | None = None
-    completed: bool | None = None
-    dismissed: bool | None = None
-    last_home_state: str | None = None
 
 
 async def _auth_user_id(init_data: str) -> int:
@@ -1733,389 +1699,122 @@ async def api_profile_labs_upload(
 
 @app.get("/api/profile/nutrients")
 async def api_profile_nutrients_get(x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
-    tg_user_id = await _auth_user_id(x_telegram_init_data)
-    if not await _premium_guard(tg_user_id):
-        return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
-    items = []
-    for profile in sorted(get_enabled_nutrients(), key=lambda x: (str(x.get("category") or ""), str(x.get("title_ru") or ""))):
-        items.append(
-            {
-                "nutrient_code": str(profile.get("nutrient_code") or ""),
-                "title_ru": str(profile.get("title_ru") or ""),
-                "category": str(profile.get("category") or "other"),
-                "status_level": str(profile.get("status_level") or "weak"),
-                "engine_mode": str(profile.get("engine_mode") or "limited"),
-                "planner_mode": str(profile.get("planner_mode") or "limited"),
-                "explanation_mode": str(profile.get("explanation_mode") or "limited"),
-                "readiness_level": str(profile.get("readiness_level") or "metadata_only"),
-                "supported": True,
-                "ui_notes_ru": str(profile.get("ui_notes_ru") or ""),
-                "limitation_note_ru": str(profile.get("limitation_note_ru") or ""),
-                "capabilities": dict(profile.get("capabilities") or {}),
-            }
-        )
-    return JSONResponse({"ok": True, "items": items})
+    await _auth_user_id(x_telegram_init_data)
+    return JSONResponse({"ok": False, "code": "NUTRIENT_ASSISTANT_DISABLED"}, status_code=410)
 
 
 @app.get("/api/profile/nutrient-assistant/overview")
 async def api_profile_nutrient_overview_get(x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
-    tg_user_id = await _auth_user_id(x_telegram_init_data)
-    if not await _premium_guard(tg_user_id):
-        return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
-    conn = await db.connect(s.DB_PATH)
-    try:
-        overview = await db.get_nutrient_assistant_overview(conn, tg_user_id)
-        return JSONResponse({"ok": True, "overview": overview})
-    finally:
-        await conn.close()
+    await _auth_user_id(x_telegram_init_data)
+    return JSONResponse({"ok": False, "code": "NUTRIENT_ASSISTANT_DISABLED"}, status_code=410)
 
 
 @app.get("/api/profile/nutrient-assistant/dashboard")
 async def api_profile_nutrient_dashboard_get(x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
-    tg_user_id = await _auth_user_id(x_telegram_init_data)
-    if not await _premium_guard(tg_user_id):
-        return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
-    conn = await db.connect(s.DB_PATH)
-    try:
-        dashboard = await db.get_nutrient_assistant_dashboard(conn, tg_user_id)
-        return JSONResponse({"ok": True, "dashboard": dashboard})
-    finally:
-        await conn.close()
+    await _auth_user_id(x_telegram_init_data)
+    return JSONResponse({"ok": False, "code": "NUTRIENT_ASSISTANT_DISABLED"}, status_code=410)
 
 
 @app.get("/api/profile/nutrient-assistant/onboarding")
 async def api_profile_nutrient_onboarding_get(x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
-    tg_user_id = await _auth_user_id(x_telegram_init_data)
-    if not await _premium_guard(tg_user_id):
-        return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
-    conn = await db.connect(s.DB_PATH)
-    try:
-        item = await db.get_nutrient_assistant_onboarding_state(conn, tg_user_id)
-        return JSONResponse({"ok": True, "onboarding": item})
-    finally:
-        await conn.close()
+    await _auth_user_id(x_telegram_init_data)
+    return JSONResponse({"ok": False, "code": "NUTRIENT_ASSISTANT_DISABLED"}, status_code=410)
 
 
 @app.post("/api/profile/nutrient-assistant/onboarding")
-async def api_profile_nutrient_onboarding_post(body: NutrientAssistantOnboardingBody, x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
-    tg_user_id = await _auth_user_id(x_telegram_init_data)
-    if not await _premium_guard(tg_user_id):
-        return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
-    conn = await db.connect(s.DB_PATH)
-    try:
-        item = await db.update_nutrient_assistant_onboarding_state(
-            conn,
-            tg_user_id,
-            seen=body.seen,
-            completed=body.completed,
-            dismissed=body.dismissed,
-            last_home_state=body.last_home_state,
-        )
-        return JSONResponse({"ok": True, "onboarding": item})
-    finally:
-        await conn.close()
+async def api_profile_nutrient_onboarding_post(x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
+    await _auth_user_id(x_telegram_init_data)
+    return JSONResponse({"ok": False, "code": "NUTRIENT_ASSISTANT_DISABLED"}, status_code=410)
 
 
 @app.get("/api/profile/nutrient-assistant/registry-summary")
 async def api_profile_nutrient_registry_summary(x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
-    tg_user_id = await _auth_user_id(x_telegram_init_data)
-    allowed, denial, _role, _perms = await _require_perm(tg_user_id, "system_diag")
-    if not allowed:
-        return denial
-    return JSONResponse({"ok": True, **registry_summary()})
+    await _auth_user_id(x_telegram_init_data)
+    return JSONResponse({"ok": False, "code": "NUTRIENT_ASSISTANT_DISABLED"}, status_code=410)
 
 
 @app.get("/api/profile/nutrient-assistant/coverage-report")
 async def api_profile_nutrient_coverage_report(x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
-    tg_user_id = await _auth_user_id(x_telegram_init_data)
-    allowed, denial, _role, _perms = await _require_perm(tg_user_id, "system_diag")
-    if not allowed:
-        return denial
-    return JSONResponse({"ok": True, **coverage_report()})
+    await _auth_user_id(x_telegram_init_data)
+    return JSONResponse({"ok": False, "code": "NUTRIENT_ASSISTANT_DISABLED"}, status_code=410)
 
 
 @app.get("/api/profile/nutrient-assistant/packs")
 async def api_profile_nutrient_packs_get(x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
-    tg_user_id = await _auth_user_id(x_telegram_init_data)
-    allowed, denial, _role, _perms = await _require_perm(tg_user_id, "system_diag")
-    if not allowed:
-        return denial
-    return JSONResponse({"ok": True, "items": list_loaded_packs()})
+    await _auth_user_id(x_telegram_init_data)
+    return JSONResponse({"ok": False, "code": "NUTRIENT_ASSISTANT_DISABLED"}, status_code=410)
 
 
 @app.get("/api/profile/nutrient-assistant/packs/{pack_id}")
 async def api_profile_nutrient_pack_detail_get(pack_id: str, x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
-    tg_user_id = await _auth_user_id(x_telegram_init_data)
-    allowed, denial, _role, _perms = await _require_perm(tg_user_id, "system_diag")
-    if not allowed:
-        return denial
-    item = get_pack_detail(pack_id)
-    if not item:
-        raise HTTPException(status_code=404, detail="Pack not found")
-    return JSONResponse({"ok": True, "item": item})
+    _ = pack_id
+    await _auth_user_id(x_telegram_init_data)
+    return JSONResponse({"ok": False, "code": "NUTRIENT_ASSISTANT_DISABLED"}, status_code=410)
 
 
 @app.post("/api/profile/nutrient-assistant/preview")
-async def api_profile_nutrient_preview(body: NutrientPreviewBody, x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
-    tg_user_id = await _auth_user_id(x_telegram_init_data)
-    if not await _premium_guard(tg_user_id):
-        return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
-
-    nutrient_code = str(body.nutrient_code or "").strip().lower()
-    conn = await db.connect(s.DB_PATH)
-    try:
-        profile = await db.get_user_health_profile(conn, tg_user_id)
-        supplements = await db.get_user_supplements_with_enabled(conn, tg_user_id)
-        active = [x for x in supplements if int(x.get("enabled") or 0) == 1]
-        report_id = int(body.report_id) if body.report_id is not None else None
-        lab_rows = await db.get_recent_lab_results_for_user(conn, tg_user_id, report_id=report_id, limit=150)
-    finally:
-        await conn.close()
-
-    result = nutrient_engine.evaluate_nutrient(
-        nutrient_code=nutrient_code,
-        profile=profile,
-        active_supplements=active,
-        lab_rows=lab_rows,
-    )
-    profile = get_nutrient_rule(nutrient_code) or {}
-    if profile:
-        result["title_ru"] = profile.get("title_ru") or result.get("title_ru")
-    return JSONResponse({"ok": True, **result})
+async def api_profile_nutrient_preview(x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
+    await _auth_user_id(x_telegram_init_data)
+    return JSONResponse({"ok": False, "code": "NUTRIENT_ASSISTANT_DISABLED"}, status_code=410)
 
 
 @app.post("/api/profile/nutrient-assistant/plan")
-async def api_profile_nutrient_plan(body: NutrientPlanBody, x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
-    tg_user_id = await _auth_user_id(x_telegram_init_data)
-    if not await _premium_guard(tg_user_id):
-        return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
-
-    nutrient_code = str(body.nutrient_code or "").strip().lower()
-    conn = await db.connect(s.DB_PATH)
-    try:
-        profile = await db.get_user_health_profile(conn, tg_user_id)
-        supplements = await db.get_user_supplements_with_enabled(conn, tg_user_id)
-        active = [x for x in supplements if int(x.get("enabled") or 0) == 1]
-        report_id = int(body.report_id) if body.report_id is not None else None
-        lab_rows = await db.get_recent_lab_results_for_user(conn, tg_user_id, report_id=report_id, limit=150)
-
-        preview = nutrient_engine.evaluate_nutrient(
-            nutrient_code=nutrient_code,
-            profile=profile,
-            active_supplements=active,
-            lab_rows=lab_rows,
-        )
-        profile = get_nutrient_rule(nutrient_code) or {}
-        if profile:
-            preview["title_ru"] = profile.get("title_ru") or preview.get("title_ru")
-
-        plan = nutrient_planner.build_plan_from_preview(preview)
-        plan_id = None
-        if bool(body.save_plan):
-            plan_id = await db.create_nutrient_plan_run(
-                conn,
-                tg_user_id,
-                nutrient_code,
-                report_id,
-                preview,
-                plan,
-            )
-            await db.save_nutrient_followup_items(conn, tg_user_id, int(plan_id), nutrient_code, plan.get("followup_items") or [])
-            await db.save_nutrient_reminder_candidates(conn, tg_user_id, int(plan_id), nutrient_code, plan.get("reminder_candidates") or [])
-            await conn.commit()
-        latest = await db.get_latest_active_nutrient_plan(conn, tg_user_id, nutrient_code)
-        return JSONResponse({"ok": True, "preview": preview, "plan": plan, "plan_id": plan_id, "latest_active": latest})
-    finally:
-        await conn.close()
+async def api_profile_nutrient_plan(x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
+    await _auth_user_id(x_telegram_init_data)
+    return JSONResponse({"ok": False, "code": "NUTRIENT_ASSISTANT_DISABLED"}, status_code=410)
 
 
 @app.get("/api/profile/nutrient-assistant/plans")
-async def api_profile_nutrient_plans_get(limit: int = 20, x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
-    tg_user_id = await _auth_user_id(x_telegram_init_data)
-    if not await _premium_guard(tg_user_id):
-        return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
-    conn = await db.connect(s.DB_PATH)
-    try:
-        items = await db.list_user_nutrient_plans(conn, tg_user_id, limit=max(1, min(int(limit), 100)))
-        return JSONResponse({"ok": True, "items": items})
-    finally:
-        await conn.close()
+async def api_profile_nutrient_plans_get(x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
+    await _auth_user_id(x_telegram_init_data)
+    return JSONResponse({"ok": False, "code": "NUTRIENT_ASSISTANT_DISABLED"}, status_code=410)
 
 
 @app.get("/api/profile/nutrient-assistant/plans/{plan_id}")
 async def api_profile_nutrient_plan_get(plan_id: int, x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
-    tg_user_id = await _auth_user_id(x_telegram_init_data)
-    if not await _premium_guard(tg_user_id):
-        return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
-    conn = await db.connect(s.DB_PATH)
-    try:
-        item = await db.get_user_nutrient_plan_by_id(conn, tg_user_id, int(plan_id))
-        if not item:
-            raise HTTPException(status_code=404, detail="Plan not found")
-        return JSONResponse({"ok": True, "item": item})
-    finally:
-        await conn.close()
+    _ = plan_id
+    await _auth_user_id(x_telegram_init_data)
+    return JSONResponse({"ok": False, "code": "NUTRIENT_ASSISTANT_DISABLED"}, status_code=410)
 
 
 @app.post("/api/profile/nutrient-assistant/explain")
-async def api_profile_nutrient_explain(body: NutrientExplainBody, x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
-    tg_user_id = await _auth_user_id(x_telegram_init_data)
-    if not await _premium_guard(tg_user_id):
-        return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
-
-    conn = await db.connect(s.DB_PATH)
-    try:
-        plan_item = None
-        if body.plan_run_id is not None:
-            plan_item = await db.get_user_nutrient_plan_by_id(conn, tg_user_id, int(body.plan_run_id))
-        elif body.nutrient_code and bool(body.use_latest_plan):
-            active = await db.get_latest_active_nutrient_plan(conn, tg_user_id, str(body.nutrient_code).lower())
-            if active:
-                plan_item = await db.get_user_nutrient_plan_by_id(conn, tg_user_id, int(active.get("id")))
-        if not plan_item:
-            raise HTTPException(status_code=404, detail="Plan run not found")
-
-        plan_run_id = int(plan_item.get("id"))
-        nutrient_code = str(plan_item.get("nutrient_code") or "").lower()
-
-        cached = await db.get_active_plan_explanation(conn, tg_user_id, plan_run_id, nutrient_explainer.PROMPT_VERSION)
-        if cached:
-            return JSONResponse({
-                "ok": True,
-                "plan_run_id": plan_run_id,
-                "nutrient_code": nutrient_code,
-                "source_type": cached.get("source_type") or "fallback",
-                "prompt_version": cached.get("prompt_version") or nutrient_explainer.PROMPT_VERSION,
-                "model_name": cached.get("model_name") or "",
-                "explanation": cached.get("explanation") or {},
-                "cached": True,
-            })
-
-        cfg = OpenAIConfig(api_key=s.OPENAI_API_KEY, model=s.OPENAI_MODEL or "gpt-4o-mini") if s.OPENAI_API_KEY else None
-        built = await nutrient_explainer.build_explanation_from_plan(
-            cfg=cfg,
-            nutrient_code=nutrient_code,
-            preview_snapshot=plan_item.get("preview_snapshot") or {},
-            plan_snapshot=plan_item.get("plan_snapshot") or {},
-        )
-        explanation = built.get("explanation") or {}
-        source_type = str(built.get("source_type") or "fallback")
-        model_name = built.get("model_name")
-        prompt_version = str(built.get("prompt_version") or nutrient_explainer.PROMPT_VERSION)
-
-        exp_id = await db.save_plan_explanation(
-            conn,
-            tg_user_id,
-            plan_run_id,
-            nutrient_code,
-            explanation,
-            model_name,
-            prompt_version,
-            source_type,
-        )
-        await conn.commit()
-        return JSONResponse({
-            "ok": True,
-            "plan_run_id": plan_run_id,
-            "nutrient_code": nutrient_code,
-            "source_type": source_type,
-            "prompt_version": prompt_version,
-            "model_name": model_name or "",
-            "explanation_id": exp_id,
-            "explanation": explanation,
-            "cached": False,
-        })
-    finally:
-        await conn.close()
+async def api_profile_nutrient_explain(x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
+    await _auth_user_id(x_telegram_init_data)
+    return JSONResponse({"ok": False, "code": "NUTRIENT_ASSISTANT_DISABLED"}, status_code=410)
 
 
 @app.post("/api/profile/nutrient-assistant/plan/{plan_id}/activate-reminders")
 async def api_profile_nutrient_plan_activate_reminders(plan_id: int, x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
-    tg_user_id = await _auth_user_id(x_telegram_init_data)
-    if not await _premium_guard(tg_user_id):
-        return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
-    conn = await db.connect(s.DB_PATH)
-    try:
-        plan_item = await db.get_user_nutrient_plan_by_id(conn, tg_user_id, int(plan_id))
-        if not plan_item:
-            raise HTTPException(status_code=404, detail="Plan not found")
-        activated = await db.activate_nutrient_reminders_for_plan(conn, tg_user_id, int(plan_id))
-        all_items = await db.list_nutrient_followup_reminders(conn, tg_user_id, limit=200)
-        active_for_plan = [x for x in all_items if int(x.get("plan_run_id") or 0) == int(plan_id) and str(x.get("status") or "") in {"scheduled", "snoozed", "sent"}]
-        nearest = min((x for x in active_for_plan if x.get("scheduled_for_utc")), key=lambda x: str(x.get("scheduled_for_utc")), default=None)
-        return JSONResponse({
-            "ok": True,
-            "plan_id": int(plan_id),
-            "activated_count": len(activated),
-            "activated": activated,
-            "active_count_for_plan": len(active_for_plan),
-            "nearest_scheduled_for_utc": nearest.get("scheduled_for_utc") if nearest else "",
-        })
-    finally:
-        await conn.close()
+    _ = plan_id
+    await _auth_user_id(x_telegram_init_data)
+    return JSONResponse({"ok": False, "code": "NUTRIENT_ASSISTANT_DISABLED"}, status_code=410)
 
 
 @app.get("/api/profile/nutrient-assistant/reminders")
-async def api_profile_nutrient_reminders_get(limit: int = 60, x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
-    tg_user_id = await _auth_user_id(x_telegram_init_data)
-    if not await _premium_guard(tg_user_id):
-        return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
-    conn = await db.connect(s.DB_PATH)
-    try:
-        items = await db.list_nutrient_followup_reminders(conn, tg_user_id, limit=max(1, min(int(limit), 200)))
-        return JSONResponse({"ok": True, "items": items})
-    finally:
-        await conn.close()
+async def api_profile_nutrient_reminders_get(x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
+    await _auth_user_id(x_telegram_init_data)
+    return JSONResponse({"ok": False, "code": "NUTRIENT_ASSISTANT_DISABLED"}, status_code=410)
 
 
 @app.post("/api/profile/nutrient-assistant/reminders/{reminder_id}/complete")
 async def api_profile_nutrient_reminder_complete(reminder_id: int, x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
-    tg_user_id = await _auth_user_id(x_telegram_init_data)
-    if not await _premium_guard(tg_user_id):
-        return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
-    conn = await db.connect(s.DB_PATH)
-    try:
-        ok = await db.update_nutrient_followup_reminder_status(conn, tg_user_id, int(reminder_id), "done")
-        if not ok:
-            raise HTTPException(status_code=404, detail="Reminder not found")
-        item = await db.get_nutrient_followup_reminder_by_id(conn, tg_user_id, int(reminder_id))
-        return JSONResponse({"ok": True, "item": item})
-    finally:
-        await conn.close()
+    _ = reminder_id
+    await _auth_user_id(x_telegram_init_data)
+    return JSONResponse({"ok": False, "code": "NUTRIENT_ASSISTANT_DISABLED"}, status_code=410)
 
 
 @app.post("/api/profile/nutrient-assistant/reminders/{reminder_id}/dismiss")
 async def api_profile_nutrient_reminder_dismiss(reminder_id: int, x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
-    tg_user_id = await _auth_user_id(x_telegram_init_data)
-    if not await _premium_guard(tg_user_id):
-        return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
-    conn = await db.connect(s.DB_PATH)
-    try:
-        ok = await db.update_nutrient_followup_reminder_status(conn, tg_user_id, int(reminder_id), "dismissed")
-        if not ok:
-            raise HTTPException(status_code=404, detail="Reminder not found")
-        item = await db.get_nutrient_followup_reminder_by_id(conn, tg_user_id, int(reminder_id))
-        return JSONResponse({"ok": True, "item": item})
-    finally:
-        await conn.close()
+    _ = reminder_id
+    await _auth_user_id(x_telegram_init_data)
+    return JSONResponse({"ok": False, "code": "NUTRIENT_ASSISTANT_DISABLED"}, status_code=410)
 
 
 @app.post("/api/profile/nutrient-assistant/reminders/{reminder_id}/snooze")
-async def api_profile_nutrient_reminder_snooze(reminder_id: int, body: NutrientReminderActionBody, x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
-    tg_user_id = await _auth_user_id(x_telegram_init_data)
-    if not await _premium_guard(tg_user_id):
-        return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
-    days = int(body.days or 3)
-    if days not in {1, 3, 7}:
-        raise HTTPException(status_code=400, detail="Snooze supports only 1,3,7 days")
-    conn = await db.connect(s.DB_PATH)
-    try:
-        item = await db.snooze_nutrient_followup_reminder(conn, tg_user_id, int(reminder_id), days)
-        if not item:
-            raise HTTPException(status_code=404, detail="Reminder not found")
-        return JSONResponse({"ok": True, "item": item})
-    finally:
-        await conn.close()
+async def api_profile_nutrient_reminder_snooze(reminder_id: int, x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
+    _ = reminder_id
+    await _auth_user_id(x_telegram_init_data)
+    return JSONResponse({"ok": False, "code": "NUTRIENT_ASSISTANT_DISABLED"}, status_code=410)
 
 
 @app.get("/api/body_map")

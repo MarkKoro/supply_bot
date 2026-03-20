@@ -1927,7 +1927,15 @@ async def api_my_supplements_freeze(
 
     if not updated:
         return JSONResponse({"ok": False, "error": "NOT_FOUND"}, status_code=404)
-    return JSONResponse({"ok": True, "supplement_id": int(body.supplement_id), "enabled": enabled})
+    return JSONResponse(
+        {
+            "ok": True,
+            "supplement_id": int(body.supplement_id),
+            "enabled": enabled,
+            "is_frozen": enabled == 0,
+            "status": "active" if enabled == 1 else "frozen",
+        }
+    )
 
 @app.post("/api/my_supplements/update")
 async def api_my_supplements_update(
@@ -1966,10 +1974,10 @@ async def api_reminders_for_supplement(
 
     conn = await db.connect(s.DB_PATH)
     try:
-        times = await db.list_reminders_for_supplement(conn, tg_user_id, int(supplement_id))
+        effective = await db.get_effective_reminders_for_supplement(conn, tg_user_id, int(supplement_id))
     finally:
         await conn.close()
-    return JSONResponse({"ok": True, "times": times})
+    return JSONResponse({"ok": True, "mode": str(effective.get("mode") or "slot"), "times": list(effective.get("times") or [])})
 
 
 @app.post("/api/reminders/set")
@@ -1994,11 +2002,11 @@ async def api_reminders_set(
             mode=mode,
             times=list(body.times or []),
         )
-        times = await db.list_reminders_for_supplement(conn, tg_user_id, int(body.supplement_id))
+        effective = await db.get_effective_reminders_for_supplement(conn, tg_user_id, int(body.supplement_id))
     finally:
         await conn.close()
 
-    return JSONResponse({"ok": True, "mode": mode, "times": times})
+    return JSONResponse({"ok": True, "mode": str(effective.get("mode") or mode), "times": list(effective.get("times") or [])})
 
 
 @app.post("/api/my_supplements/toggle")

@@ -5226,7 +5226,9 @@ async def get_supplement_detail_for_user(
                   s.purchase_url,
                   s.tags_json, s.body_targets_json, s.body_burdens_json,
                   s.body_effects_json,
-                  us.supplement_id AS in_stack_id
+                  us.supplement_id AS in_stack_id,
+                  us.enabled AS user_enabled,
+                  us.is_active AS user_is_active
            FROM supplements s
            LEFT JOIN user_supplements us ON us.user_id=? AND us.supplement_id=s.id
            WHERE s.slug=? AND s.is_active=1
@@ -5235,6 +5237,9 @@ async def get_supplement_detail_for_user(
     )
     if not row:
         return None
+    in_stack = row["in_stack_id"] is not None
+    is_active_for_intake = bool(in_stack and int(row["user_is_active"] or 0) == 1 and int(row["user_enabled"] or 0) == 1)
+    is_frozen = bool(in_stack and int(row["user_is_active"] or 0) == 1 and int(row["user_enabled"] or 0) == 0)
     return {
         "id": int(row["id"]),
         "slug": str(row["slug"] or ""),
@@ -5253,7 +5258,11 @@ async def get_supplement_detail_for_user(
         "body_targets_json": str(row["body_targets_json"] or "[]"),
         "body_burdens_json": str(row["body_burdens_json"] or "[]"),
         "body_effects_json": str(row["body_effects_json"] or "[]"),
-        "in_stack": row["in_stack_id"] is not None,
+        "in_stack": in_stack,
+        "enabled": int(row["user_enabled"] or 0) if in_stack else 0,
+        "is_active": int(row["user_is_active"] or 0) if in_stack else 0,
+        "is_frozen": is_frozen,
+        "status": "active" if is_active_for_intake else ("frozen" if is_frozen else "inactive"),
     }
 
 # user library
@@ -5550,6 +5559,9 @@ async def get_user_supplements_with_enabled(conn: aiosqlite.Connection, tg_user_
         {
             "supplement_id": int(r["supplement_id"] or 0),
             "enabled": int(r["enabled"] or 0),
+            "is_active": int(r["is_active"] or 0),
+            "is_frozen": int(r["enabled"] or 0) == 0,
+            "status": "active" if int(r["enabled"] or 0) == 1 else "frozen",
             "slug": str(r["slug"] or "").strip(),
             "name_ru": str(r["name_ru"] or "").strip(),
             "name_en": str(r["name_en"] or "").strip(),
@@ -5741,6 +5753,56 @@ async def list_reminders_for_supplement(
     return out
 
 
+async def get_effective_reminders_for_supplement(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    supplement_id: int,
+) -> dict[str, object]:
+    custom_times = await list_reminders_for_supplement(conn, int(tg_user_id), int(supplement_id))
+    if custom_times:
+        return {"mode": "custom", "times": custom_times}
+
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    schedule_row = await fetchone(
+        conn,
+        """SELECT slot_id, time_hhmm
+           FROM user_schedules
+           WHERE user_id=? AND supplement_id=?
+           LIMIT 1""",
+        (user_id, int(supplement_id)),
+    )
+    slots = await get_user_slots(conn, user_id)
+
+    slot_time_by_id: dict[str, str] = {}
+    for slot in slots:
+        slot_id = str(slot.get("slot_id") or "").strip()
+        time_local = _normalize_hhmm(str(slot.get("time_local") or "").strip()) or ""
+        if slot_id and time_local:
+            slot_time_by_id[slot_id] = time_local
+
+    effective_time: str | None = None
+    if schedule_row:
+        override_time = _normalize_hhmm(str(schedule_row["time_hhmm"] or "").strip())
+        if override_time:
+            effective_time = override_time
+        else:
+            schedule_slot_id = str(schedule_row["slot_id"] or "").strip()
+            if schedule_slot_id:
+                effective_time = slot_time_by_id.get(schedule_slot_id)
+
+    if not effective_time:
+        effective_time = slot_time_by_id.get("morning")
+    if not effective_time:
+        for slot in slots:
+            if bool(slot.get("is_enabled", True)):
+                time_local = _normalize_hhmm(str(slot.get("time_local") or "").strip())
+                if time_local:
+                    effective_time = time_local
+                    break
+
+    return {"mode": "slot", "times": [effective_time] if effective_time else []}
+
+
 async def set_reminders_for_supplement(
     conn: aiosqlite.Connection,
     tg_user_id: int,
@@ -5783,25 +5845,116 @@ async def list_reminders_for_user(conn: aiosqlite.Connection, user_id: int):
     )
 
 async def list_due_reminders(conn: aiosqlite.Connection):
-    rows = await fetchall(
+    custom_rows = await fetchall(
         conn,
-        """SELECT r.*, u.tz_name
+        """SELECT DISTINCT r.user_id, r.supplement_id, r.time_local, u.tz_name
            FROM reminders r
            JOIN users u ON u.tg_user_id=r.user_id
-           WHERE r.enabled=1""",
+           JOIN user_supplements us ON us.user_id=u.id AND us.supplement_id=r.supplement_id
+           WHERE r.enabled=1
+             AND us.is_active=1
+             AND us.enabled=1""",
     )
+    slot_rows = await fetchall(
+        conn,
+        """SELECT u.tg_user_id, u.tz_name, us.supplement_id,
+                  sch.time_hhmm AS schedule_time_hhmm,
+                  sch.slot_id AS schedule_slot_id,
+                  uss.time_local AS slot_time_local
+           FROM user_supplements us
+           JOIN users u ON u.id=us.user_id
+           LEFT JOIN user_schedules sch
+             ON sch.user_id=us.user_id AND sch.supplement_id=us.supplement_id AND sch.is_enabled=1
+           LEFT JOIN user_schedule_slots uss
+             ON uss.user_id=us.user_id AND uss.slot_id=sch.slot_id AND uss.is_enabled=1
+           WHERE us.is_active=1
+             AND us.enabled=1""",
+    )
+
+    custom_mode_pairs: set[tuple[int, int]] = set()
+    for row in custom_rows:
+        custom_mode_pairs.add((int(row["user_id"]), int(row["supplement_id"])))
+
     due = []
-    for row in rows:
+    seen_due: set[tuple[int, int, str, str]] = set()
+    handled_today_cache: dict[tuple[int, str], set[int]] = {}
+
+    async def _handled_supplements_for_day(tg_user_id: int, day_local: str) -> set[int]:
+        key = (int(tg_user_id), str(day_local))
+        cached = handled_today_cache.get(key)
+        if cached is not None:
+            return cached
+        rows = await fetchall(
+            conn,
+            """SELECT sds.supplement_id
+               FROM supplement_day_state sds
+               JOIN users u ON u.id=sds.user_id
+               WHERE u.tg_user_id=?
+                 AND sds.day=?
+                 AND sds.status IN ('taken', 'skipped')""",
+            (int(tg_user_id), str(day_local)),
+        )
+        handled = {int(r["supplement_id"]) for r in rows}
+        handled_today_cache[key] = handled
+        return handled
+
+    for row in custom_rows:
         tz_name = str(row["tz_name"] or "").strip()
         local_now = datetime.now(parse_utc_tz(tz_name))
-        if local_now.strftime("%H:%M") != str(row["time_local"] or ""):
+        day_local = local_now.date().isoformat()
+        handled_supplements = await _handled_supplements_for_day(int(row["user_id"]), day_local)
+        if int(row["supplement_id"]) in handled_supplements:
             continue
+        reminder_time = _normalize_hhmm(str(row["time_local"] or "").strip())
+        if not reminder_time:
+            continue
+        if local_now.strftime("%H:%M") != reminder_time:
+            continue
+        key = (int(row["user_id"]), int(row["supplement_id"]), reminder_time, day_local)
+        if key in seen_due:
+            continue
+        seen_due.add(key)
         due.append(
             {
                 "user_id": int(row["user_id"]),
                 "supplement_id": int(row["supplement_id"]),
-                "time_local": str(row["time_local"]),
-                "day": local_now.date().isoformat(),
+                "time_local": reminder_time,
+                "day": day_local,
+                "tz_name": tz_name,
+            }
+        )
+
+    for row in slot_rows:
+        tg_user_id = int(row["tg_user_id"])
+        supplement_id = int(row["supplement_id"])
+        if (tg_user_id, supplement_id) in custom_mode_pairs:
+            continue
+
+        schedule_time = _normalize_hhmm(str(row["schedule_time_hhmm"] or "").strip())
+        slot_time = _normalize_hhmm(str(row["slot_time_local"] or "").strip())
+        effective_time = schedule_time or slot_time
+        if not effective_time:
+            continue
+
+        tz_name = str(row["tz_name"] or "").strip()
+        local_now = datetime.now(parse_utc_tz(tz_name))
+        day_local = local_now.date().isoformat()
+        handled_supplements = await _handled_supplements_for_day(tg_user_id, day_local)
+        if supplement_id in handled_supplements:
+            continue
+        if local_now.strftime("%H:%M") != effective_time:
+            continue
+
+        key = (tg_user_id, supplement_id, effective_time, day_local)
+        if key in seen_due:
+            continue
+        seen_due.add(key)
+        due.append(
+            {
+                "user_id": tg_user_id,
+                "supplement_id": supplement_id,
+                "time_local": effective_time,
+                "day": day_local,
                 "tz_name": tz_name,
             }
         )

@@ -2320,17 +2320,43 @@ async def reminder_fire_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     supplement_id = int(data.get("supplement_id"))
     await reminder_fire(context, tg_user_id, supplement_id, is_snooze=True)
 
-def _reminder_batch_actions() -> InlineKeyboardMarkup:
+def _parse_callback_batch_ids(raw: str | None) -> list[int]:
+    out: list[int] = []
+    for token in str(raw or "").split(","):
+        token = token.strip()
+        if not token or not token.isdigit():
+            continue
+        sid = int(token)
+        if sid <= 0 or sid in out:
+            continue
+        out.append(sid)
+    return out
+
+
+def _reminder_batch_actions(supplement_ids: list[int]) -> InlineKeyboardMarkup:
+    batch_ids = [int(sid) for sid in supplement_ids if int(sid) > 0]
+    encoded_batch = ",".join(str(sid) for sid in batch_ids)
+    done_cb = f"rem:done_all:{encoded_batch}" if encoded_batch else "rem:done_all"
+    skip_cb = f"rem:skip_all:{encoded_batch}" if encoded_batch else "rem:skip_all"
+    snooze15_cb = f"rem:snooze_all:15:{encoded_batch}" if encoded_batch else "rem:snooze_all:15"
+    snooze30_cb = f"rem:snooze_all:30:{encoded_batch}" if encoded_batch else "rem:snooze_all:30"
+    snooze60_cb = f"rem:snooze_all:60:{encoded_batch}" if encoded_batch else "rem:snooze_all:60"
+    if max(len(done_cb), len(skip_cb), len(snooze15_cb), len(snooze30_cb), len(snooze60_cb)) > 64:
+        done_cb = "rem:done_all"
+        skip_cb = "rem:skip_all"
+        snooze15_cb = "rem:snooze_all:15"
+        snooze30_cb = "rem:snooze_all:30"
+        snooze60_cb = "rem:snooze_all:60"
     return InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton("✅ Выпил", callback_data="rem:done_all"),
-                InlineKeyboardButton("❌ Не выпил", callback_data="rem:skip_all"),
+                InlineKeyboardButton("✅ Выпил", callback_data=done_cb),
+                InlineKeyboardButton("❌ Не выпил", callback_data=skip_cb),
             ],
             [
-                InlineKeyboardButton("⏱ 15 мин", callback_data="rem:snooze_all:15"),
-                InlineKeyboardButton("⏱ 30 мин", callback_data="rem:snooze_all:30"),
-                InlineKeyboardButton("⏱ 60 мин", callback_data="rem:snooze_all:60"),
+                InlineKeyboardButton("⏱ 15 мин", callback_data=snooze15_cb),
+                InlineKeyboardButton("⏱ 30 мин", callback_data=snooze30_cb),
+                InlineKeyboardButton("⏱ 60 мин", callback_data=snooze60_cb),
             ],
         ]
     )
@@ -2366,10 +2392,18 @@ async def reminder_fire_batch(
         if _is_tz_unset(tz_name):
             return
         ui_message_id, ui_screen, ui_payload = await db.get_ui_state(conn, tg_user_id)
-        if ui_message_id:
-            last_chat_id = int(user_row["last_chat_id"] or 0) or tg_user_id
+        try:
+            payload_data = json.loads(ui_payload) if ui_payload else {}
+        except json.JSONDecodeError:
+            payload_data = {}
+        if not isinstance(payload_data, dict):
+            payload_data = {}
+
+        previous_reminder_msg_id = int(payload_data.get("reminder_msg_id") or 0)
+        if previous_reminder_msg_id > 0:
+            previous_reminder_chat_id = int(payload_data.get("reminder_chat_id") or 0) or int(user_row["last_chat_id"] or 0) or tg_user_id
             try:
-                await context.bot.delete_message(chat_id=last_chat_id, message_id=ui_message_id)
+                await context.bot.delete_message(chat_id=previous_reminder_chat_id, message_id=previous_reminder_msg_id)
             except Exception:
                 pass
 
@@ -2402,17 +2436,12 @@ async def reminder_fire_batch(
         msg = await context.bot.send_message(
             chat_id=target_chat_id,
             text=text,
-            reply_markup=_reminder_batch_actions(),
+            reply_markup=_reminder_batch_actions([item["id"] for item in entries]),
             parse_mode="HTML",
             disable_web_page_preview=True,
         )
-        try:
-            payload_data = json.loads(ui_payload) if ui_payload else {}
-        except json.JSONDecodeError:
-            payload_data = {}
-        if not isinstance(payload_data, dict):
-            payload_data = {}
         payload_data["reminder_msg_id"] = msg.message_id
+        payload_data["reminder_chat_id"] = target_chat_id
         payload_data["reminder_batch_ids"] = [item["id"] for item in entries]
         payload_json = json.dumps(payload_data, ensure_ascii=False)
         if ui_screen:
@@ -4782,17 +4811,30 @@ async def on_reminder_action(update: Update, context: ContextTypes.DEFAULT_TYPE)
     action = parts[1]
     supplement_id: int | None = None
     snooze_minutes = 15
+    callback_batch_ids: list[int] = []
     if action in ("done", "skip"):
-        supplement_id = int(parts[2])
+        if len(parts) >= 3 and str(parts[2]).isdigit():
+            supplement_id = int(parts[2])
     elif action == "snooze":
-        supplement_id = int(parts[2])
+        if len(parts) >= 3 and str(parts[2]).isdigit():
+            supplement_id = int(parts[2])
         if len(parts) >= 4:
-            snooze_minutes = int(parts[3])
+            try:
+                snooze_minutes = int(parts[3])
+            except Exception:
+                snooze_minutes = 15
     elif action in ("done_all", "skip_all"):
+        if len(parts) >= 3:
+            callback_batch_ids = _parse_callback_batch_ids(parts[2])
         supplement_id = None
     elif action == "snooze_all":
         if len(parts) >= 3:
-            snooze_minutes = int(parts[2])
+            try:
+                snooze_minutes = int(parts[2])
+            except Exception:
+                snooze_minutes = 15
+        if len(parts) >= 4:
+            callback_batch_ids = _parse_callback_batch_ids(parts[3])
         supplement_id = None
     else:
         return
@@ -4812,15 +4854,18 @@ async def on_reminder_action(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if not isinstance(payload_data, dict):
             payload_data = {}
 
+        payload_batch_ids = [int(item_id) for item_id in payload_data.get("reminder_batch_ids", []) if str(item_id).isdigit()]
+        effective_batch_ids = callback_batch_ids or payload_batch_ids
+
         if action == "done" and supplement_id is not None:
             await db.set_today_status(conn, tg_uid, supplement_id, "taken")
         elif action == "skip" and supplement_id is not None:
             await db.set_today_status(conn, tg_uid, supplement_id, "skipped")
         elif action == "done_all":
-            for item_id in payload_data.get("reminder_batch_ids", []):
+            for item_id in effective_batch_ids:
                 await db.set_today_status(conn, tg_uid, int(item_id), "taken")
         elif action == "skip_all":
-            for item_id in payload_data.get("reminder_batch_ids", []):
+            for item_id in effective_batch_ids:
                 await db.set_today_status(conn, tg_uid, int(item_id), "skipped")
         elif action in {"snooze", "snooze_all"}:
             minutes = snooze_minutes or 15
@@ -4836,7 +4881,7 @@ async def on_reminder_action(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 for job in context.application.job_queue.get_jobs_by_name(snooze_name):
                     job.schedule_removal()
                 if action == "snooze_all":
-                    batch_ids = payload_data.get("reminder_batch_ids", [])
+                    batch_ids = effective_batch_ids
                     if not batch_ids:
                         pass
                     else:
@@ -4862,6 +4907,7 @@ async def on_reminder_action(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
         if isinstance(payload_data, dict) and "reminder_msg_id" in payload_data:
             payload_data.pop("reminder_msg_id", None)
+            payload_data.pop("reminder_chat_id", None)
             payload_data.pop("reminder_batch_ids", None)
             await db.update_ui_state_payload(conn, tg_uid, json.dumps(payload_data, ensure_ascii=False))
     finally:

@@ -45,6 +45,7 @@ from keyboards import (
     my_supplement_reminders,
     timezone_picker,
     settings_menu,
+    settings_notifications_kb,
     schedule_menu_kb,
     schedule_slots_pick_kb,
     supplement_time_kb,
@@ -429,6 +430,25 @@ async def _show_schedule_home(update: Update, context: ContextTypes.DEFAULT_TYPE
             continue
         lines.append(f"• [{slot.get('time_local','--:--')}] {slot.get('title_ru','Слот')}")
     await show(update, context, "\n".join(lines), schedule_menu_kb(), route="settings:schedule")
+
+
+async def _show_notifications_settings(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, tg_uid: int) -> None:
+    user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
+    slots = await db.get_user_slots(conn, user_id)
+    reminders_enabled = await db.get_user_notifications_enabled(conn, tg_uid)
+    text = "\n".join([
+        "🔔 <b>Уведомления</b>",
+        "",
+        f"Общий переключатель: {'включены' if reminders_enabled else 'выключены'}",
+        "Можно отключить всё сразу, слоты или управлять отдельными БАДами через «Мои БАДы».",
+    ])
+    await show(
+        update,
+        context,
+        text,
+        settings_notifications_kb(reminders_enabled=reminders_enabled, slots=slots),
+        route="settings:notifications",
+    )
 
 
 async def _show_supplement_time_screen(
@@ -2826,6 +2846,27 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if data == "settings:schedule":
             await _show_schedule_home(update, context, conn, tg_uid)
             return
+        if data == "settings:notifications":
+            await _show_notifications_settings(update, context, conn, tg_uid)
+            return
+        if data.startswith("settings:notifications:global:"):
+            enabled = data.split(":")[-1] == "1"
+            await db.set_user_notifications_enabled(conn, tg_uid, enabled)
+            await _show_notifications_settings(update, context, conn, tg_uid)
+            return
+        if data.startswith("settings:notifications:slot:"):
+            slot_id = data.split(":", 3)[3]
+            user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
+            slots = await db.get_user_slots(conn, user_id)
+            updated = []
+            for slot in slots:
+                next_slot = dict(slot)
+                if str(slot.get("slot_id") or "") == slot_id:
+                    next_slot["is_enabled"] = not bool(slot.get("is_enabled", True))
+                updated.append(next_slot)
+            await db.set_user_slots(conn, user_id, updated)
+            await _show_notifications_settings(update, context, conn, tg_uid)
+            return
         if data == "settings:complexes":
             await _show_complexes_hub(update, context, conn, tg_uid)
             return
@@ -5111,6 +5152,9 @@ async def _render_route(
         return
     if route == "rem:home":
         await _show_reminders_home(update, context, conn, tg_uid)
+        return
+    if route == "settings:notifications":
+        await _show_notifications_settings(update, context, conn, tg_uid)
         return
 
     if route == "menu:settings":

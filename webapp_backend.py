@@ -183,6 +183,13 @@ class CosmeticsSetBody(BaseModel):
 class UserTimezoneBody(BaseModel):
     tz_name: str
 
+class UserNotificationsBody(BaseModel):
+    reminders_enabled: bool
+
+class SlotEnabledBody(BaseModel):
+    slot_id: str
+    is_enabled: bool
+
 
 class ProfileUpsertBody(BaseModel):
     sex_at_birth: str | None = ""
@@ -923,9 +930,10 @@ async def api_settings_get(
     conn = await db.connect(s.DB_PATH)
     try:
         tz_name = await db.get_user_tz(conn, tg_user_id)
+        reminders_enabled = await db.get_user_notifications_enabled(conn, tg_user_id)
     finally:
         await conn.close()
-    return JSONResponse({"ok": True, "tz_name": str(tz_name or "UTC"), "offer_url": s.OFFER_URL, "privacy_url": s.PRIVACY_URL, "offer_version": s.OFFER_VERSION, "privacy_version": s.PRIVACY_VERSION})
+    return JSONResponse({"ok": True, "tz_name": str(tz_name or "UTC"), "reminders_enabled": bool(reminders_enabled), "offer_url": s.OFFER_URL, "privacy_url": s.PRIVACY_URL, "offer_version": s.OFFER_VERSION, "privacy_version": s.PRIVACY_VERSION})
 
 
 @app.post("/api/settings/timezone")
@@ -944,6 +952,20 @@ async def api_settings_timezone_set(
     finally:
         await conn.close()
     return JSONResponse({"ok": True, "tz_name": tz_name})
+
+
+@app.post("/api/settings/notifications")
+async def api_settings_notifications_set(
+    body: UserNotificationsBody,
+    x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
+):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    conn = await db.connect(s.DB_PATH)
+    try:
+        enabled = await db.set_user_notifications_enabled(conn, tg_user_id, bool(body.reminders_enabled))
+    finally:
+        await conn.close()
+    return JSONResponse({"ok": True, "reminders_enabled": bool(enabled)})
 
 
 
@@ -2095,6 +2117,27 @@ async def api_schedule_slot_time(body: SlotTimeBody, x_telegram_init_data: str =
     try:
         user_id = await db.get_or_create_user(conn, tg_user_id, tz_name="")
         await db.set_user_slot_time(conn, user_id, body.slot_id, body.time_local)
+    finally:
+        await conn.close()
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/schedule/slot_enabled")
+async def api_schedule_slot_enabled(body: SlotEnabledBody, x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    if not await _premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
+    conn = await db.connect(s.DB_PATH)
+    try:
+        user_id = await db.get_or_create_user(conn, tg_user_id, tz_name="")
+        slots = await db.get_user_slots(conn, user_id)
+        updated: list[dict] = []
+        for slot in slots:
+            next_slot = dict(slot)
+            if str(slot.get("slot_id") or "") == str(body.slot_id or ""):
+                next_slot["is_enabled"] = bool(body.is_enabled)
+            updated.append(next_slot)
+        await db.set_user_slots(conn, user_id, updated)
     finally:
         await conn.close()
     return JSONResponse({"ok": True})

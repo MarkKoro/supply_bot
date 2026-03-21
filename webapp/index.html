@@ -691,6 +691,11 @@
     .profile-module-btn strong { display:block; font-size:14px; overflow-wrap:anywhere; }
     .profile-module-btn .muted { font-size:12px; white-space:normal; overflow-wrap:anywhere; }
     .profile-module-btn.active { box-shadow:0 0 0 1px rgba(190,220,255,.65) inset, 0 10px 20px rgba(4,10,30,.45); }
+    .profile-hero-head { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+    .profile-hero-head strong { margin-right:auto; }
+    .profile-hero-head .chip { max-width:100%; overflow-wrap:anywhere; }
+    .profile-hero-head .btn { width:100%; }
+    @media (min-width: 680px) { .profile-hero-head .btn { width:auto; } }
 
     .payment-success-overlay {
       position: fixed;
@@ -1193,6 +1198,16 @@
 
   function formatDate() {
     return new Date().toLocaleDateString("ru-RU", { weekday: "short", day: "2-digit", month: "short" });
+  }
+  function formatRuDate(value) {
+    const raw = String(value || "").trim();
+    if (!raw) return "без даты";
+    const onlyDate = raw.match(/^\d{4}-\d{2}-\d{2}$/) ? `${raw}T00:00:00` : raw.replace(" ", "T");
+    const dt = new Date(onlyDate);
+    if (!Number.isNaN(dt.getTime())) return dt.toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit", year: "numeric" });
+    const parts = raw.split("-");
+    if (parts.length === 3) return `${parts[2]}.${parts[1]}.${parts[0]}`;
+    return raw;
   }
 
   function evidenceUserLabel(value) {
@@ -3051,7 +3066,7 @@ function adminField(label, field, value, kind='input') {
   function unitOptions(code, unit){ const item=ANALYTE_PRESETS.find((a)=>a.code===code)||ANALYTE_PRESETS[0]; return (item.units||[]).map((u)=>`<option value="${esc(u)}" ${u===unit?'selected':''}>${esc(u)}</option>`).join(''); }
   function renderLabRow(idx,row={}){ const code=row.analyte_code||ANALYTE_PRESETS[0].code; return `<div class="lab-result-row" data-lab-row="${idx}"><label class="muted">Показатель<select class="select" data-lab-field="analyte_code" data-idx="${idx}">${analyteOptions(code)}</select></label><div class="field-grid two"><label class="muted">Значение<input class="input" inputmode="decimal" data-lab-field="value_num" data-idx="${idx}" value="${esc(row.value_num??row.value_text??'')}"/></label><label class="muted">Единица<select class="select" data-lab-field="unit" data-idx="${idx}">${unitOptions(code,row.unit||'')}</select></label></div><div class="field-grid two"><label class="muted">Референс от<input class="input" inputmode="decimal" data-lab-field="ref_low" data-idx="${idx}" value="${esc(row.ref_low??'')}"/></label><label class="muted">Референс до<input class="input" inputmode="decimal" data-lab-field="ref_high" data-idx="${idx}" value="${esc(row.ref_high??'')}"/></label></div></div>`; }
 
-  function labsEmptyState(){ return `<div class="muted">Пока нет добавленных анализов</div><div class="row" style="margin-top:10px; gap:8px"><button class="btn" data-open-upload>Загрузить документ</button><button class="btn secondary" data-open-manual>Ввести вручную</button></div>`; }
+  function labsEmptyState(){ return `<div class="muted">Пока нет добавленных анализов</div>`; }
   function renderLabsModal(type){
     if (!(type==='manual'?state.profileUi.manualOpen:state.profileUi.uploadOpen)) return '';
     return `<div class="modal-overlay" data-close-${type}><section class="card modal-card" onclick="event.stopPropagation()"><div class="row"><strong>${type==='manual'?'Ручной ввод анализа':'Загрузка документа'}</strong><button class="btn secondary" data-close-${type}>Закрыть</button></div>${type==='manual'?`<div class="field-grid" style="margin-top:10px"><label class="muted">Дата анализа<input type="date" class="input" id="manualReportDate"/></label><label class="muted">Лаборатория (необязательно)<input class="input" id="manualLabName"/></label><label class="muted">Комментарий (необязательно)<textarea class="textarea" id="manualNotes"></textarea></label><div id="manualRows">${renderLabRow(0)}</div><button class="btn secondary" data-add-manual-row>+ Добавить показатель</button><button class="btn" data-save-manual>${state.profileUi.savingManual?'Сохраняем…':'Сохранить анализ'}</button></div>`:`<div class="field-grid" style="margin-top:10px"><label class="muted">Дата анализа<input type="date" class="input" id="uploadReportDate"/></label><label class="muted">Лаборатория (необязательно)<input class="input" id="uploadLabName"/></label><label class="muted">Комментарий (необязательно)<textarea class="textarea" id="uploadNotes"></textarea></label><input type="file" class="input" id="labsFile" accept=".pdf,.jpg,.jpeg,.png,.webp"/><button class="btn" data-upload-labs>${state.profileUi.uploading?'Загружаем…':'Загрузить документ'}</button></div>`}</section></div>`;
@@ -3143,8 +3158,8 @@ function adminField(label, field, value, kind='input') {
         <div class="row"><strong>🧪 Нутриентный помощник</strong></div>
         <div class="muted" style="margin-top:8px">Модуль рекомендаций сейчас упрощается.<br>Профиль и анализы уже сохраняются.<br>Следующая версия будет собирать план на основе ваших данных через AI без тяжёлой внутренней логики.</div>
       </section>
-      <section class="card fade" data-open-edit><div class="profile-hero"><div class="profile-avatar">👤</div><div><div class="row"><strong>Мой профиль</strong><span class="chip">Lv.${level} · ${esc(levelTitle)}</span><button class="btn secondary" data-open-edit>Редактировать профиль</button></div><div class="progress" style="margin-top:6px"><i style="width:${levelPct}%"></i></div><div class="profile-summary-grid">${summary}</div></div></div></section>
-      <section class="card fade"><div class="row"><strong>📄 Мои анализы</strong></div><div style="margin-top:10px">${labs.length?labs.map((r)=>`<button class="item-row" data-open-review="${r.id}"><span>${esc(r.report_date||'без даты')} · ${esc(r.lab_name||'Лаборатория не указана')}</span><span class="muted">${Array.isArray(r.results)?r.results.length:0} показ.</span></button>`).join(''):labsEmptyState()}</div><div class="row" style="margin-top:10px; gap:8px"><button class="btn" data-open-upload>Загрузить документ</button><button class="btn secondary" data-open-manual>Ввести вручную</button></div></section>`;
+      <section class="card fade" data-open-edit><div class="profile-hero"><div class="profile-avatar">👤</div><div><div class="profile-hero-head"><strong>Мой профиль</strong><span class="chip">Lv.${level} · ${esc(levelTitle)}</span><button class="btn secondary" data-open-edit>Редактировать профиль</button></div><div class="progress" style="margin-top:6px"><i style="width:${levelPct}%"></i></div><div class="profile-summary-grid">${summary}</div></div></div></section>
+      <section class="card fade"><div class="row"><strong>📄 Мои анализы</strong></div><div style="margin-top:10px">${labs.length?labs.map((r)=>`<button class="item-row" data-open-review="${r.id}"><span>${esc(formatRuDate(r.report_date))} · ${esc(r.lab_name||'Лаборатория не указана')}</span><span class="muted">${Array.isArray(r.results)?r.results.length:0} показ.</span></button>`).join(''):labsEmptyState()}</div><div class="row" style="margin-top:10px; gap:8px"><button class="btn" data-open-upload>Загрузить документ</button><button class="btn secondary" data-open-manual>Ввести вручную</button></div></section>`;
 
     return `${renderProfileModulesGrid()}${moduleHtml}${renderProfileEditorModal()}${renderLabsModal('manual')}${renderLabsModal('upload')}${renderReviewModal()}`;
   }
@@ -4387,7 +4402,7 @@ function adminField(label, field, value, kind='input') {
     const summary = history.summary || {};
     const rows = history.entries || [];
     const summaryHtml = `<div class="history-item"><strong>Последний приём: ${esc(summary.last_taken_day || '—')}</strong><div class="muted" style="margin-top:4px">Дней с приёмом: ${Number(summary.taken_days || 0)} · Период: ${esc(summary.first_taken_day || '—')} → ${esc(summary.last_taken_day || '—')}</div></div>`;
-    const rowsHtml = rows.length ? rows.map((row)=>`<div class="history-item"><strong>${esc(row.day || '—')} · ${esc(row.status_label || '—')}</strong><div class="muted" style="margin-top:4px">Доза: ${esc(row.dose_text || 'не указана')} · Время: ${esc(row.time_hint || '—')}</div></div>`).join('') : '<div class="muted">Пока нет записей о приёме этой добавки.</div>';
+    const rowsHtml = rows.length ? rows.map((row)=>`<div class="history-item"><strong>${esc(formatRuDate(row.day))} · ${esc(row.status_label || '—')}</strong><div class="muted" style="margin-top:4px">Доза: ${esc(row.dose_text || 'не указана')} · Время: ${esc(row.time_hint || '—')}</div></div>`).join('') : '<div class="muted">Пока нет записей о приёме этой добавки.</div>';
     return `${summaryHtml}${rowsHtml}`;
   }
 

@@ -614,6 +614,7 @@ def supplement_page(
     if show_buy:
         btns.append([shop_url_button(show_buy)])
     btns.append([InlineKeyboardButton("⬅️ Назад", callback_data=back_route)])
+    btns.append([InlineKeyboardButton("🏠 Меню", callback_data="menu:home")])
     return InlineKeyboardMarkup(btns)
 
 def supplement_compat_list(

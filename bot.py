@@ -3983,6 +3983,18 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 )
             else:
                 back_route = context.user_data.get("last_route")
+                if isinstance(back_route, str) and back_route.startswith("supp:compat:"):
+                    parts = back_route.split(":")
+                    if len(parts) >= 3:
+                        parent_id = parts[2]
+                        if parent_id.isdigit():
+                            back_route = f"supp:open:{parent_id}"
+                elif isinstance(back_route, str) and back_route.startswith("card:compat:"):
+                    parts = back_route.split(":")
+                    if len(parts) >= 3:
+                        parent_id = parts[2]
+                        if parent_id.isdigit():
+                            back_route = f"cat:open:{parent_id}"
                 await _show_supplement_page(update, context, conn, tg_uid, supplement_id, back_route=back_route)
             return
 

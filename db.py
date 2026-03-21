@@ -2899,6 +2899,17 @@ def _normalize_hhmm(value: str) -> str | None:
     return None
 
 
+def _is_reminder_due_now(local_now: datetime, target_hhmm: str, grace_seconds: int = 120) -> bool:
+    normalized = _normalize_hhmm(target_hhmm)
+    if not normalized:
+        return False
+    hh, mm = normalized.split(":", 1)
+    target_seconds = int(hh) * 3600 + int(mm) * 60
+    now_seconds = local_now.hour * 3600 + local_now.minute * 60 + local_now.second
+    delta = now_seconds - target_seconds
+    return 0 <= delta < int(grace_seconds)
+
+
 def _slot_id_from_time(time_local: str) -> str:
     normalized = _normalize_hhmm(time_local) or "00:00"
     return f"t_{normalized.replace(':', '')}"
@@ -5908,7 +5919,7 @@ async def list_due_reminders(conn: aiosqlite.Connection):
         reminder_time = _normalize_hhmm(str(row["time_local"] or "").strip())
         if not reminder_time:
             continue
-        if local_now.strftime("%H:%M") != reminder_time:
+        if not _is_reminder_due_now(local_now, reminder_time):
             continue
         key = (int(row["user_id"]), int(row["supplement_id"]), reminder_time, day_local)
         if key in seen_due:
@@ -5942,7 +5953,7 @@ async def list_due_reminders(conn: aiosqlite.Connection):
         handled_supplements = await _handled_supplements_for_day(tg_user_id, day_local)
         if supplement_id in handled_supplements:
             continue
-        if local_now.strftime("%H:%M") != effective_time:
+        if not _is_reminder_due_now(local_now, effective_time):
             continue
 
         key = (tg_user_id, supplement_id, effective_time, day_local)

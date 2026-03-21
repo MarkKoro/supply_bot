@@ -7,9 +7,6 @@ import sys
 from pathlib import Path
 from settings import get_settings
 import db
-from nutrient_pack_loader import build_registry_from_packs, load_all_nutrient_packs
-from nutrient_rule_validator import validate_registry_rules
-from nutrient_pack_qc import build_pack_qc_report
 
 def _iter_slug_chunks(path: str):
     start_line = 0
@@ -383,36 +380,6 @@ async def _import(
         await conn.close()
 
 
-async def _import_nutrient_packs(mode: str) -> dict:
-    packs = load_all_nutrient_packs()
-    merged, meta = build_registry_from_packs(fail_on_conflict=True)
-    validation = validate_registry_rules(merged, strict=False)
-    report = build_pack_qc_report(packs, merged, validation)
-
-    if mode == "validate-only":
-        return {"mode": mode, "ok": len(validation.get("errors") or []) == 0, "packs": len(packs), "validation": validation}
-    if mode == "report-only":
-        return {"mode": mode, "ok": True, "report": report, "meta": meta}
-    if mode in {"sync-runtime", "sync-runtime-and-db"}:
-        import nutrient_registry
-
-        nutrient_registry.load_registry(force_reload=True)
-    if mode in {"sync-db", "sync-runtime-and-db"}:
-        s = get_settings()
-        conn = await db.connect(s.DB_PATH)
-        try:
-            await db.bootstrap_nutrient_protocol_defs(conn)
-            await conn.commit()
-        finally:
-            await conn.close()
-    return {
-        "mode": mode,
-        "ok": len(validation.get("errors") or []) == 0,
-        "packs": len(packs),
-        "rules": len(merged),
-        "validation": validation,
-        "summary": report.get("summary") or {},
-    }
 
 def main():
     ap = argparse.ArgumentParser()
@@ -422,11 +389,6 @@ def main():
     ap.add_argument("--curated-stacks", default=None)
     ap.add_argument("--curated-items", default=None)
     ap.add_argument("--normalize-jsonl", action="append", default=[])
-    ap.add_argument(
-        "--nutrient-packs-mode",
-        choices=["validate-only", "sync-runtime", "sync-db", "sync-runtime-and-db", "report-only"],
-        default="",
-    )
     args = ap.parse_args()
 
     for path in args.normalize_jsonl:
@@ -444,10 +406,7 @@ def main():
             )
         )
         print("Import done.")
-    if args.nutrient_packs_mode:
-        result = asyncio.run(_import_nutrient_packs(args.nutrient_packs_mode))
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-    elif not args.normalize_jsonl:
+    if not args.normalize_jsonl:
         ap.error("Provide import paths and/or --normalize-jsonl")
 
 if __name__ == "__main__":

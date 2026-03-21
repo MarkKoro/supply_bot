@@ -2389,8 +2389,6 @@ async def reminder_fire_batch(
         if not user_row:
             return
         tz_name = str(user_row["tz_name"] or "").strip()
-        if _is_tz_unset(tz_name):
-            return
         ui_message_id, ui_screen, ui_payload = await db.get_ui_state(conn, tg_user_id)
         try:
             payload_data = json.loads(ui_payload) if ui_payload else {}

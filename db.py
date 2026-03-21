@@ -987,6 +987,45 @@ async def _ensure_profile_foundation_tables(conn: aiosqlite.Connection) -> None:
           error_text TEXT
         )"""
     )
+    await conn.execute(
+        """CREATE TABLE IF NOT EXISTS llm_assistant_runs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id INTEGER NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          prompt_version TEXT NOT NULL,
+          model_name TEXT NOT NULL,
+          input_snapshot_json TEXT NOT NULL,
+          response_json TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'ok',
+          is_active INTEGER NOT NULL DEFAULT 0,
+          applied_at TEXT NOT NULL DEFAULT ''
+        )"""
+    )
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_llm_assistant_runs_user_created ON llm_assistant_runs(user_id, id DESC)")
+    await conn.execute(
+        """CREATE TABLE IF NOT EXISTS llm_assistant_plan_actions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          run_id INTEGER NOT NULL,
+          user_id INTEGER NOT NULL,
+          nutrient_code TEXT NOT NULL,
+          nutrient_name_ru TEXT NOT NULL,
+          recommend_action TEXT NOT NULL,
+          supplement_id INTEGER,
+          supplement_name TEXT,
+          dose_text TEXT,
+          frequency_text TEXT,
+          duration_text TEXT,
+          timing_text TEXT,
+          stop_or_pause_rule_ru TEXT,
+          with_food INTEGER NOT NULL DEFAULT 0,
+          reminders_json TEXT NOT NULL DEFAULT '[]',
+          status TEXT NOT NULL DEFAULT 'prepared',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        )"""
+    )
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_llm_assistant_plan_actions_run ON llm_assistant_plan_actions(run_id, id ASC)")
     await conn.execute("CREATE INDEX IF NOT EXISTS idx_nutrient_plan_runs_user_code_active ON nutrient_plan_runs(user_id, nutrient_code, is_active)")
     await conn.execute("CREATE INDEX IF NOT EXISTS idx_nutrient_followup_plan ON nutrient_followup_items(plan_run_id)")
     await conn.execute("CREATE INDEX IF NOT EXISTS idx_nutrient_reminder_plan ON nutrient_reminder_candidates(plan_run_id)")
@@ -1008,6 +1047,8 @@ async def _ensure_profile_foundation_tables(conn: aiosqlite.Connection) -> None:
     await _ensure_column(conn, "nutrient_protocol_defs", "curation_status", "TEXT NOT NULL DEFAULT 'draft'")
     await _ensure_column(conn, "nutrient_plan_runs", "source_report_id", "INTEGER")
     await _ensure_column(conn, "nutrient_plan_runs", "is_active", "INTEGER NOT NULL DEFAULT 1")
+    await _ensure_column(conn, "llm_assistant_runs", "is_active", "INTEGER NOT NULL DEFAULT 0")
+    await _ensure_column(conn, "llm_assistant_runs", "applied_at", "TEXT NOT NULL DEFAULT ''")
     await _ensure_column(conn, "nutrient_plan_runs", "freshness_status", "TEXT NOT NULL DEFAULT 'fresh'")
     await _ensure_column(conn, "nutrient_plan_runs", "stale_reason_codes_json", "TEXT")
     await _ensure_column(conn, "nutrient_plan_runs", "based_on_profile_updated_at_utc", "TEXT")
@@ -5575,7 +5616,7 @@ async def get_user_supplements_with_enabled(conn: aiosqlite.Connection, tg_user_
     user_id = await get_or_create_user(conn, int(tg_user_id))
     rows = await fetchall(
         conn,
-        """SELECT us.supplement_id, us.enabled, us.is_active,
+        """SELECT us.supplement_id, us.enabled, us.is_active, us.created_at,
                   s.slug, s.name_ru, s.name_en, s.name,
                   COALESCE(NULLIF(uss.dose_text,''), us.dose_text, '') AS dose_text,
                   COALESCE(NULLIF(us.note_text,''), '') AS note_text
@@ -5599,6 +5640,7 @@ async def get_user_supplements_with_enabled(conn: aiosqlite.Connection, tg_user_
             "name": str(r["name"] or "").strip(),
             "dose_text": str(r["dose_text"] or "").strip(),
             "note_text": str(r["note_text"] or "").strip(),
+            "created_at": str(r["created_at"] or "").strip(),
         }
         for r in rows
     ]
@@ -8731,6 +8773,240 @@ async def update_lab_report_meta(conn: aiosqlite.Connection, tg_user_id: int, re
         ),
     )
     return await get_lab_report_by_id(conn, tg_user_id, int(report_id))
+
+
+async def list_latest_lab_results(conn: aiosqlite.Connection, tg_user_id: int, limit: int = 80) -> list[dict]:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    rows = await fetchall(
+        conn,
+        """SELECT lr.id, lr.analyte_code, lr.analyte_name, lr.value_text, lr.value_num, lr.unit,
+                  lr.ref_low, lr.ref_high, lr.measured_at, lr.created_at_utc, lr.report_id
+           FROM lab_results lr
+           LEFT JOIN lab_reports r ON r.id=lr.report_id
+           WHERE lr.user_id=?
+           ORDER BY COALESCE(NULLIF(lr.measured_at,''), NULLIF(r.report_date,''), lr.created_at_utc) DESC, lr.id DESC
+           LIMIT ?""",
+        (user_id, max(1, int(limit))),
+    )
+    return [dict(row) for row in rows]
+
+
+async def create_llm_assistant_run(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    *,
+    prompt_version: str,
+    model_name: str,
+    input_snapshot: dict,
+    response_json: dict,
+    status: str = "ok",
+) -> int:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    now = utc_now_iso()
+    cur = await conn.execute(
+        """INSERT INTO llm_assistant_runs(
+            user_id, created_at, updated_at, prompt_version, model_name,
+            input_snapshot_json, response_json, status
+        ) VALUES(?,?,?,?,?,?,?,?)""",
+        (
+            user_id,
+            now,
+            now,
+            str(prompt_version or ""),
+            str(model_name or ""),
+            json.dumps(input_snapshot or {}, ensure_ascii=False),
+            json.dumps(response_json or {}, ensure_ascii=False),
+            str(status or "ok"),
+        ),
+    )
+    return int(cur.lastrowid)
+
+
+async def get_llm_assistant_run(conn: aiosqlite.Connection, tg_user_id: int, run_id: int) -> dict | None:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    row = await fetchone(
+        conn,
+        """SELECT id, created_at, updated_at, prompt_version, model_name, input_snapshot_json, response_json, status, is_active, applied_at
+           FROM llm_assistant_runs WHERE user_id=? AND id=? LIMIT 1""",
+        (user_id, int(run_id)),
+    )
+    if not row:
+        return None
+    out = dict(row)
+    for k in ("input_snapshot_json", "response_json"):
+        try:
+            out[k] = json.loads(str(out.get(k) or "{}"))
+        except Exception:
+            out[k] = {}
+    return out
+
+
+async def list_llm_assistant_runs(conn: aiosqlite.Connection, tg_user_id: int, limit: int = 20) -> list[dict]:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    rows = await fetchall(
+        conn,
+        """SELECT id, created_at, prompt_version, model_name, response_json, status, is_active, applied_at
+           FROM llm_assistant_runs WHERE user_id=? ORDER BY id DESC LIMIT ?""",
+        (user_id, max(1, int(limit))),
+    )
+    out: list[dict] = []
+    for row in rows:
+        item = dict(row)
+        try:
+            resp = json.loads(str(item.get("response_json") or "{}"))
+        except Exception:
+            resp = {}
+        item["response_json"] = resp
+        out.append(item)
+    return out
+
+
+async def delete_llm_assistant_run(conn: aiosqlite.Connection, tg_user_id: int, run_id: int) -> bool:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    await conn.execute("DELETE FROM llm_assistant_plan_actions WHERE user_id=? AND run_id=?", (user_id, int(run_id)))
+    cur = await conn.execute("DELETE FROM llm_assistant_runs WHERE user_id=? AND id=?", (user_id, int(run_id)))
+    return int(cur.rowcount or 0) > 0
+
+
+async def mark_llm_assistant_run_status(conn: aiosqlite.Connection, tg_user_id: int, run_id: int, status: str) -> bool:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    now = utc_now_iso()
+    cur = await conn.execute(
+        "UPDATE llm_assistant_runs SET status=?, updated_at=? WHERE user_id=? AND id=?",
+        (str(status or ""), now, user_id, int(run_id)),
+    )
+    return int(cur.rowcount or 0) > 0
+
+
+async def has_llm_assistant_cancel_today(conn: aiosqlite.Connection, tg_user_id: int) -> bool:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    today_utc = datetime.now(timezone.utc).date().isoformat()
+    row = await fetchone(
+        conn,
+        """SELECT 1 AS x FROM llm_assistant_runs
+           WHERE user_id=? AND status='cancelled' AND substr(created_at,1,10)=?
+           LIMIT 1""",
+        (user_id, today_utc),
+    )
+    return row is not None
+
+
+async def save_llm_assistant_plan_actions(conn: aiosqlite.Connection, tg_user_id: int, run_id: int, actions: list[dict]) -> int:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    now = utc_now_iso()
+    await conn.execute("DELETE FROM llm_assistant_plan_actions WHERE user_id=? AND run_id=?", (user_id, int(run_id)))
+    inserted = 0
+    for item in list(actions or []):
+        await conn.execute(
+            """INSERT INTO llm_assistant_plan_actions(
+                run_id, user_id, nutrient_code, nutrient_name_ru, recommend_action,
+                supplement_id, supplement_name, dose_text, frequency_text, duration_text, timing_text,
+                stop_or_pause_rule_ru, with_food, reminders_json, status, created_at, updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                int(run_id),
+                user_id,
+                str(item.get("nutrient_code") or ""),
+                str(item.get("nutrient_name_ru") or ""),
+                str(item.get("recommend_action") or ""),
+                item.get("supplement_id"),
+                str(item.get("supplement_name") or ""),
+                str(item.get("dose_text") or ""),
+                str(item.get("frequency_text") or ""),
+                str(item.get("duration_text") or ""),
+                str(item.get("timing_text") or ""),
+                str(item.get("stop_or_pause_rule_ru") or ""),
+                1 if bool(item.get("with_food")) else 0,
+                json.dumps(item.get("reminders") or [], ensure_ascii=False),
+                str(item.get("status") or "prepared"),
+                now,
+                now,
+            ),
+        )
+        inserted += 1
+    return inserted
+
+
+async def list_llm_assistant_plan_actions(conn: aiosqlite.Connection, tg_user_id: int, run_id: int) -> list[dict]:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    rows = await fetchall(
+        conn,
+        """SELECT id, run_id, nutrient_code, nutrient_name_ru, recommend_action, supplement_id, supplement_name,
+                  dose_text, frequency_text, duration_text, timing_text, stop_or_pause_rule_ru, with_food,
+                  reminders_json, status, created_at, updated_at
+           FROM llm_assistant_plan_actions WHERE user_id=? AND run_id=? ORDER BY id ASC""",
+        (user_id, int(run_id)),
+    )
+    out: list[dict] = []
+    for row in rows:
+        item = dict(row)
+        try:
+            item["reminders"] = json.loads(str(item.get("reminders_json") or "[]"))
+        except Exception:
+            item["reminders"] = []
+        item["with_food"] = bool(item.get("with_food"))
+        out.append(item)
+    return out
+
+
+async def mark_llm_assistant_plan_action_status(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    run_id: int,
+    action_id: int,
+    status: str,
+    supplement_id: int | None = None,
+) -> None:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    now = utc_now_iso()
+    await conn.execute(
+        """UPDATE llm_assistant_plan_actions
+           SET status=?, supplement_id=COALESCE(?, supplement_id), updated_at=?
+           WHERE user_id=? AND run_id=? AND id=?""",
+        (str(status or "applied"), supplement_id, now, user_id, int(run_id), int(action_id)),
+    )
+
+
+async def deactivate_other_assistant_runs(conn: aiosqlite.Connection, tg_user_id: int, keep_run_id: int) -> None:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    now = utc_now_iso()
+    await conn.execute(
+        "UPDATE llm_assistant_runs SET is_active=0, updated_at=? WHERE user_id=? AND id!=?",
+        (now, user_id, int(keep_run_id)),
+    )
+    await conn.execute(
+        "UPDATE llm_assistant_plan_actions SET status='superseded', updated_at=? WHERE user_id=? AND run_id!=? AND status='applied'",
+        (now, user_id, int(keep_run_id)),
+    )
+
+
+async def activate_assistant_run(conn: aiosqlite.Connection, tg_user_id: int, run_id: int) -> None:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    now = utc_now_iso()
+    await conn.execute(
+        "UPDATE llm_assistant_runs SET is_active=1, status='applied', applied_at=?, updated_at=? WHERE user_id=? AND id=?",
+        (now, now, user_id, int(run_id)),
+    )
+
+
+async def list_applied_actions_from_other_runs(conn: aiosqlite.Connection, tg_user_id: int, keep_run_id: int) -> list[dict]:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    rows = await fetchall(
+        conn,
+        """SELECT id, run_id, nutrient_code, recommend_action, supplement_id, reminders_json
+           FROM llm_assistant_plan_actions
+           WHERE user_id=? AND run_id!=? AND status='applied'""",
+        (user_id, int(keep_run_id)),
+    )
+    out: list[dict] = []
+    for row in rows:
+        item = dict(row)
+        try:
+            item["reminders"] = json.loads(str(item.get("reminders_json") or "[]"))
+        except Exception:
+            item["reminders"] = []
+        out.append(item)
+    return out
 
 
 async def deactivate_active_nutrient_plans(conn: aiosqlite.Connection, tg_user_id: int, nutrient_code: str) -> int:

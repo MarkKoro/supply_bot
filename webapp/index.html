@@ -773,7 +773,41 @@
     profileLabs: { reports: [], loading: false, saving: false },
     profileNutrients: { items: [], loading: false },
     profileOverview: null,
-    nutrientAssistant: { selectedCode: "vitamin_d", preview: null, loadingPreview: false, plan: null, loadingPlan: false, plans: [], loadingPlans: false, explanation: null, loadingExplanation: false, explanationMeta: null, currentPlanId: null, reminders: [], loadingReminders: false, dashboard: null, onboarding: null, onboardingStep: 0 },
+    nutrientAssistant: {
+      form: {
+        menstrual_status: "unknown",
+        heavy_menstrual_bleeding: false,
+        fish_intake_frequency: "unknown",
+        meat_intake_frequency: "unknown",
+        dairy_intake_frequency: "unknown",
+        egg_intake_frequency: "unknown",
+        sunscreen_use: "unknown",
+        sleep_quality: "unknown",
+        stress_level: "unknown",
+        symptoms: [],
+        symptoms_other_free_text: "",
+        primary_goal: "",
+        gi_problems_text: "",
+        thyroid_conditions_text: "",
+        allergies_or_restrictions_text: "",
+        known_past_deficiencies_text: "",
+        kidney_conditions_text: "",
+        liver_conditions_text: "",
+        malabsorption_risk: false,
+        bariatric_or_gi_surgery_history: false
+      },
+      manualLabs: [{ analyte_code: "", analyte_name_ru: "", value: "", unit: "", ref_low: "", ref_high: "", measured_at: "" }],
+      computing: false,
+      applying: false,
+      cancelling: false,
+      blocked: false,
+      result: null,
+      currentRunId: null,
+      history: [],
+      loadingHistory: false,
+      pendingOverwriteRuns: [],
+      pendingComputePayload: null
+    },
     profileUi: { editOpen: false, manualOpen: false, uploadOpen: false, reviewOpen: false, selectedReportId: null, uploading: false, savingManual: false, savingReview: false, activeModule: "assistant" },
     survey: {
       step: 0,
@@ -3006,6 +3040,24 @@ function adminField(label, field, value, kind='input') {
     {code:'magnesium', title:'Магний', units:['mmol/L','mg/dL']},
     {code:'calcium', title:'Кальций', units:['mmol/L','mg/dL']}
   ];
+  const ASSISTANT_ANALYTE_PRESETS = [
+    { code:'vitamin_d_25oh', name:'25(OH)D', units:['ng/mL','nmol/L'] },
+    { code:'vitamin_b12', name:'Витамин B12', units:['pg/mL','pmol/L'] },
+    { code:'ferritin', name:'Ферритин', units:['ng/mL','µg/L'] },
+    { code:'serum_iron', name:'Железо сывороточное', units:['µmol/L','µg/dL'] },
+    { code:'hemoglobin', name:'Гемоглобин', units:['g/L','g/dL'] },
+    { code:'folate', name:'Фолат', units:['ng/mL','nmol/L'] },
+    { code:'magnesium_serum', name:'Магний (сыворотка)', units:['mmol/L','mg/dL'] },
+    { code:'zinc', name:'Цинк', units:['µmol/L','µg/dL'] },
+    { code:'selenium', name:'Селен', units:['µg/L','µmol/L'] },
+    { code:'tsh', name:'ТТГ', units:['mIU/L','µIU/mL'] },
+    { code:'free_t4', name:'Свободный T4', units:['pmol/L','ng/dL'] },
+    { code:'free_t3', name:'Свободный T3', units:['pmol/L','pg/mL'] },
+    { code:'crp', name:'СРБ', units:['mg/L','mg/dL'] },
+    { code:'hba1c', name:'HbA1c', units:['%','mmol/mol'] },
+    { code:'glucose_fasting', name:'Глюкоза натощак', units:['mmol/L','mg/dL'] },
+    { code:'omega3_index', name:'Омега-3 индекс', units:['%'] }
+  ];
 
   function yearsOptions(selected) {
     const yearNow = new Date().getFullYear();
@@ -3031,16 +3083,32 @@ function adminField(label, field, value, kind='input') {
   }
 
   async function loadProfileShell(force) {
-    await Promise.all([loadBodyMap(force),loadStatsOnly().catch(()=>null),loadAchievements(force).catch(()=>null),loadProfileData(force),loadProfileLabs(force)]);
+    await Promise.all([loadBodyMap(force),loadStatsOnly().catch(()=>null),loadAchievements(force).catch(()=>null),loadProfileData(force),loadProfileLabs(force),loadNutrientPlans(force).catch(()=>null)]);
   }
   async function loadProfileData(force) { if (state.profile.loading && !force) return; state.profile.loading = true; try { const res = await api('./api/profile'); state.profile.data = res.profile || {}; } catch {} state.profile.loading = false; }
   async function loadProfileLabs(force) { if (state.profileLabs.loading && !force) return; state.profileLabs.loading = true; try { const res = await api('./api/profile/labs'); state.profileLabs.reports = Array.isArray(res.reports) ? res.reports : []; } catch {} state.profileLabs.loading = false; }
   async function loadProfileNutrients(force) { return; }
   async function loadNutrientOverview(force) { return; }
-  async function loadNutrientPlans(force) { return; }
   async function loadNutrientReminders(force) { return; }
-  async function loadNutrientDashboard(force) { return; }
   async function loadNutrientOnboarding(force) { return; }
+  async function loadNutrientDashboard(force) {
+    if (state.nutrientAssistant.loadingHistory && !force) return;
+    state.nutrientAssistant.loadingHistory = true;
+    try {
+      const res = await api('./api/profile/nutrient-assistant/dashboard');
+      state.nutrientAssistant.history = Array.isArray(res.history) ? res.history : [];
+    } catch {}
+    state.nutrientAssistant.loadingHistory = false;
+  }
+  async function loadNutrientPlans(force) {
+    if (state.nutrientAssistant.loadingHistory && !force) return;
+    state.nutrientAssistant.loadingHistory = true;
+    try {
+      const res = await api('./api/profile/nutrient-assistant/plans');
+      state.nutrientAssistant.history = Array.isArray(res.runs) ? res.runs : [];
+    } catch {}
+    state.nutrientAssistant.loadingHistory = false;
+  }
 
   function renderProfileEditorModal() {
     if (!state.profileUi.editOpen) return '';
@@ -3068,6 +3136,7 @@ function adminField(label, field, value, kind='input') {
 
   function labsEmptyState(){ return `<div class="muted">Пока нет добавленных анализов</div>`; }
   function renderLabsModal(type){
+    if (type === 'upload') return '';
     if (!(type==='manual'?state.profileUi.manualOpen:state.profileUi.uploadOpen)) return '';
     return `<div class="modal-overlay" data-close-${type}><section class="card modal-card" onclick="event.stopPropagation()"><div class="row"><strong>${type==='manual'?'Ручной ввод анализа':'Загрузка документа'}</strong><button class="btn secondary" data-close-${type}>Закрыть</button></div>${type==='manual'?`<div class="field-grid" style="margin-top:10px"><label class="muted">Дата анализа<input type="date" class="input" id="manualReportDate"/></label><label class="muted">Лаборатория (необязательно)<input class="input" id="manualLabName"/></label><label class="muted">Комментарий (необязательно)<textarea class="textarea" id="manualNotes"></textarea></label><div id="manualRows">${renderLabRow(0)}</div><button class="btn secondary" data-add-manual-row>+ Добавить показатель</button><button class="btn" data-save-manual>${state.profileUi.savingManual?'Сохраняем…':'Сохранить анализ'}</button></div>`:`<div class="field-grid" style="margin-top:10px"><label class="muted">Дата анализа<input type="date" class="input" id="uploadReportDate"/></label><label class="muted">Лаборатория (необязательно)<input class="input" id="uploadLabName"/></label><label class="muted">Комментарий (необязательно)<textarea class="textarea" id="uploadNotes"></textarea></label><input type="file" class="input" id="labsFile" accept=".pdf,.jpg,.jpeg,.png,.webp"/><button class="btn" data-upload-labs>${state.profileUi.uploading?'Загружаем…':'Загрузить документ'}</button></div>`}</section></div>`;
   }
@@ -3139,6 +3208,91 @@ function adminField(label, field, value, kind='input') {
     </section>`;
   }
 
+  function parseCommaLines(txt){ return String(txt||'').split(/\n|,/).map((x)=>x.trim()).filter(Boolean); }
+  function boolMark(v){ return v ? '✅' : '—'; }
+  function confidenceRu(v){ return ({low:'Низкая',medium:'Средняя',high:'Высокая'})[String(v||'')] || '—'; }
+  function assistantOutcomeClass(action){ return action === 'start' ? 'ok' : (action === 'stop' ? 'bad' : 'warn'); }
+  function assistantOutcomeLabel(action){
+    return ({start:'Старт',continue:'Продолжить',stop:'Остановить',do_not_start:'Не начинать',discuss_with_physician:'Обсудить с врачом',retest_only:'Только пересдать'})[String(action||'')] || action || '—';
+  }
+  function assistantAnalyteOptions(selectedCode){
+    const head = `<option value="">Выберите показатель</option>`;
+    return head + ASSISTANT_ANALYTE_PRESETS.map((item)=>`<option value="${esc(item.code)}" ${String(selectedCode||'')===String(item.code)?'selected':''}>${esc(item.name)}</option>`).join('');
+  }
+  function assistantUnitOptions(code, selectedUnit){
+    const preset = ASSISTANT_ANALYTE_PRESETS.find((x)=>String(x.code)===String(code));
+    const units = Array.isArray(preset?.units) ? preset.units : [];
+    const head = `<option value="">Выберите единицу</option>`;
+    return head + units.map((unit)=>`<option value="${esc(unit)}" ${String(selectedUnit||'')===String(unit)?'selected':''}>${esc(unit)}</option>`).join('');
+  }
+  function renderAssistantLabRow(idx, row = {}) {
+    const code = row.analyte_code || '';
+    return `<div class="field-grid two" data-assistant-lab-row="${idx}">
+      <label class="muted">analyte_code<select class="select" data-assistant-lab="analyte_code" data-idx="${idx}">${assistantAnalyteOptions(code)}</select></label>
+      <label class="muted">analyte_name_ru<input class="input" data-assistant-lab="analyte_name_ru" data-idx="${idx}" value="${esc(row.analyte_name_ru || '')}" placeholder="25(OH)D"/></label>
+      <label class="muted">value<input class="input" data-assistant-lab="value" data-idx="${idx}" value="${esc(row.value || '')}" placeholder="19.8"/></label>
+      <label class="muted">unit<select class="select" data-assistant-lab="unit" data-idx="${idx}">${assistantUnitOptions(code, row.unit || '')}</select></label>
+      <label class="muted">ref_low<input class="input" data-assistant-lab="ref_low" data-idx="${idx}" value="${esc(row.ref_low || '')}" placeholder="30"/></label>
+      <label class="muted">ref_high<input class="input" data-assistant-lab="ref_high" data-idx="${idx}" value="${esc(row.ref_high || '')}" placeholder="100"/></label>
+      <label class="muted">measured_at<input type="date" class="input" data-assistant-lab="measured_at" data-idx="${idx}" value="${esc(row.measured_at || '')}"/></label>
+    </div>`;
+  }
+
+  function renderAssistantModule(profile, labs) {
+    const a = state.nutrientAssistant;
+    const form = a.form || {};
+    const result = a.result || null;
+    const summary = profileSummary(profile).map((x)=>`<div class="muted">${x}</div>`).join('');
+    const history = Array.isArray(a.history) ? a.history : [];
+    const nutrients = Array.isArray(result?.nutrient_plan) ? result.nutrient_plan : [];
+    return `
+      <section class="card fade"><div class="row"><strong>🧪 Nutrient Assistant</strong><button class="btn secondary" data-open-edit>Редактировать профиль</button></div><div class="profile-summary-grid" style="margin-top:8px">${summary}</div></section>
+      <section class="card fade">
+        <div class="row"><strong>Данные для расчёта</strong></div>
+        <div class="field-grid two" style="margin-top:8px">
+          <label class="muted">Менструальный статус<select class="select" data-assistant-field="menstrual_status">${selectOptions([['regular','Регулярный'],['irregular','Нерегулярный'],['postmenopause','Постменопауза'],['not_applicable','Неактуально'],['unknown','Неизвестно']], form.menstrual_status)}</select></label>
+          <label class="muted">Обильные менструации<select class="select" data-assistant-field="heavy_menstrual_bleeding">${selectOptions([['false','Нет'],['true','Да']], String(!!form.heavy_menstrual_bleeding), 'Выберите')}</select></label>
+          <label class="muted">Рыба<select class="select" data-assistant-field="fish_intake_frequency">${selectOptions([['none','Не ем'],['rare','Редко'],['weekly','Еженедельно'],['often','Часто'],['unknown','Неизвестно']], form.fish_intake_frequency)}</select></label>
+          <label class="muted">Мясо<select class="select" data-assistant-field="meat_intake_frequency">${selectOptions([['none','Не ем'],['rare','Редко'],['weekly','Еженедельно'],['often','Часто'],['unknown','Неизвестно']], form.meat_intake_frequency)}</select></label>
+          <label class="muted">Молочные<select class="select" data-assistant-field="dairy_intake_frequency">${selectOptions([['none','Не ем'],['rare','Редко'],['weekly','Еженедельно'],['often','Часто'],['unknown','Неизвестно']], form.dairy_intake_frequency)}</select></label>
+          <label class="muted">Яйца<select class="select" data-assistant-field="egg_intake_frequency">${selectOptions([['none','Не ем'],['rare','Редко'],['weekly','Еженедельно'],['often','Часто'],['unknown','Неизвестно']], form.egg_intake_frequency)}</select></label>
+          <label class="muted">Сон<select class="select" data-assistant-field="sleep_quality">${selectOptions([['poor','Плохой'],['fair','Средний'],['good','Хороший'],['unknown','Неизвестно']], form.sleep_quality)}</select></label>
+          <label class="muted">Стресс<select class="select" data-assistant-field="stress_level">${selectOptions([['low','Низкий'],['medium','Средний'],['high','Высокий'],['unknown','Неизвестно']], form.stress_level)}</select></label>
+        </div>
+      </section>
+      <section class="card fade">
+        <div class="row"><strong>Симптомы и цель</strong></div>
+        <div class="field-grid" style="margin-top:8px">
+          <label class="muted">Симптомы (каждый с новой строки)<textarea class="textarea" data-assistant-field="symptoms">${esc((form.symptoms||[]).join('\n'))}</textarea></label>
+          <label class="muted">Доп. симптомы<input class="input" data-assistant-field="symptoms_other_free_text" value="${esc(form.symptoms_other_free_text || '')}"/></label>
+          <label class="muted">Главная цель<input class="input" data-assistant-field="primary_goal" value="${esc(form.primary_goal || '')}" placeholder="more_energy"/></label>
+          <label class="muted">ЖКТ (строки/запятые)<input class="input" data-assistant-field="gi_problems_text" value="${esc(form.gi_problems_text || '')}"/></label>
+          <label class="muted">Щитовидка (строки/запятые)<input class="input" data-assistant-field="thyroid_conditions_text" value="${esc(form.thyroid_conditions_text || '')}"/></label>
+        </div>
+      </section>
+      <section class="card fade">
+        <div class="row"><strong>Анализы</strong><button class="btn secondary" data-assistant-add-lab>+ Показатель</button></div>
+        <div class="muted" style="margin-top:6px">Ручной ввод — основной режим. Заполните analyte_code, analyte_name_ru, value, unit, ref_low, ref_high, measured_at.</div>
+        <div id="assistantLabRows" style="margin-top:8px">${(a.manualLabs||[]).map((row,idx)=>renderAssistantLabRow(idx,row)).join('')}</div>
+        <div class="row" style="margin-top:10px"><button class="btn" data-assistant-compute>${a.computing?'Считаем…':'Рассчитать'}</button></div>
+      </section>
+      ${result ? `<section class="card fade"><div class="row"><strong>Результат</strong><div style="display:flex;gap:8px"><button class="btn" data-assistant-apply>${a.applying?'Применяем…':'Принять'}</button><button class="btn secondary" data-assistant-cancel>${a.cancelling?'Отменяем…':'Отменить'}</button></div></div>
+        <div class="muted" style="margin-top:8px">${esc(result.summary_ru || '')}</div>
+        <div class="row" style="margin-top:8px"><span class="chip">Уверенность: ${esc(confidenceRu(result.confidence))}</span><span class="chip">Нутриентов: ${nutrients.length}</span><span class="chip">Анализов: ${(result.labs_used||[]).length}</span></div>
+        <div class="field-grid two" style="margin-top:10px">
+          <div><strong>Safety flags</strong>${(result.safety_flags||[]).length ? (result.safety_flags||[]).map((x)=>`<div class="muted">• ${esc(x)}</div>`).join('') : '<div class="muted">Нет</div>'}</div>
+          <div><strong>Physician flags</strong>${(result.physician_flags||[]).length ? (result.physician_flags||[]).map((x)=>`<div class="muted">• ${esc(x)}</div>`).join('') : '<div class="muted">Нет</div>'}</div>
+        </div>
+        <div style="margin-top:10px">${nutrients.map((n)=>`<div class="item-row" style="display:block"><div class="row"><strong>${esc(n.nutrient_name_ru || n.nutrient_code || 'Нутриент')}</strong><span class="chip ${assistantOutcomeClass(n.recommend_action)}">${esc(assistantOutcomeLabel(n.recommend_action))}</span></div><div class="muted">${esc(n.reason_ru || '')}</div><div class="muted">Доза: ${esc(n.dose_text_ru || '—')} · Частота: ${esc(n.frequency_text_ru || '—')} · Длительность: ${esc(n.duration_text_ru || '—')}</div><div class="muted">Тайминг: ${esc(n.timing_text_ru || '—')} · С едой: ${boolMark(n.with_food)}</div><div class="muted">Стоп/пауза: ${esc(n.stop_or_pause_rule_ru || '—')}</div></div>`).join('')}</div>
+        <div style="margin-top:10px"><strong>Next steps</strong>${(result.next_steps_ru||[]).map((x)=>`<div class="muted">• ${esc(x)}</div>`).join('')}</div>
+      </section>` : ''}
+      <section class="card fade"><div class="row"><strong>История прошлых расчётов</strong></div>
+      <div style="margin-top:8px">${history.length ? history.map((h)=>`<button class="item-row" data-assistant-history="${h.id}"><span>${esc(formatUtcShort(h.created_at || ''))} · #${h.id}${h.is_active ? ' · Активная' : ''}</span><span class="muted">${esc((h.response_json||{}).confidence || h.status || '')}</span></button>`).join('') : '<div class="muted">Пока пусто</div>'}</div></section>
+      ${a.pendingOverwriteRuns?.length ? `<div class="modal-overlay"><section class="card modal-card" onclick="event.stopPropagation()"><div class="row"><strong>История заполнена (максимум 3)</strong></div><div class="muted" style="margin-top:8px">Выберите, какую версию удалить перед новым расчётом:</div><div style="margin-top:8px">${a.pendingOverwriteRuns.map((r)=>`<button class="item-row" data-assistant-overwrite="${r.id}"><span>#${r.id} · ${esc(formatUtcShort(r.created_at||''))}${r.is_active?' · Активная':''}</span><span class="muted">${esc((r.response_json||{}).confidence||r.status||'')}</span></button>`).join('')}</div><div class="row" style="margin-top:10px"><button class="btn secondary" data-assistant-overwrite-cancel>Отмена</button></div></section></div>`:''}
+      ${a.blocked ? `<div class="modal-overlay"><section class="card modal-card"><div class="row"><strong>Считаем рекомендации…</strong></div><div class="muted" style="margin-top:8px">Пожалуйста, подождите. Пока отчёт формируется, действия временно заблокированы.</div></section></div>` : ''}
+    `;
+  }
+
   function renderProfile() {
     const p = state.profile.data || {};
     const labs = state.profileLabs.reports || [];
@@ -3153,18 +3307,45 @@ function adminField(label, field, value, kind='input') {
     if (activeModule === 'organs') moduleHtml = `<section class="card fade">${renderBodyMap()}</section>`;
     if (activeModule === 'achievements') moduleHtml = renderProfileAchievementsModule();
     if (activeModule === 'cosmetics') moduleHtml = renderProfileCosmeticsModule();
-    if (activeModule === 'assistant') moduleHtml = `
-      <section class="card fade">
-        <div class="row"><strong>🧪 Нутриентный помощник</strong></div>
-        <div class="muted" style="margin-top:8px">Модуль рекомендаций сейчас упрощается.<br>Профиль и анализы уже сохраняются.<br>Следующая версия будет собирать план на основе ваших данных через AI без тяжёлой внутренней логики.</div>
-      </section>
-      <section class="card fade" data-open-edit><div class="profile-hero"><div class="profile-avatar">👤</div><div><div class="profile-hero-head"><strong>Мой профиль</strong><span class="chip">Lv.${level} · ${esc(levelTitle)}</span><button class="btn secondary" data-open-edit>Редактировать профиль</button></div><div class="progress" style="margin-top:6px"><i style="width:${levelPct}%"></i></div><div class="profile-summary-grid">${summary}</div></div></div></section>
-      <section class="card fade"><div class="row"><strong>📄 Мои анализы</strong></div><div style="margin-top:10px">${labs.length?labs.map((r)=>`<button class="item-row" data-open-review="${r.id}"><span>${esc(formatRuDate(r.report_date))} · ${esc(r.lab_name||'Лаборатория не указана')}</span><span class="muted">${Array.isArray(r.results)?r.results.length:0} показ.</span></button>`).join(''):labsEmptyState()}</div><div class="row" style="margin-top:10px; gap:8px"><button class="btn" data-open-upload>Загрузить документ</button><button class="btn secondary" data-open-manual>Ввести вручную</button></div></section>`;
+    if (activeModule === 'assistant') moduleHtml = renderAssistantModule(p, labs);
 
     return `${renderProfileModulesGrid()}${moduleHtml}${renderProfileEditorModal()}${renderLabsModal('manual')}${renderLabsModal('upload')}${renderReviewModal()}`;
   }
 
   function collectLabRows(containerId){ const rows=[]; document.querySelectorAll(`#${containerId} [data-lab-row]`).forEach((rowEl)=>{ const idx=rowEl.dataset.labRow; const analyte_code=document.querySelector(`[data-lab-field="analyte_code"][data-idx="${idx}"]`)?.value||''; const preset=ANALYTE_PRESETS.find((x)=>x.code===analyte_code); const value=document.querySelector(`[data-lab-field="value_num"][data-idx="${idx}"]`)?.value||''; rows.push({ analyte_code, analyte_name:preset?.title||analyte_code, value_text:String(value), value_num:Number(String(value).replace(',','.'))||null, unit:document.querySelector(`[data-lab-field="unit"][data-idx="${idx}"]`)?.value||'', ref_low:Number(document.querySelector(`[data-lab-field="ref_low"][data-idx="${idx}"]`)?.value||'')||null, ref_high:Number(document.querySelector(`[data-lab-field="ref_high"][data-idx="${idx}"]`)?.value||'')||null }); }); return rows.filter((x)=>x.analyte_code); }
+  function collectAssistantLabs(){
+    const rows = [];
+    document.querySelectorAll('[data-assistant-lab-row]').forEach((rowEl)=>{
+      const idx = rowEl.dataset.assistantLabRow;
+      const item = {};
+      ['analyte_code','analyte_name_ru','value','unit','ref_low','ref_high','measured_at'].forEach((f)=>item[f] = document.querySelector(`[data-assistant-lab="${f}"][data-idx="${idx}"]`)?.value || '');
+      if (!item.analyte_name_ru && item.analyte_code) {
+        const preset = ASSISTANT_ANALYTE_PRESETS.find((x)=>String(x.code)===String(item.analyte_code));
+        item.analyte_name_ru = preset?.name || item.analyte_code;
+      }
+      if (String(item.analyte_code || '').trim()) rows.push(item);
+    });
+    return rows;
+  }
+  function collectAssistantForm(){
+    const next = { ...(state.nutrientAssistant.form || {}) };
+    document.querySelectorAll('[data-assistant-field]').forEach((el)=>{
+      const key = String(el.dataset.assistantField || '');
+      if (!key) return;
+      next[key] = el.value;
+    });
+    next.heavy_menstrual_bleeding = String(next.heavy_menstrual_bleeding) === 'true';
+    next.symptoms = parseCommaLines(next.symptoms);
+    next.gi_problems = parseCommaLines(next.gi_problems_text);
+    next.thyroid_conditions = parseCommaLines(next.thyroid_conditions_text);
+    next.allergies_or_restrictions = parseCommaLines(next.allergies_or_restrictions_text);
+    next.known_past_deficiencies = parseCommaLines(next.known_past_deficiencies_text);
+    next.kidney_conditions = parseCommaLines(next.kidney_conditions_text);
+    next.liver_conditions = parseCommaLines(next.liver_conditions_text);
+    next.malabsorption_risk = !!next.malabsorption_risk;
+    next.bariatric_or_gi_surgery_history = !!next.bariatric_or_gi_surgery_history;
+    return next;
+  }
 
   function bindProfileEvents() {
     document.querySelectorAll('[data-profile-module]').forEach((el)=>el.addEventListener('click', async ()=>{
@@ -3174,6 +3355,9 @@ function adminField(label, field, value, kind='input') {
       if (next === 'organs') {
         await loadBodyMap(true);
         bindBodyMapEvents();
+      } else if (next === 'assistant') {
+        await loadNutrientPlans(true);
+        renderActiveTab();
       }
     }));
     document.querySelectorAll('[data-open-edit]').forEach((el)=>el.addEventListener('click', ()=>{ state.profileUi.editOpen=true; renderActiveTab(); }));
@@ -3184,6 +3368,105 @@ function adminField(label, field, value, kind='input') {
     document.querySelectorAll('[data-close-upload]').forEach((el)=>el.addEventListener('click', ()=>{ state.profileUi.uploadOpen=false; renderActiveTab(); }));
     document.querySelectorAll('[data-close-review]').forEach((el)=>el.addEventListener('click', ()=>{ state.profileUi.reviewOpen=false; renderActiveTab(); }));
     document.querySelectorAll('[data-open-review]').forEach((el)=>el.addEventListener('click', ()=>{ state.profileUi.selectedReportId=Number(el.dataset.openReview); state.profileUi.reviewOpen=true; renderActiveTab(); }));
+    document.querySelector('[data-assistant-add-lab]')?.addEventListener('click', ()=>{
+      state.nutrientAssistant.manualLabs.push({ analyte_code: "", analyte_name_ru: "", value: "", unit: "", ref_low: "", ref_high: "", measured_at: "" });
+      renderActiveTab();
+    });
+    document.querySelector('[data-assistant-compute]')?.addEventListener('click', async ()=>{
+      if (state.nutrientAssistant.computing) return;
+      state.nutrientAssistant.computing = true;
+      state.nutrientAssistant.blocked = true;
+      renderActiveTab();
+      try {
+        const assistant_profile = collectAssistantForm();
+        const labs = collectAssistantLabs();
+        const replace_run_id = Number(state.nutrientAssistant.pendingComputePayload?.replace_run_id || 0) || null;
+        state.nutrientAssistant.form = assistant_profile;
+        state.nutrientAssistant.manualLabs = labs.length ? labs : state.nutrientAssistant.manualLabs;
+        const res = await api('./api/profile/nutrient-assistant/compute', { method:'POST', body: { assistant_profile, labs, replace_run_id } });
+        state.nutrientAssistant.result = res.result || null;
+        state.nutrientAssistant.currentRunId = res.run_id || null;
+        state.nutrientAssistant.pendingOverwriteRuns = [];
+        state.nutrientAssistant.pendingComputePayload = null;
+        await loadNutrientPlans(true);
+        showToast('Расчёт готов');
+      } catch (e) {
+        if (e.message === 'ASSISTANT_HISTORY_FULL') {
+          try {
+            const conflictRes = await api('./api/profile/nutrient-assistant/plans');
+            state.nutrientAssistant.pendingOverwriteRuns = Array.isArray(conflictRes.runs) ? conflictRes.runs.slice(0,3) : [];
+            state.nutrientAssistant.pendingComputePayload = { replace_run_id: null };
+          } catch {}
+          showToast('Выберите версию для перезаписи');
+        } else if (e.message === 'DAILY_LIMIT_ONE_REQUEST') {
+          showToast('Лимит: после отмены доступен только 1 запрос в день');
+        } else {
+          showToast(e.message || 'Не удалось выполнить расчёт');
+        }
+      }
+      state.nutrientAssistant.computing = false;
+      state.nutrientAssistant.blocked = false;
+      renderActiveTab();
+    });
+    document.querySelector('[data-assistant-apply]')?.addEventListener('click', async ()=>{
+      if (state.nutrientAssistant.applying || !state.nutrientAssistant.currentRunId) return;
+      state.nutrientAssistant.applying = true;
+      renderActiveTab();
+      try {
+        const res = await api('./api/profile/nutrient-assistant/apply', { method:'POST', body: { run_id: state.nutrientAssistant.currentRunId } });
+        showToast(`План применён: ${Array.isArray(res.applied) ? res.applied.length : 0}`);
+      } catch (e) {
+        showToast(e.message || 'Не удалось применить план');
+      }
+      state.nutrientAssistant.applying = false;
+      renderActiveTab();
+    });
+    document.querySelector('[data-assistant-cancel]')?.addEventListener('click', async ()=>{
+      if (state.nutrientAssistant.cancelling || !state.nutrientAssistant.currentRunId) return;
+      state.nutrientAssistant.cancelling = true;
+      renderActiveTab();
+      try {
+        await api(`./api/profile/nutrient-assistant/runs/${state.nutrientAssistant.currentRunId}/cancel`, { method:'POST', body:{} });
+        showToast('Запрос отменён. Новый расчёт будет доступен завтра');
+        await loadNutrientPlans(true);
+      } catch (e) {
+        showToast(e.message || 'Не удалось отменить');
+      }
+      state.nutrientAssistant.cancelling = false;
+      renderActiveTab();
+    });
+    document.querySelectorAll('[data-assistant-history]').forEach((el)=>el.addEventListener('click', async ()=>{
+      try {
+        const id = Number(el.dataset.assistantHistory);
+        const res = await api(`./api/profile/nutrient-assistant/plans/${id}`);
+        state.nutrientAssistant.result = res.run?.response_json || null;
+        state.nutrientAssistant.currentRunId = id;
+        showToast('Загружена версия расчёта');
+      } catch {
+        showToast('Не удалось открыть расчёт');
+      }
+      renderActiveTab();
+    }));
+    document.querySelectorAll('[data-assistant-lab="analyte_code"]').forEach((el)=>el.addEventListener('change',(e)=>{
+      const idx = e.target.dataset.idx;
+      const code = e.target.value || '';
+      const preset = ASSISTANT_ANALYTE_PRESETS.find((x)=>String(x.code)===String(code));
+      const unitEl = document.querySelector(`[data-assistant-lab="unit"][data-idx="${idx}"]`);
+      if (unitEl) unitEl.innerHTML = assistantUnitOptions(code, '');
+      const nameEl = document.querySelector(`[data-assistant-lab="analyte_name_ru"][data-idx="${idx}"]`);
+      if (nameEl && !String(nameEl.value || '').trim()) nameEl.value = preset?.name || code;
+    }));
+    document.querySelectorAll('[data-assistant-overwrite]').forEach((el)=>el.addEventListener('click', ()=>{
+      state.nutrientAssistant.pendingComputePayload = { replace_run_id: Number(el.dataset.assistantOverwrite || 0) };
+      state.nutrientAssistant.pendingOverwriteRuns = [];
+      renderActiveTab();
+      document.querySelector('[data-assistant-compute]')?.click();
+    }));
+    document.querySelector('[data-assistant-overwrite-cancel]')?.addEventListener('click', ()=>{
+      state.nutrientAssistant.pendingOverwriteRuns = [];
+      state.nutrientAssistant.pendingComputePayload = null;
+      renderActiveTab();
+    });
 
     document.querySelector('[data-profile-save]')?.addEventListener('click', async () => {
       if (state.profile.saving) return;

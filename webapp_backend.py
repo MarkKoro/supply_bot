@@ -4,6 +4,7 @@ import os
 import re
 import uuid
 from datetime import timedelta
+from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
@@ -17,7 +18,7 @@ from telegram_webapp_auth import verify_init_data
 import db
 import engine
 from settings import get_settings
-from openai_client import OpenAIConfig, _sync_call
+from openai_client import OpenAIConfig, _sync_call, nutrient_assistant_single_call
 from achievements import THEMES, TAB_SKINS, BADGES
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -228,6 +229,17 @@ class LabReportUpdateBody(BaseModel):
     results: list[dict] = []
 
 
+class NutrientAssistantComputeBody(BaseModel):
+    assistant_profile: dict = {}
+    labs: list[dict] = []
+    assistant_context: dict = {}
+    replace_run_id: int | None = None
+
+
+class NutrientAssistantApplyBody(BaseModel):
+    run_id: int
+
+
 async def _auth_user_id(init_data: str) -> int:
     ok, parsed = verify_init_data(init_data, BOT_TOKEN)
     if not ok:
@@ -318,6 +330,91 @@ def _parse_labs_text(raw_text: str) -> tuple[list[dict], str]:
         })
     status = "parsed" if parsed else "needs_manual_review"
     return parsed, status
+
+
+ASSISTANT_PROMPT_VERSION = "v2"
+
+
+def _safe_json_loads(raw: str) -> dict | None:
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _extract_json_object(raw: str) -> dict | None:
+    direct = _safe_json_loads(str(raw or "").strip())
+    if direct is not None:
+        return direct
+    text = str(raw or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?", "", text).strip()
+        text = re.sub(r"```$", "", text).strip()
+        direct = _safe_json_loads(text)
+        if direct is not None:
+            return direct
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+        return _safe_json_loads(text[start : end + 1])
+    return None
+
+
+def _validate_assistant_response(data: dict) -> tuple[bool, str]:
+    required = [
+        "summary_ru", "confidence", "safety_flags", "physician_flags", "labs_used",
+        "missing_data", "nutrient_plan", "next_steps_ru", "disclaimer_ru",
+    ]
+    for key in required:
+        if key not in data:
+            return False, f"missing_field:{key}"
+    if str(data.get("confidence") or "") not in {"low", "medium", "high"}:
+        return False, "invalid_confidence"
+    if not isinstance(data.get("nutrient_plan"), list):
+        return False, "invalid_nutrient_plan"
+    return True, ""
+
+
+def _parse_json_list_field(raw: str | None) -> list[str]:
+    text = str(raw or "").strip()
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return []
+    return [str(x).strip() for x in parsed if str(x).strip()] if isinstance(parsed, list) else []
+
+
+def _to_iso_date(raw: str | None) -> str:
+    txt = str(raw or "").strip()
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", txt):
+        return txt
+    return ""
+
+
+def _extract_reminder_times(frequency_text: str) -> list[str]:
+    text = str(frequency_text or "").lower()
+    if ("2" in text and "д" in text) or "2x" in text or "дважды" in text:
+        return ["09:00", "19:00"]
+    if ("3" in text and "д" in text) or "3x" in text or "трижды" in text:
+        return ["09:00", "14:00", "20:00"]
+    return ["09:00"]
+
+
+def _days_since_iso(raw: str | None) -> int | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        delta = datetime.now(timezone.utc) - dt.astimezone(timezone.utc)
+        return max(0, int(delta.days))
+    except Exception:
+        return None
 
 
 async def supply_http_exception_handler(request, exc: HTTPException):
@@ -1657,66 +1754,8 @@ async def api_profile_labs_upload(
     tg_user_id = await _auth_user_id(x_telegram_init_data)
     if not await _premium_guard(tg_user_id):
         return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
-
-    filename = str(file.filename or "report")
-    ext = Path(filename).suffix.lower()
-    if ext not in {".pdf", ".jpg", ".jpeg", ".png", ".webp"}:
-        raise HTTPException(status_code=400, detail="Unsupported file format")
-
-    user_dir = UPLOADS_DIR / str(int(tg_user_id))
-    user_dir.mkdir(parents=True, exist_ok=True)
-    safe_name = f"{uuid.uuid4().hex}{ext}"
-    local_path = user_dir / safe_name
-    content = await file.read()
-    local_path.write_bytes(content)
-
-    mime_type = str(file.content_type or _guess_mime_type(filename))
-    parse_notes = ""
-    parse_status = "needs_manual_review"
-    parsed_results: list[dict] = []
-
-    if ext == ".pdf":
-        extracted_text = ""
-        try:
-            import pypdf  # type: ignore
-            reader = pypdf.PdfReader(str(local_path))
-            extracted_text = "\n".join([(p.extract_text() or "") for p in reader.pages])
-        except Exception:
-            extracted_text = ""
-        if extracted_text.strip():
-            parsed_results, parse_status = _parse_labs_text(extracted_text)
-            parse_notes = "Автоматический парсинг текстового PDF выполнен" if parsed_results else "Текст PDF прочитан, но показатели не распознаны"
-        else:
-            parse_notes = "PDF загружен, автоматическое извлечение недоступно"
-    else:
-        parse_notes = "Файл загружен. Для изображений нужна ручная проверка"
-
-    conn = await db.connect(s.DB_PATH)
-    try:
-        report_id = await db.create_lab_report(conn, tg_user_id, {
-            "source": "pdf_upload",
-            "lab_name": lab_name,
-            "report_date": report_date,
-            "notes": notes,
-            "source_filename": filename,
-            "mime_type": mime_type,
-            "parse_status": parse_status,
-            "parse_notes": parse_notes,
-            "source_file_path": os.path.relpath(local_path, BASE_DIR),
-        })
-        inserted = await db.add_lab_results_batch(conn, tg_user_id, report_id, parsed_results)
-        report = await db.get_lab_report_by_id(conn, tg_user_id, report_id)
-        report["results"] = await db.get_lab_results_by_report_id(conn, tg_user_id, report_id)
-        await conn.commit()
-        return JSONResponse({
-            "ok": True,
-            "report_id": report_id,
-            "inserted_results": inserted,
-            "parse_status": parse_status,
-            "report": report,
-        })
-    finally:
-        await conn.close()
+    _ = (file, report_date, lab_name, notes, tg_user_id)
+    return JSONResponse({"ok": False, "code": "MANUAL_LABS_ONLY"}, status_code=410)
 
 
 @app.get("/api/profile/nutrients")
@@ -1733,8 +1772,215 @@ async def api_profile_nutrient_overview_get(x_telegram_init_data: str = Header(d
 
 @app.get("/api/profile/nutrient-assistant/dashboard")
 async def api_profile_nutrient_dashboard_get(x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
-    await _auth_user_id(x_telegram_init_data)
-    return JSONResponse({"ok": False, "code": "NUTRIENT_ASSISTANT_DISABLED"}, status_code=410)
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    if not await _premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
+    conn = await db.connect(s.DB_PATH)
+    try:
+        runs = await db.list_llm_assistant_runs(conn, tg_user_id, limit=20)
+        profile = await db.get_user_health_profile(conn, tg_user_id)
+        labs = await db.list_latest_lab_results(conn, tg_user_id, limit=100)
+        return JSONResponse({"ok": True, "history": runs, "profile": profile, "labs_count": len(labs)})
+    finally:
+        await conn.close()
+
+
+@app.post("/api/profile/nutrient-assistant/compute")
+async def api_profile_nutrient_assistant_compute(
+    body: NutrientAssistantComputeBody,
+    x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
+):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    if not await _premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
+    if not s.OPENAI_API_KEY:
+        return JSONResponse({"ok": False, "code": "OPENAI_DISABLED"}, status_code=503)
+
+    conn = await db.connect(s.DB_PATH)
+    try:
+        if await db.has_llm_assistant_cancel_today(conn, tg_user_id):
+            return JSONResponse({"ok": False, "code": "DAILY_LIMIT_ONE_REQUEST"}, status_code=429)
+        history = await db.list_llm_assistant_runs(conn, tg_user_id, limit=10)
+        active_history = [h for h in history if str(h.get("status") or "") in {"ok", "applied", "cancelled"}]
+        if len(active_history) >= 3:
+            replace_run_id = int(body.replace_run_id or 0)
+            if replace_run_id <= 0:
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "code": "ASSISTANT_HISTORY_FULL",
+                        "max_history": 3,
+                        "runs": active_history[:3],
+                    },
+                    status_code=409,
+                )
+            target = next((r for r in active_history if int(r.get("id") or 0) == replace_run_id), None)
+            if not target:
+                return JSONResponse({"ok": False, "code": "INVALID_REPLACE_RUN"}, status_code=400)
+            await db.delete_llm_assistant_run(conn, tg_user_id, replace_run_id)
+
+        profile = await db.get_user_health_profile(conn, tg_user_id)
+        stack = await db.get_user_supplements_with_enabled(conn, tg_user_id)
+        if body.labs:
+            labs = list(body.labs)
+        else:
+            latest = await db.list_latest_lab_results(conn, tg_user_id, limit=80)
+            labs = [
+                {
+                    "analyte_code": str(x.get("analyte_code") or ""),
+                    "analyte_name_ru": str(x.get("analyte_name") or ""),
+                    "value": x.get("value_num") if x.get("value_num") is not None else str(x.get("value_text") or ""),
+                    "unit": str(x.get("unit") or ""),
+                    "ref_low": x.get("ref_low"),
+                    "ref_high": x.get("ref_high"),
+                    "measured_at": _to_iso_date(str(x.get("measured_at") or "")),
+                }
+                for x in latest
+            ]
+
+        birth_year = int(profile.get("birth_year") or 0) if str(profile.get("birth_year") or "").isdigit() else None
+        current_year = int(db.get_user_local_date(None).split("-")[0])
+        age = current_year - birth_year if birth_year and 1900 <= birth_year <= current_year else None
+        assistant_profile = dict(body.assistant_profile or {})
+        user_profile_payload = {
+            "sex_at_birth": {"m": "male", "f": "female", "na": "unknown"}.get(str(profile.get("sex_at_birth") or "").lower(), "unknown"),
+            "age": age,
+            "height_cm": profile.get("height_cm"),
+            "weight_kg": profile.get("weight_kg"),
+            "country_code": str(profile.get("country_code") or ""),
+            "city": str(profile.get("city") or ""),
+            "pregnancy_status": {"yes": "yes", "no": "no", "na": "not_applicable"}.get(str(profile.get("pregnancy_status") or "").lower(), "unknown"),
+            "lactation_status": {"yes": "yes", "no": "no", "na": "not_applicable"}.get(str(profile.get("lactation_status") or "").lower(), "unknown"),
+            "menstrual_status": str(assistant_profile.get("menstrual_status") or "unknown"),
+            "heavy_menstrual_bleeding": bool(assistant_profile.get("heavy_menstrual_bleeding")),
+            "diet_type": str(assistant_profile.get("diet_type") or "unknown"),
+            "fish_intake_frequency": str(assistant_profile.get("fish_intake_frequency") or "unknown"),
+            "meat_intake_frequency": str(assistant_profile.get("meat_intake_frequency") or "unknown"),
+            "dairy_intake_frequency": str(assistant_profile.get("dairy_intake_frequency") or "unknown"),
+            "egg_intake_frequency": str(assistant_profile.get("egg_intake_frequency") or "unknown"),
+            "sun_exposure_level": str(assistant_profile.get("sun_exposure_level") or "unknown"),
+            "sunscreen_use": str(assistant_profile.get("sunscreen_use") or "unknown"),
+            "training_sessions_per_week": assistant_profile.get("training_sessions_per_week") or profile.get("training_sessions_per_week"),
+            "training_minutes_per_week": assistant_profile.get("training_minutes_per_week") or profile.get("training_minutes_per_week"),
+            "smoking_status": str(assistant_profile.get("smoking_status") or "unknown"),
+            "alcohol_status": str(assistant_profile.get("alcohol_status") or "unknown"),
+            "sleep_quality": str(assistant_profile.get("sleep_quality") or "unknown"),
+            "stress_level": str(assistant_profile.get("stress_level") or "unknown"),
+            "medications": _parse_json_list_field(profile.get("meds_json")),
+            "health_conditions": _parse_json_list_field(profile.get("conditions_json")),
+            "gi_problems": list(assistant_profile.get("gi_problems") or []),
+            "malabsorption_risk": bool(assistant_profile.get("malabsorption_risk")),
+            "kidney_conditions": list(assistant_profile.get("kidney_conditions") or []),
+            "liver_conditions": list(assistant_profile.get("liver_conditions") or []),
+            "thyroid_conditions": list(assistant_profile.get("thyroid_conditions") or []),
+            "bariatric_or_gi_surgery_history": bool(assistant_profile.get("bariatric_or_gi_surgery_history")),
+            "allergies_or_restrictions": list(assistant_profile.get("allergies_or_restrictions") or []),
+            "known_past_deficiencies": list(assistant_profile.get("known_past_deficiencies") or []),
+            "primary_goal": str(assistant_profile.get("primary_goal") or ""),
+            "symptoms": list(assistant_profile.get("symptoms") or []),
+            "symptoms_other_free_text": str(assistant_profile.get("symptoms_other_free_text") or ""),
+        }
+        active_stack_payload = []
+        for item in stack:
+            if int(item.get("is_active") or 0) != 1:
+                continue
+            started_days = _days_since_iso(str(item.get("created_at") or ""))
+            dose = str(item.get("dose_text") or "")
+            if started_days is not None:
+                dose = f"{dose} (принимает {started_days} дн.)".strip()
+            active_stack_payload.append(
+                {
+                    "supplement_name": str(item.get("name_ru") or item.get("name_en") or item.get("name") or ""),
+                    "nutrient_code": str(item.get("slug") or ""),
+                    "dose_text": dose,
+                    "frequency_text": "daily",
+                    "started_days_ago": started_days,
+                    "note_text": str(item.get("note_text") or ""),
+                }
+            )
+
+        llm_payload = {
+            "user_profile": user_profile_payload,
+            "active_stack": active_stack_payload,
+            "labs": labs,
+            "assistant_context": {
+                "request_source": "webapp",
+                "language": "ru",
+                "goal": "build_nutrient_recommendations",
+                "prompt_version": ASSISTANT_PROMPT_VERSION,
+                **dict(body.assistant_context or {}),
+            },
+        }
+        cfg = OpenAIConfig(api_key=s.OPENAI_API_KEY, model=s.OPENAI_MODEL)
+        raw_response = await nutrient_assistant_single_call(cfg, payload=llm_payload)
+        parsed = _extract_json_object(raw_response)
+        if not parsed:
+            run_id = await db.create_llm_assistant_run(
+                conn, tg_user_id,
+                prompt_version=ASSISTANT_PROMPT_VERSION,
+                model_name=s.OPENAI_MODEL,
+                input_snapshot=llm_payload,
+                response_json={"raw_text": raw_response},
+                status="invalid_json",
+            )
+            await conn.commit()
+            return JSONResponse({"ok": False, "code": "LLM_INVALID_JSON", "run_id": run_id}, status_code=422)
+        valid, reason = _validate_assistant_response(parsed)
+        if not valid:
+            run_id = await db.create_llm_assistant_run(
+                conn, tg_user_id,
+                prompt_version=ASSISTANT_PROMPT_VERSION,
+                model_name=s.OPENAI_MODEL,
+                input_snapshot=llm_payload,
+                response_json={"raw_text": raw_response, "parsed": parsed, "reason": reason},
+                status="invalid_contract",
+            )
+            await conn.commit()
+            return JSONResponse({"ok": False, "code": "LLM_INVALID_CONTRACT", "reason": reason, "run_id": run_id}, status_code=422)
+
+        run_id = await db.create_llm_assistant_run(
+            conn, tg_user_id,
+            prompt_version=ASSISTANT_PROMPT_VERSION,
+            model_name=s.OPENAI_MODEL,
+            input_snapshot=llm_payload,
+            response_json=parsed,
+            status="ok",
+        )
+        prepared_actions: list[dict] = []
+        seen_action_keys: set[tuple[str, str]] = set()
+        for item in list(parsed.get("nutrient_plan") or []):
+            action = str(item.get("recommend_action") or "")
+            if action not in {"start", "continue", "stop"}:
+                continue
+            nutrient_code = str(item.get("nutrient_code") or "").strip().lower()
+            key = (nutrient_code, action)
+            if key in seen_action_keys:
+                continue
+            seen_action_keys.add(key)
+            prepared_actions.append(
+                {
+                    "nutrient_code": nutrient_code,
+                    "nutrient_name_ru": str(item.get("nutrient_name_ru") or ""),
+                    "recommend_action": action,
+                    "supplement_name": str(item.get("nutrient_name_ru") or ""),
+                    "dose_text": str(item.get("dose_text_ru") or ""),
+                    "frequency_text": str(item.get("frequency_text_ru") or ""),
+                    "duration_text": str(item.get("duration_text_ru") or ""),
+                    "timing_text": str(item.get("timing_text_ru") or ""),
+                    "stop_or_pause_rule_ru": str(item.get("stop_or_pause_rule_ru") or ""),
+                    "with_food": bool(item.get("with_food")),
+                    "reminders": _extract_reminder_times(str(item.get("frequency_text_ru") or "")),
+                    "status": "prepared",
+                }
+            )
+        await db.save_llm_assistant_plan_actions(conn, tg_user_id, run_id, prepared_actions)
+        await conn.commit()
+        return JSONResponse({"ok": True, "run_id": run_id, "result": parsed, "prepared_actions": prepared_actions})
+    except Exception:
+        await conn.rollback()
+        return JSONResponse({"ok": False, "code": "ASSISTANT_COMPUTE_ERROR"}, status_code=500)
+    finally:
+        await conn.close()
 
 
 @app.get("/api/profile/nutrient-assistant/onboarding")
@@ -1788,15 +2034,120 @@ async def api_profile_nutrient_plan(x_telegram_init_data: str = Header(default="
 
 @app.get("/api/profile/nutrient-assistant/plans")
 async def api_profile_nutrient_plans_get(x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
-    await _auth_user_id(x_telegram_init_data)
-    return JSONResponse({"ok": False, "code": "NUTRIENT_ASSISTANT_DISABLED"}, status_code=410)
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    if not await _premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
+    conn = await db.connect(s.DB_PATH)
+    try:
+        runs = await db.list_llm_assistant_runs(conn, tg_user_id, limit=25)
+        return JSONResponse({"ok": True, "runs": runs})
+    finally:
+        await conn.close()
 
 
 @app.get("/api/profile/nutrient-assistant/plans/{plan_id}")
 async def api_profile_nutrient_plan_get(plan_id: int, x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
-    _ = plan_id
-    await _auth_user_id(x_telegram_init_data)
-    return JSONResponse({"ok": False, "code": "NUTRIENT_ASSISTANT_DISABLED"}, status_code=410)
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    if not await _premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
+    conn = await db.connect(s.DB_PATH)
+    try:
+        run = await db.get_llm_assistant_run(conn, tg_user_id, int(plan_id))
+        if not run:
+            raise HTTPException(status_code=404, detail="Assistant run not found")
+        actions = await db.list_llm_assistant_plan_actions(conn, tg_user_id, int(plan_id))
+        return JSONResponse({"ok": True, "run": run, "prepared_actions": actions})
+    finally:
+        await conn.close()
+
+
+@app.post("/api/profile/nutrient-assistant/apply")
+async def api_profile_nutrient_assistant_apply(
+    body: NutrientAssistantApplyBody,
+    x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
+):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    if not await _premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
+    conn = await db.connect(s.DB_PATH)
+    try:
+        run = await db.get_llm_assistant_run(conn, tg_user_id, int(body.run_id))
+        if not run:
+            raise HTTPException(status_code=404, detail="Assistant run not found")
+        old_applied_actions = await db.list_applied_actions_from_other_runs(conn, tg_user_id, int(body.run_id))
+        actions = await db.list_llm_assistant_plan_actions(conn, tg_user_id, int(body.run_id))
+        applied: list[dict] = []
+        skipped: list[dict] = []
+        newly_applied_supplement_ids: set[int] = set()
+        processed_supplements: set[int] = set()
+        for item in actions:
+            action = str(item.get("recommend_action") or "")
+            nutrient_code = str(item.get("nutrient_code") or "").strip().lower()
+            nutrient_name = str(item.get("nutrient_name_ru") or "").strip()
+            supp = await db.find_supplement_by_slug_or_name(conn, nutrient_code or None, nutrient_name or None)
+            if not supp:
+                skipped.append({"action_id": int(item["id"]), "reason": "supplement_not_found", "nutrient_code": nutrient_code, "nutrient_name_ru": nutrient_name})
+                continue
+            supplement_id = int(supp["id"])
+            if supplement_id in processed_supplements:
+                continue
+            processed_supplements.add(supplement_id)
+            if action in {"start", "continue"}:
+                await db.add_user_supplement(conn, tg_user_id, supplement_id)
+                await db.set_user_supp_fields(
+                    conn,
+                    tg_user_id,
+                    supplement_id,
+                    str(item.get("dose_text") or ""),
+                    f"AI assistant: {str(item.get('duration_text') or '')}. Стоп/пауза: {str(item.get('stop_or_pause_rule_ru') or '')}".strip(),
+                )
+                reminders = list(item.get("reminders") or [])
+                if reminders:
+                    await db.set_reminders_for_supplement(conn, tg_user_id, supplement_id, "custom", reminders)
+                await db.mark_llm_assistant_plan_action_status(conn, tg_user_id, int(body.run_id), int(item["id"]), "applied", supplement_id=supplement_id)
+                newly_applied_supplement_ids.add(supplement_id)
+                applied.append({"action_id": int(item["id"]), "supplement_id": supplement_id, "name_ru": str(supp.get("name_ru") or supp.get("name") or ""), "action": action, "reminders": reminders})
+            elif action == "stop":
+                await db.remove_user_supplement(conn, tg_user_id, supplement_id)
+                await db.mark_llm_assistant_plan_action_status(conn, tg_user_id, int(body.run_id), int(item["id"]), "applied", supplement_id=supplement_id)
+                newly_applied_supplement_ids.add(supplement_id)
+                applied.append({"action_id": int(item["id"]), "supplement_id": supplement_id, "name_ru": str(supp.get("name_ru") or supp.get("name") or ""), "action": action})
+
+        for prev in old_applied_actions:
+            prev_supplement_id = int(prev.get("supplement_id") or 0)
+            if prev_supplement_id <= 0 or prev_supplement_id in newly_applied_supplement_ids:
+                continue
+            prev_action = str(prev.get("recommend_action") or "")
+            if prev_action in {"start", "continue"}:
+                await db.remove_user_supplement(conn, tg_user_id, prev_supplement_id)
+                await db.delete_reminders_for_supplement(conn, tg_user_id, prev_supplement_id)
+
+        await db.deactivate_other_assistant_runs(conn, tg_user_id, int(body.run_id))
+        await db.activate_assistant_run(conn, tg_user_id, int(body.run_id))
+        await conn.commit()
+        return JSONResponse({"ok": True, "run_id": int(body.run_id), "applied": applied, "skipped": skipped})
+    finally:
+        await conn.close()
+
+
+@app.post("/api/profile/nutrient-assistant/runs/{run_id}/cancel")
+async def api_profile_nutrient_assistant_cancel(
+    run_id: int,
+    x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
+):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    if not await _premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
+    conn = await db.connect(s.DB_PATH)
+    try:
+        run = await db.get_llm_assistant_run(conn, tg_user_id, int(run_id))
+        if not run:
+            raise HTTPException(status_code=404, detail="Assistant run not found")
+        await db.mark_llm_assistant_run_status(conn, tg_user_id, int(run_id), "cancelled")
+        await conn.commit()
+        return JSONResponse({"ok": True, "run_id": int(run_id), "status": "cancelled", "daily_limit": "one_request_until_next_day"})
+    finally:
+        await conn.close()
 
 
 @app.post("/api/profile/nutrient-assistant/explain")

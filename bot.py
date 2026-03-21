@@ -5885,7 +5885,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         route=f"mysupp:set_dose:{supplement_id}",
                     )
                 else:
-                    await db.set_user_supp_dose(conn, tg_uid, supplement_id, trimmed)
+                    user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
+                    await db.set_user_supp_dose(conn, user_id, supplement_id, trimmed)
                     context.user_data.pop(WAITING_KEY, None)
                     await show_my_supp_hub(update, context, tg_uid, supplement_id, conn=conn)
             elif waiting.startswith("mysupp:rem_add:"):

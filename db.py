@@ -6400,13 +6400,15 @@ async def upsert_user_supp_settings(
 
 async def set_user_supp_dose(
     conn: aiosqlite.Connection,
-    user_id: int,
+    user_ref: int,
     supplement_id: int,
     dose_text: str | None,
 ) -> None:
+    existing_user = await fetchone(conn, "SELECT id FROM users WHERE id=?", (int(user_ref),))
+    resolved_user_id = int(existing_user["id"]) if existing_user else await get_or_create_user(conn, int(user_ref))
     await upsert_user_supp_settings(
         conn,
-        user_id,
+        resolved_user_id,
         supplement_id,
         {"dose_text": dose_text},
     )

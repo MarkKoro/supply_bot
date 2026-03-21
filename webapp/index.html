@@ -78,8 +78,10 @@
     .main-content {
       flex: 1;
       overflow-y: auto;
+      overflow-x: hidden;
       padding: 14px 14px calc(100px + env(safe-area-inset-bottom));
       -webkit-overflow-scrolling: touch;
+      touch-action: pan-y;
     }
 
     .topbar {
@@ -685,8 +687,9 @@
     .field-grid.two { grid-template-columns:repeat(2,minmax(0,1fr)); }
     .lab-result-row { border:1px solid rgba(255,255,255,.14); border-radius:12px; padding:8px; margin-bottom:8px; background:rgba(255,255,255,.03); }
     .profile-module-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; margin-bottom:10px; }
-    .profile-module-btn { min-height:90px; border-radius:16px; text-align:left; padding:10px; display:grid; gap:6px; align-content:space-between; }
-    .profile-module-btn .muted { font-size:12px; }
+    .profile-module-btn { min-height:98px; border-radius:16px; text-align:left; padding:10px; display:grid; gap:6px; align-content:flex-start; line-height:1.25; overflow:hidden; }
+    .profile-module-btn strong { display:block; font-size:14px; overflow-wrap:anywhere; }
+    .profile-module-btn .muted { font-size:12px; white-space:normal; overflow-wrap:anywhere; }
     .profile-module-btn.active { box-shadow:0 0 0 1px rgba(190,220,255,.65) inset, 0 10px 20px rgba(4,10,30,.45); }
 
     .payment-success-overlay {
@@ -719,6 +722,18 @@
   const tg = window.Telegram?.WebApp;
   tg?.ready();
   tg?.expand();
+
+  function lockHorizontalPanAndZoom() {
+    let activePointers = 0;
+    document.addEventListener('pointerdown', () => { activePointers += 1; }, { passive: true });
+    document.addEventListener('pointerup', () => { activePointers = Math.max(0, activePointers - 1); }, { passive: true });
+    document.addEventListener('pointercancel', () => { activePointers = Math.max(0, activePointers - 1); }, { passive: true });
+    document.addEventListener('touchmove', (event) => {
+      if (activePointers > 1 || (event.touches && event.touches.length > 1)) event.preventDefault();
+    }, { passive: false });
+  }
+
+  lockHorizontalPanAndZoom();
 
   const state = {
     initData: tg?.initData || "",
@@ -3053,10 +3068,10 @@ function adminField(label, field, value, kind='input') {
   function renderProfileModulesGrid() {
     const active = String(state.profileUi.activeModule || 'assistant');
     const modules = [
-      { id: 'assistant', title: '🧪 Нутриентный помощник', hint: 'Временный режим до запуска новой AI-версии' },
-      { id: 'organs', title: '🫀 Карта органов', hint: 'Влияние добавок на системы организма' },
-      { id: 'achievements', title: '🏆 Достижения', hint: 'Прогресс и новые открытия' },
-      { id: 'cosmetics', title: '🎨 Косметика', hint: 'Тема, таб-меню и бейдж' }
+      { id: 'assistant', title: '🧪 Помощник', hint: 'Персональные рекомендации (обновляется)' },
+      { id: 'organs', title: '🫀 Карта органов', hint: 'Как добавки влияют на системы' },
+      { id: 'achievements', title: '🏆 Достижения', hint: 'Ваш прогресс и открытия' },
+      { id: 'cosmetics', title: '🎨 Косметика', hint: 'Тема, вкладки и бейдж' }
     ];
     return `<section class="card fade"><div class="profile-module-grid">${modules.map((m)=>`<button class="btn profile-module-btn ${active===m.id?'active':''}" data-profile-module="${m.id}"><div><strong>${m.title}</strong></div><div class="muted">${m.hint}</div></button>`).join('')}</div></section>`;
   }
@@ -3212,7 +3227,6 @@ function adminField(label, field, value, kind='input') {
 
     document.querySelector('[data-profile-open-bodymap]')?.addEventListener('click', async () => { await loadBodyMap(true); const target = document.getElementById('tabContent'); target.innerHTML += `<section class="card fade">${renderBodyMap()}</section>`; bindBodyMapEvents(); });
     document.querySelector('[data-open-settings-ach]')?.addEventListener('click', async ()=>{ state.activeTab = 'settings'; renderMainApp(); });
-    document.getElementById('nutrientPreviewSelect')?.addEventListener('change', (e) => { state.nutrientAssistant.selectedCode = String(e.target.value || 'vitamin_d'); });
     document.querySelector('[data-cos-save]')?.addEventListener('click', async () => {
       try {
         const patch = {

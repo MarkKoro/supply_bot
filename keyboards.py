@@ -794,9 +794,26 @@ def settings_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🕒 Часовой пояс", callback_data="settings:tz")],
         [InlineKeyboardButton("✨ Начальный подбор", callback_data="settings:initial_pick")],
         [InlineKeyboardButton("⏰ Расписание", callback_data="settings:schedule")],
+        [InlineKeyboardButton("🔔 Уведомления", callback_data="settings:notifications")],
         [InlineKeyboardButton("🧩 Комплексы", callback_data="settings:complexes")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")],
     ])
+
+
+def settings_notifications_kb(*, reminders_enabled: bool, slots: list[dict]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    rows.append([InlineKeyboardButton(
+        "🔕 Отключить все уведомления" if reminders_enabled else "🔔 Включить все уведомления",
+        callback_data=f"settings:notifications:global:{0 if reminders_enabled else 1}",
+    )])
+    for slot in slots:
+        slot_id = str(slot.get("slot_id") or "")
+        title = str(slot.get("title_ru") or "Слот")
+        state = "✅" if bool(slot.get("is_enabled", True)) else "⛔"
+        rows.append([InlineKeyboardButton(f"{state} {title}", callback_data=f"settings:notifications:slot:{slot_id}")])
+    rows.append([InlineKeyboardButton("💊 Точечные напоминания БАДов", callback_data="menu:my")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="menu:settings")])
+    return InlineKeyboardMarkup(rows)
 
 
 def complexes_hub_kb(items: list[dict]) -> InlineKeyboardMarkup:

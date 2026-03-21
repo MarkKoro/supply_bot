@@ -373,6 +373,11 @@ CREATE TABLE IF NOT EXISTS user_supp_settings (
   PRIMARY KEY(user_id, supplement_id)
 );
 
+CREATE TABLE IF NOT EXISTS user_notification_prefs (
+  user_id INTEGER PRIMARY KEY,
+  reminders_enabled INTEGER NOT NULL DEFAULT 1
+);
+
 CREATE TABLE IF NOT EXISTS supplement_day_state (
   user_id       INTEGER NOT NULL,
   supplement_id INTEGER NOT NULL,
@@ -614,6 +619,7 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     await _ensure_user_schedules(conn)
     await _ensure_user_intake_log(conn)
     await _ensure_user_supp_settings(conn)
+    await _ensure_user_notification_prefs(conn)
     await _ensure_supplement_day_state(conn)
     await _ensure_reminders(conn)
     await _ensure_ui_state(conn)
@@ -1382,6 +1388,28 @@ async def _ensure_user_supp_settings(conn: aiosqlite.Connection) -> None:
     await _ensure_column(conn, "user_supp_settings", "taken_date", "TEXT NOT NULL DEFAULT ''")
     await _ensure_column(conn, "user_supp_settings", "skip_date", "TEXT NOT NULL DEFAULT ''")
     await _ensure_column(conn, "user_supp_settings", "updated_at", "TEXT NOT NULL DEFAULT ''")
+
+
+async def _ensure_user_notification_prefs(conn: aiosqlite.Connection) -> None:
+    table = await fetchone(
+        conn,
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='user_notification_prefs'",
+    )
+    if not table:
+        await conn.execute(
+            """CREATE TABLE IF NOT EXISTS user_notification_prefs (
+              user_id INTEGER PRIMARY KEY,
+              reminders_enabled INTEGER NOT NULL DEFAULT 1
+            )"""
+        )
+        await conn.commit()
+    await _ensure_column(conn, "user_notification_prefs", "user_id", "INTEGER")
+    await _ensure_column(conn, "user_notification_prefs", "reminders_enabled", "INTEGER NOT NULL DEFAULT 1")
+    await conn.execute(
+        """INSERT OR IGNORE INTO user_notification_prefs(user_id, reminders_enabled)
+           SELECT id, 1 FROM users"""
+    )
+    await conn.commit()
 
 async def _ensure_supplement_day_state(conn: aiosqlite.Connection) -> None:
     table = await fetchone(
@@ -5855,6 +5883,31 @@ async def list_reminders_for_user(conn: aiosqlite.Connection, user_id: int):
         (user_id,),
     )
 
+
+async def get_user_notifications_enabled(conn: aiosqlite.Connection, tg_user_id: int) -> bool:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    row = await fetchone(conn, "SELECT reminders_enabled FROM user_notification_prefs WHERE user_id=?", (user_id,))
+    if not row:
+        await conn.execute(
+            "INSERT OR IGNORE INTO user_notification_prefs(user_id, reminders_enabled) VALUES(?, 1)",
+            (user_id,),
+        )
+        await conn.commit()
+        return True
+    return bool(int(row["reminders_enabled"] or 0))
+
+
+async def set_user_notifications_enabled(conn: aiosqlite.Connection, tg_user_id: int, enabled: bool) -> bool:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    await conn.execute(
+        """INSERT INTO user_notification_prefs(user_id, reminders_enabled)
+           VALUES(?, ?)
+           ON CONFLICT(user_id) DO UPDATE SET reminders_enabled=excluded.reminders_enabled""",
+        (user_id, 1 if enabled else 0),
+    )
+    await conn.commit()
+    return bool(enabled)
+
 async def list_due_reminders(conn: aiosqlite.Connection):
     custom_rows = await fetchall(
         conn,
@@ -5862,7 +5915,9 @@ async def list_due_reminders(conn: aiosqlite.Connection):
            FROM reminders r
            JOIN users u ON u.tg_user_id=r.user_id
            JOIN user_supplements us ON us.user_id=u.id AND us.supplement_id=r.supplement_id
+           LEFT JOIN user_notification_prefs np ON np.user_id=u.id
            WHERE r.enabled=1
+             AND COALESCE(np.reminders_enabled, 1)=1
              AND us.is_active=1
              AND us.enabled=1""",
     )
@@ -5874,11 +5929,13 @@ async def list_due_reminders(conn: aiosqlite.Connection):
                   uss.time_local AS slot_time_local
            FROM user_supplements us
            JOIN users u ON u.id=us.user_id
+           LEFT JOIN user_notification_prefs np ON np.user_id=u.id
            LEFT JOIN user_schedules sch
              ON sch.user_id=us.user_id AND sch.supplement_id=us.supplement_id AND sch.is_enabled=1
            LEFT JOIN user_schedule_slots uss
              ON uss.user_id=us.user_id AND uss.slot_id=sch.slot_id AND uss.is_enabled=1
            WHERE us.is_active=1
+             AND COALESCE(np.reminders_enabled, 1)=1
              AND us.enabled=1""",
     )
 

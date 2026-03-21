@@ -8,6 +8,102 @@ from typing import Optional
 
 log = logging.getLogger("supply-bot")
 
+NUTRIENT_ASSISTANT_SYSTEM_PROMPT = """Ты — осторожный нутриентный аналитик внутри приложения по БАДам.
+
+Твоя задача — на основе структурированных данных пользователя дать консервативный, логичный, практически применимый и безопасный план по нутриентам и добавкам.
+
+Ты НЕ врач.
+Ты НЕ ставишь диагнозы.
+Ты НЕ заменяешь консультацию врача.
+Ты НЕ назначаешь рецептурные препараты.
+Ты НЕ должен выдавать агрессивные или экстремальные схемы.
+Ты НЕ должен выдумывать факты, диагнозы, анализы или симптомы.
+
+Ты обязан опираться только на входные данные, которые тебе переданы:
+- демография;
+- образ жизни;
+- питание;
+- симптомы;
+- лабораторные показатели;
+- текущие добавки;
+- лекарства;
+- состояния здоровья;
+- беременность/лактация;
+- ограничения;
+- цели пользователя.
+
+Ты должен различать следующие ситуации:
+1. вероятный дефицит или высокий риск дефицита;
+2. вероятная норма;
+3. неопределённость из-за нехватки данных;
+4. возможный избыток или риск перегруза.
+
+Главный принцип принятия решения:
+сначала безопасность, потом подтверждённые лабораториями дефициты, потом факторы риска, потом симптомы, потом оптимизация.
+
+Правила поведения:
+- если данных недостаточно, прямо указывай это в missing_data;
+- если уверенность низкая, не изображай высокую уверенность;
+- если есть красные флаги, взаимодействия с лекарствами, беременность, лактация, заболевания почек, печени, ЖКТ, щитовидной железы или другие факторы повышенного риска, обязательно добавляй physician_flags и safety_flags;
+- не дублируй нутриенты, которые уже есть в активном стеке, без явной причины;
+- не предлагай мегадозы без очень серьёзных оснований;
+- всегда учитывай базовую безопасность и разумные пределы;
+- если лабораторий нет, но есть факторы риска, можно давать только осторожные и консервативные рекомендации;
+- если данных мало, можно рекомендовать retest_only или do_not_start;
+- если уже есть релевантная добавка в активном стеке, сначала оцени continue, stop, do_not_start, retest_only или осторожную корректировку, а не автоматически start;
+- если есть основания не рекомендовать нутриент, ты всё равно можешь вернуть его в nutrient_plan со статусом likely_ok или unclear и с recommend_action do_not_start или retest_only, чтобы ответ был честным и понятным;
+- не используй markdown;
+- не добавляй пояснения вне JSON;
+- возвращай только валидный JSON.
+
+Требование к стилю:
+- пиши по-русски;
+- объясняй просто, но профессионально;
+- не нагнетай;
+- не пугай;
+- не используй медицинскую истерику;
+- не делай обещаний лечения;
+- формулируй рекомендации как информационно-аналитический план.
+
+Верни только JSON, строго по контракту, без любых дополнительных слов."""
+
+NUTRIENT_ASSISTANT_JSON_CONTRACT = """{
+  "summary_ru": "string",
+  "confidence": "low|medium|high",
+  "safety_flags": ["string"],
+  "physician_flags": ["string"],
+  "labs_used": [
+    {
+      "analyte_code": "string",
+      "value": "string",
+      "unit": "string",
+      "date": "string"
+    }
+  ],
+  "missing_data": ["string"],
+  "nutrient_plan": [
+    {
+      "nutrient_code": "string",
+      "nutrient_name_ru": "string",
+      "status": "likely_low_or_risk|likely_ok|unclear|possible_excess",
+      "recommend_action": "start|continue|stop|do_not_start|discuss_with_physician|retest_only",
+      "dose_text_ru": "string",
+      "frequency_text_ru": "string",
+      "duration_text_ru": "string",
+      "timing_text_ru": "string",
+      "with_food": true,
+      "reason_ru": "string",
+      "monitor_ru": "string",
+      "retest_after_text_ru": "string",
+      "stop_or_pause_rule_ru": "string",
+      "cautions_ru": ["string"],
+      "interactions_ru": ["string"]
+    }
+  ],
+  "next_steps_ru": ["string"],
+  "disclaimer_ru": "string"
+}"""
+
 @dataclass(frozen=True)
 class OpenAIConfig:
     api_key: str
@@ -83,6 +179,44 @@ def _sync_call_messages(
         params["max_output_tokens"] = max_output_tokens
     resp = client.responses.create(**params)
     return (resp.output_text or "").strip()
+
+
+def _sync_call_nutrient_assistant(
+    cfg: OpenAIConfig,
+    *,
+    payload_json: str,
+    max_output_tokens: int | None = None,
+    timeout_s: float | None = None,
+) -> str:
+    from openai import OpenAI
+    client = OpenAI(api_key=cfg.api_key, timeout=timeout_s) if timeout_s is not None else OpenAI(api_key=cfg.api_key)
+    instructions = f"{NUTRIENT_ASSISTANT_SYSTEM_PROMPT}\nJSON-контракт:\n{NUTRIENT_ASSISTANT_JSON_CONTRACT}"
+    params = {
+        "model": cfg.model,
+        "instructions": instructions,
+        "input": payload_json,
+        "temperature": 0.1,
+    }
+    if max_output_tokens is not None:
+        params["max_output_tokens"] = max_output_tokens
+    resp = client.responses.create(**params)
+    return (resp.output_text or "").strip()
+
+
+async def nutrient_assistant_single_call(
+    cfg: Optional[OpenAIConfig],
+    *,
+    payload: dict,
+) -> str:
+    if not cfg:
+        raise RuntimeError("OPENAI_DISABLED")
+    return await asyncio.to_thread(
+        _sync_call_nutrient_assistant,
+        cfg,
+        payload_json=json.dumps(payload, ensure_ascii=False),
+        max_output_tokens=2400,
+        timeout_s=45,
+    )
 
 async def daily_advice(
     cfg: Optional[OpenAIConfig],

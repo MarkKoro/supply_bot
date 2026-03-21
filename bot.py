@@ -619,7 +619,7 @@ async def _render_settings_menu(update: Update, context: ContextTypes.DEFAULT_TY
     premium_until = await db.get_premium_until(conn, tg_uid) if premium_active else None
     premium_line = f"активен до {_format_until_ru(premium_until)}" if premium_active else "сейчас активной подписки нет — можно купить"
 
-    complexes = await db.list_user_complexes(conn, tg_uid)
+    complexes = await db.list_complexes(conn, tg_uid)
     complexes_count = len(complexes)
     complexes_line = f"доступны к редактированию · создано: {complexes_count}"
 

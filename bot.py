@@ -52,7 +52,6 @@ from keyboards import (
     ai_checkin_entry_kb,
     ai_checkin_voice_kb,
     today_home_kb,
-    today_slots_kb,
     slot_intake_kb,
     premium_plans_kb,
     premium_stars_kb,
@@ -331,34 +330,63 @@ async def _show_stats_screen(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
 
 async def _show_today_home(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, tg_uid: int) -> None:
-    user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
-    slots = await db.get_user_slots(conn, user_id)
+    tz_name = await db.get_user_tz(conn, tg_uid)
+    now_local = db.local_now(tz_name or None)
+    date_local, slots = await _today_slots_payload(conn, tg_uid)
+    pending_slots: list[dict] = []
+    for slot in slots:
+        total = int(slot.get("total") or 0)
+        taken = int(slot.get("taken") or 0)
+        skipped = int(slot.get("skipped") or 0)
+        pending = max(0, total - taken - skipped)
+        if pending <= 0:
+            continue
+        time_local = str(slot.get("time") or "--:--")
+        minute_of_day = 24 * 60 + 1
+        if re.fullmatch(r"\d{2}:\d{2}", time_local):
+            hh, mm = time_local.split(":")
+            minute_of_day = int(hh) * 60 + int(mm)
+        pending_slots.append({**slot, "pending": pending, "minute_of_day": minute_of_day})
+
+    pending_slots.sort(key=lambda row: (int(row.get("minute_of_day") or 0), str(row.get("slot_id") or "")))
+    next_two = pending_slots[:2]
+    now_hhmm = now_local.strftime("%H:%M")
+    lines = [
+        f"📅 <b>Сегодня · {date_local}</b>",
+        f"Сейчас у тебя {now_hhmm}.",
+        "",
+    ]
+    if next_two:
+        lines.append("<b>Ближайшие приёмы:</b>")
+        for idx, slot in enumerate(next_two, start=1):
+            title = str(slot.get("title") or "Слот")
+            time_local = str(slot.get("time") or "--:--")
+            pending = int(slot.get("pending") or 0)
+            lines.append(f"{idx}) {title} — до {time_local} · осталось {pending}")
+        remaining = len(pending_slots) - len(next_two)
+        if remaining > 0:
+            lines.append("")
+            lines.append(f"После этого ожидается ещё {remaining} приём(а).")
+    else:
+        lines.append("На сегодня уже всё принято.")
     await show(
         update,
         context,
-        "📅 <b>Сегодня</b>\n\nОтмечай приём и смотри напоминания. Всё в 2–3 тапа.",
-        today_home_kb(slots),
+        "\n".join(lines),
+        today_home_kb(next_two),
         route="today:home",
     )
 
 
 async def _show_today_slots(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, tg_uid: int) -> None:
-    date_local, slots = await _today_slots_payload(conn, tg_uid)
-    await show(
-        update,
-        context,
-        f"📅 <b>Слоты на {date_local}</b>",
-        today_slots_kb(slots, date_local),
-        route="today:slots",
-        payload={"date_local": date_local},
-    )
+    await _show_today_home(update, context, conn, tg_uid)
 
 
 async def _show_slot_screen(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, tg_uid: int, slot_id: str) -> None:
     date_local, slots = await _today_slots_payload(conn, tg_uid)
     slot = next((s for s in slots if str(s.get("slot_id") or "") == slot_id), None)
     if not slot:
-        await show(update, context, "Слот не найден.", back("today:slots"), route="today:slots")
+        await show(update, context, "Слот не найден.", back("today:home"), route="today:home")
         return
     title = str(slot.get("title") or "Слот")
     time_local = str(slot.get("time") or "--:--")
@@ -386,7 +414,7 @@ async def _show_intake_picker(
     date_local, slots = await _today_slots_payload(conn, tg_uid)
     slot = next((s for s in slots if str(s.get("slot_id") or "") == slot_id), None)
     if not slot:
-        await show(update, context, "Слот не найден.", back("today:slots"), route="today:slots")
+        await show(update, context, "Слот не найден.", back("today:home"), route="today:home")
         return
     state_map = await db.get_day_state_map(conn, tg_uid, date_local)
     items = list(slot.get("items") or [])
@@ -2150,8 +2178,7 @@ def _home_text(
         "• Каталог: быстро найди добавку и проверь совместимость.\n"
         "• Мои БАДы: собери свой список и настрой напоминания.\n"
         "• AI / WebApp: стартовый подбор и удобный ежедневный трекинг.\n\n"
-        f"Следующий шаг: {next_step}\n\n"
-        "<i>Не медицинский совет.</i>"
+        f"Следующий шаг: {next_step}"
     )
 
 def _initial_pick_prompt_text(prefix: str | None = None) -> str:
@@ -2750,51 +2777,10 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await _show_stats_screen(update, context, conn, tg_uid)
             return
         if data == "menu:webapp":
-            has_access = await db.has_any_webapp_access(conn, tg_uid)
-            has_premium = await db.is_premium_active(conn, tg_uid)
-            starter_used_row = await db.fetchone(
-                conn,
-                "SELECT starter_trial_used FROM users WHERE tg_user_id=?",
-                (int(tg_uid),),
-            )
-            starter_used = int(starter_used_row["starter_trial_used"] or 0) if starter_used_row else 0
-            s_cfg = context.application.bot_data["settings"]
-            if not s_cfg.WEBAPP_URL:
-                await show(update, context, "WEBAPP_URL не настроен.", premium_upsell_kb(), route="menu:premium")
-                return
-            if has_access:
-                await show(
-                    update,
-                    context,
-                    "🧪 <b>Нутриентный помощник готов</b>\n\n"
-                    "План по витаминам и минералам на основе профиля, анализов и вашей истории.\n"
-                    "Внутри: статус, следующий шаг, история планов и follow-up.",
-                    InlineKeyboardMarkup([
-                        [InlineKeyboardButton("Открыть мой план", url=s_cfg.WEBAPP_URL)],
-                        [InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")],
-                    ]),
-                    route="menu:webapp",
-                )
-                return
-            if not has_premium and starter_used == 0:
-                await show(
-                    update,
-                    context,
-                    "🔓 <b>Попробуйте Premium WebApp 3 дня бесплатно</b>\n\n"
-                    "Включает Нутриентный помощник: персональный план, историю обновлений и follow-up.",
-                    InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🎁 Активировать 3 дня", callback_data="starter:activate")],
-                        [InlineKeyboardButton("⭐ Купить Premium", callback_data="menu:premium")],
-                        [InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")],
-                    ]),
-                    route="menu:webapp",
-                )
-                return
             await show(
                 update,
                 context,
-                "🔒 WebApp сейчас закрыт.\n\n"
-                "В Premium доступен Нутриентный помощник: он собирает план по профилю и анализам, показывает что изменилось и напоминает о follow-up.",
+                "Нутриентный помощник убран из бота и доступен только внутри Premium WebApp.",
                 InlineKeyboardMarkup([
                     [InlineKeyboardButton("⭐ Купить Premium", callback_data="menu:premium")],
                     [InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")],
@@ -2878,11 +2864,11 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if data.startswith("schedule:slot_time_set:"):
             slot_id = data.split(":", 2)[2]
             context.user_data[WAITING_KEY] = f"schedule:slot_time_set:{slot_id}"
-            await show(update, context, "Введи время в формате HH:MM", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="settings:schedule")]]), route=f"schedule:slot_time_set:{slot_id}")
+            await show(update, context, "Введи время в формате HH:MM", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="settings:notifications")]]), route=f"schedule:slot_time_set:{slot_id}")
             return
         if data == "schedule:add_custom":
             context.user_data[WAITING_KEY] = "schedule:add_custom"
-            await show(update, context, "Введи время в формате HH:MM", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="settings:schedule")]]), route="schedule:add_custom")
+            await show(update, context, "Введи время в формате HH:MM", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="settings:notifications")]]), route="schedule:add_custom")
             return
 
         if data == "menu:add":
@@ -5919,7 +5905,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 parsed_time = _parse_user_time_input(txt)
                 user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
                 if not parsed_time:
-                    await show(update, context, "Не понял время. Пример: 16:00", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="settings:schedule")]]), route="schedule:add_custom")
+                    await show(update, context, "Не понял время. Пример: 16:00", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="settings:notifications")]]), route="schedule:add_custom")
                 else:
                     await db.add_custom_slot(conn, user_id, parsed_time)
                     context.user_data.pop(WAITING_KEY, None)
@@ -5929,7 +5915,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 slot_id = waiting.split(":", 2)[2]
                 user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
                 if not parsed_time:
-                    await show(update, context, "Не понял время. Пример: 08:30", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="settings:schedule")]]), route=f"schedule:slot_time_set:{slot_id}")
+                    await show(update, context, "Не понял время. Пример: 08:30", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="settings:notifications")]]), route=f"schedule:slot_time_set:{slot_id}")
                 else:
                     await db.set_user_slot_time(conn, user_id, slot_id, parsed_time)
                     context.user_data.pop(WAITING_KEY, None)

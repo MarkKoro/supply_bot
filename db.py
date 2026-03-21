@@ -5434,7 +5434,7 @@ async def get_user_supplement(conn: aiosqlite.Connection, tg_user_id: int, suppl
            FROM user_supplements us
            JOIN supplements s ON s.id=us.supplement_id
            LEFT JOIN user_supp_settings uss ON uss.user_id=us.user_id AND uss.supplement_id=us.supplement_id
-           WHERE us.user_id=? AND us.supplement_id=?""",
+           WHERE us.user_id=? AND us.supplement_id=? AND us.is_active=1 AND us.enabled=1""",
         (user_id, supplement_id),
     )
 
@@ -5463,7 +5463,7 @@ async def get_user_supplement_with_status(
             JOIN supplements s ON s.id=us.supplement_id
             LEFT JOIN user_schedules sch ON sch.user_id=us.user_id AND sch.supplement_id=us.supplement_id
             {status_join}
-            WHERE us.user_id=? AND us.supplement_id=?""",
+            WHERE us.user_id=? AND us.supplement_id=? AND us.is_active=1 AND us.enabled=1""",
         tuple(params),
     )
 
@@ -5493,7 +5493,7 @@ async def list_user_supplements_page(
         f"""SELECT COUNT(*) AS total
             FROM user_supplements us
             JOIN supplements s ON s.id=us.supplement_id
-            WHERE us.user_id=?{filters}""",
+            WHERE us.user_id=? AND us.is_active=1 AND us.enabled=1{filters}""",
         tuple(count_params),
     )
     total = int(count_row["total"]) if count_row else 0
@@ -5513,7 +5513,7 @@ async def list_user_supplements_page(
            FROM user_supplements us
            JOIN supplements s ON s.id=us.supplement_id
            {status_join}
-           WHERE us.user_id=?{filters}
+           WHERE us.user_id=? AND us.is_active=1 AND us.enabled=1{filters}
            ORDER BY s.name
            LIMIT ? OFFSET ?""",
         tuple(params),

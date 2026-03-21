@@ -301,21 +301,8 @@ def pick_search_results(rows, prefix: str) -> InlineKeyboardMarkup:
 def my_supplements_list(rows, page: int, has_prev: bool, has_next: bool, *, show_clear: bool) -> InlineKeyboardMarkup:
     btns = []
     for r in rows:
-        status = r["today_status"] if "today_status" in r.keys() else None
-        if status == "taken":
-            marker = "✅"
-        elif status == "skipped":
-            marker = "❌"
-        else:
-            marker = "…"
-        label = f"{r['name']} {marker}"
-        btns.append(
-            [
-                InlineKeyboardButton(label, callback_data=f"mysupp:open:{r['supplement_id']}"),
-                InlineKeyboardButton("✅", callback_data=f"mysupp:quick:taken:{r['supplement_id']}:{page}"),
-                InlineKeyboardButton("❌", callback_data=f"mysupp:quick:skip:{r['supplement_id']}:{page}"),
-            ]
-        )
+        label = str(r.get('name') or 'Добавка')
+        btns.append([InlineKeyboardButton(label, callback_data=f"mysupp:open:{r['supplement_id']}")])
     btns.append([InlineKeyboardButton("➕ Добавить", callback_data="mysupp:add")])
     btns.append([InlineKeyboardButton("🧩 Комплексы", callback_data="menu:complexes")])
     nav = []
@@ -332,41 +319,15 @@ def my_supplements_list(rows, page: int, has_prev: bool, has_next: bool, *, show
 def my_supplements_overview_kb(base_rows, ai_rows, page: int, has_prev: bool, has_next: bool) -> InlineKeyboardMarkup:
     btns = []
     for r in base_rows:
-        status = r["today_status"] if "today_status" in r.keys() else None
-        if status == "taken":
-            marker = "✅"
-        elif status == "skipped":
-            marker = "❌"
-        else:
-            marker = "…"
-        label = f"{r['name']} {marker}"
-        btns.append(
-            [
-                InlineKeyboardButton(label, callback_data=f"mysupp:open:{r['supplement_id']}"),
-                InlineKeyboardButton("✅", callback_data=f"mysupp:quick:taken:{r['supplement_id']}:{page}"),
-                InlineKeyboardButton("❌", callback_data=f"mysupp:quick:skip:{r['supplement_id']}:{page}"),
-            ]
-        )
+        label = str(r.get('name') or 'Добавка')
+        btns.append([InlineKeyboardButton(label, callback_data=f"mysupp:open:{r['supplement_id']}")])
 
     if ai_rows:
         btns.append([InlineKeyboardButton("🤖 AI-добавления на сегодня", callback_data="noop")])
         for item in ai_rows:
-            status = item.get("today_status")
-            if status == "taken":
-                marker = "✅"
-            elif status == "skipped":
-                marker = "❌"
-            else:
-                marker = "…"
             name = (item.get("name_ru") or item.get("name_en") or item.get("name") or "Добавка").strip()
             sid = int(item.get("supplement_id") or 0)
-            btns.append(
-                [
-                    InlineKeyboardButton(f"🤖 {name} {marker}", callback_data=f"supp:open:{sid}"),
-                    InlineKeyboardButton("✅", callback_data=f"mysupp:aiquick:taken:{sid}:{page}"),
-                    InlineKeyboardButton("❌", callback_data=f"mysupp:aiquick:skip:{sid}:{page}"),
-                ]
-            )
+            btns.append([InlineKeyboardButton(f"🤖 {name}", callback_data=f"supp:open:{sid}")])
 
     btns.append([InlineKeyboardButton("➕ Добавить", callback_data="mysupp:add")])
     btns.append([InlineKeyboardButton("🧩 Комплексы", callback_data="menu:complexes")])
@@ -720,8 +681,6 @@ def my_supplement_hub(
     supplement_id: int,
 ) -> InlineKeyboardMarkup:
     btns = [
-        [InlineKeyboardButton("✅ Отметить: выпил сегодня", callback_data=f"mysupp:mark:taken:{supplement_id}")],
-        [InlineKeyboardButton("✖️ Отметить: не буду сегодня", callback_data=f"mysupp:mark:skip:{supplement_id}")],
         [InlineKeyboardButton("⏰ Напоминания", callback_data=f"mysupp:rem:{supplement_id}")],
         [InlineKeyboardButton("🧾 Доза", callback_data=f"mysupp:set_dose:{supplement_id}")],
         [InlineKeyboardButton("⏰ Время приёма", callback_data=f"supplement:set_time:{supplement_id}")],

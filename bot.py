@@ -352,7 +352,7 @@ async def _show_today_home(update: Update, context: ContextTypes.DEFAULT_TYPE, c
     next_two = pending_slots[:2]
     now_hhmm = now_local.strftime("%H:%M")
     lines = [
-        f"📅 <b>Сегодня · {date_local}</b>",
+        f"📅 <b>Сегодня · {_format_day_ru(date_local)}</b>",
         f"Сейчас у тебя {now_hhmm}.",
         "",
     ]
@@ -399,7 +399,7 @@ async def _show_slot_screen(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         cx_line = "\n🧩 Комплексы:\n" + "\n".join(
             [f"• {str(c.get('name') or '')}: {int(c.get('taken_count') or 0)}/{int(c.get('total_count') or 0)}" for c in complexes]
         )
-    text = f"🕒 <b>{title} · {time_local}</b>\n📅 {date_local}\n\n✅ Принято: {taken}/{total}\n⛔ Пропущено: {skipped}{cx_line}"
+    text = f"🕒 <b>{title} · {time_local}</b>\n📅 {_format_day_ru(date_local)}\n\n✅ Принято: {taken}/{total}\n⛔ Пропущено: {skipped}{cx_line}"
     await show(update, context, text, slot_intake_kb(slot_id, taken, total), route=f"today:slot:{slot_id}")
 
 
@@ -586,6 +586,52 @@ def _format_day_ru(day: str) -> str:
         return datetime.strptime(day, "%Y-%m-%d").strftime("%d.%m.%Y")
     except ValueError:
         return day
+
+
+def _format_until_ru(iso_value: str | None) -> str:
+    raw = str(iso_value or "").strip()
+    if not raw:
+        return "—"
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        return dt.strftime("%d.%m.%Y %H:%M")
+    except ValueError:
+        return raw
+
+
+async def _render_settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, tg_uid: int) -> None:
+    user_id = await db.get_or_create_user(conn, tg_uid)
+    tz_name = await db.get_user_tz(conn, tg_uid) or "UTC"
+    reminders_enabled = await db.get_user_notifications_enabled(conn, tg_uid)
+    slots = await db.get_user_slots(conn, user_id)
+    enabled_slots = [f"{str(s.get('title_ru') or 'Слот')} ({str(s.get('time_local') or '--:--')})" for s in slots if bool(s.get("is_enabled", False))]
+    if reminders_enabled and enabled_slots:
+        notif_line = " · ".join(enabled_slots[:3])
+        if len(enabled_slots) > 3:
+            notif_line += f" и ещё {len(enabled_slots) - 3}"
+    else:
+        notif_line = "сейчас включённых уведомлений нет"
+
+    summary = await db.build_stats_compact(conn, tg_uid, _today_date_for_user(tz_name))
+    stats_available = sum(1 for key in ("today", "last7", "last30") if int((summary.get(key) or {}).get("expected") or 0) > 0)
+
+    premium_active = await db.is_premium_active(conn, tg_uid)
+    premium_until = await db.get_premium_until(conn, tg_uid) if premium_active else None
+    premium_line = f"активен до {_format_until_ru(premium_until)}" if premium_active else "сейчас активной подписки нет — можно купить"
+
+    complexes = await db.list_user_complexes(conn, tg_uid)
+    complexes_count = len(complexes)
+    complexes_line = f"доступны к редактированию · создано: {complexes_count}"
+
+    text = (
+        "⚙️ <b>Настройки</b>\n\n"
+        f"🕒 Часовой пояс: <b>{tz_name}</b>\n"
+        f"🔔 Уведомления: {notif_line}\n"
+        f"📈 Статистика: доступно элементов — {stats_available}/3\n"
+        f"⭐ Премиум: {premium_line}\n"
+        f"🧩 Комплексы: {complexes_line}"
+    )
+    await show(update, context, text, settings_menu(), route="menu:settings")
 
 def _format_link_names(items: list[dict]) -> str:
     if not items:
@@ -1197,7 +1243,7 @@ async def _render_ai_checkin_results(
     state = _get_ai_checkin_state(context)
     target_day_label = _ai_checkin_target_day_label(str(state.get("target_day") or "today"))
     lines = [
-        f"🤖 AI-рекомендации на {target_day_label} ({date_local})",
+        f"🤖 AI-рекомендации на {target_day_label} ({_format_day_ru(date_local)})",
         "",
         summary,
         "",
@@ -1267,7 +1313,7 @@ async def _render_ai_checkin_selection(
     target_message_id: int | None = None,
 ) -> None:
     actions = payload.get("actions") or []
-    lines = [f"🎯 Выбор действий ({date_local})", ""]
+    lines = [f"🎯 Выбор действий ({_format_day_ru(date_local)})", ""]
     rows = []
     if actions:
         for idx, action in enumerate(actions, start=1):
@@ -2654,13 +2700,7 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             return
         if data == "menu:settings":
-            await show(
-                update,
-                context,
-                "⚙️ <b>Настройки</b>",
-                settings_menu(),
-                route="menu:settings",
-            )
+            await _render_settings_menu(update, context, conn, tg_uid)
             return
         if data == "menu:premium":
             await _show_premium_hub(update, context)
@@ -4773,13 +4813,7 @@ async def on_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return
         back_data = context.user_data.get("tz_back_data")
         if back_data == "menu:settings":
-            await show(
-                update,
-                context,
-                "⚙️ <b>Настройки</b>",
-                settings_menu(),
-                route="menu:settings",
-            )
+            await _render_settings_menu(update, context, conn, tg_uid)
         else:
             await home(update, context)
         return
@@ -5156,15 +5190,7 @@ async def _render_route(
         return
 
     if route == "menu:settings":
-        await show(
-            update,
-            context,
-            "⚙️ <b>Настройки</b>",
-            settings_menu(),
-            route=route,
-            target_chat_id=target_chat_id,
-            target_message_id=target_message_id,
-        )
+        await _render_settings_menu(update, context, conn, tg_uid)
         return
     if route == "menu:add":
         await show(
@@ -8056,9 +8082,7 @@ async def _show_my_list(
     ]
     for idx, row in enumerate(rows, start=1):
         dose = str(row["dose_text"] or "").strip() or "—"
-        status = str(row["today_status"] or "")
-        status_label = "выпил" if status == "taken" else ("не выпил" if status == "skipped" else "не отмечено")
-        lines.append(f"{idx}) {row['name']} — доза: {dose} · сегодня: {status_label}")
+        lines.append(f"{idx}) {row['name']} — доза: {dose}")
 
     lines.extend(["", "<b>Добавлено AI на сегодня</b>"])
     if ai_rows:
@@ -8066,10 +8090,8 @@ async def _show_my_list(
             name = str(item.get("name_ru") or item.get("name_en") or item.get("name") or "Добавка")
             dose = str(item.get("dose_text") or "").strip() or "—"
             action = str(item.get("action") or "")
-            status = str(item.get("today_status") or "")
-            status_label = "выпил" if status == "taken" else ("не выпил" if status == "skipped" else "не отмечено")
             action_label = {"add": "добавить", "remove": "убрать", "adjust": "изменить"}.get(action, action or "изменить")
-            lines.append(f"{idx}) {name} — {action_label}, доза: {dose} · сегодня: {status_label}")
+            lines.append(f"{idx}) {name} — {action_label}, доза: {dose}")
     else:
         lines.append("На сегодня AI ничего не добавил.")
 

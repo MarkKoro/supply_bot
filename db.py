@@ -5446,11 +5446,7 @@ async def get_user_supplement_with_status(
 ):
     user_id = await get_or_create_user(conn, tg_user_id)
     params: list = [local_date or ""]
-    status_join = (
-        "LEFT JOIN users u ON u.id=us.user_id "
-        "LEFT JOIN supplement_day_state sds ON sds.user_id=u.tg_user_id "
-        "AND sds.supplement_id=us.supplement_id AND sds.day=?"
-    )
+    status_join = "LEFT JOIN supplement_day_state sds ON sds.user_id=us.user_id AND sds.supplement_id=us.supplement_id AND sds.day=?"
     params.extend([user_id, supplement_id])
     return await fetchone(
         conn,
@@ -5499,11 +5495,7 @@ async def list_user_supplements_page(
     total = int(count_row["total"]) if count_row else 0
 
     params.extend([page_size, offset])
-    status_join = (
-        "LEFT JOIN users u ON u.id=us.user_id "
-        "LEFT JOIN supplement_day_state sds ON sds.user_id=u.tg_user_id "
-        "AND sds.supplement_id=us.supplement_id AND sds.day=?"
-    )
+    status_join = "LEFT JOIN supplement_day_state sds ON sds.user_id=us.user_id AND sds.supplement_id=us.supplement_id AND sds.day=?"
     rows = await fetchall(
         conn,
         f"""SELECT us.*, s.id AS supplement_id, s.slug, s.name, s.name_ru, s.name_en,
@@ -5654,11 +5646,7 @@ async def set_user_supp_fields(
 async def list_user_stack_details(conn: aiosqlite.Connection, tg_user_id: int, local_date: str | None = None):
     user_id = await get_or_create_user(conn, tg_user_id)
     params: list = [local_date or "", user_id]
-    status_join = (
-        "LEFT JOIN users u ON u.id=us.user_id "
-        "LEFT JOIN supplement_day_state sds ON sds.user_id=u.tg_user_id "
-        "AND sds.supplement_id=us.supplement_id AND sds.day=?"
-    )
+    status_join = "LEFT JOIN supplement_day_state sds ON sds.user_id=us.user_id AND sds.supplement_id=us.supplement_id AND sds.day=?"
     return await fetchall(
         conn,
         f"""SELECT us.supplement_id,
@@ -8365,7 +8353,7 @@ async def list_day_plan_items_with_status(
              ON sds.user_id=? AND sds.supplement_id=dpi.supplement_id AND sds.day=dpi.date_local
            WHERE dpi.user_id=? AND dpi.date_local=?
            ORDER BY dpi.id""",
-        (tg_user_id, user_id, date_local),
+        (user_id, user_id, date_local),
     )
     return [dict(row) for row in rows]
 

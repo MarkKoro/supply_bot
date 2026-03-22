@@ -300,9 +300,19 @@ def pick_search_results(rows, prefix: str) -> InlineKeyboardMarkup:
 
 def my_supplements_list(rows, page: int, has_prev: bool, has_next: bool, *, show_clear: bool) -> InlineKeyboardMarkup:
     btns = []
+    def _row_val(row, key, default=None):
+        if isinstance(row, dict):
+            return row.get(key, default)
+        try:
+            return row[key]
+        except Exception:
+            return default
     for r in rows:
-        label = str(r.get('name') or 'Добавка')
-        btns.append([InlineKeyboardButton(label, callback_data=f"mysupp:open:{r['supplement_id']}")])
+        label = str(_row_val(r, 'name') or 'Добавка')
+        sid = int(_row_val(r, 'supplement_id') or 0)
+        if sid <= 0:
+            continue
+        btns.append([InlineKeyboardButton(label, callback_data=f"mysupp:open:{sid}")])
     btns.append([InlineKeyboardButton("➕ Добавить", callback_data="mysupp:add")])
     btns.append([InlineKeyboardButton("🧩 Комплексы", callback_data="menu:complexes")])
     nav = []
@@ -318,9 +328,19 @@ def my_supplements_list(rows, page: int, has_prev: bool, has_next: bool, *, show
 
 def my_supplements_overview_kb(base_rows, ai_rows, page: int, has_prev: bool, has_next: bool) -> InlineKeyboardMarkup:
     btns = []
+    def _row_val(row, key, default=None):
+        if isinstance(row, dict):
+            return row.get(key, default)
+        try:
+            return row[key]
+        except Exception:
+            return default
     for r in base_rows:
-        label = str(r.get('name') or 'Добавка')
-        btns.append([InlineKeyboardButton(label, callback_data=f"mysupp:open:{r['supplement_id']}")])
+        label = str(_row_val(r, 'name') or 'Добавка')
+        sid = int(_row_val(r, 'supplement_id') or 0)
+        if sid <= 0:
+            continue
+        btns.append([InlineKeyboardButton(label, callback_data=f"mysupp:open:{sid}")])
 
     if ai_rows:
         btns.append([InlineKeyboardButton("🤖 AI-добавления на сегодня", callback_data="noop")])

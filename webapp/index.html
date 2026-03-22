@@ -797,6 +797,7 @@
         bariatric_or_gi_surgery_history: false
       },
       manualLabs: [{ analyte_code: "", analyte_name_ru: "", value: "", unit: "", ref_low: "", ref_high: "", measured_at: "" }],
+      expandedLabIdx: 0,
       computing: false,
       applying: false,
       cancelling: false,
@@ -3209,6 +3210,20 @@ function adminField(label, field, value, kind='input') {
   }
 
   function parseCommaLines(txt){ return String(txt||'').split(/\n|,/).map((x)=>x.trim()).filter(Boolean); }
+  function normalizeGoalText(value){
+    return String(value || '')
+      .trim()
+      .replace(/\s+/g, '_')
+      .replace(/_+/g, '_')
+      .replace(/^_+|_+$/g, '');
+  }
+  function assistantLabTitle(row){
+    const preset = ASSISTANT_ANALYTE_PRESETS.find((x)=>String(x.code)===String(row?.analyte_code || ''));
+    return String(row?.analyte_name_ru || '').trim() || preset?.name || row?.analyte_code || 'Новый показатель';
+  }
+  function assistantLabRowReady(row){
+    return String(row?.analyte_code || '').trim() && String(row?.value || '').trim();
+  }
   function boolMark(v){ return v ? '✅' : '—'; }
   function confidenceRu(v){ return ({low:'Низкая',medium:'Средняя',high:'Высокая'})[String(v||'')] || '—'; }
   function assistantOutcomeClass(action){ return action === 'start' ? 'ok' : (action === 'stop' ? 'bad' : 'warn'); }
@@ -3225,16 +3240,22 @@ function adminField(label, field, value, kind='input') {
     const head = `<option value="">Выберите единицу</option>`;
     return head + units.map((unit)=>`<option value="${esc(unit)}" ${String(selectedUnit||'')===String(unit)?'selected':''}>${esc(unit)}</option>`).join('');
   }
-  function renderAssistantLabRow(idx, row = {}) {
+  function renderAssistantLabRow(idx, row = {}, expanded = false) {
     const code = row.analyte_code || '';
-    return `<div class="field-grid two" data-assistant-lab-row="${idx}">
-      <label class="muted">analyte_code<select class="select" data-assistant-lab="analyte_code" data-idx="${idx}">${assistantAnalyteOptions(code)}</select></label>
-      <label class="muted">analyte_name_ru<input class="input" data-assistant-lab="analyte_name_ru" data-idx="${idx}" value="${esc(row.analyte_name_ru || '')}" placeholder="25(OH)D"/></label>
-      <label class="muted">value<input class="input" data-assistant-lab="value" data-idx="${idx}" value="${esc(row.value || '')}" placeholder="19.8"/></label>
-      <label class="muted">unit<select class="select" data-assistant-lab="unit" data-idx="${idx}">${assistantUnitOptions(code, row.unit || '')}</select></label>
-      <label class="muted">ref_low<input class="input" data-assistant-lab="ref_low" data-idx="${idx}" value="${esc(row.ref_low || '')}" placeholder="30"/></label>
-      <label class="muted">ref_high<input class="input" data-assistant-lab="ref_high" data-idx="${idx}" value="${esc(row.ref_high || '')}" placeholder="100"/></label>
-      <label class="muted">measured_at<input type="date" class="input" data-assistant-lab="measured_at" data-idx="${idx}" value="${esc(row.measured_at || '')}"/></label>
+    if (!expanded) {
+      return `<button class="item-row" type="button" data-assistant-edit-lab="${idx}">
+        <span><strong>${esc(assistantLabTitle(row))}</strong><div class="muted">Значение: ${esc(row.value || '—')} ${esc(row.unit || '')}</div></span>
+        <span class="muted">Открыть</span>
+      </button>`;
+    }
+    return `<div class="field-grid two lab-result-row" data-assistant-lab-row="${idx}">
+      <label class="muted">Показатель<select class="select" data-assistant-lab="analyte_code" data-idx="${idx}">${assistantAnalyteOptions(code)}</select></label>
+      <label class="muted">Название показателя<input class="input" data-assistant-lab="analyte_name_ru" data-idx="${idx}" value="${esc(row.analyte_name_ru || '')}" placeholder="Например, 25(OH)D"/></label>
+      <label class="muted">Значение<input class="input" data-assistant-lab="value" data-idx="${idx}" value="${esc(row.value || '')}" placeholder="Например, 19.8"/></label>
+      <label class="muted">Единица<select class="select" data-assistant-lab="unit" data-idx="${idx}">${assistantUnitOptions(code, row.unit || '')}</select></label>
+      <label class="muted">Референс от<input class="input" data-assistant-lab="ref_low" data-idx="${idx}" value="${esc(row.ref_low || '')}" placeholder="Например, 30"/></label>
+      <label class="muted">Референс до<input class="input" data-assistant-lab="ref_high" data-idx="${idx}" value="${esc(row.ref_high || '')}" placeholder="Например, 100"/></label>
+      <label class="muted">Дата анализа<input type="date" class="input" data-assistant-lab="measured_at" data-idx="${idx}" value="${esc(row.measured_at || '')}"/></label>
     </div>`;
   }
 
@@ -3246,7 +3267,7 @@ function adminField(label, field, value, kind='input') {
     const history = Array.isArray(a.history) ? a.history : [];
     const nutrients = Array.isArray(result?.nutrient_plan) ? result.nutrient_plan : [];
     return `
-      <section class="card fade"><div class="row"><strong>🧪 Nutrient Assistant</strong><button class="btn secondary" data-open-edit>Редактировать профиль</button></div><div class="profile-summary-grid" style="margin-top:8px">${summary}</div></section>
+      <section class="card fade"><div class="row"><strong>🧪 Нутриентный помощник</strong><button class="btn secondary" data-open-edit>Редактировать профиль</button></div><div class="profile-summary-grid" style="margin-top:8px">${summary}</div></section>
       <section class="card fade">
         <div class="row"><strong>Данные для расчёта</strong></div>
         <div class="field-grid two" style="margin-top:8px">
@@ -3263,28 +3284,28 @@ function adminField(label, field, value, kind='input') {
       <section class="card fade">
         <div class="row"><strong>Симптомы и цель</strong></div>
         <div class="field-grid" style="margin-top:8px">
-          <label class="muted">Симптомы (каждый с новой строки)<textarea class="textarea" data-assistant-field="symptoms">${esc((form.symptoms||[]).join('\n'))}</textarea></label>
-          <label class="muted">Доп. симптомы<input class="input" data-assistant-field="symptoms_other_free_text" value="${esc(form.symptoms_other_free_text || '')}"/></label>
-          <label class="muted">Главная цель<input class="input" data-assistant-field="primary_goal" value="${esc(form.primary_goal || '')}" placeholder="more_energy"/></label>
-          <label class="muted">ЖКТ (строки/запятые)<input class="input" data-assistant-field="gi_problems_text" value="${esc(form.gi_problems_text || '')}"/></label>
-          <label class="muted">Щитовидка (строки/запятые)<input class="input" data-assistant-field="thyroid_conditions_text" value="${esc(form.thyroid_conditions_text || '')}"/></label>
+          <label class="muted">Симптомы (каждый с новой строки) ❓ Это нужно, чтобы понять, какие проявления вы у себя замечаете и почему хотите отслеживать состояние (например, изменения кожи, усталость, выпадение волос и т.д.)<textarea class="textarea" data-assistant-field="symptoms">${esc((form.symptoms||[]).join('\n'))}</textarea></label>
+          <label class="muted">Главная цель (можно на русском, пробелы автоматически обработаем)<input class="input" data-assistant-field="primary_goal" value="${esc(form.primary_goal || '')}" placeholder="Например, больше энергии"/></label>
+          <label class="muted">ЖКТ — жалобы со стороны пищеварения: вздутие, изжога, боль, нестабильный стул (вводите через запятую или с новой строки)<input class="input" data-assistant-field="gi_problems_text" value="${esc(form.gi_problems_text || '')}"/></label>
+          <label class="muted">Щитовидка — известные состояния: гипотиреоз, гипертиреоз, аутоиммунный тиреоидит и т.п. (через запятую или с новой строки)<input class="input" data-assistant-field="thyroid_conditions_text" value="${esc(form.thyroid_conditions_text || '')}"/></label>
         </div>
       </section>
       <section class="card fade">
-        <div class="row"><strong>Анализы</strong><button class="btn secondary" data-assistant-add-lab>+ Показатель</button></div>
-        <div class="muted" style="margin-top:6px">Ручной ввод — основной режим. Заполните analyte_code, analyte_name_ru, value, unit, ref_low, ref_high, measured_at.</div>
-        <div id="assistantLabRows" style="margin-top:8px">${(a.manualLabs||[]).map((row,idx)=>renderAssistantLabRow(idx,row)).join('')}</div>
+        <div class="row"><strong>Анализы</strong></div>
+        <div class="muted" style="margin-top:6px">Заполните показатель, значение, единицу и при необходимости референсы. После заполнения появится кнопка «Добавить ещё».</div>
+        <div id="assistantLabRows" style="margin-top:8px">${(a.manualLabs||[]).map((row,idx)=>renderAssistantLabRow(idx,row, Number(a.expandedLabIdx ?? 0) === idx)).join('')}</div>
+        ${assistantLabRowReady((a.manualLabs||[])[Number(a.expandedLabIdx ?? 0)] || {}) ? `<div class="row" style="margin-top:8px"><button class="btn secondary" data-assistant-add-lab>Добавить ещё</button></div>` : ''}
         <div class="row" style="margin-top:10px"><button class="btn" data-assistant-compute>${a.computing?'Считаем…':'Рассчитать'}</button></div>
       </section>
       ${result ? `<section class="card fade"><div class="row"><strong>Результат</strong><div style="display:flex;gap:8px"><button class="btn" data-assistant-apply>${a.applying?'Применяем…':'Принять'}</button><button class="btn secondary" data-assistant-cancel>${a.cancelling?'Отменяем…':'Отменить'}</button></div></div>
         <div class="muted" style="margin-top:8px">${esc(result.summary_ru || '')}</div>
         <div class="row" style="margin-top:8px"><span class="chip">Уверенность: ${esc(confidenceRu(result.confidence))}</span><span class="chip">Нутриентов: ${nutrients.length}</span><span class="chip">Анализов: ${(result.labs_used||[]).length}</span></div>
         <div class="field-grid two" style="margin-top:10px">
-          <div><strong>Safety flags</strong>${(result.safety_flags||[]).length ? (result.safety_flags||[]).map((x)=>`<div class="muted">• ${esc(x)}</div>`).join('') : '<div class="muted">Нет</div>'}</div>
-          <div><strong>Physician flags</strong>${(result.physician_flags||[]).length ? (result.physician_flags||[]).map((x)=>`<div class="muted">• ${esc(x)}</div>`).join('') : '<div class="muted">Нет</div>'}</div>
+          <div><strong>Флаги безопасности</strong>${(result.safety_flags||[]).length ? (result.safety_flags||[]).map((x)=>`<div class="muted">• ${esc(x)}</div>`).join('') : '<div class="muted">Нет</div>'}</div>
+          <div><strong>Флаги для врача</strong>${(result.physician_flags||[]).length ? (result.physician_flags||[]).map((x)=>`<div class="muted">• ${esc(x)}</div>`).join('') : '<div class="muted">Нет</div>'}</div>
         </div>
         <div style="margin-top:10px">${nutrients.map((n)=>`<div class="item-row" style="display:block"><div class="row"><strong>${esc(n.nutrient_name_ru || n.nutrient_code || 'Нутриент')}</strong><span class="chip ${assistantOutcomeClass(n.recommend_action)}">${esc(assistantOutcomeLabel(n.recommend_action))}</span></div><div class="muted">${esc(n.reason_ru || '')}</div><div class="muted">Доза: ${esc(n.dose_text_ru || '—')} · Частота: ${esc(n.frequency_text_ru || '—')} · Длительность: ${esc(n.duration_text_ru || '—')}</div><div class="muted">Тайминг: ${esc(n.timing_text_ru || '—')} · С едой: ${boolMark(n.with_food)}</div><div class="muted">Стоп/пауза: ${esc(n.stop_or_pause_rule_ru || '—')}</div></div>`).join('')}</div>
-        <div style="margin-top:10px"><strong>Next steps</strong>${(result.next_steps_ru||[]).map((x)=>`<div class="muted">• ${esc(x)}</div>`).join('')}</div>
+        <div style="margin-top:10px"><strong>Следующие шаги</strong>${(result.next_steps_ru||[]).map((x)=>`<div class="muted">• ${esc(x)}</div>`).join('')}</div>
       </section>` : ''}
       <section class="card fade"><div class="row"><strong>История прошлых расчётов</strong></div>
       <div style="margin-top:8px">${history.length ? history.map((h)=>`<button class="item-row" data-assistant-history="${h.id}"><span>${esc(formatUtcShort(h.created_at || ''))} · #${h.id}${h.is_active ? ' · Активная' : ''}</span><span class="muted">${esc((h.response_json||{}).confidence || h.status || '')}</span></button>`).join('') : '<div class="muted">Пока пусто</div>'}</div></section>
@@ -3314,18 +3335,27 @@ function adminField(label, field, value, kind='input') {
 
   function collectLabRows(containerId){ const rows=[]; document.querySelectorAll(`#${containerId} [data-lab-row]`).forEach((rowEl)=>{ const idx=rowEl.dataset.labRow; const analyte_code=document.querySelector(`[data-lab-field="analyte_code"][data-idx="${idx}"]`)?.value||''; const preset=ANALYTE_PRESETS.find((x)=>x.code===analyte_code); const value=document.querySelector(`[data-lab-field="value_num"][data-idx="${idx}"]`)?.value||''; rows.push({ analyte_code, analyte_name:preset?.title||analyte_code, value_text:String(value), value_num:Number(String(value).replace(',','.'))||null, unit:document.querySelector(`[data-lab-field="unit"][data-idx="${idx}"]`)?.value||'', ref_low:Number(document.querySelector(`[data-lab-field="ref_low"][data-idx="${idx}"]`)?.value||'')||null, ref_high:Number(document.querySelector(`[data-lab-field="ref_high"][data-idx="${idx}"]`)?.value||'')||null }); }); return rows.filter((x)=>x.analyte_code); }
   function collectAssistantLabs(){
+    syncExpandedAssistantLabRow();
     const rows = [];
-    document.querySelectorAll('[data-assistant-lab-row]').forEach((rowEl)=>{
-      const idx = rowEl.dataset.assistantLabRow;
-      const item = {};
-      ['analyte_code','analyte_name_ru','value','unit','ref_low','ref_high','measured_at'].forEach((f)=>item[f] = document.querySelector(`[data-assistant-lab="${f}"][data-idx="${idx}"]`)?.value || '');
-      if (!item.analyte_name_ru && item.analyte_code) {
+    (state.nutrientAssistant.manualLabs || []).forEach((item)=>{
+      if (!String(item.analyte_name_ru || '').trim() && item.analyte_code) {
         const preset = ASSISTANT_ANALYTE_PRESETS.find((x)=>String(x.code)===String(item.analyte_code));
         item.analyte_name_ru = preset?.name || item.analyte_code;
       }
       if (String(item.analyte_code || '').trim()) rows.push(item);
     });
     return rows;
+  }
+  function syncExpandedAssistantLabRow(){
+    const idx = Number(state.nutrientAssistant.expandedLabIdx || 0);
+    if (!Array.isArray(state.nutrientAssistant.manualLabs)) state.nutrientAssistant.manualLabs = [];
+    if (!state.nutrientAssistant.manualLabs[idx]) return;
+    const next = { ...state.nutrientAssistant.manualLabs[idx] };
+    ['analyte_code','analyte_name_ru','value','unit','ref_low','ref_high','measured_at'].forEach((f)=>{
+      const val = document.querySelector(`[data-assistant-lab="${f}"][data-idx="${idx}"]`)?.value;
+      if (val !== undefined) next[f] = val;
+    });
+    state.nutrientAssistant.manualLabs[idx] = next;
   }
   function collectAssistantForm(){
     const next = { ...(state.nutrientAssistant.form || {}) };
@@ -3336,6 +3366,8 @@ function adminField(label, field, value, kind='input') {
     });
     next.heavy_menstrual_bleeding = String(next.heavy_menstrual_bleeding) === 'true';
     next.symptoms = parseCommaLines(next.symptoms);
+    next.primary_goal = normalizeGoalText(next.primary_goal);
+    delete next.symptoms_other_free_text;
     next.gi_problems = parseCommaLines(next.gi_problems_text);
     next.thyroid_conditions = parseCommaLines(next.thyroid_conditions_text);
     next.allergies_or_restrictions = parseCommaLines(next.allergies_or_restrictions_text);
@@ -3369,9 +3401,21 @@ function adminField(label, field, value, kind='input') {
     document.querySelectorAll('[data-close-review]').forEach((el)=>el.addEventListener('click', ()=>{ state.profileUi.reviewOpen=false; renderActiveTab(); }));
     document.querySelectorAll('[data-open-review]').forEach((el)=>el.addEventListener('click', ()=>{ state.profileUi.selectedReportId=Number(el.dataset.openReview); state.profileUi.reviewOpen=true; renderActiveTab(); }));
     document.querySelector('[data-assistant-add-lab]')?.addEventListener('click', ()=>{
+      syncExpandedAssistantLabRow();
+      const current = state.nutrientAssistant.manualLabs[Number(state.nutrientAssistant.expandedLabIdx || 0)] || {};
+      if (!assistantLabRowReady(current)) {
+        showToast('Сначала заполните текущий показатель (минимум показатель и значение)');
+        return;
+      }
       state.nutrientAssistant.manualLabs.push({ analyte_code: "", analyte_name_ru: "", value: "", unit: "", ref_low: "", ref_high: "", measured_at: "" });
+      state.nutrientAssistant.expandedLabIdx = state.nutrientAssistant.manualLabs.length - 1;
       renderActiveTab();
     });
+    document.querySelectorAll('[data-assistant-edit-lab]').forEach((el)=>el.addEventListener('click', ()=>{
+      syncExpandedAssistantLabRow();
+      state.nutrientAssistant.expandedLabIdx = Number(el.dataset.assistantEditLab || 0);
+      renderActiveTab();
+    }));
     document.querySelector('[data-assistant-compute]')?.addEventListener('click', async ()=>{
       if (state.nutrientAssistant.computing) return;
       state.nutrientAssistant.computing = true;
@@ -3450,12 +3494,16 @@ function adminField(label, field, value, kind='input') {
     document.querySelectorAll('[data-assistant-lab="analyte_code"]').forEach((el)=>el.addEventListener('change',(e)=>{
       const idx = e.target.dataset.idx;
       const code = e.target.value || '';
+      const row = state.nutrientAssistant.manualLabs[Number(idx)] || {};
+      row.analyte_code = code;
+      state.nutrientAssistant.manualLabs[Number(idx)] = row;
       const preset = ASSISTANT_ANALYTE_PRESETS.find((x)=>String(x.code)===String(code));
       const unitEl = document.querySelector(`[data-assistant-lab="unit"][data-idx="${idx}"]`);
       if (unitEl) unitEl.innerHTML = assistantUnitOptions(code, '');
       const nameEl = document.querySelector(`[data-assistant-lab="analyte_name_ru"][data-idx="${idx}"]`);
       if (nameEl && !String(nameEl.value || '').trim()) nameEl.value = preset?.name || code;
     }));
+    document.querySelectorAll('[data-assistant-lab]').forEach((el)=>el.addEventListener('input', ()=>syncExpandedAssistantLabRow()));
     document.querySelectorAll('[data-assistant-overwrite]').forEach((el)=>el.addEventListener('click', ()=>{
       state.nutrientAssistant.pendingComputePayload = { replace_run_id: Number(el.dataset.assistantOverwrite || 0) };
       state.nutrientAssistant.pendingOverwriteRuns = [];

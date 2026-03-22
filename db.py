@@ -8884,11 +8884,21 @@ async def has_llm_assistant_cancel_today(conn: aiosqlite.Connection, tg_user_id:
     row = await fetchone(
         conn,
         """SELECT 1 AS x FROM llm_assistant_runs
-           WHERE user_id=? AND status='cancelled' AND substr(created_at,1,10)=?
+           WHERE user_id=? AND status='cancelled' AND substr(COALESCE(updated_at, created_at),1,10)=?
            LIMIT 1""",
         (user_id, today_utc),
     )
     return row is not None
+
+
+async def replace_llm_assistant_run(conn: aiosqlite.Connection, tg_user_id: int, run_id: int) -> bool:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    now = utc_now_iso()
+    cur = await conn.execute(
+        "UPDATE llm_assistant_runs SET status='replaced', is_active=0, updated_at=? WHERE user_id=? AND id=?",
+        (now, user_id, int(run_id)),
+    )
+    return int(cur.rowcount or 0) > 0
 
 
 async def save_llm_assistant_plan_actions(conn: aiosqlite.Connection, tg_user_id: int, run_id: int, actions: list[dict]) -> int:

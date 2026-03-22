@@ -1817,7 +1817,9 @@ async def api_profile_nutrient_assistant_compute(
             target = next((r for r in active_history if int(r.get("id") or 0) == replace_run_id), None)
             if not target:
                 return JSONResponse({"ok": False, "code": "INVALID_REPLACE_RUN"}, status_code=400)
-            await db.delete_llm_assistant_run(conn, tg_user_id, replace_run_id)
+            ok = await db.replace_llm_assistant_run(conn, tg_user_id, replace_run_id)
+            if not ok:
+                return JSONResponse({"ok": False, "code": "INVALID_REPLACE_RUN"}, status_code=400)
 
         profile = await db.get_user_health_profile(conn, tg_user_id)
         stack = await db.get_user_supplements_with_enabled(conn, tg_user_id)

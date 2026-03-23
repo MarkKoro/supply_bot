@@ -796,8 +796,9 @@
         malabsorption_risk: false,
         bariatric_or_gi_surgery_history: false
       },
-      manualLabs: [{ analyte_code: "", analyte_name_ru: "", value: "", unit: "", ref_low: "", ref_high: "", measured_at: "" }],
+      manualLabs: [{ analyte_code: "", value: "", unit: "", measured_at: "" }],
       expandedLabIdx: 0,
+      helpOpenKey: "",
       computing: false,
       applying: false,
       cancelling: false,
@@ -3240,6 +3241,32 @@ function adminField(label, field, value, kind='input') {
     const head = `<option value="">Выберите единицу</option>`;
     return head + units.map((unit)=>`<option value="${esc(unit)}" ${String(selectedUnit||'')===String(unit)?'selected':''}>${esc(unit)}</option>`).join('');
   }
+  function isAssistantMale(profile){
+    return String(profile?.sex_at_birth || '').toLowerCase() === 'm';
+  }
+  function assistantHelpText(key){
+    const map = {
+      symptoms: 'Расскажите, какие проявления вы у себя замечаете и почему хотите отслеживать состояние (например: изменения кожи, усталость, выпадение волос).',
+      primary_goal: 'Кратко сформулируйте главный ожидаемый результат. Например: больше энергии, лучше сон, стабильное настроение.',
+      gi_problems_text: 'Опишите жалобы со стороны пищеварения: вздутие, изжога, боль, нестабильный стул. Можно перечислить через запятую или с новой строки.',
+      thyroid_conditions_text: 'Укажите известные состояния щитовидной железы: гипотиреоз, гипертиреоз, аутоиммунный тиреоидит и т.д. Через запятую или с новой строки.',
+      fish_intake_frequency: 'Как часто вы едите рыбу. Это влияет на оценку жирных кислот и некоторых дефицитов.',
+      meat_intake_frequency: 'Как часто вы едите мясо. Помогает точнее оценить риск дефицитов железа, B12 и др.',
+      dairy_intake_frequency: 'Как часто вы употребляете молочные продукты. Важно для оценки кальция, витамина D и связанных факторов.',
+      egg_intake_frequency: 'Как часто вы едите яйца. Это помогает точнее учитывать пищевые источники нутриентов.',
+      sleep_quality: 'Оцените качество сна за последнее время: от плохого до хорошего.',
+      stress_level: 'Оцените текущий уровень стресса: низкий, средний или высокий.',
+      menstrual_status: 'Укажите менструальный статус для более точной интерпретации некоторых рисков.',
+      heavy_menstrual_bleeding: 'Отметьте, если менструации обычно обильные — это влияет на оценку риска дефицита железа.'
+    };
+    return map[key] || '';
+  }
+  function assistantFieldLabel(title, helpKey, openKey){
+    const helpText = assistantHelpText(helpKey);
+    if (!helpText) return title;
+    const isOpen = String(openKey || '') === String(helpKey);
+    return `${esc(title)} <button class="btn secondary survey-help-btn" type="button" data-assistant-help-toggle="${esc(helpKey)}">?</button>${isOpen ? `<div class="survey-help muted" data-assistant-help-close="${esc(helpKey)}">${esc(helpText)}</div>` : ''}`;
+  }
   function renderAssistantLabRow(idx, row = {}, expanded = false) {
     const code = row.analyte_code || '';
     if (!expanded) {
@@ -3250,11 +3277,8 @@ function adminField(label, field, value, kind='input') {
     }
     return `<div class="field-grid two lab-result-row" data-assistant-lab-row="${idx}">
       <label class="muted">Показатель<select class="select" data-assistant-lab="analyte_code" data-idx="${idx}">${assistantAnalyteOptions(code)}</select></label>
-      <label class="muted">Название показателя<input class="input" data-assistant-lab="analyte_name_ru" data-idx="${idx}" value="${esc(row.analyte_name_ru || '')}" placeholder="Например, 25(OH)D"/></label>
       <label class="muted">Значение<input class="input" data-assistant-lab="value" data-idx="${idx}" value="${esc(row.value || '')}" placeholder="Например, 19.8"/></label>
       <label class="muted">Единица<select class="select" data-assistant-lab="unit" data-idx="${idx}">${assistantUnitOptions(code, row.unit || '')}</select></label>
-      <label class="muted">Референс от<input class="input" data-assistant-lab="ref_low" data-idx="${idx}" value="${esc(row.ref_low || '')}" placeholder="Например, 30"/></label>
-      <label class="muted">Референс до<input class="input" data-assistant-lab="ref_high" data-idx="${idx}" value="${esc(row.ref_high || '')}" placeholder="Например, 100"/></label>
       <label class="muted">Дата анализа<input type="date" class="input" data-assistant-lab="measured_at" data-idx="${idx}" value="${esc(row.measured_at || '')}"/></label>
     </div>`;
   }
@@ -3262,6 +3286,8 @@ function adminField(label, field, value, kind='input') {
   function renderAssistantModule(profile, labs) {
     const a = state.nutrientAssistant;
     const form = a.form || {};
+    const helpOpenKey = String(a.helpOpenKey || '');
+    const isMale = isAssistantMale(profile);
     const result = a.result || null;
     const summary = profileSummary(profile).map((x)=>`<div class="muted">${x}</div>`).join('');
     const history = Array.isArray(a.history) ? a.history : [];
@@ -3271,28 +3297,28 @@ function adminField(label, field, value, kind='input') {
       <section class="card fade">
         <div class="row"><strong>Данные для расчёта</strong></div>
         <div class="field-grid two" style="margin-top:8px">
-          <label class="muted">Менструальный статус<select class="select" data-assistant-field="menstrual_status">${selectOptions([['regular','Регулярный'],['irregular','Нерегулярный'],['postmenopause','Постменопауза'],['not_applicable','Неактуально'],['unknown','Неизвестно']], form.menstrual_status)}</select></label>
-          <label class="muted">Обильные менструации<select class="select" data-assistant-field="heavy_menstrual_bleeding">${selectOptions([['false','Нет'],['true','Да']], String(!!form.heavy_menstrual_bleeding), 'Выберите')}</select></label>
-          <label class="muted">Рыба<select class="select" data-assistant-field="fish_intake_frequency">${selectOptions([['none','Не ем'],['rare','Редко'],['weekly','Еженедельно'],['often','Часто'],['unknown','Неизвестно']], form.fish_intake_frequency)}</select></label>
-          <label class="muted">Мясо<select class="select" data-assistant-field="meat_intake_frequency">${selectOptions([['none','Не ем'],['rare','Редко'],['weekly','Еженедельно'],['often','Часто'],['unknown','Неизвестно']], form.meat_intake_frequency)}</select></label>
-          <label class="muted">Молочные<select class="select" data-assistant-field="dairy_intake_frequency">${selectOptions([['none','Не ем'],['rare','Редко'],['weekly','Еженедельно'],['often','Часто'],['unknown','Неизвестно']], form.dairy_intake_frequency)}</select></label>
-          <label class="muted">Яйца<select class="select" data-assistant-field="egg_intake_frequency">${selectOptions([['none','Не ем'],['rare','Редко'],['weekly','Еженедельно'],['often','Часто'],['unknown','Неизвестно']], form.egg_intake_frequency)}</select></label>
-          <label class="muted">Сон<select class="select" data-assistant-field="sleep_quality">${selectOptions([['poor','Плохой'],['fair','Средний'],['good','Хороший'],['unknown','Неизвестно']], form.sleep_quality)}</select></label>
-          <label class="muted">Стресс<select class="select" data-assistant-field="stress_level">${selectOptions([['low','Низкий'],['medium','Средний'],['high','Высокий'],['unknown','Неизвестно']], form.stress_level)}</select></label>
+          ${isMale ? '' : `<label class="muted">${assistantFieldLabel('Менструальный статус','menstrual_status',helpOpenKey)}<select class="select" data-assistant-field="menstrual_status">${selectOptions([['regular','Регулярный'],['irregular','Нерегулярный'],['postmenopause','Постменопауза'],['not_applicable','Неактуально'],['unknown','Неизвестно']], form.menstrual_status)}</select></label>`}
+          ${isMale ? '' : `<label class="muted">${assistantFieldLabel('Обильные менструации','heavy_menstrual_bleeding',helpOpenKey)}<select class="select" data-assistant-field="heavy_menstrual_bleeding">${selectOptions([['false','Нет'],['true','Да']], String(!!form.heavy_menstrual_bleeding), 'Выберите')}</select></label>`}
+          <label class="muted">${assistantFieldLabel('Рыба','fish_intake_frequency',helpOpenKey)}<select class="select" data-assistant-field="fish_intake_frequency">${selectOptions([['none','Не ем'],['rare','Редко'],['weekly','Еженедельно'],['often','Часто'],['unknown','Неизвестно']], form.fish_intake_frequency)}</select></label>
+          <label class="muted">${assistantFieldLabel('Мясо','meat_intake_frequency',helpOpenKey)}<select class="select" data-assistant-field="meat_intake_frequency">${selectOptions([['none','Не ем'],['rare','Редко'],['weekly','Еженедельно'],['often','Часто'],['unknown','Неизвестно']], form.meat_intake_frequency)}</select></label>
+          <label class="muted">${assistantFieldLabel('Молочные','dairy_intake_frequency',helpOpenKey)}<select class="select" data-assistant-field="dairy_intake_frequency">${selectOptions([['none','Не ем'],['rare','Редко'],['weekly','Еженедельно'],['often','Часто'],['unknown','Неизвестно']], form.dairy_intake_frequency)}</select></label>
+          <label class="muted">${assistantFieldLabel('Яйца','egg_intake_frequency',helpOpenKey)}<select class="select" data-assistant-field="egg_intake_frequency">${selectOptions([['none','Не ем'],['rare','Редко'],['weekly','Еженедельно'],['often','Часто'],['unknown','Неизвестно']], form.egg_intake_frequency)}</select></label>
+          <label class="muted">${assistantFieldLabel('Сон','sleep_quality',helpOpenKey)}<select class="select" data-assistant-field="sleep_quality">${selectOptions([['poor','Плохой'],['fair','Средний'],['good','Хороший'],['unknown','Неизвестно']], form.sleep_quality)}</select></label>
+          <label class="muted">${assistantFieldLabel('Стресс','stress_level',helpOpenKey)}<select class="select" data-assistant-field="stress_level">${selectOptions([['low','Низкий'],['medium','Средний'],['high','Высокий'],['unknown','Неизвестно']], form.stress_level)}</select></label>
         </div>
       </section>
       <section class="card fade">
         <div class="row"><strong>Симптомы и цель</strong></div>
         <div class="field-grid" style="margin-top:8px">
-          <label class="muted">Симптомы (каждый с новой строки) ❓ Это нужно, чтобы понять, какие проявления вы у себя замечаете и почему хотите отслеживать состояние (например, изменения кожи, усталость, выпадение волос и т.д.)<textarea class="textarea" data-assistant-field="symptoms">${esc((form.symptoms||[]).join('\n'))}</textarea></label>
-          <label class="muted">Главная цель (можно на русском, пробелы автоматически обработаем)<input class="input" data-assistant-field="primary_goal" value="${esc(form.primary_goal || '')}" placeholder="Например, больше энергии"/></label>
-          <label class="muted">ЖКТ — жалобы со стороны пищеварения: вздутие, изжога, боль, нестабильный стул (вводите через запятую или с новой строки)<input class="input" data-assistant-field="gi_problems_text" value="${esc(form.gi_problems_text || '')}"/></label>
-          <label class="muted">Щитовидка — известные состояния: гипотиреоз, гипертиреоз, аутоиммунный тиреоидит и т.п. (через запятую или с новой строки)<input class="input" data-assistant-field="thyroid_conditions_text" value="${esc(form.thyroid_conditions_text || '')}"/></label>
+          <label class="muted">${assistantFieldLabel('Симптомы','symptoms',helpOpenKey)}<textarea class="textarea" data-assistant-field="symptoms">${esc((form.symptoms||[]).join('\n'))}</textarea></label>
+          <label class="muted">${assistantFieldLabel('Главная цель','primary_goal',helpOpenKey)}<input class="input" data-assistant-field="primary_goal" value="${esc(form.primary_goal || '')}" placeholder="Например, больше энергии"/></label>
+          <label class="muted">${assistantFieldLabel('ЖКТ','gi_problems_text',helpOpenKey)}<input class="input" data-assistant-field="gi_problems_text" value="${esc(form.gi_problems_text || '')}"/></label>
+          <label class="muted">${assistantFieldLabel('Щитовидка','thyroid_conditions_text',helpOpenKey)}<input class="input" data-assistant-field="thyroid_conditions_text" value="${esc(form.thyroid_conditions_text || '')}"/></label>
         </div>
       </section>
       <section class="card fade">
         <div class="row"><strong>Анализы</strong></div>
-        <div class="muted" style="margin-top:6px">Заполните показатель, значение, единицу и при необходимости референсы. После заполнения появится кнопка «Добавить ещё».</div>
+        <div class="muted" style="margin-top:6px">Заполните показатель, значение и единицу. После заполнения появится кнопка «Добавить ещё».</div>
         <div id="assistantLabRows" style="margin-top:8px">${(a.manualLabs||[]).map((row,idx)=>renderAssistantLabRow(idx,row, Number(a.expandedLabIdx ?? 0) === idx)).join('')}</div>
         ${assistantLabRowReady((a.manualLabs||[])[Number(a.expandedLabIdx ?? 0)] || {}) ? `<div class="row" style="margin-top:8px"><button class="btn secondary" data-assistant-add-lab>Добавить ещё</button></div>` : ''}
         <div class="row" style="margin-top:10px"><button class="btn" data-assistant-compute>${a.computing?'Считаем…':'Рассчитать'}</button></div>
@@ -3338,11 +3364,14 @@ function adminField(label, field, value, kind='input') {
     syncExpandedAssistantLabRow();
     const rows = [];
     (state.nutrientAssistant.manualLabs || []).forEach((item)=>{
-      if (!String(item.analyte_name_ru || '').trim() && item.analyte_code) {
-        const preset = ASSISTANT_ANALYTE_PRESETS.find((x)=>String(x.code)===String(item.analyte_code));
-        item.analyte_name_ru = preset?.name || item.analyte_code;
+      if (String(item.analyte_code || '').trim()) {
+        rows.push({
+          analyte_code: item.analyte_code,
+          value: item.value || '',
+          unit: item.unit || '',
+          measured_at: item.measured_at || ''
+        });
       }
-      if (String(item.analyte_code || '').trim()) rows.push(item);
     });
     return rows;
   }
@@ -3351,7 +3380,7 @@ function adminField(label, field, value, kind='input') {
     if (!Array.isArray(state.nutrientAssistant.manualLabs)) state.nutrientAssistant.manualLabs = [];
     if (!state.nutrientAssistant.manualLabs[idx]) return;
     const next = { ...state.nutrientAssistant.manualLabs[idx] };
-    ['analyte_code','analyte_name_ru','value','unit','ref_low','ref_high','measured_at'].forEach((f)=>{
+    ['analyte_code','value','unit','measured_at'].forEach((f)=>{
       const val = document.querySelector(`[data-assistant-lab="${f}"][data-idx="${idx}"]`)?.value;
       if (val !== undefined) next[f] = val;
     });
@@ -3365,6 +3394,10 @@ function adminField(label, field, value, kind='input') {
       next[key] = el.value;
     });
     next.heavy_menstrual_bleeding = String(next.heavy_menstrual_bleeding) === 'true';
+    if (isAssistantMale(state.profile.data)) {
+      delete next.menstrual_status;
+      delete next.heavy_menstrual_bleeding;
+    }
     next.symptoms = parseCommaLines(next.symptoms);
     next.primary_goal = normalizeGoalText(next.primary_goal);
     delete next.symptoms_other_free_text;
@@ -3407,10 +3440,36 @@ function adminField(label, field, value, kind='input') {
         showToast('Сначала заполните текущий показатель (минимум показатель и значение)');
         return;
       }
-      state.nutrientAssistant.manualLabs.push({ analyte_code: "", analyte_name_ru: "", value: "", unit: "", ref_low: "", ref_high: "", measured_at: "" });
+      state.nutrientAssistant.manualLabs.push({ analyte_code: "", value: "", unit: "", measured_at: "" });
       state.nutrientAssistant.expandedLabIdx = state.nutrientAssistant.manualLabs.length - 1;
       renderActiveTab();
     });
+    document.querySelectorAll('[data-assistant-help-toggle]').forEach((el)=>el.addEventListener('click', (e)=>{
+      e.preventDefault();
+      e.stopPropagation();
+      const key = String(el.dataset.assistantHelpToggle || '');
+      state.nutrientAssistant.helpOpenKey = state.nutrientAssistant.helpOpenKey === key ? '' : key;
+      renderActiveTab();
+    }));
+    document.querySelectorAll('[data-assistant-help-close]').forEach((el)=>el.addEventListener('click', (e)=>{
+      e.preventDefault();
+      e.stopPropagation();
+      state.nutrientAssistant.helpOpenKey = '';
+      renderActiveTab();
+    }));
+    if (!state.nutrientAssistant.helpOutsideBound) {
+      document.addEventListener('click', (e)=>{
+        if (!state.nutrientAssistant.helpOpenKey) return;
+        if (String(state.profileUi?.activeModule || '') !== 'assistant') return;
+        const target = e.target;
+        if (target?.closest?.('[data-assistant-help-toggle]')) return;
+        if (target?.closest?.('[data-assistant-help-close]')) return;
+        if (target?.closest?.('.survey-help')) return;
+        state.nutrientAssistant.helpOpenKey = '';
+        renderActiveTab();
+      });
+      state.nutrientAssistant.helpOutsideBound = true;
+    }
     document.querySelectorAll('[data-assistant-edit-lab]').forEach((el)=>el.addEventListener('click', ()=>{
       syncExpandedAssistantLabRow();
       state.nutrientAssistant.expandedLabIdx = Number(el.dataset.assistantEditLab || 0);
@@ -3497,11 +3556,8 @@ function adminField(label, field, value, kind='input') {
       const row = state.nutrientAssistant.manualLabs[Number(idx)] || {};
       row.analyte_code = code;
       state.nutrientAssistant.manualLabs[Number(idx)] = row;
-      const preset = ASSISTANT_ANALYTE_PRESETS.find((x)=>String(x.code)===String(code));
       const unitEl = document.querySelector(`[data-assistant-lab="unit"][data-idx="${idx}"]`);
       if (unitEl) unitEl.innerHTML = assistantUnitOptions(code, '');
-      const nameEl = document.querySelector(`[data-assistant-lab="analyte_name_ru"][data-idx="${idx}"]`);
-      if (nameEl && !String(nameEl.value || '').trim()) nameEl.value = preset?.name || code;
     }));
     document.querySelectorAll('[data-assistant-lab]').forEach((el)=>el.addEventListener('input', ()=>syncExpandedAssistantLabRow()));
     document.querySelectorAll('[data-assistant-overwrite]').forEach((el)=>el.addEventListener('click', ()=>{

@@ -314,7 +314,7 @@ def my_supplements_list(rows, page: int, has_prev: bool, has_next: bool, *, show
             continue
         btns.append([InlineKeyboardButton(label, callback_data=f"mysupp:open:{sid}")])
     btns.append([InlineKeyboardButton("➕ Добавить", callback_data="mysupp:add")])
-    btns.append([InlineKeyboardButton("🧩 Комплексы", callback_data="menu:complexes")])
+    btns.append([InlineKeyboardButton("🧩 Комплексы", callback_data=f"mysupp:complexes:{page}")])
     nav = []
     if has_prev:
         nav.append(InlineKeyboardButton("⬅️ Назад", callback_data=f"mysupp:list:{page - 1}"))
@@ -350,7 +350,7 @@ def my_supplements_overview_kb(base_rows, ai_rows, page: int, has_prev: bool, ha
             btns.append([InlineKeyboardButton(f"🤖 {name}", callback_data=f"supp:open:{sid}")])
 
     btns.append([InlineKeyboardButton("➕ Добавить", callback_data="mysupp:add")])
-    btns.append([InlineKeyboardButton("🧩 Комплексы", callback_data="menu:complexes")])
+    btns.append([InlineKeyboardButton("🧩 Комплексы", callback_data=f"mysupp:complexes:{page}")])
     nav = []
     if has_prev:
         nav.append(InlineKeyboardButton("⬅️ Назад", callback_data=f"mysupp:list:{page - 1}"))
@@ -799,7 +799,7 @@ def settings_notifications_kb(*, reminders_enabled: bool, slots: list[dict]) -> 
     return InlineKeyboardMarkup(rows)
 
 
-def complexes_hub_kb(items: list[dict]) -> InlineKeyboardMarkup:
+def complexes_hub_kb(items: list[dict], *, back_cb: str = "menu:settings") -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     for item in items[:20]:
         cid = int(item.get("id") or 0)
@@ -807,18 +807,18 @@ def complexes_hub_kb(items: list[dict]) -> InlineKeyboardMarkup:
         count = int(item.get("items_count") or 0)
         rows.append([InlineKeyboardButton(f"🧩 {name} ({count})", callback_data=f"cx:open:{cid}")])
     rows.append([InlineKeyboardButton("➕ Создать комплекс", callback_data="cx:create")])
-    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="menu:settings")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=back_cb)])
     return InlineKeyboardMarkup(rows)
 
 
-def complex_open_kb(complex_id: int) -> InlineKeyboardMarkup:
+def complex_open_kb(complex_id: int, *, list_back_cb: str = "cx:list") -> InlineKeyboardMarkup:
     cid = int(complex_id)
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("➕ Добавить БАД", callback_data=f"cx:add:{cid}")],
         [InlineKeyboardButton("⏱ Расписание", callback_data=f"cx:schedule:{cid}")],
         [InlineKeyboardButton("✏️ Переименовать", callback_data=f"cx:rename:{cid}")],
         [InlineKeyboardButton("🗑 Удалить", callback_data=f"cx:delete:{cid}")],
-        [InlineKeyboardButton("⬅️ К списку комплексов", callback_data="settings:complexes")],
+        [InlineKeyboardButton("⬅️ К списку комплексов", callback_data=list_back_cb)],
     ])
 
 

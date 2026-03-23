@@ -107,6 +107,7 @@ AI_CHECKIN_STATE = "ai_checkin_state"
 AI_CHECKIN_NOTE_WAIT = "ai_checkin_note"
 AI_CHECKIN_TEXT_WAIT = "ai_checkin_text"
 AI_CHECKIN_VOICE_ROUTE = "checkin_voice"
+COMPLEXES_BACK_ROUTE_KEY = "complexes_back_route"
 
 GOAL_OPTIONS = [
     ("focus", "🧠 Концентрация"),
@@ -1964,9 +1965,10 @@ async def _show_complexes_hub(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not active:
         await show(update, context, "Комплексы доступны в Premium.", premium_upsell_kb(), route="menu:premium")
         return
+    back_cb = str(context.user_data.get(COMPLEXES_BACK_ROUTE_KEY) or "menu:settings")
     items = await db.list_complexes(conn, tg_uid)
     text = "🧩 <b>Комплексы</b>\n\nСоздавай, наполняй и настраивай расписание прямо в боте."
-    await show(update, context, text, complexes_hub_kb(items), route="settings:complexes")
+    await show(update, context, text, complexes_hub_kb(items, back_cb=back_cb), route="cx:list")
 
 
 async def _show_complex_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, tg_uid: int, complex_id: int) -> None:
@@ -1993,7 +1995,7 @@ async def _show_complex_detail(update: Update, context: ContextTypes.DEFAULT_TYP
                 line += f" — доза: {dose}"
             lines.append(line)
     kb_rows = [[InlineKeyboardButton(f"⚙️ {str(item.get('name_ru') or item.get('slug') or item.get('supplement_id'))}", callback_data=f"cx:item:open:{int(complex_id)}:{int(item.get('supplement_id') or 0)}")] for item in c_items[:20]]
-    kb_rows.extend(complex_open_kb(int(complex_id)).inline_keyboard)
+    kb_rows.extend(complex_open_kb(int(complex_id), list_back_cb="cx:list").inline_keyboard)
     await show(update, context, "\n".join(lines), InlineKeyboardMarkup(kb_rows), route=f"cx:open:{int(complex_id)}")
 
 
@@ -2737,11 +2739,26 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await _send_subscription_invoice(update, context, plan_id, method)
             return
         if data == "menu:complexes":
+            context.user_data[COMPLEXES_BACK_ROUTE_KEY] = "mysupp:list:0"
+            await _show_complexes_hub(update, context, conn, tg_uid)
+            return
+        if data.startswith("mysupp:complexes:"):
+            parts = data.split(":")
+            page = 0
+            if len(parts) >= 3:
+                try:
+                    page = max(0, int(parts[2]))
+                except ValueError:
+                    page = 0
+            context.user_data[COMPLEXES_BACK_ROUTE_KEY] = f"mysupp:list:{page}"
+            await _show_complexes_hub(update, context, conn, tg_uid)
+            return
+        if data == "cx:list":
             await _show_complexes_hub(update, context, conn, tg_uid)
             return
         if data == "cx:create":
             context.user_data[WAITING_KEY] = "cx:create"
-            await show(update, context, "Введи название нового комплекса.", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="settings:complexes")]]), route="cx:create")
+            await show(update, context, "Введи название нового комплекса.", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="cx:list")]]), route="cx:create")
             return
         if data.startswith("cx:open:"):
             complex_id = int(data.split(":", 2)[2])
@@ -2894,6 +2911,7 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await _show_notifications_settings(update, context, conn, tg_uid)
             return
         if data == "settings:complexes":
+            context.user_data[COMPLEXES_BACK_ROUTE_KEY] = "menu:settings"
             await _show_complexes_hub(update, context, conn, tg_uid)
             return
         if data == "schedule:slot_pick":
@@ -6002,14 +6020,14 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if waiting == "cx:create":
             name = txt.strip()[:120]
             if not name:
-                await show(update, context, "Название не может быть пустым.", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="settings:complexes")]]), route="cx:create")
+                await show(update, context, "Название не может быть пустым.", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="cx:list")]]), route="cx:create")
             else:
                 try:
                     created = await db.create_complex(conn, tg_uid, name)
                     context.user_data.pop(WAITING_KEY, None)
                     await _show_complex_detail(update, context, conn, tg_uid, int(created.get("id") or 0))
                 except Exception:
-                    await show(update, context, "Не удалось создать комплекс (возможно, такое имя уже есть).", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="settings:complexes")]]), route="cx:create")
+                    await show(update, context, "Не удалось создать комплекс (возможно, такое имя уже есть).", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="cx:list")]]), route="cx:create")
             return
         if waiting.startswith("cx:rename:"):
             complex_id = int(waiting.split(":", 2)[2])

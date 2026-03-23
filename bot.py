@@ -2057,6 +2057,8 @@ async def _complete_onboarding_flow(
     conn,
     tg_uid: int,
 ) -> None:
+    context.user_data.pop("initial_pick_back_to_tz", None)
+    context.user_data.pop("onboarding", None)
     await db.mark_onboarding_done(conn, tg_uid)
     await db.mark_onboarding_used(conn, tg_uid)
     has_premium = await db.is_premium_active(conn, tg_uid)
@@ -4896,6 +4898,7 @@ async def on_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     if data == "tz:back":
         if context.user_data.get("onboarding") == "tz" or context.user_data.get("initial_pick_back_to_tz"):
+            context.user_data["onboarding"] = "tz"
             page = int(context.user_data.get("tz_page") or 0)
             await _show_timezone_picker(
                 update,
@@ -4922,8 +4925,10 @@ async def on_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await db.get_or_create_user(conn, tg_uid, tz_name="")
             await db.set_user_tz(conn, tg_uid, tz_value)
             context.user_data.pop("tz_back_data", None)
-            context.user_data.pop("initial_pick_back_to_tz", None)
             onboarding_step = context.user_data.pop("onboarding", None)
+            back_to_onboarding = bool(context.user_data.pop("initial_pick_back_to_tz", None))
+            if onboarding_step != "tz" and back_to_onboarding:
+                onboarding_step = "tz"
             tzinfo = db.parse_utc_tz(tz_value)
             local_now = datetime.now(tzinfo).strftime("%H:%M")
             label = tz.format_confirmation_label(tz_value)

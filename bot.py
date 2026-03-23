@@ -1109,17 +1109,50 @@ def _parse_ai_json(raw: str) -> dict | None:
     if not raw:
         return None
     content = _extract_json_content(raw)
-    try:
-        parsed = json.loads(content)
-    except json.JSONDecodeError:
-        match = re.search(r"\{[\s\S]*\}", content)
+
+    def _decode_json_object(payload: str) -> dict | None:
+        text = str(payload or "").strip()
+        if not text:
+            return None
+
+        # 1) Базовый путь: корректный JSON-объект.
+        try:
+            parsed_local = json.loads(text)
+            if isinstance(parsed_local, dict):
+                return parsed_local
+            if isinstance(parsed_local, str):
+                nested = _decode_json_object(parsed_local)
+                if nested is not None:
+                    return nested
+        except json.JSONDecodeError:
+            pass
+
+        # 2) Иногда модель возвращает JSON c мусором до/после.
+        decoder = json.JSONDecoder()
+        for idx, ch in enumerate(text):
+            if ch != "{":
+                continue
+            try:
+                parsed_local, end_idx = decoder.raw_decode(text[idx:])
+            except json.JSONDecodeError:
+                continue
+            tail = text[idx + end_idx :].strip().strip('"').strip()
+            if isinstance(parsed_local, dict) and not tail:
+                return parsed_local
+            if isinstance(parsed_local, dict) and tail in {"```", "```json"}:
+                return parsed_local
+
+        # 3) Последний шанс: вырезаем самый внешний блок {...}.
+        match = re.search(r"\{[\s\S]*\}", text)
         if not match:
             return None
         try:
-            parsed = json.loads(match.group(0))
+            parsed_local = json.loads(match.group(0))
         except json.JSONDecodeError:
             return None
-    return parsed if isinstance(parsed, dict) else None
+        return parsed_local if isinstance(parsed_local, dict) else None
+
+    return _decode_json_object(content)
 
 
 def _parse_onboarding_ai_json(raw: str) -> dict | None:

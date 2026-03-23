@@ -173,8 +173,127 @@ class AdminSeedPayloadError(ValueError):
         self.incomplete = incomplete
 
 
+def _escape_control_chars_in_json_strings(raw_text: str) -> str:
+    """
+    Telegram paste can contain raw control chars (especially real newlines) inside
+    JSON string values. Strict JSON parser rejects them, so we normalize by escaping
+    control chars only while we are inside a JSON string token.
+    """
+    if not raw_text:
+        return raw_text
+    out: list[str] = []
+    in_string = False
+    escaped = False
+    for ch in raw_text:
+        if in_string:
+            if escaped:
+                out.append(ch)
+                escaped = False
+                continue
+            if ch == "\\":
+                out.append(ch)
+                escaped = True
+                continue
+            if ch == '"':
+                out.append(ch)
+                in_string = False
+                continue
+            code = ord(ch)
+            if code < 0x20:
+                if ch == "\n":
+                    out.append("\\n")
+                elif ch == "\r":
+                    out.append("\\r")
+                elif ch == "\t":
+                    out.append("\\t")
+                elif ch == "\b":
+                    out.append("\\b")
+                elif ch == "\f":
+                    out.append("\\f")
+                else:
+                    out.append(f"\\u{code:04x}")
+                continue
+            out.append(ch)
+            continue
+        out.append(ch)
+        if ch == '"':
+            in_string = True
+            escaped = False
+    return "".join(out)
+
+
+def _admin_seed_error_hint(raw_text: str, pos: int) -> str:
+    if not raw_text:
+        return ""
+    idx = max(0, min(len(raw_text) - 1, int(pos)))
+    frag_start = max(0, idx - 40)
+    frag_end = min(len(raw_text), idx + 40)
+    fragment = raw_text[frag_start:frag_end].replace("\n", "\\n")
+    pointer = " " * (idx - frag_start) + "^"
+    ch = raw_text[idx]
+    ch_code = f"U+{ord(ch):04X}"
+    return (
+        "Подсказка:\n"
+        f"<code>{html.escape(fragment)}</code>\n"
+        f"<code>{html.escape(pointer)}</code>\n"
+        f"Символ: <code>{html.escape(repr(ch))}</code> ({ch_code})"
+    )
+
+
+def _admin_seed_helper_text() -> str:
+    return (
+        "🛠 <b>JSON-помощник (импорт в базу)</b>\n"
+        "1) Допустим один объект или несколько объектов подряд.\n"
+        "2) Обязательно поле <code>slug</code> в каждом объекте.\n"
+        "3) Если Telegram разрежет длинный JSON на 2+ сообщений — просто отправляй части подряд: бот склеит их без потери символов.\n"
+        "4) Можно вставлять многострочные поля: бот экранирует «сырые» переносы строк внутри текста.\n"
+        "5) Без markdown-обёрток (<code>```json</code> ...).\n\n"
+        "Мини-пример:\n"
+        "<code>{\"slug\":\"magnesium_glycinate\",\"name_ru\":\"Магний глицинат\"}</code>"
+    )
+
+
+def _looks_like_incomplete_json(text: str, err_pos: int, err_msg: str) -> bool:
+    msg = (err_msg or "").lower()
+    if not text:
+        return False
+    if err_pos >= max(0, len(text) - 8):
+        return True
+    if any(x in msg for x in ("unterminated", "unexpected end", "invalid \\u", "invalid \\x")):
+        return True
+    if text.rstrip().endswith((",", ":", "\\", "{", "[")):
+        return True
+    brace_balance = 0
+    bracket_balance = 0
+    in_string = False
+    escaped = False
+    for ch in text:
+        if in_string:
+            if escaped:
+                escaped = False
+                continue
+            if ch == "\\":
+                escaped = True
+                continue
+            if ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+            continue
+        if ch == "{":
+            brace_balance += 1
+        elif ch == "}":
+            brace_balance -= 1
+        elif ch == "[":
+            bracket_balance += 1
+        elif ch == "]":
+            bracket_balance -= 1
+    return in_string or brace_balance > 0 or bracket_balance > 0
+
+
 def _parse_admin_seed_payload(raw_text: str) -> list[dict]:
-    text = (raw_text or "").strip()
+    text = _escape_control_chars_in_json_strings((raw_text or "").strip())
     if not text:
         raise AdminSeedPayloadError("Пустое сообщение.", incomplete=False)
 
@@ -198,16 +317,19 @@ def _parse_admin_seed_payload(raw_text: str) -> list[dict]:
             obj, end_pos = decoder.raw_decode(text, pos)
         except json.JSONDecodeError as exc:
             msg = str(exc.msg or "").lower()
-            near_end = exc.pos >= max(0, len(text) - 4)
             looks_incomplete = (
-                near_end
+                _looks_like_incomplete_json(text, exc.pos, msg)
                 or "unterminated" in msg
                 or "expecting value" in msg
                 or "expecting ',' delimiter" in msg
                 or "expecting property name enclosed in double quotes" in msg
             )
+            hint = _admin_seed_error_hint(text, exc.pos)
             raise AdminSeedPayloadError(
-                f"Не удалось прочитать JSON рядом с символом {exc.pos + 1}: {exc.msg}",
+                (
+                    f"Не удалось прочитать JSON рядом с символом {exc.pos + 1}: {exc.msg}"
+                    + (f"\n\n{hint}" if hint else "")
+                ),
                 incomplete=looks_incomplete,
             ) from exc
         if not isinstance(obj, dict):
@@ -3203,7 +3325,8 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     "➕ <b>Дополнить базу</b>\n"
                     "Отправь одним сообщением JSON-объект (или несколько подряд), как в rich seed.\n"
                     "Обязательное поле: <code>slug</code>.\n\n"
-                    "После отправки бот запустит импорт и сразу запишет данные в БД."
+                    "После отправки бот запустит импорт и сразу запишет данные в БД.\n\n"
+                    f"{_admin_seed_helper_text()}"
                 ),
                 InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="admin:home")]]),
                 route="admin:seed_patch_wait",
@@ -5851,7 +5974,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception:
             pass
         return
-    txt = update.message.text.strip()
+    txt_raw = update.message.text
+    txt = txt_raw.strip()
     try:
         await update.message.delete()
     except Exception:
@@ -5940,10 +6064,13 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 payload_data = {}
             if not isinstance(payload_data, dict):
                 payload_data = {}
-            memory_buffer = str(context.user_data.get("admin_seed_buffer") or "").strip()
-            payload_buffer = str(payload_data.get("buffer") or "").strip()
+            part = txt_raw
+            memory_buffer = str(context.user_data.get("admin_seed_buffer") or "")
+            payload_buffer = str(payload_data.get("buffer") or "")
             buffered = memory_buffer if len(memory_buffer) >= len(payload_buffer) else payload_buffer
-            merged_payload = f"{buffered}\n{txt}".strip() if buffered else txt
+            # Важно склеивать без добавления символов: Telegram может резать JSON
+            # посреди строки/escape-последовательности, и лишний \n ломает payload.
+            merged_payload = f"{buffered}{part}" if buffered else part
             try:
                 items = _parse_admin_seed_payload(merged_payload)
             except AdminSeedPayloadError as exc:
@@ -5954,7 +6081,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         context,
                         (
                             "Принял часть данных. Похоже, JSON ещё не завершён.\n"
-                            "Отправь следующую часть следующим сообщением — я склею и продолжу импорт."
+                            "Если Telegram разрезал длинный payload, просто отправь следующую часть — "
+                            "я склею сообщения и продолжу импорт."
                         ),
                         InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="admin:home")]]),
                         route="admin:seed_patch_wait",
@@ -5968,7 +6096,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     (
                         "Не удалось разобрать payload.\n"
                         f"Ошибка: <code>{html.escape(str(exc))}</code>\n\n"
-                        "Проверь JSON и отправь снова."
+                        "Проверь JSON и отправь снова.\n\n"
+                        f"{_admin_seed_helper_text()}"
                     ),
                     InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="admin:home")]]),
                     route="admin:seed_patch_wait",

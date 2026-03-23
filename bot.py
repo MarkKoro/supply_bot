@@ -497,10 +497,17 @@ async def _show_supplement_time_screen(
     current = schedule_map.get(supplement_id, {"slot_id": "morning", "time_hhmm": None})
     slot = next((s for s in slots if str(s.get("slot_id") or "") == str(current.get("slot_id") or "")), None)
     slot_title = str(slot.get("title_ru") or "Утро") if slot else "Утро"
-    override = current.get("time_hhmm")
-    mode = override if override else "по времени слота"
+    slot_time = str(slot.get("time_local") or "--:--") if slot else "--:--"
+    override = str(current.get("time_hhmm") or "").strip()
+    mode = f"своё ({override})" if override else f"как у слота ({slot_time})"
     title = (supplement["name_ru"] or supplement["name"] or "").strip()
-    text = f"⏰ <b>Время приёма</b>\n\n💊 {title}\nСлот: {slot_title}\nТекущее время: {mode}"
+    text = (
+        f"⏰ <b>Время приёма</b>\n\n"
+        f"💊 {title}\n"
+        f"Слот: {slot_title} · {slot_time}\n"
+        f"Режим времени: {mode}\n\n"
+        "Выбери режим: «Как у слота» или «Назначить своё время»."
+    )
     await show(update, context, text, supplement_time_kb(supplement_id, slots), route=f"supplement:set_time:{supplement_id}")
 
 
@@ -2595,7 +2602,7 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await show(
                 update,
                 context,
-                "Без согласия с документами мы не можем продолжить onboarding.\nКогда будешь готов(а), нажми /start.",
+                "Без согласия с документами мы не можем продолжить начальный подбор.\nКогда будешь готов(а), нажми /start.",
                 InlineKeyboardMarkup([[InlineKeyboardButton("🏠 В меню", callback_data="menu:home")]]),
                 route="consent:decline",
             )
@@ -3130,7 +3137,7 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 update,
                 context,
                 "Введи название/часть названия (RU/EN) или slug:",
-                InlineKeyboardMarkup([[InlineKeyboardButton("↩️ В админ-хаб", callback_data="admin:home")]]),
+                InlineKeyboardMarkup([[InlineKeyboardButton("↩️ В админ-меню", callback_data="admin:home")]]),
                 route="admin_wait_query",
                 payload={"admin_query": "", "offset": 0},
             )
@@ -6825,7 +6832,7 @@ async def purge_me_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     deleted = bool(out.get("deleted"))
     if deleted:
         await (update.effective_message or update.message).reply_text(
-            "🧹 Ваши данные в боте очищены. Теперь вы как новый пользователь.\nНажмите /start, чтобы пройти онбординг заново."
+            "🧹 Ваши данные в боте очищены. Теперь вы как новый пользователь.\nНажмите /start, чтобы пройти начальный подбор заново."
         )
     else:
         await (update.effective_message or update.message).reply_text(
@@ -6948,7 +6955,7 @@ async def _show_admin_home(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await show(
         update,
         context,
-        "🛠 <b>Админ-хаб</b>\n"
+        "🛠 <b>Админ-меню</b>\n"
         "- Управление ссылками на покупку\n"
         "(позже: правки карточек, доказательность, тексты и т.д.)",
         admin_hub_kb(perms=perms),
@@ -6963,7 +6970,7 @@ async def _show_admin_supp_results(update: Update, context: ContextTypes.DEFAULT
             update,
             context,
             "Запрос слишком короткий. Напиши минимум 2 символа.",
-            InlineKeyboardMarkup([[InlineKeyboardButton("↩️ В админ-хаб", callback_data="admin:home")]]),
+            InlineKeyboardMarkup([[InlineKeyboardButton("↩️ В админ-меню", callback_data="admin:home")]]),
             route="admin_wait_query",
             payload={"admin_query": "", "offset": 0},
         )

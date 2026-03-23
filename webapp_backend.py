@@ -28,7 +28,7 @@ UPLOADS_DIR = BASE_DIR / "data" / "uploads" / "labs"
 ASSETS_DIR.mkdir(parents=True, exist_ok=True)
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
-app = FastAPI(title="SupplyBot WebApp")
+app = FastAPI(title="ГУДы БАДы WebApp")
 app.mount("/assets", StaticFiles(directory=str(ASSETS_DIR)), name="assets")
 s = get_settings()
 BOT_TOKEN = s.TG_TOKEN

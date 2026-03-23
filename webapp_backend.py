@@ -760,7 +760,9 @@ async def api_achievements_summary(x_telegram_init_data: str = Header(default=""
             {
                 "key": str(item.get("key") or ""),
                 "title_ru": str(item.get("title_ru") or ""),
+                "desc_ru": str(item.get("desc_ru") or ""),
                 "unlocked_at_utc": str(item.get("unlocked_at_utc") or ""),
+                "is_unseen": not str(item.get("seen_at_utc") or "").strip(),
                 "reward_verbose": db.describe_rewards_ru(item.get("reward") or {}, catalogs_payload),
             }
             for item in recent_rows

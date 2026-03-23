@@ -11,7 +11,7 @@ def main_menu(*, is_admin: bool = False, show_complexes: bool = False) -> Inline
         [InlineKeyboardButton("📝 Ежедневный опрос", callback_data="menu:checkin_ai")],
     ]
     if is_admin:
-        rows.append([InlineKeyboardButton("🛠 Админ-хаб", callback_data="admin:home")])
+        rows.append([InlineKeyboardButton("🛠 Админ-меню", callback_data="admin:home")])
     rows.append([InlineKeyboardButton("⚙️ Настройки", callback_data="menu:settings")])
     return InlineKeyboardMarkup(rows)
 
@@ -512,7 +512,7 @@ def admin_supp_results_kb(rows: list[dict], *, offset: int, has_prev: bool, has_
     if nav:
         btns.append(nav)
     btns.append([InlineKeyboardButton("🔎 Новый поиск", callback_data="admin:supp_search")])
-    btns.append([InlineKeyboardButton("↩️ В админ-хаб", callback_data="admin:home")])
+    btns.append([InlineKeyboardButton("↩️ В админ-меню", callback_data="admin:home")])
     return InlineKeyboardMarkup(btns)
 
 
@@ -877,10 +877,11 @@ def schedule_slots_pick_kb(slots: list[dict], prefix: str = "schedule:slot_time_
 
 def supplement_time_kb(supplement_id: int, slots: list[dict]) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
+    rows.append([InlineKeyboardButton("⏰ Как у слота", callback_data=f"supplement:clear_override:{supplement_id}")])
+    rows.append([InlineKeyboardButton("✍️ Назначить своё время", callback_data=f"supplement:set_override:{supplement_id}")])
     for slot in slots:
         rows.append([InlineKeyboardButton(f"Слот: {slot.get('title_ru','Слот')} ({slot.get('time_local','--:--')})", callback_data=f"supplement:set_slot:{supplement_id}:{slot.get('slot_id','')}")])
-    rows.append([InlineKeyboardButton(f"Поставить своё время", callback_data=f"supplement:set_override:{supplement_id}")])
-    rows.append([InlineKeyboardButton(f"Следовать слоту", callback_data=f"supplement:clear_override:{supplement_id}")])
+    rows.append([InlineKeyboardButton("⚙️ Настроить слоты", callback_data="settings:schedule")])
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"mysupp:open:{supplement_id}")])
     return InlineKeyboardMarkup(rows)
 
@@ -970,5 +971,5 @@ def admin_paychecks_kb(*, index: int, total: int, filter_code: str, current_rece
         rows.append([InlineKeyboardButton("↩️ Сбросить статус чека", callback_data="admin:paychecks:mark_pending")])
     else:
         rows.append([InlineKeyboardButton("✅ Пометить чек отправленным", callback_data="admin:paychecks:mark_sent")])
-    rows.append([InlineKeyboardButton("↩️ В админ-хаб", callback_data="admin:home")])
+    rows.append([InlineKeyboardButton("↩️ В админ-меню", callback_data="admin:home")])
     return InlineKeyboardMarkup(rows)

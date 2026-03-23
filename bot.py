@@ -1242,6 +1242,28 @@ async def _resolve_onboarding_goal_candidates(conn, data: dict | None, fallback_
                 if missing_name:
                     missing.append(missing_name)
 
+        # Добираем кандидатов по цели из каталога, если модель выдала мало или пусто.
+        if len(found) < 4:
+            fallback_rows, _ = await db.search_supplements(conn, goal_name, page=0, page_size=8)
+            for row in fallback_rows:
+                supp_id = int(row["id"])
+                if supp_id in seen_ids:
+                    continue
+                seen_ids.add(supp_id)
+                found.append(
+                    {
+                        "row": row,
+                        "cand": {
+                            "why_ru": "Подобрано по цели из каталога.",
+                            "dose_ru": "Уточни дозировку в карточке перед началом.",
+                            "timing_ru": "Выбери время по карточке и переносимости.",
+                        },
+                        "goal_ru": goal_name,
+                    }
+                )
+                if len(found) >= 4:
+                    break
+
         if found:
             grouped_found.append({"goal_ru": goal_name, "items": found})
 

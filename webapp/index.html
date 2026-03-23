@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"/>
-  <title>SupplyBot WebApp</title>
+  <title>ГУДы БАДы WebApp</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
     :root {
@@ -927,7 +927,7 @@
     payment: { pending: null, checking: false, lastStatus: '', modalOpen: false, success: false, successInfo: null, receiptEmail: null, savingEmail: false, emailInput: '', emailError: '', savingReceiptPref: false }
   };
 
-  const APP_NAME = "SupplyBot";
+  const APP_NAME = "ГУДы БАДы";
   const appEl = document.getElementById("app");
   const TARGET_LABELS_RU = {
     brain: "Мозг",
@@ -980,7 +980,7 @@
     ],
     profile_tab: [
       { selector: '[data-profile-module="organs"]', title: 'Карта органов', text: 'Здесь можно быстро увидеть, какие системы организма вы поддерживаете добавками.' },
-      { selector: '[data-profile-module="assistant"]', title: 'Внутренний помощник', text: 'Заполните данные профиля и анализов, чтобы получать более персональные и точные рекомендации.' },
+      { selector: '[data-profile-module="assistant"]', title: 'Внутренний помощник', text: 'Этот модуль всегда виден в веб-апе. На Starter он недоступен для нажатия и открывается после покупки Premium.' },
       { selector: '[data-profile-module="cosmetics"]', title: 'Косметика', text: 'В этом разделе вы меняете внешний вид интерфейса: темы, иконки вкладок и бейдж.' }
     ]
   };
@@ -1577,6 +1577,8 @@
 
   function closeGuide() {
     if (!state.guide.active) return;
+    const activeName = String(state.guide.active || "");
+    if (activeName) markGuideSeen(activeName);
     state.guide = { active: null, step: 0, steps: [], rect: null, card: null, arrow: null };
     renderMainApp();
   }
@@ -1584,7 +1586,6 @@
   function startGuide(name, steps) {
     if (!Array.isArray(steps) || !steps.length) return;
     if (state.guide.active) return;
-    markGuideSeen(name);
     state.guide = { active: name, step: 0, steps, rect: null, card: null, arrow: null };
     renderMainApp();
   }
@@ -3395,14 +3396,14 @@ function adminField(label, field, value, kind='input') {
   function renderProfileModulesGrid() {
     const hasPaidPremium = Boolean(state.me?.premium);
     const modules = [
-      { id: 'organs', title: '🫀 Карта органов', hint: 'Как добавки влияют на системы' },
-      ...(hasPaidPremium ? [{ id: 'assistant', title: '🧪 Помощник', hint: 'Персональные рекомендации (обновляется)' }] : []),
-      { id: 'achievements', title: '🏆 Достижения', hint: 'Ваш прогресс и открытия' },
-      { id: 'cosmetics', title: '🎨 Косметика', hint: 'Тема, вкладки и бейдж' }
+      { id: 'organs', title: '🫀 Карта органов', hint: 'Как добавки влияют на системы', locked: false },
+      { id: 'assistant', title: '🧪 Помощник', hint: hasPaidPremium ? 'Персональные рекомендации (обновляется)' : 'Доступен при покупке Premium', locked: !hasPaidPremium },
+      { id: 'achievements', title: '🏆 Достижения', hint: 'Ваш прогресс и открытия', locked: false },
+      { id: 'cosmetics', title: '🎨 Косметика', hint: 'Тема, вкладки и бейдж', locked: false }
     ];
     const firstModuleId = modules[0]?.id || 'organs';
     const active = String(state.profileUi.activeModule || firstModuleId);
-    return `<section class="card fade"><div class="profile-module-grid">${modules.map((m)=>`<button class="btn profile-module-btn ${active===m.id?'active':''}" data-profile-module="${m.id}"><div><strong>${m.title}</strong></div><div class="muted">${m.hint}</div></button>`).join('')}</div></section>`;
+    return `<section class="card fade"><div class="profile-module-grid">${modules.map((m)=>`<button class="btn profile-module-btn ${active===m.id?'active':''}" data-profile-module="${m.id}" ${m.locked ? 'disabled' : ''}><div><strong>${m.title}</strong></div><div class="muted">${m.hint}</div></button>`).join('')}</div></section>`;
   }
 
   function renderProfileAchievementsModule() {

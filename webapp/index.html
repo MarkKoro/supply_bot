@@ -1022,6 +1022,12 @@
     tg?.HapticFeedback?.impactOccurred?.("light");
   }
 
+  function refreshInitDataFromTelegram() {
+    const liveInitData = String(tg?.initData || "").trim();
+    if (liveInitData) state.initData = liveInitData;
+    return !!liveInitData;
+  }
+
   function showToast(text) {
     const wrap = document.getElementById("toastWrap");
     wrap.innerHTML = `<div class="toast fade">${text}</div>`;
@@ -1046,12 +1052,11 @@
     state.payment.emailInput = value;
     if (!isValidEmail(value)) {
       state.payment.emailError = 'Введите корректный email.';
-      renderPaymentScreen(parseScreenParams().plan_id || '');
+      showToast(state.payment.emailError);
       return;
     }
     state.payment.savingEmail = true;
     state.payment.emailError = '';
-    renderPaymentScreen(parseScreenParams().plan_id || '');
     try {
       const res = await api('api/receipt-email', { method: 'POST', body: { email: value } });
       state.payment.receiptEmail = { ...(state.payment.receiptEmail || {}), email: res.email, status: 'provided', collected_at: res.collected_at, has_email: true };
@@ -1061,7 +1066,6 @@
       state.payment.emailError = 'Не удалось сохранить email.';
     } finally {
       state.payment.savingEmail = false;
-      renderPaymentScreen(parseScreenParams().plan_id || '');
     }
   }
 
@@ -1069,7 +1073,6 @@
     if (!state.payment.receiptEmail) return;
     state.payment.savingReceiptPref = true;
     state.payment.receiptEmail = { ...state.payment.receiptEmail, wants_receipt: !!wantsReceipt };
-    renderPaymentScreen(planId || parseScreenParams().plan_id || '');
     try {
       const res = await api('api/receipt-preference', { method: 'POST', body: { wants_receipt: !!wantsReceipt } });
       state.payment.receiptEmail = { ...state.payment.receiptEmail, wants_receipt: !!res?.wants_receipt };
@@ -1077,7 +1080,6 @@
       showToast('Не удалось сохранить выбор чека');
     } finally {
       state.payment.savingReceiptPref = false;
-      renderPaymentScreen(planId || parseScreenParams().plan_id || '');
     }
   }
 
@@ -1280,7 +1282,7 @@
   }
 
   async function api(path, { method = "GET", body } = {}) {
-    const res = await fetch(normalizeApiPath(path), {
+    const doFetch = async () => fetch(normalizeApiPath(path), {
       method,
       headers: {
         "Content-Type": "application/json",
@@ -1288,6 +1290,10 @@
       },
       body: body ? JSON.stringify(body) : undefined
     });
+    let res = await doFetch();
+    if (res.status === 401 && refreshInitDataFromTelegram()) {
+      res = await doFetch();
+    }
 
     if (res.status === 401) {
       showToast("Открой WebApp внутри Telegram");
@@ -1325,7 +1331,7 @@
   }
 
   async function apiText(path, textBody) {
-    const res = await fetch(normalizeApiPath(path), {
+    const doFetch = async () => fetch(normalizeApiPath(path), {
       method: "POST",
       headers: {
         "Content-Type": "text/plain; charset=utf-8",
@@ -1333,6 +1339,10 @@
       },
       body: String(textBody || "")
     });
+    let res = await doFetch();
+    if (res.status === 401 && refreshInitDataFromTelegram()) {
+      res = await doFetch();
+    }
     if (res.status === 401) {
       showToast("Открой WebApp внутри Telegram");
       throw new Error("UNAUTHORIZED");
@@ -3928,7 +3938,6 @@ function adminField(label, field, value, kind='input') {
     const normTime = normalizeHHMM(shownTime);
     const hasSlotAtTime = !!(hub.slots || []).find((slot) => String(slot.time_local || '') === normTime);
     const canCreateSlot = !!normTime && !hasSlotAtTime;
-    const reminderCustom = hub.remindersMode === 'custom';
     return `
       <div class="sheet-backdrop" data-supp-hub-close></div>
       <div class="card sheet" role="dialog" style="max-height:72vh">
@@ -3955,32 +3964,17 @@ function adminField(label, field, value, kind='input') {
               <button class="chip ${hub.timeMode !== 'custom' ? 'green' : ''}" type="button" data-time-mode="slot">Как у слота</button>
               <button class="chip ${hub.timeMode === 'custom' ? 'green' : ''}" type="button" data-time-mode="custom">Своё время</button>
             </div>
-            <label class="muted">Точное время (HH:MM)</label>
-            <input id="hubTime" class="input" value="${esc(shownTime)}" placeholder="08:30" ${hub.timeMode !== 'custom' ? 'disabled' : ''} />
+            ${hub.timeMode === 'custom' ? `
+              <label class="muted">Точное время (HH:MM)</label>
+              <input id="hubTime" class="input" value="${esc(shownTime)}" placeholder="08:30" />
+            ` : '<div class="muted">Время и напоминание будут как у выбранного слота.</div>'}
           </div>
           <div class="row" style="margin-top:8px; justify-content:flex-start; gap:8px; flex-wrap:wrap;">
             ${hub.timeMode === 'custom' && hub.customTime ? `<button class="btn secondary" type="button" data-clear-custom-time>Очистить своё время</button>` : ''}
-            <button class="btn secondary" type="button" data-open-slot-settings>Настроить слоты</button>
           </div>
           ${canCreateSlot ? `<div style="margin-top:8px"><button class="btn secondary" data-schedule-add-slot>Создать отдельный слот на ${esc(normTime)}</button></div>` : ''}
-          <div style="margin-top:10px" class="row">
-            <strong>Напоминания</strong>
-          </div>
-          <div class="row" style="margin-top:8px; gap:8px">
-            <button class="chip ${!reminderCustom ? 'green' : ''}" data-rem-mode="slot">Как у слота</button>
-            <button class="chip ${reminderCustom ? 'green' : ''}" data-rem-mode="custom">Свои</button>
-          </div>
-          ${reminderCustom ? `
-            <div style="margin-top:8px" class="row">
-              <input id="hubRemTime" class="input" placeholder="HH:MM" value="${esc(hub.reminderInput || '')}" style="flex:1" />
-              <button class="btn secondary" data-rem-add-time>Добавить время</button>
-            </div>
-            <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap">
-              ${(hub.reminderTimes || []).map((t)=>`<button class="chip" data-rem-remove="${esc(t)}">${esc(t)} ✕</button>`).join('') || '<span class="muted">Пока нет собственных напоминаний.</span>'}
-            </div>
-          ` : '<div class="muted" style="margin-top:8px">Используется только время слота, персональные напоминания не создаются.</div>'}
           <div style="margin-top:12px" class="row" >
-            <button class="btn" data-supp-hub-save ${hub.saving ? 'disabled' : ''}>${hub.saving ? 'Сохраняем...' : 'Сохранить'}</button>
+            ${hub.timeMode === 'custom' ? `<button class="btn" data-supp-hub-save ${hub.saving ? 'disabled' : ''}>${hub.saving ? 'Сохраняем...' : 'Сохранить'}</button>` : ''}
             <button class="btn secondary" type="button" data-supp-hub-history>${hub.historyOpen ? 'Скрыть последние приёмы' : 'Мои последние приёмы'}</button>
           </div>
           ${hub.historyOpen ? `<div class="history-list">${hub.historyLoading ? '<div class="muted">Загружаем историю…</div>' : renderSuppHistory(hub.history)}</div>` : ''}
@@ -4327,8 +4321,11 @@ function adminField(label, field, value, kind='input') {
             slot.is_enabled = false;
           }
         }
+        document.querySelectorAll('[data-slot-enabled]').forEach((slotEl) => {
+          slotEl.disabled = !enabled;
+          if (!enabled) slotEl.checked = false;
+        });
         showToast(enabled ? 'Уведомления включены' : 'Уведомления выключены');
-        renderActiveTab();
       } catch {
         e.target.checked = !enabled;
         showToast('Не удалось изменить уведомления');
@@ -4347,7 +4344,6 @@ function adminField(label, field, value, kind='input') {
           const slot = (state.settingsSchedule.slots || []).find((x) => String(x.slot_id || '') === slotId);
           if (slot) slot.is_enabled = enabled;
           showToast('Слот обновлён');
-          renderActiveTab();
         } catch {
           e.target.checked = !enabled;
           showToast('Не удалось обновить слот');
@@ -4486,10 +4482,7 @@ function adminField(label, field, value, kind='input') {
     state.suppHub.deleting = false;
     renderActiveTab();
     try {
-      const [scheduleRes, remRes] = await Promise.all([
-        api('./api/schedule'),
-        api(`./api/reminders/for_supplement?supplement_id=${sid}`),
-      ]);
+      const scheduleRes = await api('./api/schedule');
       const slots = Array.isArray(scheduleRes.slots) ? scheduleRes.slots : [];
       const schedules = Array.isArray(scheduleRes.schedules) ? scheduleRes.schedules : [];
       const sch = schedules.find((x) => Number(x.supplement_id) === sid);
@@ -4501,8 +4494,8 @@ function adminField(label, field, value, kind='input') {
       state.suppHub.timeMode = customTime ? 'custom' : 'slot';
       state.suppHub.customTime = customTime;
       state.suppHub.time = customTime || slotTime || '';
-      state.suppHub.reminderTimes = Array.isArray(remRes.times) ? remRes.times : [];
-      state.suppHub.remindersMode = state.suppHub.reminderTimes.length ? 'custom' : 'slot';
+      state.suppHub.reminderTimes = [];
+      state.suppHub.remindersMode = 'slot';
     } catch {
       showToast('Не удалось загрузить меню добавки');
     } finally {
@@ -4638,19 +4631,31 @@ function adminField(label, field, value, kind='input') {
       });
     });
 
-    appEl.querySelectorAll('[data-rem-mode]').forEach((el) => {
-      el.addEventListener('click', () => {
-        state.suppHub.remindersMode = el.dataset.remMode === 'custom' ? 'custom' : 'slot';
-        renderActiveTab();
-      });
-    });
-
-    appEl.querySelectorAll('[data-rem-remove]').forEach((el) => {
-      el.addEventListener('click', () => {
-        state.suppHub.reminderTimes = (state.suppHub.reminderTimes || []).filter((x) => x !== el.dataset.remRemove);
-        renderActiveTab();
-      });
-    });
+    const persistSuppHub = async ({ showSavedToast = false } = {}) => {
+      const item = state.suppHub.item;
+      if (!item || state.suppHub.saving) return false;
+      const sid = Number(item.supplement_id);
+      const customTime = normalizeHHMM(state.suppHub.customTime);
+      const time = state.suppHub.timeMode === 'custom' ? (customTime || null) : null;
+      if (state.suppHub.timeMode === 'custom' && !time) {
+        showToast('Введите время HH:MM');
+        return false;
+      }
+      state.suppHub.saving = true;
+      try {
+        await api('./api/my_supplements/update', { method: 'POST', body: { supplement_id: sid, dose_text: state.suppHub.doseText || '', note_text: state.suppHub.noteText || '' } });
+        await api('./api/schedule/set', { method: 'POST', body: { supplement_id: sid, slot_id: state.suppHub.slotId || 'morning', time_hhmm: time } });
+        await api('./api/reminders/set', { method: 'POST', body: { supplement_id: sid, mode: 'slot', times: [] } });
+        await Promise.all([loadMySupplements(true), loadToday(true)]);
+        if (showSavedToast) showToast('Изменения сохранены');
+        return true;
+      } catch {
+        showToast('Не удалось сохранить изменения');
+        return false;
+      } finally {
+        state.suppHub.saving = false;
+      }
+    };
 
     document.getElementById('hubDose')?.addEventListener('input', (e) => { state.suppHub.doseText = e.target.value || ''; });
     document.getElementById('hubNote')?.addEventListener('input', (e) => { state.suppHub.noteText = e.target.value || ''; });
@@ -4658,36 +4663,33 @@ function adminField(label, field, value, kind='input') {
       state.suppHub.slotId = e.target.value || 'morning';
       const slot = (state.suppHub.slots || []).find((x) => String(x.slot_id || '') === String(state.suppHub.slotId || ''));
       const slotTime = normalizeHHMM(slot?.time_local || '');
-      if (state.suppHub.timeMode !== 'custom') state.suppHub.time = slotTime || '';
+      if (state.suppHub.timeMode !== 'custom') {
+        state.suppHub.time = slotTime || '';
+        persistSuppHub();
+      }
     });
 
     appEl.querySelectorAll('[data-time-mode]').forEach((el) => {
-      el.addEventListener('click', () => {
+      el.addEventListener('click', async () => {
         const mode = el.dataset.timeMode === 'custom' ? 'custom' : 'slot';
+        if (state.suppHub.timeMode === mode) return;
         state.suppHub.timeMode = mode;
         if (mode === 'slot') {
           state.suppHub.customTime = '';
           const slot = (state.suppHub.slots || []).find((x) => String(x.slot_id || '') === String(state.suppHub.slotId || ''));
           state.suppHub.time = normalizeHHMM(slot?.time_local || '');
+          await persistSuppHub();
         }
         renderActiveTab();
       });
     });
 
-    appEl.querySelector('[data-clear-custom-time]')?.addEventListener('click', () => {
+    appEl.querySelector('[data-clear-custom-time]')?.addEventListener('click', async () => {
       state.suppHub.customTime = '';
       state.suppHub.timeMode = 'slot';
       const slot = (state.suppHub.slots || []).find((x) => String(x.slot_id || '') === String(state.suppHub.slotId || ''));
       state.suppHub.time = normalizeHHMM(slot?.time_local || '');
-      renderActiveTab();
-    });
-
-    appEl.querySelector('[data-open-slot-settings]')?.addEventListener('click', async () => {
-      state.activeTab = 'settings';
-      renderMainApp();
-      try {
-        await Promise.all([loadSettingsData(true), loadScheduleData(true), loadStatsOnly().catch(() => null)]);
-      } catch {}
+      await persistSuppHub();
       renderActiveTab();
     });
 
@@ -4738,19 +4740,6 @@ function adminField(label, field, value, kind='input') {
       state.suppHub.customTime = val;
       if (state.suppHub.timeMode === 'custom') state.suppHub.time = val;
     });
-    document.getElementById('hubRemTime')?.addEventListener('input', (e) => { state.suppHub.reminderInput = e.target.value || ''; });
-
-    appEl.querySelectorAll('[data-rem-add-time]').forEach((el) => {
-      el.addEventListener('click', () => {
-        const time = normalizeHHMM(state.suppHub.reminderInput);
-        if (!time) return showToast('Введите время HH:MM');
-        if ((state.suppHub.reminderTimes || []).includes(time)) return;
-        state.suppHub.reminderTimes = [...(state.suppHub.reminderTimes || []), time].sort();
-        state.suppHub.reminderInput = '';
-        renderActiveTab();
-      });
-    });
-
     appEl.querySelectorAll('[data-schedule-add-slot]').forEach((el) => {
       el.addEventListener('click', async () => {
         const time = normalizeHHMM(state.suppHub.timeMode === 'custom' ? state.suppHub.customTime : state.suppHub.time);
@@ -4760,7 +4749,10 @@ function adminField(label, field, value, kind='input') {
           const s = await api('./api/schedule');
           state.suppHub.slots = Array.isArray(s.slots) ? s.slots : [];
           state.suppHub.slotId = r.slot_id || state.suppHub.slotId;
-          if (state.suppHub.timeMode !== 'custom') state.suppHub.time = time;
+          state.suppHub.timeMode = 'slot';
+          state.suppHub.customTime = '';
+          state.suppHub.time = time;
+          await persistSuppHub();
           renderActiveTab();
           showToast('Слот создан');
         } catch {
@@ -4771,25 +4763,8 @@ function adminField(label, field, value, kind='input') {
 
     appEl.querySelectorAll('[data-supp-hub-save]').forEach((el) => {
       el.addEventListener('click', async () => {
-        const item = state.suppHub.item;
-        if (!item) return;
-        const sid = Number(item.supplement_id);
-        const customTime = normalizeHHMM(state.suppHub.customTime);
-        const time = state.suppHub.timeMode === 'custom' ? (customTime || null) : null;
-        state.suppHub.saving = true;
+        await persistSuppHub({ showSavedToast: true });
         renderActiveTab();
-        try {
-          await api('./api/my_supplements/update', { method: 'POST', body: { supplement_id: sid, dose_text: state.suppHub.doseText || '', note_text: state.suppHub.noteText || '' } });
-          await api('./api/schedule/set', { method: 'POST', body: { supplement_id: sid, slot_id: state.suppHub.slotId || 'morning', time_hhmm: time } });
-          await api('./api/reminders/set', { method: 'POST', body: { supplement_id: sid, mode: state.suppHub.remindersMode, times: state.suppHub.remindersMode === 'custom' ? (state.suppHub.reminderTimes || []) : [] } });
-          await Promise.all([loadMySupplements(true), loadToday(true)]);
-          showToast('Изменения сохранены');
-        } catch {
-          showToast('Не удалось сохранить изменения');
-        } finally {
-          state.suppHub.saving = false;
-          renderActiveTab();
-        }
       });
     });
   }

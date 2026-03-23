@@ -280,6 +280,17 @@ async def _premium_guard(tg_user_id: int) -> bool:
         await conn.close()
 
 
+async def _paid_premium_guard(tg_user_id: int) -> bool:
+    role, _ = await _get_role_and_perms(tg_user_id)
+    if role in {db.ROLE_OWNER, db.ROLE_ADMIN}:
+        return True
+    conn = await db.connect(s.DB_PATH)
+    try:
+        return await db.is_premium_active(conn, tg_user_id)
+    finally:
+        await conn.close()
+
+
 def _normalize_analyte_code(value: str) -> str:
     text = re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower())
     return text.strip("_")
@@ -1773,8 +1784,8 @@ async def api_profile_nutrient_overview_get(x_telegram_init_data: str = Header(d
 @app.get("/api/profile/nutrient-assistant/dashboard")
 async def api_profile_nutrient_dashboard_get(x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
     tg_user_id = await _auth_user_id(x_telegram_init_data)
-    if not await _premium_guard(tg_user_id):
-        return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
+    if not await _paid_premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "code": "PAID_PREMIUM_REQUIRED"}, status_code=403)
     conn = await db.connect(s.DB_PATH)
     try:
         runs = await db.list_llm_assistant_runs(conn, tg_user_id, limit=20)
@@ -1791,8 +1802,8 @@ async def api_profile_nutrient_assistant_compute(
     x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
 ):
     tg_user_id = await _auth_user_id(x_telegram_init_data)
-    if not await _premium_guard(tg_user_id):
-        return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
+    if not await _paid_premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "code": "PAID_PREMIUM_REQUIRED"}, status_code=403)
     if not s.OPENAI_API_KEY:
         return JSONResponse({"ok": False, "code": "OPENAI_DISABLED"}, status_code=503)
 
@@ -2037,8 +2048,8 @@ async def api_profile_nutrient_plan(x_telegram_init_data: str = Header(default="
 @app.get("/api/profile/nutrient-assistant/plans")
 async def api_profile_nutrient_plans_get(x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
     tg_user_id = await _auth_user_id(x_telegram_init_data)
-    if not await _premium_guard(tg_user_id):
-        return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
+    if not await _paid_premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "code": "PAID_PREMIUM_REQUIRED"}, status_code=403)
     conn = await db.connect(s.DB_PATH)
     try:
         runs = await db.list_llm_assistant_runs(conn, tg_user_id, limit=25)
@@ -2050,8 +2061,8 @@ async def api_profile_nutrient_plans_get(x_telegram_init_data: str = Header(defa
 @app.get("/api/profile/nutrient-assistant/plans/{plan_id}")
 async def api_profile_nutrient_plan_get(plan_id: int, x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
     tg_user_id = await _auth_user_id(x_telegram_init_data)
-    if not await _premium_guard(tg_user_id):
-        return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
+    if not await _paid_premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "code": "PAID_PREMIUM_REQUIRED"}, status_code=403)
     conn = await db.connect(s.DB_PATH)
     try:
         run = await db.get_llm_assistant_run(conn, tg_user_id, int(plan_id))
@@ -2069,8 +2080,8 @@ async def api_profile_nutrient_assistant_apply(
     x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
 ):
     tg_user_id = await _auth_user_id(x_telegram_init_data)
-    if not await _premium_guard(tg_user_id):
-        return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
+    if not await _paid_premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "code": "PAID_PREMIUM_REQUIRED"}, status_code=403)
     conn = await db.connect(s.DB_PATH)
     try:
         run = await db.get_llm_assistant_run(conn, tg_user_id, int(body.run_id))
@@ -2138,8 +2149,8 @@ async def api_profile_nutrient_assistant_cancel(
     x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
 ):
     tg_user_id = await _auth_user_id(x_telegram_init_data)
-    if not await _premium_guard(tg_user_id):
-        return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
+    if not await _paid_premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "code": "PAID_PREMIUM_REQUIRED"}, status_code=403)
     conn = await db.connect(s.DB_PATH)
     try:
         run = await db.get_llm_assistant_run(conn, tg_user_id, int(run_id))

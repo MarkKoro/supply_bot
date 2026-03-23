@@ -770,8 +770,8 @@ def reminder_actions(supplement_id: int) -> InlineKeyboardMarkup:
         ],
     ])
 
-def settings_menu() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
+def settings_menu(*, show_starter_activation: bool = False) -> InlineKeyboardMarkup:
+    rows = [
         [InlineKeyboardButton("🕒 Часовой пояс", callback_data="settings:tz")],
         [InlineKeyboardButton("✨ Начальный подбор", callback_data="settings:initial_pick")],
         [InlineKeyboardButton("🔔 Уведомления", callback_data="settings:notifications")],
@@ -779,7 +779,10 @@ def settings_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("⭐ Премиум", callback_data="menu:premium")],
         [InlineKeyboardButton("🧩 Комплексы", callback_data="settings:complexes")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")],
-    ])
+    ]
+    if show_starter_activation:
+        rows.insert(5, [InlineKeyboardButton("🎁 Активировать 3 дня", callback_data="starter:activate")])
+    return InlineKeyboardMarkup(rows)
 
 
 def settings_notifications_kb(*, reminders_enabled: bool, slots: list[dict]) -> InlineKeyboardMarkup:

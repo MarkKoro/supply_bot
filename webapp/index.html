@@ -1121,7 +1121,7 @@
     return data;
   }
 
-  async function saveReceiptEmail(inputEl) {
+  async function saveReceiptEmail(inputEl, planId) {
     const value = String((inputEl?.value || state.payment.emailInput || '')).trim().toLowerCase();
     state.payment.emailInput = value;
     if (!isValidEmail(value)) {
@@ -1140,13 +1140,16 @@
       state.payment.emailError = 'Не удалось сохранить email.';
     } finally {
       state.payment.savingEmail = false;
+      if (planId) renderPaymentScreen(planId);
     }
   }
 
   async function saveReceiptPreference(wantsReceipt, planId) {
-    if (!state.payment.receiptEmail) return;
+    const fallbackReceiptState = state.me?.receipt_email ? { ...state.me.receipt_email } : {};
+    state.payment.receiptEmail = { ...fallbackReceiptState, ...(state.payment.receiptEmail || {}) };
     state.payment.savingReceiptPref = true;
     state.payment.receiptEmail = { ...state.payment.receiptEmail, wants_receipt: !!wantsReceipt };
+    if (planId) renderPaymentScreen(planId);
     try {
       const res = await api('api/receipt-preference', { method: 'POST', body: { wants_receipt: !!wantsReceipt } });
       state.payment.receiptEmail = { ...state.payment.receiptEmail, wants_receipt: !!res?.wants_receipt };
@@ -1154,6 +1157,7 @@
       showToast('Не удалось сохранить выбор чека');
     } finally {
       state.payment.savingReceiptPref = false;
+      if (planId) renderPaymentScreen(planId);
     }
   }
 
@@ -1895,7 +1899,7 @@
     `;
     document.getElementById('prepareRedirectPaymentBtn')?.addEventListener('click', (e) => prepareRedirectPayment(planId, e.currentTarget));
     document.getElementById('openExternalPaymentBtn')?.addEventListener('click', () => openExternalPayment(pending?.confirmation_url || ''));
-    document.getElementById('saveReceiptEmailBtn')?.addEventListener('click', () => saveReceiptEmail(document.getElementById('receiptEmailInput')));
+    document.getElementById('saveReceiptEmailBtn')?.addEventListener('click', () => saveReceiptEmail(document.getElementById('receiptEmailInput'), planId));
     document.getElementById('changeReceiptEmailBtn')?.addEventListener('click', () => {
       state.payment.receiptEmail = { ...(state.payment.receiptEmail || {}), email: '', status: 'missing', has_email: false };
       state.payment.emailInput = receiptEmail;

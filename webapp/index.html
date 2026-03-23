@@ -635,6 +635,16 @@
     .ios-group summary::-webkit-details-marker { display:none; }
     .ios-group .ios-content { padding: 0 14px 12px; display:grid; gap:8px; }
     .ios-arrow { color: var(--muted); font-size: 13px; }
+    .settings-sections { margin-top: 12px; display:grid; gap:10px; }
+    .settings-section details { border: 1px solid rgba(255,255,255,.12); border-radius: 16px; background: rgba(255,255,255,.04); overflow: hidden; }
+    .settings-section summary { list-style: none; cursor: pointer; padding: 12px 14px; display:flex; align-items:center; justify-content:space-between; gap:10px; font-weight:700; }
+    .settings-section summary::-webkit-details-marker { display:none; }
+    .settings-section .ios-content { padding: 0 14px 12px; display:grid; gap:8px; }
+    .settings-slot-grid { display:grid; gap:8px; margin-top:8px; }
+    .settings-slot-card { border: 1px solid rgba(255,255,255,.14); border-radius: 12px; padding: 10px; background: rgba(255,255,255,.03); display:grid; gap:8px; }
+    .settings-slot-head { display:flex; align-items:center; gap:8px; justify-content:space-between; }
+    .settings-slot-time { display:flex; align-items:center; gap:8px; }
+    .settings-slot-time .btn { min-width: 34px; padding: 7px 10px; }
 
     .catalog-modal-overlay { position: fixed; inset: 0; z-index: 34; background: rgba(2,5,16,0.62); }
     .catalog-modal-shell { position: fixed; left: 10px; right: 10px; bottom: calc(88px + env(safe-area-inset-bottom)); z-index: 35; display: grid; gap: 8px; max-height: calc(100vh - 130px - env(safe-area-inset-bottom)); }
@@ -857,9 +867,9 @@
       duplicatesLoading: false,
       duplicateResolveBusy: ""
     },
-    settingsUi: { openMySuppBusy: false, premiumOpen: false, loadingSchedule: false, savingNotifications: false, slotBusy: {} },
+    settingsUi: { loadingSchedule: false, savingNotifications: false, slotBusy: {}, sectionsOpen: { premium: false, schedule: false, stats: false }, slotEdit: { open: false, slotId: "", time: "" } },
     settingsData: { tz_name: 'UTC', reminders_enabled: true, loading: false, offer_url: '', privacy_url: '', offer_version: '', privacy_version: '' },
-    settingsSchedule: { slots: [], schedules: [] },
+    settingsSchedule: { slots: [] },
     payment: { pending: null, checking: false, lastStatus: '', modalOpen: false, success: false, successInfo: null, receiptEmail: null, savingEmail: false, emailInput: '', emailError: '', savingReceiptPref: false }
   };
 
@@ -1692,7 +1702,7 @@
       const source = parseScreenParams().source;
       if (state.me?.webapp_access && source === 'settings') {
         state.activeTab = 'settings';
-        state.settingsUi = { ...(state.settingsUi || {}), premiumOpen: true };
+        state.settingsUi.sectionsOpen = { ...(state.settingsUi.sectionsOpen || {}), premium: true };
         renderMainApp();
         return;
       }
@@ -4074,17 +4084,14 @@ function adminField(label, field, value, kind='input') {
     try {
       const res = await api('./api/schedule');
       state.settingsSchedule.slots = Array.isArray(res.slots) ? res.slots : [];
-      state.settingsSchedule.schedules = Array.isArray(res.schedules) ? res.schedules : [];
     } catch {
       state.settingsSchedule.slots = [];
-      state.settingsSchedule.schedules = [];
     } finally {
       state.settingsUi.loadingSchedule = false;
     }
   }
 
   function renderSettings() {
-    const adminHint = !!(state.me?.role && state.me.role !== "none");
     const me = state.me || {};
     const accessLabel = me.premium ? "Premium" : (me.starter_trial_active ? "Starter" : "Нет активного доступа");
     const accessHint = me.premium
@@ -4200,7 +4207,10 @@ function adminField(label, field, value, kind='input') {
       })
       .join('');
     const scheduleSlots = Array.isArray(state.settingsSchedule?.slots) ? state.settingsSchedule.slots : [];
+    const notificationsEnabled = state.settingsData?.reminders_enabled !== false;
     const enabledSlots = scheduleSlots.filter((s) => !!s.is_enabled);
+    const sectionsOpen = state.settingsUi?.sectionsOpen || {};
+    const slotEdit = state.settingsUi?.slotEdit || { open: false, slotId: "", time: "" };
     const summaryStats = state.stats || {};
     const topMiss = Array.isArray(summaryStats.top_misses_7) ? summaryStats.top_misses_7 : [];
     const topStreaks = Array.isArray(summaryStats.top_streaks) ? summaryStats.top_streaks : [];
@@ -4213,53 +4223,84 @@ function adminField(label, field, value, kind='input') {
         <div class="muted" style="margin-top:4px">${esc(accessHint)}</div>
         <div class="muted" style="margin-top:4px">После подписки: постоянный доступ к WebApp, AI check-in и удобный ежедневный трекинг.</div>
         <div class="muted" style="margin-top:6px">Документы: ${state.settingsData?.offer_url ? `<a href="${esc(state.settingsData.offer_url)}" target="_blank" rel="noopener noreferrer">Оферта</a>${state.settingsData?.offer_version ? ` (v${esc(state.settingsData.offer_version)})` : ''}` : 'Оферта недоступна'} · ${state.settingsData?.privacy_url ? `<a href="${esc(state.settingsData.privacy_url)}" target="_blank" rel="noopener noreferrer">Privacy Policy</a>${state.settingsData?.privacy_version ? ` (v${esc(state.settingsData.privacy_version)})` : ''}` : 'Privacy Policy недоступна'}</div>
-        <details class="card" style="margin-top:10px" ${state.settingsUi?.premiumOpen ? 'open' : ''}><summary><strong>💳 Подписка</strong></summary>
-          <div class="muted" style="margin-top:8px">${me.premium ? `Активна до ${esc(String(me.premium_until_utc || '').slice(0, 10) || '—')}` : 'Не активна'}</div>
-          <div class="muted" style="margin-top:6px">Преимущества: доступ к WebApp, AI check-in, удобный ежедневный трекинг, карта/today/настройка стека/напоминания.</div>
-          <div class="muted" style="margin-top:8px">Рубли</div>
-          <div class="premium-plan-grid">
-            ${rubPlanTiles || '<div class="muted">Планы в рублях недоступны</div>'}
+        <div class="settings-sections">
+          <div class="settings-section">
+            <details ${sectionsOpen.premium ? 'open' : ''} data-settings-section="premium">
+              <summary><span>💳 Подписка</span><span class="ios-arrow">▾</span></summary>
+              <div class="ios-content">
+                <div class="muted" style="margin-top:8px">${me.premium ? `Активна до ${esc(String(me.premium_until_utc || '').slice(0, 10) || '—')}` : 'Не активна'}</div>
+                <div class="muted" style="margin-top:6px">Преимущества: доступ к WebApp, AI check-in, удобный ежедневный трекинг, карта/today/настройка стека/напоминания.</div>
+                <div class="muted" style="margin-top:8px">Рубли</div>
+                <div class="premium-plan-grid">
+                  ${rubPlanTiles || '<div class="muted">Планы в рублях недоступны</div>'}
+                </div>
+                <div class="muted" style="margin-top:8px">Звёзды</div>
+                <div class="premium-plan-grid">
+                  ${starsPlanTiles || '<div class="muted">Планы в звёздах недоступны</div>'}
+                </div>
+              </div>
+            </details>
           </div>
-          <div class="muted" style="margin-top:8px">Звёзды</div>
-          <div class="premium-plan-grid">
-            ${starsPlanTiles || '<div class="muted">Планы в звёздах недоступны</div>'}
-          </div>
-        </details>
-        <div class="ios-group">
-          <details open>
-            <summary><span>🕒 Время и расписание</span><span class="ios-arrow">▾</span></summary>
-            <div class="ios-content">
+          <div class="settings-section">
+            <details ${sectionsOpen.schedule ? 'open' : ''} data-settings-section="schedule">
+              <summary><span>🕒 Время и расписание</span><span class="ios-arrow">▾</span></summary>
+              <div class="ios-content">
               <label class="muted">Часовой пояс</label>
               <select id="settingsTimezone" class="select">${timezoneOptionsHtml(state.settingsData?.tz_name || 'UTC+03:00')}</select>
               <label style="display:flex;align-items:center;gap:8px;margin-top:10px;cursor:pointer;"><input type="checkbox" id="settingsNotificationsEnabled" ${state.settingsData?.reminders_enabled ? 'checked' : ''}/> <span class="muted">Включить уведомления</span></label>
               <div class="muted" style="margin-top:6px">Активные слоты: ${enabledSlots.length}/${scheduleSlots.length || 0}</div>
-              <div style="display:grid;gap:8px;margin-top:8px">${scheduleSlots.map((slot)=>`<label class="row" style="justify-content:flex-start;gap:8px"><input type="checkbox" data-slot-enabled="${esc(slot.slot_id || '')}" ${slot.is_enabled ? 'checked' : ''}/> <span>${esc(slot.title_ru || 'Слот')} · ${esc(slot.time_local || '--:--')}</span></label>`).join('') || '<div class="muted">Слоты загрузятся после подключения.</div>'}</div>
-              <div class="row" style="gap:8px; flex-wrap:wrap"><button class="btn secondary" id="settingsOpenToday">Открыть слот-план</button><button class="btn secondary" id="settingsOpenMySupp">Мои БАДы</button></div>
-              <div class="muted" style="margin-top:6px">Индивидуальные напоминания для конкретных БАДов редактируются внутри «Мои БАДы».</div>
-            </div>
-          </details>
-          <details>
-            <summary><span>🧪 Подбор и проверка</span><span class="ios-arrow">▾</span></summary>
-            <div class="ios-content">
-              <div class="muted">Начальный подбор и цели доступны в веб-опросе.</div>
-              <div><button class="btn" id="settingsOpenSurvey">Открыть опрос</button></div>
-            </div>
-          </details>
-          <details>
-            <summary><span>ℹ️ Справка</span><span class="ios-arrow">▾</span></summary>
-            <div class="ios-content"><div class="muted">Те же базовые настройки, что и в боте: таймзона, расписание/слоты, напоминания и подбор. Напоминания для каждой добавки — через «Мои БАДы». ${adminHint ? 'Админка вынесена в отдельную вкладку.' : ''}</div></div>
-          </details>
+              <div class="settings-slot-grid">${scheduleSlots.map((slot)=>`<article class="settings-slot-card">
+                <div class="settings-slot-head">
+                  <label class="row" style="justify-content:flex-start;gap:8px;cursor:pointer;">
+                    <input type="checkbox" data-slot-enabled="${esc(slot.slot_id || '')}" ${slot.is_enabled ? 'checked' : ''} ${notificationsEnabled ? '' : 'disabled'}/>
+                    <span>${esc(slot.title_ru || 'Слот')}</span>
+                  </label>
+                  <div class="settings-slot-time">
+                    <strong>${esc(slot.time_local || '--:--')}</strong>
+                    <button class="btn secondary" type="button" data-slot-edit-open="${esc(slot.slot_id || '')}" title="Изменить время">⚙️</button>
+                  </div>
+                </div>
+              </article>`).join('') || '<div class="muted">Слоты загрузятся после подключения.</div>'}</div>
+              </div>
+            </details>
+          </div>
+          <div class="settings-section">
+            <details ${sectionsOpen.stats ? 'open' : ''} data-settings-section="stats">
+              <summary><span>📈 Статистика</span><span class="ios-arrow">▾</span></summary>
+              <div class="ios-content">
+                <div class="muted" style="margin-top:8px">Самый частый пропуск (7д): ${esc(topMissText)}</div>
+                <div class="muted">Лучший стрик: ${esc(topStreakText)}</div>
+                ${renderStatsBlock() || '<div class="muted" style="margin-top:8px">Пока нет данных для отображения.</div>'}
+              </div>
+            </details>
+          </div>
         </div>
       </section>
-      <section class="card fade"><div class="row"><strong>📈 Статистика</strong><span class="muted">Сегодня и 30 дней</span></div>
-        <div class="muted" style="margin-top:8px">Самый частый пропуск (7д): ${esc(topMissText)}</div>
-        <div class="muted">Лучший стрик: ${esc(topStreakText)}</div>
-        ${renderStatsBlock() || '<div class="muted" style="margin-top:8px">Пока нет данных для отображения.</div>'}
-      </section>
+      ${slotEdit.open ? `<div class="modal-overlay" data-slot-edit-close>
+        <section class="card modal-card" onclick="event.stopPropagation()">
+          <div class="row"><strong>Изменить время слота</strong><button class="btn secondary" type="button" data-slot-edit-close>Закрыть</button></div>
+          <div class="field-grid" style="margin-top:10px">
+            <label class="muted">Новое время (HH:MM)
+              <input class="input" id="settingsSlotTimeInput" type="time" value="${esc(slotEdit.time || '')}" />
+            </label>
+            <div class="row" style="justify-content:flex-end;gap:8px">
+              <button class="btn secondary" type="button" data-slot-edit-close>Отмена</button>
+              <button class="btn" type="button" id="settingsSlotTimeSave">Сохранить</button>
+            </div>
+          </div>
+        </section>
+      </div>` : ''}
     `;
   }
 
   function bindSettingsEvents() {
+    document.querySelectorAll('[data-settings-section]').forEach((el) => {
+      el.addEventListener('toggle', () => {
+        const key = String(el.dataset.settingsSection || '');
+        if (!key) return;
+        state.settingsUi.sectionsOpen = { ...(state.settingsUi.sectionsOpen || {}), [key]: !!el.open };
+      });
+    });
     document.getElementById('settingsTimezone')?.addEventListener('change', async (e) => {
       const tzName = String(e.target.value || '').trim();
       if (!tzName) return;
@@ -4278,7 +4319,16 @@ function adminField(label, field, value, kind='input') {
       try {
         await api('./api/settings/notifications', { method: 'POST', body: { reminders_enabled: enabled } });
         state.settingsData.reminders_enabled = enabled;
+        if (!enabled) {
+          const slots = state.settingsSchedule.slots || [];
+          for (const slot of slots) {
+            if (!slot?.slot_id) continue;
+            await api('./api/schedule/slot_enabled', { method: 'POST', body: { slot_id: slot.slot_id, is_enabled: false } });
+            slot.is_enabled = false;
+          }
+        }
         showToast(enabled ? 'Уведомления включены' : 'Уведомления выключены');
+        renderActiveTab();
       } catch {
         e.target.checked = !enabled;
         showToast('Не удалось изменить уведомления');
@@ -4306,27 +4356,55 @@ function adminField(label, field, value, kind='input') {
         }
       });
     });
-    document.getElementById('settingsOpenSurvey')?.addEventListener('click', async () => {
-      state.activeTab = 'survey';
-      renderMainApp();
-      await loadSurveyForTarget();
+    document.querySelectorAll('[data-slot-edit-open]').forEach((el) => {
+      el.addEventListener('click', () => {
+        const slotId = String(el.dataset.slotEditOpen || '');
+        const slot = (state.settingsSchedule.slots || []).find((x) => String(x.slot_id || '') === slotId);
+        if (!slotId || !slot) return;
+        state.settingsUi.slotEdit = { open: true, slotId, time: normalizeHHMM(slot.time_local || '') };
+        renderActiveTab();
+      });
     });
-    document.getElementById('settingsOpenToday')?.addEventListener('click', async () => {
-      state.activeTab = 'today';
-      renderMainApp();
-      await loadToday(true);
+    document.querySelectorAll('[data-slot-edit-close]').forEach((el) => {
+      el.addEventListener('click', () => {
+        state.settingsUi.slotEdit = { open: false, slotId: "", time: "" };
+        renderActiveTab();
+      });
     });
-    document.getElementById('settingsOpenMySupp')?.addEventListener('click', async () => {
-      state.activeTab = 'today';
-      state.mySupplements.open = true;
-      renderMainApp();
-      await loadMySupplements(true);
+    document.getElementById('settingsSlotTimeSave')?.addEventListener('click', async () => {
+      const slotId = String(state.settingsUi?.slotEdit?.slotId || '');
+      const input = document.getElementById('settingsSlotTimeInput');
+      const time = normalizeHHMM(input?.value || '');
+      if (!slotId || !time) {
+        showToast('Укажите время в формате HH:MM');
+        return;
+      }
+      if (state.settingsUi.slotBusy[slotId]) return;
+      state.settingsUi.slotBusy[slotId] = true;
+      try {
+        await api('./api/schedule/slot_time', { method: 'POST', body: { slot_id: slotId, time_local: time } });
+        const slot = (state.settingsSchedule.slots || []).find((x) => String(x.slot_id || '') === slotId);
+        if (slot) slot.time_local = time;
+        state.settingsUi.slotEdit = { open: false, slotId: "", time: "" };
+        showToast('Время слота обновлено');
+        renderActiveTab();
+      } catch {
+        showToast('Не удалось сохранить время слота');
+      } finally {
+        delete state.settingsUi.slotBusy[slotId];
+      }
     });
     document.querySelectorAll('[data-settings-open-premium-plan-stars]').forEach((el) => {
-      el.addEventListener('click', () => { state.settingsUi = { ...(state.settingsUi || {}), premiumOpen: true }; purchase(el.dataset.settingsOpenPremiumPlanStars, 'stars', el); });
+      el.addEventListener('click', () => {
+        state.settingsUi.sectionsOpen = { ...(state.settingsUi.sectionsOpen || {}), premium: true };
+        purchase(el.dataset.settingsOpenPremiumPlanStars, 'stars', el);
+      });
     });
     document.querySelectorAll('[data-settings-open-premium-plan-rub]').forEach((el) => {
-      el.addEventListener('click', () => { state.settingsUi = { ...(state.settingsUi || {}), premiumOpen: true }; openPaymentScreen(el.dataset.settingsOpenPremiumPlanRub, 'settings'); });
+      el.addEventListener('click', () => {
+        state.settingsUi.sectionsOpen = { ...(state.settingsUi.sectionsOpen || {}), premium: true };
+        openPaymentScreen(el.dataset.settingsOpenPremiumPlanRub, 'settings');
+      });
     });
     const applyPatch = async () => {
       const patch = {

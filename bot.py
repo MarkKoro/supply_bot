@@ -1937,11 +1937,13 @@ async def home(
     raw = str(onboarding_state.get("onboarding_raw_json") or "")
     used = int(onboarding_state.get("onboarding_free_pick_used") or 0)
     has_unfinished = status in {"active", "results"} and bool(raw)
+    entry_reason = str(context.user_data.pop("home_entry_reason", "") or "")
 
     text = _home_text(
         has_unfinished_onboarding=has_unfinished,
         onboarding_done=(used == 1 and status == "done"),
         starter_active=starter_active,
+        entry_reason=entry_reason,
     )
 
     base_menu = main_menu(is_admin=is_admin, show_complexes=show_complexes)
@@ -2067,6 +2069,7 @@ async def _complete_onboarding_flow(
     if not has_premium and starter_used == 0:
         await _show_starter_trial_offer(update, context)
         return
+    context.user_data["home_entry_reason"] = "onboarding_completed"
     await home(update, context)
 
 
@@ -2219,15 +2222,9 @@ async def on_success_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
     finally:
         await conn.close()
 
-    s2 = context.application.bot_data["settings"]
-    rows = []
-    if s2.WEBAPP_URL:
-        rows.append([InlineKeyboardButton("🔓 Открыть WebApp", url=s2.WEBAPP_URL)])
-    rows.append([InlineKeyboardButton("⭐ Премиум", callback_data="menu:premium")])
-    await msg.reply_text(
-        f"Оплата прошла успешно! Premium активен до: {until_iso}",
-        reply_markup=InlineKeyboardMarkup(rows),
-    )
+    await msg.reply_text(f"Оплата прошла успешно! Premium активен до: {until_iso}")
+    context.user_data["home_entry_reason"] = "premium_activated"
+    await home(update, context)
 
 
 def _home_text(
@@ -2235,6 +2232,7 @@ def _home_text(
     has_unfinished_onboarding: bool = False,
     onboarding_done: bool = False,
     starter_active: bool = False,
+    entry_reason: str = "",
 ) -> str:
     next_step = "Начни со стартового подбора или открой каталог."
     if has_unfinished_onboarding:
@@ -2243,12 +2241,32 @@ def _home_text(
         next_step = "Дальше: добавь БАДы в свой список и настрой время приёма."
     if starter_active:
         next_step = "Открой WebApp — там удобнее отмечать приём и смотреть план."
+    contextual_lines: list[str] = []
+    if entry_reason == "onboarding_completed":
+        contextual_lines = [
+            "",
+            "✅ <b>Начальный подбор завершён.</b>",
+            "Что можно делать дальше в бесплатной версии:",
+            "• открыть «Каталог» и изучать карточки добавок;",
+            "• перейти в «Мои БАДы», собрать стек и настроить напоминания;",
+            "• продолжать отмечать приём и отслеживать прогресс в боте.",
+        ]
+    elif entry_reason == "premium_activated":
+        contextual_lines = [
+            "",
+            "🎉 <b>Premium активирован.</b>",
+            "Теперь тебе доступно:",
+            "• полный WebApp с расширенным трекингом и планом на день;",
+            "• AI check-in и персональные подсказки;",
+            "• Нутриентный помощник и расширенные Premium-функции.",
+        ]
     return (
         "💊 <b>Supply Bot</b>\n\n"
         "• Каталог: быстро найди добавку и проверь совместимость.\n"
         "• Мои БАДы: собери свой список и настрой напоминания.\n"
         "• AI / WebApp: стартовый подбор и удобный ежедневный трекинг.\n\n"
         f"Следующий шаг: {next_step}"
+        + ("\n".join(contextual_lines) if contextual_lines else "")
     )
 
 def _initial_pick_prompt_text(prefix: str | None = None) -> str:
@@ -2277,11 +2295,15 @@ async def _start_initial_pick(
     target_message_id: int | None = None,
 ) -> None:
     context.user_data[WAITING_KEY] = "initial_pick_goal"
+    context.user_data["initial_pick_back_to_tz"] = back_cb == "tz:back"
+    buttons = [[InlineKeyboardButton("⬅️ Назад", callback_data=back_cb)]]
+    if back_cb == "tz:back":
+        buttons.insert(0, [InlineKeyboardButton("⏭️ Пропустить", callback_data="onboard:skip")])
     await show(
         update,
         context,
         _initial_pick_prompt_text(prefix),
-        InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=back_cb)]]),
+        InlineKeyboardMarkup(buttons),
         route=route,
         target_chat_id=target_chat_id,
         target_message_id=target_message_id,
@@ -2687,15 +2709,8 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             return
         if data == "starter:stay":
+            context.user_data["home_entry_reason"] = "onboarding_completed"
             await home(update, context)
-            await show(
-                update,
-                context,
-                "Поняли тебя 🙌\n\n"
-                "Остаёмся в боте. Если захочешь, 3-дневный бесплатный доступ можно активировать позже в настройках.",
-                InlineKeyboardMarkup([[InlineKeyboardButton("⚙️ Открыть настройки", callback_data="menu:settings")]]),
-                route="menu:home",
-            )
             return
         if data == "starter:premium_about":
             await show(
@@ -4873,12 +4888,14 @@ async def on_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     await _safe_answer_callback(update)
     data = q.data or ""
+    s = context.application.bot_data["settings"]
+    tg_uid = update.effective_user.id
     if data.startswith("tz:page:"):
         _, _, page = data.split(":", 2)
         await _show_timezone_picker(update, context, int(page))
         return
     if data == "tz:back":
-        if context.user_data.get("onboarding") == "tz":
+        if context.user_data.get("onboarding") == "tz" or context.user_data.get("initial_pick_back_to_tz"):
             page = int(context.user_data.get("tz_page") or 0)
             await _show_timezone_picker(
                 update,
@@ -4889,20 +4906,23 @@ async def on_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return
         back_data = context.user_data.get("tz_back_data")
         if back_data == "menu:settings":
-            await _render_settings_menu(update, context, conn, tg_uid)
+            conn = await db.connect(s.DB_PATH)
+            try:
+                await _render_settings_menu(update, context, conn, tg_uid)
+            finally:
+                await conn.close()
         else:
             await home(update, context)
         return
     if data.startswith("tz:set:"):
         tz_tag = data.split(":", 2)[2]
         tz_value = tz.tz_name_from_tag(tz_tag)
-        s = context.application.bot_data["settings"]
-        tg_uid = update.effective_user.id
         conn = await db.connect(s.DB_PATH)
         try:
             await db.get_or_create_user(conn, tg_uid, tz_name="")
             await db.set_user_tz(conn, tg_uid, tz_value)
             context.user_data.pop("tz_back_data", None)
+            context.user_data.pop("initial_pick_back_to_tz", None)
             onboarding_step = context.user_data.pop("onboarding", None)
             tzinfo = db.parse_utc_tz(tz_value)
             local_now = datetime.now(tzinfo).strftime("%H:%M")

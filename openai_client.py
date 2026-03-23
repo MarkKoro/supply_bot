@@ -6,6 +6,8 @@ import os
 from dataclasses import dataclass
 from typing import Optional
 
+from openai import APIConnectionError, APITimeoutError
+
 log = logging.getLogger("supply-bot")
 
 NUTRIENT_ASSISTANT_SYSTEM_PROMPT = """Ты — осторожный нутриентный аналитик внутри приложения по БАДам.
@@ -104,6 +106,64 @@ NUTRIENT_ASSISTANT_JSON_CONTRACT = """{
   "disclaimer_ru": "string"
 }"""
 
+SUGGEST_STACK_JSON_SCHEMA = {
+    "name": "supplement_stack_suggestion",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "goals": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "goal_ru": {"type": "string"},
+                        "candidates": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "properties": {
+                                    "name": {"type": "string"},
+                                    "name_ru": {"type": "string"},
+                                    "why_ru": {"type": "string"},
+                                    "dose_ru": {"type": "string"},
+                                    "timing_ru": {"type": "string"},
+                                    "confidence": {"type": "number", "minimum": 0, "maximum": 100},
+                                },
+                                "required": ["name", "name_ru", "why_ru", "dose_ru", "timing_ru", "confidence"],
+                            },
+                        },
+                    },
+                    "required": ["goal_ru", "candidates"],
+                },
+            },
+            "candidates": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "name": {"type": "string"},
+                        "name_ru": {"type": "string"},
+                        "why_ru": {"type": "string"},
+                        "dose_ru": {"type": "string"},
+                        "timing_ru": {"type": "string"},
+                        "confidence": {"type": "number", "minimum": 0, "maximum": 100},
+                    },
+                    "required": ["name", "name_ru", "why_ru", "dose_ru", "timing_ru", "confidence"],
+                },
+            },
+            "warnings_ru": {"type": "array", "items": {"type": "string"}},
+            "questions_ru": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["goals", "candidates", "warnings_ru", "questions_ru"],
+    },
+}
+
+
 @dataclass(frozen=True)
 class OpenAIConfig:
     api_key: str
@@ -114,6 +174,13 @@ class OpenAITranscribeConfig:
     api_key: str
     model: str
 
+def _build_openai_client(cfg: OpenAIConfig | OpenAITranscribeConfig, timeout_s: float | None = None):
+    from openai import OpenAI
+    if timeout_s is None:
+        return OpenAI(api_key=cfg.api_key)
+    return OpenAI(api_key=cfg.api_key, timeout=timeout_s)
+
+
 def _sync_call(
     cfg: OpenAIConfig,
     *,
@@ -121,12 +188,9 @@ def _sync_call(
     input_text: str,
     max_output_tokens: int | None = None,
     timeout_s: float | None = None,
+    text_format: dict | None = None,
 ) -> str:
-    from openai import OpenAI
-    if timeout_s is not None:
-        client = OpenAI(api_key=cfg.api_key, timeout=timeout_s)
-    else:
-        client = OpenAI(api_key=cfg.api_key)
+    client = _build_openai_client(cfg, timeout_s=timeout_s)
     params = {
         "model": cfg.model,
         "instructions": instructions,
@@ -134,6 +198,8 @@ def _sync_call(
     }
     if max_output_tokens is not None:
         params["max_output_tokens"] = max_output_tokens
+    if text_format is not None:
+        params["text"] = {"format": text_format}
     resp = client.responses.create(**params)
     return (resp.output_text or "").strip()
 
@@ -145,11 +211,7 @@ def _sync_transcribe_call(
     language: str | None = None,
     timeout_s: float | None = None,
 ) -> str:
-    from openai import OpenAI
-    if timeout_s is not None:
-        client = OpenAI(api_key=cfg.api_key, timeout=timeout_s)
-    else:
-        client = OpenAI(api_key=cfg.api_key)
+    client = _build_openai_client(cfg, timeout_s=timeout_s)
     params = {
         "model": cfg.model,
         "file": (filename, audio_bytes, "audio/ogg"),
@@ -166,11 +228,7 @@ def _sync_call_messages(
     max_output_tokens: int | None = None,
     timeout_s: float | None = None,
 ) -> str:
-    from openai import OpenAI
-    if timeout_s is not None:
-        client = OpenAI(api_key=cfg.api_key, timeout=timeout_s)
-    else:
-        client = OpenAI(api_key=cfg.api_key)
+    client = _build_openai_client(cfg, timeout_s=timeout_s)
     params = {
         "model": cfg.model,
         "input": messages,
@@ -188,8 +246,7 @@ def _sync_call_nutrient_assistant(
     max_output_tokens: int | None = None,
     timeout_s: float | None = None,
 ) -> str:
-    from openai import OpenAI
-    client = OpenAI(api_key=cfg.api_key, timeout=timeout_s) if timeout_s is not None else OpenAI(api_key=cfg.api_key)
+    client = _build_openai_client(cfg, timeout_s=timeout_s)
     instructions = f"{NUTRIENT_ASSISTANT_SYSTEM_PROMPT}\nJSON-контракт:\n{NUTRIENT_ASSISTANT_JSON_CONTRACT}"
     params = {
         "model": cfg.model,
@@ -269,67 +326,55 @@ async def suggest_stack_v1(
 
     instructions = (
         "Ты помощник по первичному подбору БАДов в Telegram-боте. "
-        "Пользователь уже получил юридические предупреждения и понимает, что это не медицинский совет. "
-        "НЕ назначай лечение и НЕ ставь диагнозы. "
-        "Верни строго чистый JSON object (top-level { ... }) без Markdown, комментариев и пояснений до/после JSON. "
-        "Разделяй рекомендации по целям пользователя. Обязательно покрой каждую явно упомянутую цель отдельным блоком goals[]. "
-        "Вопросы пользователю задавать нельзя: поле questions_ru всегда возвращай пустым массивом []. "
-        "Используй распространённые названия: name — англ/латиница, name_ru — привычное русское название для каталога."
+        "Никаких диагнозов и лечения; только консервативные информационные рекомендации. "
+        "Пользователь уже получил юридические предупреждения. "
+        "Возвращай только структурированный JSON по заданной схеме."
     )
 
-    prompt = f"""ЦЕЛЬ ПОЛЬЗОВАТЕЛЯ:
-{goal_text}
+    prompt = f"""ВХОДНЫЕ ДАННЫЕ
+- Цель пользователя: {goal_text}
+- Текущие добавки: {user_supplements_text}
 
-ТЕКУЩИЕ ДОБАВКИ ПОЛЬЗОВАТЕЛЯ:
-{user_supplements_text}
-
-ЗАДАЧА:
-1) Выдели явные цели пользователя (если цель одна — верни один блок).
-2) Для каждой цели предложи релевантные добавки (обычно 1–8 на цель, суммарно до 25).
-3) Если точного названия может не быть в каталоге, используй распространённые синонимы в name/name_ru.
-4) На каждую добавку дай краткое обоснование, дозу и время приёма.
-
-Верни СТРОГО JSON object по схеме:
-{{
-  "goals": [
-    {{
-      "goal_ru": "Нормализация сна",
-      "candidates": [
-        {{
-          "name": "L-theanine",
-          "name_ru": "L-теанин",
-          "why_ru": "кратко почему подходит для этой цели",
-          "dose_ru": "рекомендуемая доза текстом",
-          "timing_ru": "когда принимать",
-          "confidence": 0
-        }}
-      ]
-    }}
-  ],
-  "candidates": [
-    {{
-      "name": "L-theanine",
-      "name_ru": "L-теанин",
-      "why_ru": "кратко почему подходит",
-      "dose_ru": "рекомендуемая доза текстом",
-      "timing_ru": "когда принимать",
-      "confidence": 0
-    }}
-  ],
-  "warnings_ru": ["..."],
-  "questions_ru": []
-}}
-Если данных мало — НЕ задавай вопросы, просто снизь confidence и добавь предупреждения в warnings_ru. confidence: число 0–100.
+ТРЕБОВАНИЯ
+1) Выдели явные цели пользователя и покрой каждую целью в goals[].
+2) Для каждой цели предложи практичный короткий список релевантных кандидатов.
+3) На каждую добавку дай коротко why_ru, dose_ru, timing_ru и confidence 0-100.
+4) Используй распространённые названия для каталога: name (англ/латиница), name_ru (русский).
+5) Если данных мало — уменьши confidence и добавь предупреждения в warnings_ru.
+6) questions_ru всегда пустой массив [].
 """
 
-    return await asyncio.to_thread(
-        _sync_call,
-        cfg,
-        instructions=instructions,
-        input_text=prompt,
-        max_output_tokens=700,
-        timeout_s=12,
-    )
+    timeouts = (20, 35, 50)
+    last_exc: Exception | None = None
+    text_format = {
+        "type": "json_schema",
+        "name": SUGGEST_STACK_JSON_SCHEMA["name"],
+        "strict": True,
+        "schema": SUGGEST_STACK_JSON_SCHEMA["schema"],
+    }
+
+    for attempt, timeout_s in enumerate(timeouts, start=1):
+        try:
+            return await asyncio.to_thread(
+                _sync_call,
+                cfg,
+                instructions=instructions,
+                input_text=prompt,
+                max_output_tokens=800,
+                timeout_s=timeout_s,
+                text_format=text_format,
+            )
+        except (APITimeoutError, APIConnectionError) as exc:
+            last_exc = exc
+            log.warning("suggest_stack_v1 transient OpenAI error on attempt %s/%s: %s", attempt, len(timeouts), exc)
+            if attempt < len(timeouts):
+                await asyncio.sleep(0.6 * attempt)
+                continue
+            raise
+
+    if last_exc is not None:
+        raise last_exc
+    return ""
 
 async def transcribe_voice_v1(
     cfg: Optional[OpenAITranscribeConfig],

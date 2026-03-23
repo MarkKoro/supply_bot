@@ -619,6 +619,13 @@ async def _render_settings_menu(update: Update, context: ContextTypes.DEFAULT_TY
     premium_active = await db.is_premium_active(conn, tg_uid)
     premium_until = await db.get_premium_until(conn, tg_uid) if premium_active else None
     premium_line = f"активен до {_format_until_ru(premium_until)}" if premium_active else "сейчас активной подписки нет — можно купить"
+    starter_active = await db.is_starter_trial_active(conn, tg_uid)
+    starter_row = await db.fetchone(
+        conn,
+        "SELECT starter_trial_used FROM users WHERE tg_user_id=?",
+        (int(tg_uid),),
+    )
+    starter_used = int(starter_row["starter_trial_used"] or 0) if starter_row else 0
 
     complexes = await db.list_complexes(conn, tg_uid)
     complexes_count = len(complexes)
@@ -632,7 +639,13 @@ async def _render_settings_menu(update: Update, context: ContextTypes.DEFAULT_TY
         f"⭐ Премиум: {premium_line}\n"
         f"🧩 Комплексы: {complexes_line}"
     )
-    await show(update, context, text, settings_menu(), route="menu:settings")
+    await show(
+        update,
+        context,
+        text,
+        settings_menu(show_starter_activation=(not premium_active and not starter_active and starter_used == 0)),
+        route="menu:settings",
+    )
 
 def _format_link_names(items: list[dict]) -> str:
     if not items:
@@ -2016,12 +2029,14 @@ async def _show_starter_trial_offer(update: Update, context: ContextTypes.DEFAUL
         "Ты уже получил стартовый подбор.",
         "",
         "Теперь можно 3 дня бесплатно пользоваться WebApp: отмечать приём, смотреть карту, настраивать стек и проверить, как это ощущается в жизни.",
+        "",
+        "<i>(Нутриентный помощник остаётся закрыт на бесплатном 3-дневном доступе.)</i>",
     ]
     kb = InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("🎁 Активировать 3 дня", callback_data="starter:activate")],
-            [InlineKeyboardButton("📚 Остаться в боте", callback_data="menu:home")],
-            [InlineKeyboardButton("⭐ Что даёт Premium", callback_data="premium:about")],
+            [InlineKeyboardButton("📚 Остаться в боте", callback_data="starter:stay")],
+            [InlineKeyboardButton("⭐ Что даёт Premium", callback_data="starter:premium_about")],
         ]
     )
     await show(update, context, "\n".join(lines), kb, route="starter:offer")
@@ -2650,7 +2665,8 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 await show(
                     update,
                     context,
-                    f"Starter доступ активирован до <b>{until_iso}</b>",
+                    f"Starter доступ активирован до <b>{until_iso}</b>\n\n"
+                    "<i>Нутриентный помощник доступен только на платном Premium.</i>",
                     InlineKeyboardMarkup(rows),
                     route="starter:active",
                 )
@@ -2661,6 +2677,38 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "У тебя уже активен Premium — WebApp открыт без ограничений.",
                 InlineKeyboardMarkup([[InlineKeyboardButton("🏠 В меню", callback_data="menu:home")]]),
                 route="menu:home",
+            )
+            return
+        if data == "starter:stay":
+            await home(update, context)
+            await show(
+                update,
+                context,
+                "Поняли тебя 🙌\n\n"
+                "Остаёмся в боте. Если захочешь, 3-дневный бесплатный доступ можно активировать позже в настройках.",
+                InlineKeyboardMarkup([[InlineKeyboardButton("⚙️ Открыть настройки", callback_data="menu:settings")]]),
+                route="menu:home",
+            )
+            return
+        if data == "starter:premium_about":
+            await show(
+                update,
+                context,
+                "⭐ <b>Что входит в Premium</b>\n\n"
+                "• полный доступ к WebApp\n"
+                "• карта органов с деталями по системам\n"
+                "• AI check-in и подсказки по самочувствию\n"
+                "• удобный трекинг приёма и напоминаний\n"
+                "• достижения и персонализация интерфейса\n\n"
+                "База добавок и стартовый подбор по-прежнему доступны бесплатно.\n\n"
+                "<i>(На бесплатном 3-дневном доступе Нутриентный помощник остаётся закрыт.)</i>",
+                InlineKeyboardMarkup(
+                    [
+                        [InlineKeyboardButton("🎁 Активировать 3 дня", callback_data="starter:activate")],
+                        [InlineKeyboardButton("⬅️ Назад", callback_data="starter:offer")],
+                    ]
+                ),
+                route="starter:about",
             )
             return
         if data == "onboard:restart_confirm":

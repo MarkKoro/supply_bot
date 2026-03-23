@@ -1484,6 +1484,7 @@
         <div class="card fade">
           <h2 style="margin:0 0 4px">Premium — всё важное в одном месте</h2>
           <div class="muted">Today • Каталог • Карта органов • Нутриентный помощник • AI check-in</div>
+          <div class="muted" style="margin-top:6px"><i>На бесплатном 3-дневном Starter Нутриентный помощник остаётся закрыт.</i></div>
         </div>
 
         <div class="preview-grid">
@@ -3145,13 +3146,17 @@ function adminField(label, field, value, kind='input') {
   function renderReviewModal(){ if(!state.profileUi.reviewOpen) return ''; const r=(state.profileLabs.reports||[]).find((x)=>String(x.id)===String(state.profileUi.selectedReportId)); if(!r) return ''; return `<div class="modal-overlay" data-close-review><section class="card modal-card" onclick="event.stopPropagation()"><div class="row"><strong>Проверка распознанных данных</strong><button class="btn secondary" data-close-review>Закрыть</button></div><div class="muted" style="margin-top:8px">${r.parse_status==='needs_manual_review'?'Документ загружен, но данные нужно проверить вручную':'Проверьте распознанные значения'}</div><div class="field-grid" style="margin-top:8px"><label class="muted">Дата анализа<input type="date" class="input" id="reviewReportDate" value="${esc(r.report_date||'')}"/></label><label class="muted">Лаборатория<input class="input" id="reviewLabName" value="${esc(r.lab_name||'')}"/></label><label class="muted">Комментарий<textarea class="textarea" id="reviewNotes">${esc(r.notes||'')}</textarea></label><div id="reviewRows">${(r.results||[]).map((row,idx)=>renderLabRow(idx,row)).join('') || renderLabRow(0)}</div><button class="btn" data-save-review>${state.profileUi.savingReview?'Сохраняем…':'Сохранить результат'}</button></div></section></div>`; }
 
   function renderProfileModulesGrid() {
-    const active = String(state.profileUi.activeModule || 'assistant');
+    const hasPaidPremium = Boolean(state.me?.premium);
     const modules = [
-      { id: 'assistant', title: '🧪 Помощник', hint: 'Персональные рекомендации (обновляется)' },
       { id: 'organs', title: '🫀 Карта органов', hint: 'Как добавки влияют на системы' },
       { id: 'achievements', title: '🏆 Достижения', hint: 'Ваш прогресс и открытия' },
       { id: 'cosmetics', title: '🎨 Косметика', hint: 'Тема, вкладки и бейдж' }
     ];
+    if (hasPaidPremium) {
+      modules.unshift({ id: 'assistant', title: '🧪 Помощник', hint: 'Персональные рекомендации (обновляется)' });
+    }
+    const firstModuleId = modules[0]?.id || 'organs';
+    const active = String(state.profileUi.activeModule || firstModuleId);
     return `<section class="card fade"><div class="profile-module-grid">${modules.map((m)=>`<button class="btn profile-module-btn ${active===m.id?'active':''}" data-profile-module="${m.id}"><div><strong>${m.title}</strong></div><div class="muted">${m.hint}</div></button>`).join('')}</div></section>`;
   }
 
@@ -3349,12 +3354,15 @@ function adminField(label, field, value, kind='input') {
     const levelPct = Math.max(0, Math.min(100, Number(ach.level_progress_pct || 0)));
     const levelTitle = ach.level_title_ru || 'Новый уровень';
 
-    const activeModule = String(state.profileUi.activeModule || 'assistant');
+    const hasPaidPremium = Boolean(state.me?.premium);
+    const fallbackModule = hasPaidPremium ? 'assistant' : 'organs';
+    const activeModule = String(state.profileUi.activeModule || fallbackModule);
     let moduleHtml = '';
     if (activeModule === 'organs') moduleHtml = `<section class="card fade">${renderBodyMap()}</section>`;
     if (activeModule === 'achievements') moduleHtml = renderProfileAchievementsModule();
     if (activeModule === 'cosmetics') moduleHtml = renderProfileCosmeticsModule();
-    if (activeModule === 'assistant') moduleHtml = renderAssistantModule(p, labs);
+    if (activeModule === 'assistant' && hasPaidPremium) moduleHtml = renderAssistantModule(p, labs);
+    if (!moduleHtml) moduleHtml = `<section class="card fade">${renderBodyMap()}</section>`;
 
     return `${renderProfileModulesGrid()}${moduleHtml}${renderProfileEditorModal()}${renderLabsModal('manual')}${renderLabsModal('upload')}${renderReviewModal()}`;
   }

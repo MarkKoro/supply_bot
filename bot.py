@@ -1434,20 +1434,30 @@ async def _render_ai_suggestions(
     save_to_onboarding: bool = True,
 ) -> bool:
     data = None
-    format_error_shown = False
+    fallback_mode = False
     if raw:
         data = _parse_onboarding_ai_json(raw)
         if data is None:
-            await show(
-                update,
-                context,
-                "Не удалось обработать ответ подборщика. Попробуй ещё раз или пропусти этап.",
-                InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Попробовать ещё раз", callback_data="onboard:retry")], [InlineKeyboardButton("⏭️ Пропустить", callback_data="onboard:skip")], [InlineKeyboardButton("⬅️ К выбору пояса", callback_data="tz:back")]]),
-                route="onboard:goal",
-            )
-            format_error_shown = True
+            fallback_mode = True
     else:
-        await show(update, context, "Начальный подбор не вернул ответ. Попробуй ещё раз.", back(), route="onboard:goal")
+        fallback_mode = True
+
+    if fallback_mode:
+        extracted_goals = _extract_goal_fragments(goal_text)
+        limited_goals = extracted_goals[:6] if extracted_goals else [goal_text]
+        data = {
+            "goals": [
+                {"goal_ru": goal_name, "candidates": []}
+                for goal_name in limited_goals
+                if str(goal_name).strip()
+            ],
+            "candidates": [],
+            "warnings_ru": [
+                "AI-ответ пришёл в неполном формате, поэтому подбор восстановлен из каталога.",
+                "Проверь переносимость и взаимодействия по карточкам добавок перед стартом.",
+            ],
+            "questions_ru": [],
+        }
 
     if isinstance(data, dict):
         grouped_found, missing = await _resolve_onboarding_goal_candidates(conn, data, goal_text)
@@ -1473,6 +1483,9 @@ async def _render_ai_suggestions(
             "✨ <b>Начальный подбор</b>",
             "",
         ]
+        if fallback_mode:
+            lines.append("⚠️ Ответ AI восстановлен из каталога (резервный режим).")
+            lines.append("")
 
         all_found_items: list[dict] = []
         if grouped_found:
@@ -1556,14 +1569,8 @@ async def _render_ai_suggestions(
             },
         )
         return True
-    if raw and not format_error_shown:
-        await show(
-            update,
-            context,
-            "Не удалось обработать ответ подборщика. Попробуй ещё раз или пропусти этап.",
-            InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Попробовать ещё раз", callback_data="onboard:retry")], [InlineKeyboardButton("⏭️ Пропустить", callback_data="onboard:skip")], [InlineKeyboardButton("⬅️ К выбору пояса", callback_data="tz:back")]]),
-            route="onboard:goal",
-        )
+
+    await show(update, context, "Начальный подбор временно недоступен. Попробуй ещё раз.", back(), route="onboard:goal")
     return False
 
 
@@ -2345,6 +2352,7 @@ def _initial_pick_prompt_text(prefix: str | None = None) -> str:
         "Чем подробнее опишешь запрос, тем точнее будет подбор: я предложу список добавок с примерными "
         "дозировками и временем приёма для стартового стека.\n\n"
         "Можно написать текстом или отправить голосовое сообщение.\n\n"
+        "<i>Обычно это занимает 1–3 минуты.</i>\n\n"
         "<i>Не медицинский совет.</i>"
     )
     if prefix:
@@ -6264,7 +6272,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 sups = await db.list_user_supplements(conn, tg_uid, limit=100)
                 user_supp_text = ", ".join([r["name"] for r in sups]) or "нет"
                 cfg = OpenAIConfig(api_key=s.OPENAI_API_KEY, model=s.OPENAI_MODEL)
-                await show(update, context, "🤖 Думаю…", None, route="onboard:goal")
+                await show(update, context, "🤖 Думаю… Это может занять 1–3 минуты.", None, route="onboard:goal")
                 raw = None
                 try:
                     raw = await suggest_stack_v1(cfg, txt, user_supp_text)
@@ -6594,7 +6602,7 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         sups = await db.list_user_supplements(conn, tg_uid, limit=100)
         user_supp_text = ", ".join([r["name"] for r in sups]) or "нет"
         cfg = OpenAIConfig(api_key=s.OPENAI_API_KEY, model=s.OPENAI_MODEL)
-        await show(update, context, "🤖 Думаю…", None, route="onboard:goal")
+        await show(update, context, "🤖 Думаю… Это может занять 1–3 минуты.", None, route="onboard:goal")
         raw = None
         try:
             raw = await suggest_stack_v1(cfg, transcription, user_supp_text)

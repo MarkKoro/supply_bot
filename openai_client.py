@@ -332,32 +332,52 @@ async def suggest_stack_v1(
     if not cfg:
         return "AI отключен: добавь OPENAI_API_KEY в .env."
 
+    raw_goal = str(goal_text or "").strip()
+    compact_goal = " ".join(raw_goal.split())
+    goal_parts = [part.strip(" ,;:-") for part in compact_goal.replace(" и ", ",").split(",")]
+    normalized_goals: list[str] = []
+    for part in goal_parts:
+        lowered = part.lower()
+        if len(lowered) < 3:
+            continue
+        if lowered in {"хочу", "нужно", "надо", "чтобы", "в целом", "вообще"}:
+            continue
+        if lowered in normalized_goals:
+            continue
+        normalized_goals.append(lowered)
+    if not normalized_goals and compact_goal:
+        normalized_goals = [compact_goal.lower()]
+    limited_goals = normalized_goals[:6]
+    goals_hint = "; ".join(limited_goals) if limited_goals else compact_goal
+
     instructions = (
         "Ты помощник по первичному подбору БАДов в Telegram-боте. "
         "Никаких диагнозов и лечения; только консервативные информационные рекомендации. "
         "Пользователь уже получил юридические предупреждения. "
         "Возвращай только структурированный JSON по заданной схеме. "
-        "Покрывай цели широко и практично, без чрезмерной осторожной недодачи вариантов."
+        "Покрывай цели широко и практично, без чрезмерной осторожной недодачи вариантов. "
+        "Если целей очень много, обрабатывай только первые 6 самых явных, чтобы гарантировать полный валидный JSON-ответ."
     )
 
     prompt = f"""ВХОДНЫЕ ДАННЫЕ
-- Цель пользователя: {goal_text}
+- Цель пользователя (оригинал): {goal_text}
+- Нормализованные цели (лимит 6): {goals_hint}
 - Текущие добавки: {user_supplements_text}
 
 ТРЕБОВАНИЯ
 1) Выдели явные цели пользователя и покрой каждую отдельным блоком в goals[].
-2) Для каждой цели предложи 4-6 релевантных кандидатов (если действительно уместно и без дублирования внутри цели).
+2) Для каждой цели предложи 2-4 релевантных кандидатов (минимум 1, если данных мало), без дублирования внутри цели.
 3) На каждую добавку дай очень коротко why_ru, dose_ru, timing_ru (до ~12 слов в каждом поле) и confidence 0-100.
 4) Используй распространённые названия для каталога: name (англ/латиница), name_ru (русский).
 5) Если данных мало — уменьши confidence и добавь предупреждения в warnings_ru.
 6) questions_ru всегда пустой массив [].
-7) На верхнем уровне candidates[] верни агрегированный список 10-18 кандидатов (уникальных по name), собранный из целей.
+7) На верхнем уровне candidates[] верни агрегированный список 6-14 кандидатов (уникальных по name), собранный из целей.
 8) Если в цели есть "тестостерон", "сила", "восстановление", "печень" или близкие формулировки — обязательно дай отдельные блоки под них.
 9) Внутри каждой цели старайся давать разные по механике варианты, а не однотипные дубли.
 10) Верни только JSON-объект по схеме без markdown и без пояснений вне JSON.
 """
 
-    timeouts = (20, 35, 50)
+    timeouts = (35, 65, 95)
     last_exc: Exception | None = None
     text_format = {
         "type": "json_schema",
@@ -373,7 +393,7 @@ async def suggest_stack_v1(
                 cfg,
                 instructions=instructions,
                 input_text=prompt,
-                max_output_tokens=1300,
+                max_output_tokens=2200,
                 timeout_s=timeout_s,
                 max_retries=0,
                 text_format=text_format,

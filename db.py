@@ -7873,8 +7873,8 @@ async def get_recent_achievements(conn, user_id: int, limit: int = 20) -> list[d
     safe_limit = max(1, min(100, int(limit or 20)))
     rows = await fetchall(
         conn,
-        """SELECT ua.achievement_key, ua.unlocked_at_utc,
-                  a.title_ru, a.reward_json
+        """SELECT ua.achievement_key, ua.unlocked_at_utc, ua.seen_at_utc,
+                  a.title_ru, a.desc_ru, a.reward_json
            FROM user_achievements ua
            JOIN achievements a ON a.key=ua.achievement_key
            WHERE ua.user_id=?
@@ -7894,7 +7894,9 @@ async def get_recent_achievements(conn, user_id: int, limit: int = 20) -> list[d
             {
                 "key": str(row["achievement_key"] or ""),
                 "title_ru": str(row["title_ru"] or ""),
+                "desc_ru": str(row["desc_ru"] or ""),
                 "unlocked_at_utc": str(row["unlocked_at_utc"] or ""),
+                "seen_at_utc": str(row["seen_at_utc"] or ""),
                 "reward": reward,
             }
         )

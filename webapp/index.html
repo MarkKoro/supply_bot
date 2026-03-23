@@ -775,9 +775,14 @@
       box-shadow: 0 18px 32px rgba(0,0,0,.45);
       pointer-events: auto;
     }
-    .coach-card h4 { margin: 0 0 6px; font-size: 15px; }
+    .coach-card-head { display:flex; align-items:flex-start; justify-content:space-between; gap:8px; margin-bottom:6px; }
+    .coach-card h4 { margin: 0; font-size: 15px; }
+    .coach-skip-top { margin-left:auto; }
     .coach-card .muted { line-height: 1.35; }
     .coach-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 10px; }
+    .coach-actions-left { display:flex; align-items:center; gap:8px; min-width:96px; }
+    .coach-actions-right { display:flex; align-items:center; gap:8px; }
+    .coach-actions-spacer { width:96px; }
     .coach-step { font-size: 12px; color: var(--muted); }
 
   </style>
@@ -1564,12 +1569,19 @@
       <div class="coach-highlight" style="top:${g.rect.top}px;left:${g.rect.left}px;width:${g.rect.width}px;height:${g.rect.height}px;"></div>
       <div class="coach-arrow" style="left:${g.arrow.left}px;top:${g.arrow.top}px;width:${g.arrow.width}px;transform:rotate(${g.arrow.angle}deg);"></div>
       <section class="coach-card" style="top:${g.card.top}px;left:${g.card.left}px;width:${g.card.width}px;">
-        <h4>${esc(step.title || "Подсказка")}</h4>
+        <div class="coach-card-head">
+          <h4>${esc(step.title || "Подсказка")}</h4>
+          <button class="btn secondary coach-skip-top" data-guide-skip>Пропустить</button>
+        </div>
         <div class="muted">${esc(step.text || "")}</div>
         <div class="coach-actions">
-          <button class="btn secondary" data-guide-skip>Пропустить</button>
+          <div class="coach-actions-left">
+            ${g.step > 0 ? '<button class="btn secondary" data-guide-prev>Назад</button>' : '<span class="coach-actions-spacer" aria-hidden="true"></span>'}
+          </div>
           <span class="coach-step">${g.step + 1}/${total}</span>
-          <button class="btn" data-guide-next>${isLast ? 'Завершить' : 'Дальше'}</button>
+          <div class="coach-actions-right">
+            <button class="btn" data-guide-next>${isLast ? 'Завершить' : 'Дальше'}</button>
+          </div>
         </div>
       </section>
     </div>`;
@@ -1600,6 +1612,12 @@
 
   function bindGuideEvents() {
     document.querySelector('[data-guide-skip]')?.addEventListener('click', () => { haptic(); closeGuide(); });
+    document.querySelector('[data-guide-prev]')?.addEventListener('click', () => {
+      haptic();
+      if (state.guide.step <= 0) return;
+      state.guide.step -= 1;
+      renderMainApp();
+    });
     document.querySelector('[data-guide-next]')?.addEventListener('click', () => {
       haptic();
       const total = state.guide.steps.length;
@@ -2085,6 +2103,10 @@
     lastRenderedTabKey = tabKey;
     lastRenderedTabHtml = nextHtml;
     if (typeof binder === "function") binder();
+    requestAnimationFrame(() => {
+      if (state.activeTab === "survey") maybeStartGuide(GUIDE_KEYS.survey);
+      if (state.activeTab === "profile") maybeStartGuide(GUIDE_KEYS.profile);
+    });
   }
 
 
@@ -3395,15 +3417,16 @@ function adminField(label, field, value, kind='input') {
 
   function renderProfileModulesGrid() {
     const hasPaidPremium = Boolean(state.me?.premium);
+    const unseen = getUnseenAchievementsCount();
     const modules = [
       { id: 'organs', title: '🫀 Карта органов', hint: 'Как добавки влияют на системы', locked: false },
       { id: 'assistant', title: '🧪 Помощник', hint: hasPaidPremium ? 'Персональные рекомендации (обновляется)' : 'Доступен при покупке Premium', locked: !hasPaidPremium },
-      { id: 'achievements', title: '🏆 Достижения', hint: 'Ваш прогресс и открытия', locked: false },
+      { id: 'achievements', title: '🏆 Достижения', hint: 'Ваш прогресс и открытия', locked: false, unseen },
       { id: 'cosmetics', title: '🎨 Косметика', hint: 'Тема, вкладки и бейдж', locked: false }
     ];
     const firstModuleId = modules[0]?.id || 'organs';
     const active = String(state.profileUi.activeModule || firstModuleId);
-    return `<section class="card fade"><div class="profile-module-grid">${modules.map((m)=>`<button class="btn profile-module-btn ${active===m.id?'active':''}" data-profile-module="${m.id}" ${m.locked ? 'disabled' : ''}><div><strong>${m.title}</strong></div><div class="muted">${m.hint}</div></button>`).join('')}</div></section>`;
+    return `<section class="card fade"><div class="profile-module-grid">${modules.map((m)=>`<button class="btn profile-module-btn ${active===m.id?'active':''}" data-profile-module="${m.id}" ${m.locked ? 'disabled' : ''}><div><strong>${m.title}${m.unseen ? `<span class="new-pill" style="margin-left:6px">NEW ${m.unseen}</span>` : ''}</strong></div><div class="muted">${m.hint}</div></button>`).join('')}</div></section>`;
   }
 
   function renderProfileAchievementsModule() {
@@ -3412,6 +3435,7 @@ function adminField(label, field, value, kind='input') {
     const unlocked = items.filter((x) => x.unlocked);
     const locked = items.filter((x) => !x.unlocked);
     const recent = Array.isArray(ach.recent_achievements) ? ach.recent_achievements : [];
+    const unseenCount = getUnseenAchievementsCount();
     const next = (Array.isArray(ach.next_up) ? ach.next_up : []).filter((item) => Number(item?.pct || 0) > 0 && Number(item?.pct || 0) < 100);
     const achFilter = String(state.ui?.achFilter || "all");
     const achQuery = String(state.ui?.achQuery || "").trim().toLowerCase();
@@ -3437,10 +3461,11 @@ function adminField(label, field, value, kind='input') {
       ${arr.map((a)=>`<div class="ach-item ${a.unlocked ? "" : "locked"}"><div><strong>${a.unlocked ? '🏆' : '🔒'} ${esc(a.title_ru || '')}</strong></div><div class="muted">${esc(a.desc_ru || '')}</div></div>`).join('')}
       </div></div>`).join('');
     const filterBtn = (key, label) => `<button class="chip ${achFilter===key?'green':''}" data-ach-filter="${key}">${label}</button>`;
-    return `<section class="card fade"><div class="row"><strong>🏆 Достижения</strong><span class="muted">Открыто: ${unlocked.length} · Закрыто: ${locked.length}</span></div>
+    return `<section class="card fade"><div class="row"><strong>🏆 Достижения${unseenCount ? `<span class="new-pill">NEW ${unseenCount}</span>` : ''}</strong><span class="muted">Открыто: ${unlocked.length} · Закрыто: ${locked.length}</span></div>
+      ${unseenCount ? `<div style="margin-top:8px"><button class="btn secondary" data-ach-open-new>🔴 Показать новое (${unseenCount})</button></div>` : ''}
       <div class="ios-group" style="margin-top:10px">
         <details open><summary><span>🎯 Дальше по плану</span><span class="ios-arrow">▾</span></summary><div class="ios-content">${next.length ? next.map((item)=>`<div class="ach-item"><div><strong>${esc(item.title_ru || '')}</strong></div><div class="muted">Прогресс: ${Math.max(0, Math.min(100, Number(item.pct || 0)))}%</div>${item.hint_ru ? `<div class="muted">${esc(item.hint_ru)}</div>` : ''}</div>`).join('') : '<div class="muted">Сейчас нет актуальных шагов.</div>'}</div></details>
-        <details><summary><span>🕒 Последние открытия</span><span class="ios-arrow">▾</span></summary><div class="ios-content">${recent.length ? recent.slice(0,8).map((item)=>`<div class="ach-item"><div><strong>${esc(item.title_ru || '')}</strong></div><div class="muted">${esc(formatUtcShort(item.unlocked_at_utc || ''))}</div></div>`).join('') : '<div class="muted">Пока нет новых открытий.</div>'}</div></details>
+        <details><summary><span>🕒 Последние открытия</span><span class="ios-arrow">▾</span></summary><div class="ios-content">${recent.length ? recent.slice(0,8).map((item)=>`<div class="ach-item"><div><strong>${esc(item.title_ru || '')}</strong>${item.is_unseen ? '<span class="new-pill">NEW</span>' : ''}</div><div class="muted">${esc(formatUtcShort(item.unlocked_at_utc || ''))}</div><div class="muted">${esc(item.desc_ru || 'Описание появится позже')}</div>${Array.isArray(item.reward_verbose) && item.reward_verbose.length ? `<div class="muted" style="margin-top:4px">Награда: ${esc(item.reward_verbose.join(' · '))}</div>` : ''}</div>`).join('') : '<div class="muted">Пока нет новых открытий.</div>'}</div></details>
         <details><summary><span>🏅 Все достижения</span><span class="ios-arrow">▾</span></summary><div class="ios-content"><div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap;">${filterBtn('all','Все')}${filterBtn('unlocked','Открытые')}${filterBtn('locked','Закрытые')}${filterBtn('new','Новые')}</div><div style="margin-top:8px"><input class="input" id="achSearch" placeholder="Поиск по названию или описанию" value="${esc(state.ui?.achQuery || "")}" /></div>${groupedHtml || '<div class="muted" style="margin-top:10px">Ничего не найдено.</div>'}</div></details>
       </div></section>`;
   }
@@ -3670,6 +3695,9 @@ function adminField(label, field, value, kind='input') {
     document.querySelectorAll('[data-profile-module]').forEach((el)=>el.addEventListener('click', async ()=>{
       const next = String(el.dataset.profileModule || 'assistant');
       state.profileUi.activeModule = next;
+      if (next === 'achievements' && getUnseenAchievementsCount() > 0) {
+        await markAchievementsSeen();
+      }
       renderActiveTab();
       if (next === 'organs') {
         await loadBodyMap(true);
@@ -3901,6 +3929,13 @@ function adminField(label, field, value, kind='input') {
         state.ui.achFilter = String(btn.dataset.achFilter || 'all');
         renderActiveTab();
       });
+    });
+    document.querySelector('[data-ach-open-new]')?.addEventListener('click', async () => {
+      state.ui = state.ui || {};
+      state.ui.achFilter = 'new';
+      state.ui.achQuery = '';
+      await markAchievementsSeen();
+      renderActiveTab();
     });
     document.getElementById('achSearch')?.addEventListener('input', (e) => {
       state.ui = state.ui || {};

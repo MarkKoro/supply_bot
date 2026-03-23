@@ -733,17 +733,17 @@
       z-index: 95;
       pointer-events: none;
     }
-    .coach-dim {
+    .coach-dim-part {
       position: absolute;
-      inset: 0;
       background: rgba(4, 8, 24, 0.7);
       backdrop-filter: blur(8px);
+      pointer-events: none;
     }
     .coach-highlight {
       position: absolute;
       border-radius: 14px;
       border: 2px solid rgba(190, 221, 255, 0.9);
-      box-shadow: 0 0 0 200vmax rgba(4, 8, 24, 0.62), 0 0 0 3px rgba(125,183,255,0.32);
+      box-shadow: 0 0 0 3px rgba(125,183,255,0.32);
       background: rgba(255,255,255,0.03);
       pointer-events: none;
     }
@@ -1025,6 +1025,7 @@
       kind: String(qp.get("kind") || "").trim(),
       plan_id: String(qp.get("plan_id") || "").trim(),
       source: String(qp.get("source") || "").trim(),
+      tutorial: String(qp.get("tutorial") || "").trim(),
     };
   }
 
@@ -1549,8 +1550,17 @@
     if (!step || !g.rect || !g.card || !g.arrow) return "";
     const total = g.steps.length;
     const isLast = g.step >= total - 1;
+    const topH = Math.max(0, g.rect.top);
+    const leftW = Math.max(0, g.rect.left);
+    const rightX = g.rect.left + g.rect.width;
+    const rightW = Math.max(0, window.innerWidth - rightX);
+    const bottomY = g.rect.top + g.rect.height;
+    const bottomH = Math.max(0, window.innerHeight - bottomY);
     return `<div class="coach-overlay" data-guide-overlay>
-      <div class="coach-dim"></div>
+      <div class="coach-dim-part" style="top:0;left:0;width:100%;height:${topH}px;"></div>
+      <div class="coach-dim-part" style="top:${g.rect.top}px;left:0;width:${leftW}px;height:${g.rect.height}px;"></div>
+      <div class="coach-dim-part" style="top:${g.rect.top}px;left:${rightX}px;width:${rightW}px;height:${g.rect.height}px;"></div>
+      <div class="coach-dim-part" style="top:${bottomY}px;left:0;width:100%;height:${bottomH}px;"></div>
       <div class="coach-highlight" style="top:${g.rect.top}px;left:${g.rect.left}px;width:${g.rect.width}px;height:${g.rect.height}px;"></div>
       <div class="coach-arrow" style="left:${g.arrow.left}px;top:${g.arrow.top}px;width:${g.arrow.width}px;transform:rotate(${g.arrow.angle}deg);"></div>
       <section class="coach-card" style="top:${g.card.top}px;left:${g.card.left}px;width:${g.card.width}px;">
@@ -1627,6 +1637,9 @@
       if (!me.webapp_access) {
         renderPaywall();
       } else {
+        if (sp.tutorial === "main") {
+          localStorage.removeItem(guideStorageKey(GUIDE_KEYS.main));
+        }
         try { await loadAchievements(); } catch {}
         renderMainApp();
         maybeStartGuide(GUIDE_KEYS.main);

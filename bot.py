@@ -9,7 +9,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, Update, WebAppInfo
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, MessageHandler, PreCheckoutQueryHandler, ContextTypes, filters
 )
@@ -2103,6 +2103,16 @@ def build_webapp_payment_url(base_url: str, plan_id: str) -> str:
     clean = str(base_url or "").rstrip("/")
     return f"{clean}/?screen=payment&kind=subscription&plan_id={plan_id}"
 
+
+def build_webapp_entry_url(base_url: str, source: str = "bot", tutorial: str = "") -> str:
+    clean = str(base_url or "").rstrip("/")
+    if not clean:
+        return ""
+    params = [f"source={source}"]
+    if tutorial:
+        params.append(f"tutorial={tutorial}")
+    return f"{clean}/?{'&'.join(params)}"
+
 async def _send_subscription_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE, plan_id: str, method: str) -> None:
     s = context.application.bot_data["settings"]
     chat_id = update.effective_chat.id if update.effective_chat else (update.effective_user.id if update.effective_user else 0)
@@ -2691,12 +2701,17 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 s_cfg = context.application.bot_data["settings"]
                 rows = []
                 if s_cfg.WEBAPP_URL:
-                    rows.append([InlineKeyboardButton("🔓 Открыть WebApp", url=s_cfg.WEBAPP_URL)])
+                    webapp_url = build_webapp_entry_url(
+                        s_cfg.WEBAPP_URL,
+                        source="starter_activation",
+                        tutorial="main",
+                    )
+                    rows.append([InlineKeyboardButton("🔓 Открыть WebApp", web_app=WebAppInfo(url=webapp_url))])
                 rows.append([InlineKeyboardButton("🏠 В меню", callback_data="menu:home")])
                 await show(
                     update,
                     context,
-                    f"Starter доступ активирован до <b>{until_iso}</b>\n\n"
+                    f"Премиум доступ активирован до <b>{until_iso}</b>\n\n"
                     "<i>Нутриентный помощник доступен только на платном Premium.</i>",
                     InlineKeyboardMarkup(rows),
                     route="starter:active",

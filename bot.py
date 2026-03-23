@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -164,6 +165,87 @@ def _slugify_ascii(value: str) -> str:
     src = re.sub(r"[^a-z0-9_]", "", src)
     src = re.sub(r"_+", "_", src)
     return src.strip("_")
+
+
+class AdminSeedPayloadError(ValueError):
+    def __init__(self, message: str, *, incomplete: bool = False):
+        super().__init__(message)
+        self.incomplete = incomplete
+
+
+def _parse_admin_seed_payload(raw_text: str) -> list[dict]:
+    text = (raw_text or "").strip()
+    if not text:
+        raise AdminSeedPayloadError("Пустое сообщение.", incomplete=False)
+
+    if text[:1] == text[-1:] and text[:1] in {'"', "'"}:
+        try:
+            unwrapped = json.loads(text)
+            if isinstance(unwrapped, str):
+                text = unwrapped.strip()
+        except json.JSONDecodeError:
+            pass
+
+    decoder = json.JSONDecoder()
+    pos = 0
+    items: list[dict] = []
+    while pos < len(text):
+        while pos < len(text) and text[pos].isspace():
+            pos += 1
+        if pos >= len(text):
+            break
+        try:
+            obj, end_pos = decoder.raw_decode(text, pos)
+        except json.JSONDecodeError as exc:
+            msg = str(exc.msg or "").lower()
+            near_end = exc.pos >= max(0, len(text) - 4)
+            looks_incomplete = (
+                near_end
+                or "unterminated" in msg
+                or "expecting value" in msg
+                or "expecting ',' delimiter" in msg
+                or "expecting property name enclosed in double quotes" in msg
+            )
+            raise AdminSeedPayloadError(
+                f"Не удалось прочитать JSON рядом с символом {exc.pos + 1}: {exc.msg}",
+                incomplete=looks_incomplete,
+            ) from exc
+        if not isinstance(obj, dict):
+            raise AdminSeedPayloadError("Каждый JSON-объект должен быть словарём.", incomplete=False)
+        slug = str(obj.get("slug") or "").strip()
+        if not slug:
+            raise AdminSeedPayloadError("У одного из объектов отсутствует поле slug.", incomplete=False)
+        items.append(obj)
+        pos = end_pos
+
+    if not items:
+        raise AdminSeedPayloadError("Не найдено ни одного JSON-объекта.", incomplete=False)
+    return items
+
+
+async def _admin_import_seed_objects(items: list[dict]) -> list[str]:
+    fd, path = tempfile.mkstemp(prefix="admin_seed_patch_", suffix=".jsonl")
+    temp_path = Path(path)
+    os.close(fd)
+    try:
+        payload = "\n".join(
+            json.dumps(item, ensure_ascii=False, separators=(",", ":"))
+            for item in items
+        ) + "\n"
+        temp_path.write_text(payload, encoding="utf-8")
+        await seed_import._import(
+            supp_path=None,
+            inter_path=None,
+            rich_supp_path=str(temp_path),
+            curated_stacks_path=None,
+            curated_items_path=None,
+        )
+        return [str(item.get("slug") or "").strip() for item in items]
+    finally:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 CHECKIN_VOICE_MAX_SECONDS = 90
 CHECKIN_VOICE_MAX_BYTES = 10 * 1024 * 1024
@@ -3102,11 +3184,31 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
 
         if data == "admin:home":
+            context.user_data.pop("admin_seed_buffer", None)
             await _show_admin_home(update, context)
             return
 
         if data == "admin:bulk_stub":
             await show(update, context, "Bulk-операции доступны в WebApp разделе Admin.", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="admin:home")]]), route="admin:home")
+            return
+
+        if data == "admin:seed_patch":
+            if not await _require_admin(update, context, "content_bulk"):
+                return
+            context.user_data["admin_seed_buffer"] = ""
+            await show(
+                update,
+                context,
+                (
+                    "➕ <b>Дополнить базу</b>\n"
+                    "Отправь одним сообщением JSON-объект (или несколько подряд), как в rich seed.\n"
+                    "Обязательное поле: <code>slug</code>.\n\n"
+                    "После отправки бот запустит импорт и сразу запишет данные в БД."
+                ),
+                InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="admin:home")]]),
+                route="admin:seed_patch_wait",
+                payload={"mode": "rich_patch", "buffer": ""},
+            )
             return
 
         if data == "admin:users_stub":
@@ -3217,6 +3319,8 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if data.startswith("admin:supp"):
                 required_perm = "content_edit"
             elif data.startswith("admin:stack") or data == "admin:stacks":
+                required_perm = "content_bulk"
+            elif data.startswith("admin:seed_patch"):
                 required_perm = "content_bulk"
             elif data.startswith("admin:roles"):
                 required_perm = "roles_manage"
@@ -5821,6 +5925,85 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if not await _require_admin(update, context, "content_edit"):
                 return
             await _show_admin_supp_results(update, context, conn, txt, offset=0)
+            try:
+                await update.message.delete()
+            except Exception:
+                pass
+            return
+
+        if ui_screen == "admin:seed_patch_wait":
+            if not await _require_admin(update, context, "content_bulk"):
+                return
+            try:
+                payload_data = json.loads(ui_payload) if ui_payload else {}
+            except json.JSONDecodeError:
+                payload_data = {}
+            if not isinstance(payload_data, dict):
+                payload_data = {}
+            memory_buffer = str(context.user_data.get("admin_seed_buffer") or "").strip()
+            payload_buffer = str(payload_data.get("buffer") or "").strip()
+            buffered = memory_buffer if len(memory_buffer) >= len(payload_buffer) else payload_buffer
+            merged_payload = f"{buffered}\n{txt}".strip() if buffered else txt
+            try:
+                items = _parse_admin_seed_payload(merged_payload)
+            except AdminSeedPayloadError as exc:
+                if exc.incomplete:
+                    context.user_data["admin_seed_buffer"] = merged_payload
+                    await show(
+                        update,
+                        context,
+                        (
+                            "Принял часть данных. Похоже, JSON ещё не завершён.\n"
+                            "Отправь следующую часть следующим сообщением — я склею и продолжу импорт."
+                        ),
+                        InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="admin:home")]]),
+                        route="admin:seed_patch_wait",
+                        payload={"mode": "rich_patch", "buffer": merged_payload},
+                    )
+                    return
+                context.user_data.pop("admin_seed_buffer", None)
+                await show(
+                    update,
+                    context,
+                    (
+                        "Не удалось разобрать payload.\n"
+                        f"Ошибка: <code>{html.escape(str(exc))}</code>\n\n"
+                        "Проверь JSON и отправь снова."
+                    ),
+                    InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="admin:home")]]),
+                    route="admin:seed_patch_wait",
+                    payload={"mode": "rich_patch", "buffer": ""},
+                )
+                return
+            try:
+                imported_slugs = await _admin_import_seed_objects(items)
+            except Exception as exc:
+                context.user_data.pop("admin_seed_buffer", None)
+                await show(
+                    update,
+                    context,
+                    (
+                        "Импорт завершился с ошибкой.\n"
+                        f"<code>{html.escape(str(exc))}</code>"
+                    ),
+                    InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="admin:home")]]),
+                    route="admin:seed_patch_wait",
+                    payload={"mode": "rich_patch", "buffer": ""},
+                )
+                return
+            context.user_data.pop("admin_seed_buffer", None)
+            preview = ", ".join(imported_slugs[:5])
+            more = f" и ещё {len(imported_slugs) - 5}" if len(imported_slugs) > 5 else ""
+            await show(
+                update,
+                context,
+                (
+                    f"✅ Импортировано объектов: <b>{len(imported_slugs)}</b>\n"
+                    f"Slug: <code>{html.escape(preview)}</code>{more}"
+                ),
+                InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ В админ-меню", callback_data="admin:home")]]),
+                route="admin:home",
+            )
             try:
                 await update.message.delete()
             except Exception:

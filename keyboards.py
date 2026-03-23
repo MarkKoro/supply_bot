@@ -485,6 +485,7 @@ def admin_hub_kb(*, perms: dict[str, bool] | None = None) -> InlineKeyboardMarku
         rows.append([InlineKeyboardButton("🔎 Контент: найти БАД", callback_data="admin:supp_search")])
     if perms.get("content_bulk", False):
         rows.append([InlineKeyboardButton("📦 Bulk операции", callback_data="admin:bulk_stub")])
+        rows.append([InlineKeyboardButton("➕ Дополнить базу", callback_data="admin:seed_patch")])
     if perms.get("users_view", False) or perms.get("users_ban", False):
         rows.append([InlineKeyboardButton("👤 Пользователи", callback_data="admin:users_stub")])
     if perms.get("payments_view", False):

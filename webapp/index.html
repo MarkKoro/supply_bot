@@ -2064,6 +2064,72 @@
 
   let lastRenderedTabKey = "";
   let lastRenderedTabHtml = "";
+  function escSelector(value) {
+    const raw = String(value ?? "");
+    if (window.CSS?.escape) return window.CSS.escape(raw);
+    return raw.replace(/["\\]/g, "\\$&");
+  }
+
+  function getFocusableSnapshot(root) {
+    const active = document.activeElement;
+    if (!active || !root?.contains(active)) return null;
+    const tag = String(active.tagName || "").toLowerCase();
+    if (!["input", "textarea", "select"].includes(tag) && !active.isContentEditable) return null;
+
+    let selector = "";
+    if (active.id) {
+      selector = `#${escSelector(active.id)}`;
+    } else {
+      const preferredDataAttrs = [
+        "data-profile-field",
+        "data-profile-lines",
+        "data-assistant-field",
+        "data-assistant-lab",
+        "data-lab-field",
+        "data-admin-field",
+        "data-idx",
+        "name"
+      ];
+      const parts = [];
+      preferredDataAttrs.forEach((attr) => {
+        if (active.hasAttribute(attr)) {
+          parts.push(`[${attr}="${escSelector(active.getAttribute(attr) || "")}"]`);
+        }
+      });
+      if (!parts.length) {
+        for (const attr of active.attributes) {
+          if (String(attr.name || "").startsWith("data-")) {
+            parts.push(`[${attr.name}="${escSelector(attr.value || "")}"]`);
+            break;
+          }
+        }
+      }
+      if (parts.length) selector = `${tag}${parts.join("")}`;
+    }
+    if (!selector) return null;
+
+    const snapshot = { selector, tag };
+    if (typeof active.selectionStart === "number" && typeof active.selectionEnd === "number") {
+      snapshot.selectionStart = active.selectionStart;
+      snapshot.selectionEnd = active.selectionEnd;
+    }
+    return snapshot;
+  }
+
+  function restoreFocusableSnapshot(root, snapshot) {
+    if (!root || !snapshot?.selector) return;
+    const candidate = root.querySelector(snapshot.selector);
+    if (!candidate) return;
+    try {
+      candidate.focus({ preventScroll: true });
+    } catch {
+      candidate.focus();
+    }
+    if (typeof snapshot.selectionStart === "number" && typeof snapshot.selectionEnd === "number" && typeof candidate.setSelectionRange === "function") {
+      candidate.setSelectionRange(snapshot.selectionStart, snapshot.selectionEnd);
+    }
+  }
+
   function renderActiveTab() {
     const target = document.getElementById("tabContent");
     if (!target) return;
@@ -2099,9 +2165,11 @@
     }
 
     if (lastRenderedTabKey === tabKey && lastRenderedTabHtml === nextHtml) return;
+    const focusSnapshot = getFocusableSnapshot(target);
     target.innerHTML = nextHtml;
     lastRenderedTabKey = tabKey;
     lastRenderedTabHtml = nextHtml;
+    restoreFocusableSnapshot(target, focusSnapshot);
     if (typeof binder === "function") binder();
     requestAnimationFrame(() => {
       if (state.activeTab === "survey") maybeStartGuide(GUIDE_KEYS.survey);

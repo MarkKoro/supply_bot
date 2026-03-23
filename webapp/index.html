@@ -727,6 +727,59 @@
       box-shadow: 0 24px 38px rgba(0,0,0,.45), 0 1px 0 rgba(255,255,255,.22) inset;
     }
 
+    .coach-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 95;
+      pointer-events: none;
+    }
+    .coach-dim {
+      position: absolute;
+      inset: 0;
+      background: rgba(4, 8, 24, 0.7);
+      backdrop-filter: blur(8px);
+    }
+    .coach-highlight {
+      position: absolute;
+      border-radius: 14px;
+      border: 2px solid rgba(190, 221, 255, 0.9);
+      box-shadow: 0 0 0 200vmax rgba(4, 8, 24, 0.62), 0 0 0 3px rgba(125,183,255,0.32);
+      background: rgba(255,255,255,0.03);
+      pointer-events: none;
+    }
+    .coach-arrow {
+      position: absolute;
+      height: 2px;
+      background: linear-gradient(90deg, rgba(125,183,255,0.92), rgba(187,220,255,0.72));
+      transform-origin: left center;
+      pointer-events: none;
+    }
+    .coach-arrow::after {
+      content: "";
+      position: absolute;
+      right: -10px;
+      top: -4px;
+      width: 0;
+      height: 0;
+      border-top: 5px solid transparent;
+      border-bottom: 5px solid transparent;
+      border-left: 10px solid rgba(187,220,255,0.9);
+    }
+    .coach-card {
+      position: absolute;
+      width: min(360px, calc(100vw - 24px));
+      border-radius: 16px;
+      padding: 12px;
+      border: 1px solid rgba(255,255,255,.24);
+      background: linear-gradient(180deg, rgba(28,44,92,.95), rgba(15,24,46,.96));
+      box-shadow: 0 18px 32px rgba(0,0,0,.45);
+      pointer-events: auto;
+    }
+    .coach-card h4 { margin: 0 0 6px; font-size: 15px; }
+    .coach-card .muted { line-height: 1.35; }
+    .coach-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 10px; }
+    .coach-step { font-size: 12px; color: var(--muted); }
+
   </style>
 </head>
 <body>
@@ -820,7 +873,8 @@
       pendingOverwriteRuns: [],
       pendingComputePayload: null
     },
-    profileUi: { editOpen: false, manualOpen: false, uploadOpen: false, reviewOpen: false, selectedReportId: null, uploading: false, savingManual: false, savingReview: false, activeModule: "assistant" },
+    profileUi: { editOpen: false, manualOpen: false, uploadOpen: false, reviewOpen: false, selectedReportId: null, uploading: false, savingManual: false, savingReview: false, activeModule: "organs" },
+    guide: { active: null, step: 0, steps: [], rect: null, card: null, arrow: null },
     survey: {
       step: 0,
       loading: false,
@@ -910,6 +964,26 @@
     { id: "profile", title: "Профиль", icon: "👤" },
     { id: "settings", title: "Настройки", icon: "⚙️" }
   ];
+  const GUIDE_KEYS = { main: 'main_tabs', survey: 'survey_tab', profile: 'profile_tab' };
+  const GUIDE_TEXT = {
+    main_tabs: [
+      { selector: '.tab[data-tab="today"]', title: 'Сегодня', text: 'Здесь вы отмечаете приём БАДов на сегодня и видите текущий дневной план.' },
+      { selector: '.tab[data-tab="catalog"]', title: 'Каталог', text: 'Здесь вы выбираете добавки, сравниваете их и добавляете в свой стек.' },
+      { selector: '.tab[data-tab="survey"]', title: 'Опрос', text: 'Здесь можно пройти e-опрос, чтобы получить подсказки на остаток дня или заранее на завтра.' },
+      { selector: '.tab[data-tab="profile"]', title: 'Профиль', text: 'Здесь находятся карта органов, персональные модули и настройки данных для точных рекомендаций.' },
+      { selector: '.tab[data-tab="settings"]', title: 'Настройки', text: 'Здесь вы управляете напоминаниями, персонализацией и системными параметрами приложения.' }
+    ],
+    survey_tab: [
+      { selector: '[data-set-target="today"]', title: 'Сегодня / Завтра', text: 'Переключайте период: подсказка на остаток сегодняшнего дня или подготовка плана на завтра.' },
+      { selector: '.survey-option, .survey-goals, #surveyNote', title: 'Вопросы опроса', text: 'Заполняйте ответы, чтобы помощник лучше понял ваше состояние, цели и ситуацию на день.' },
+      { selector: '#surveyNext', title: 'Далее', text: 'Кнопка переводит вас к следующему шагу и в конце запускает расчёт рекомендаций.' }
+    ],
+    profile_tab: [
+      { selector: '[data-profile-module="organs"]', title: 'Карта органов', text: 'Здесь можно быстро увидеть, какие системы организма вы поддерживаете добавками.' },
+      { selector: '[data-profile-module="assistant"]', title: 'Внутренний помощник', text: 'Заполните данные профиля и анализов, чтобы получать более персональные и точные рекомендации.' },
+      { selector: '[data-profile-module="cosmetics"]', title: 'Косметика', text: 'В этом разделе вы меняете внешний вид интерфейса: темы, иконки вкладок и бейдж.' }
+    ]
+  };
   let catalogObserver = null;
   state.organSvgs = state.organSvgs || {};
 
@@ -1400,6 +1474,129 @@
     });
   }
 
+  function guideStorageKey(name) {
+    const uid = state.userId || tg?.initDataUnsafe?.user?.id || "anon";
+    return `supply:guide:${name}:${uid}`;
+  }
+
+  function hasSeenGuide(name) {
+    return localStorage.getItem(guideStorageKey(name)) === "1";
+  }
+
+  function markGuideSeen(name) {
+    localStorage.setItem(guideStorageKey(name), "1");
+  }
+
+  function findGuideTarget(step) {
+    const selectors = String(step.selector || "").split(',').map((x) => x.trim()).filter(Boolean);
+    for (const selector of selectors) {
+      const el = document.querySelector(selector);
+      if (el) return el;
+    }
+    return null;
+  }
+
+  function clamp(val, min, max) {
+    return Math.min(max, Math.max(min, val));
+  }
+
+  function updateGuideLayout() {
+    const g = state.guide;
+    if (!g.active || !g.steps?.length) return;
+    const step = g.steps[g.step];
+    if (!step) return;
+    const target = findGuideTarget(step);
+    if (!target) return;
+    const r = target.getBoundingClientRect();
+    const pad = 8;
+    const rect = {
+      top: clamp(r.top - pad, 8, window.innerHeight - 52),
+      left: clamp(r.left - pad, 8, window.innerWidth - 52),
+      width: clamp(r.width + pad * 2, 44, window.innerWidth - 16),
+      height: clamp(r.height + pad * 2, 36, window.innerHeight - 16)
+    };
+    const cardW = Math.min(360, window.innerWidth - 24);
+    const preferBottom = rect.top < window.innerHeight * 0.56;
+    const cardTop = preferBottom
+      ? clamp(rect.top + rect.height + 18, 8, window.innerHeight - 190)
+      : clamp(rect.top - 158, 8, window.innerHeight - 190);
+    const cardLeft = clamp(rect.left + rect.width / 2 - cardW / 2, 8, window.innerWidth - cardW - 8);
+    const fromX = rect.left + rect.width / 2;
+    const fromY = preferBottom ? rect.top + rect.height : rect.top;
+    const toX = cardLeft + cardW / 2;
+    const toY = preferBottom ? cardTop : cardTop + 120;
+    const dx = toX - fromX;
+    const dy = toY - fromY;
+    g.rect = rect;
+    g.card = { top: cardTop, left: cardLeft, width: cardW };
+    g.arrow = { left: fromX, top: fromY, width: Math.hypot(dx, dy), angle: Math.atan2(dy, dx) * 180 / Math.PI };
+  }
+
+  function renderGuideOverlay() {
+    const g = state.guide;
+    if (!g.active || !g.steps?.length) return "";
+    while (g.step < g.steps.length && !findGuideTarget(g.steps[g.step])) g.step += 1;
+    if (g.step >= g.steps.length) {
+      state.guide = { active: null, step: 0, steps: [], rect: null, card: null, arrow: null };
+      return "";
+    }
+    updateGuideLayout();
+    const step = g.steps[g.step];
+    if (!step || !g.rect || !g.card || !g.arrow) return "";
+    const total = g.steps.length;
+    const isLast = g.step >= total - 1;
+    return `<div class="coach-overlay" data-guide-overlay>
+      <div class="coach-dim"></div>
+      <div class="coach-highlight" style="top:${g.rect.top}px;left:${g.rect.left}px;width:${g.rect.width}px;height:${g.rect.height}px;"></div>
+      <div class="coach-arrow" style="left:${g.arrow.left}px;top:${g.arrow.top}px;width:${g.arrow.width}px;transform:rotate(${g.arrow.angle}deg);"></div>
+      <section class="coach-card" style="top:${g.card.top}px;left:${g.card.left}px;width:${g.card.width}px;">
+        <h4>${esc(step.title || "Подсказка")}</h4>
+        <div class="muted">${esc(step.text || "")}</div>
+        <div class="coach-actions">
+          <button class="btn secondary" data-guide-skip>Пропустить</button>
+          <span class="coach-step">${g.step + 1}/${total}</span>
+          <button class="btn" data-guide-next>${isLast ? 'Завершить' : 'Дальше'}</button>
+        </div>
+      </section>
+    </div>`;
+  }
+
+  function closeGuide() {
+    if (!state.guide.active) return;
+    state.guide = { active: null, step: 0, steps: [], rect: null, card: null, arrow: null };
+    renderMainApp();
+  }
+
+  function startGuide(name, steps) {
+    if (!Array.isArray(steps) || !steps.length) return;
+    if (state.guide.active) return;
+    markGuideSeen(name);
+    state.guide = { active: name, step: 0, steps, rect: null, card: null, arrow: null };
+    renderMainApp();
+  }
+
+  function maybeStartGuide(name) {
+    if (state.guide.active || hasSeenGuide(name)) return;
+    const steps = GUIDE_TEXT[name] || [];
+    if (!steps.length) return;
+    if (!steps.some((step) => findGuideTarget(step))) return;
+    startGuide(name, steps);
+  }
+
+  function bindGuideEvents() {
+    document.querySelector('[data-guide-skip]')?.addEventListener('click', () => { haptic(); closeGuide(); });
+    document.querySelector('[data-guide-next]')?.addEventListener('click', () => {
+      haptic();
+      const total = state.guide.steps.length;
+      if (state.guide.step >= total - 1) {
+        closeGuide();
+        return;
+      }
+      state.guide.step += 1;
+      renderMainApp();
+    });
+  }
+
 
   async function boot() {
     try {
@@ -1428,6 +1625,7 @@
       } else {
         try { await loadAchievements(); } catch {}
         renderMainApp();
+        maybeStartGuide(GUIDE_KEYS.main);
         await loadToday();
         startAutoSync();
         await loadSurveyForTarget();
@@ -1751,6 +1949,7 @@
       ${renderTabs(false)}
       ${renderUnlockToastCard()}
       ${renderPaymentSuccessModal()}
+      ${renderGuideOverlay()}
     `;
 
     lastRenderedTabKey = "";
@@ -1758,6 +1957,7 @@
     bindMainEvents();
     bindUnlockToastEvents();
     bindPaymentSuccessEvents();
+    bindGuideEvents();
     renderActiveTab();
   }
 
@@ -1806,12 +2006,14 @@
         }
         if (tab === "profile") {
           await loadProfileShell(true);
+          maybeStartGuide(GUIDE_KEYS.profile);
         }
         if (tab === "admin" && !state.admin.items.length) {
           await loadAdminSupplements(true);
         }
         if (tab === "survey") {
           await loadSurveyForTarget();
+          maybeStartGuide(GUIDE_KEYS.survey);
         }
         if (tab === "settings") {
           try {
@@ -3177,12 +3379,10 @@ function adminField(label, field, value, kind='input') {
     const hasPaidPremium = Boolean(state.me?.premium);
     const modules = [
       { id: 'organs', title: '🫀 Карта органов', hint: 'Как добавки влияют на системы' },
+      ...(hasPaidPremium ? [{ id: 'assistant', title: '🧪 Помощник', hint: 'Персональные рекомендации (обновляется)' }] : []),
       { id: 'achievements', title: '🏆 Достижения', hint: 'Ваш прогресс и открытия' },
       { id: 'cosmetics', title: '🎨 Косметика', hint: 'Тема, вкладки и бейдж' }
     ];
-    if (hasPaidPremium) {
-      modules.unshift({ id: 'assistant', title: '🧪 Помощник', hint: 'Персональные рекомендации (обновляется)' });
-    }
     const firstModuleId = modules[0]?.id || 'organs';
     const active = String(state.profileUi.activeModule || firstModuleId);
     return `<section class="card fade"><div class="profile-module-grid">${modules.map((m)=>`<button class="btn profile-module-btn ${active===m.id?'active':''}" data-profile-module="${m.id}"><div><strong>${m.title}</strong></div><div class="muted">${m.hint}</div></button>`).join('')}</div></section>`;
@@ -3383,7 +3583,7 @@ function adminField(label, field, value, kind='input') {
     const levelTitle = ach.level_title_ru || 'Новый уровень';
 
     const hasPaidPremium = Boolean(state.me?.premium);
-    const fallbackModule = hasPaidPremium ? 'assistant' : 'organs';
+    const fallbackModule = 'organs';
     const activeModule = String(state.profileUi.activeModule || fallbackModule);
     let moduleHtml = '';
     if (activeModule === 'organs') moduleHtml = `<section class="card fade">${renderBodyMap()}</section>`;

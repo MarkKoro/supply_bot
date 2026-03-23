@@ -174,11 +174,18 @@ class OpenAITranscribeConfig:
     api_key: str
     model: str
 
-def _build_openai_client(cfg: OpenAIConfig | OpenAITranscribeConfig, timeout_s: float | None = None):
+def _build_openai_client(
+    cfg: OpenAIConfig | OpenAITranscribeConfig,
+    timeout_s: float | None = None,
+    max_retries: int | None = None,
+):
     from openai import OpenAI
-    if timeout_s is None:
-        return OpenAI(api_key=cfg.api_key)
-    return OpenAI(api_key=cfg.api_key, timeout=timeout_s)
+    params: dict[str, object] = {"api_key": cfg.api_key}
+    if timeout_s is not None:
+        params["timeout"] = timeout_s
+    if max_retries is not None:
+        params["max_retries"] = max_retries
+    return OpenAI(**params)
 
 
 def _sync_call(
@@ -188,9 +195,10 @@ def _sync_call(
     input_text: str,
     max_output_tokens: int | None = None,
     timeout_s: float | None = None,
+    max_retries: int | None = None,
     text_format: dict | None = None,
 ) -> str:
-    client = _build_openai_client(cfg, timeout_s=timeout_s)
+    client = _build_openai_client(cfg, timeout_s=timeout_s, max_retries=max_retries)
     params = {
         "model": cfg.model,
         "instructions": instructions,
@@ -362,6 +370,7 @@ async def suggest_stack_v1(
                 input_text=prompt,
                 max_output_tokens=800,
                 timeout_s=timeout_s,
+                max_retries=0,
                 text_format=text_format,
             )
         except (APITimeoutError, APIConnectionError) as exc:

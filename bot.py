@@ -2718,6 +2718,9 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 route="starter:about",
             )
             return
+        if data == "starter:offer":
+            await _show_starter_trial_offer(update, context)
+            return
         if data == "onboard:restart_confirm":
             kb = InlineKeyboardMarkup(
                 [

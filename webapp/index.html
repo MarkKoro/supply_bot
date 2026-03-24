@@ -962,7 +962,7 @@
       duplicatesLoading: false,
       duplicateResolveBusy: ""
     },
-    settingsUi: { loadingSchedule: false, savingNotifications: false, slotBusy: {}, sectionsOpen: { premium: false, schedule: false, stats: false }, slotEdit: { open: false, slotId: "", time: "" } },
+    settingsUi: { loadingSchedule: false, savingNotifications: false, slotBusy: {}, sectionsOpen: { general: false, premium: false, schedule: false, stats: false }, slotEdit: { open: false, slotId: "", time: "" } },
     settingsData: { tz_name: 'UTC', reminders_enabled: true, loading: false, offer_url: '', privacy_url: '', offer_version: '', privacy_version: '' },
     settingsSchedule: { slots: [] },
     payment: { pending: null, checking: false, lastStatus: '', modalOpen: false, success: false, successInfo: null, receiptEmail: null, savingEmail: false, emailInput: '', emailError: '', savingReceiptPref: false }
@@ -4881,15 +4881,19 @@ function adminField(label, field, value, kind='input') {
     return `
       <h2 class="settings-heading">Настройки</h2>
       <section class="card fade">
-        <div class="row"><strong>ℹ️ Общая информация</strong></div>
-        <div class="muted" style="margin-top:6px"><b>Имя:</b> ${esc(String(me.first_name || "Пользователь"))}</div>
-        <div class="muted" style="margin-top:4px"><b>ID:</b> ${esc(String(me.id || state.userId || "—"))}</div>
-        <div class="muted" style="margin-top:4px"><b>Часовой пояс:</b> ${esc(state.settingsData?.tz_name || "UTC")}</div>
-        <div class="muted" style="margin-top:4px"><b>Доступ:</b> ${esc(accessLabel)}</div>
-        <div class="muted" style="margin-top:4px">${esc(accessHint)}</div>
-        <div class="muted" style="margin-top:4px">После подписки: постоянный доступ к WebApp, AI check-in и удобный ежедневный трекинг.</div>
-        <div class="muted" style="margin-top:6px">Документы: ${state.settingsData?.offer_url ? `<a href="${esc(state.settingsData.offer_url)}" target="_blank" rel="noopener noreferrer">Оферта</a>${state.settingsData?.offer_version ? ` (v${esc(state.settingsData.offer_version)})` : ''}` : 'Оферта недоступна'} · ${state.settingsData?.privacy_url ? `<a href="${esc(state.settingsData.privacy_url)}" target="_blank" rel="noopener noreferrer">Политика конфиденциальности</a>${state.settingsData?.privacy_version ? ` (v${esc(state.settingsData.privacy_version)})` : ''}` : 'Политика конфиденциальности недоступна'}</div>
         <div class="settings-sections">
+          <div class="settings-section">
+            <details ${sectionsOpen.general ? 'open' : ''} data-settings-section="general">
+              <summary><span>ℹ️ Общая информация</span><span class="ios-arrow">▾</span></summary>
+              <div class="ios-content">
+                <div class="muted" style="margin-top:8px"><b>Часовой пояс:</b> ${esc(state.settingsData?.tz_name || "UTC")}</div>
+                <div class="muted" style="margin-top:4px"><b>Доступ:</b> ${esc(accessLabel)}</div>
+                <div class="muted" style="margin-top:4px">${esc(accessHint)}</div>
+                <div class="muted" style="margin-top:4px">После подписки: постоянный доступ к WebApp, AI check-in и удобный ежедневный трекинг.</div>
+                <div class="muted" style="margin-top:6px">Документы: ${state.settingsData?.offer_url ? `<a href="${esc(state.settingsData.offer_url)}" target="_blank" rel="noopener noreferrer">Оферта</a>${state.settingsData?.offer_version ? ` (v${esc(state.settingsData.offer_version)})` : ''}` : 'Оферта недоступна'} · ${state.settingsData?.privacy_url ? `<a href="${esc(state.settingsData.privacy_url)}" target="_blank" rel="noopener noreferrer">Политика конфиденциальности</a>${state.settingsData?.privacy_version ? ` (v${esc(state.settingsData.privacy_version)})` : ''}` : 'Политика конфиденциальности недоступна'}</div>
+              </div>
+            </details>
+          </div>
           <div class="settings-section">
             <details ${sectionsOpen.premium ? 'open' : ''} data-settings-section="premium">
               <summary><span>💳 Подписка</span><span class="ios-arrow">▾</span></summary>
@@ -5586,6 +5590,11 @@ function adminField(label, field, value, kind='input') {
       const sid = Number(item.supplement_id);
       const customTime = normalizeHHMM(state.suppHub.customTime);
       const time = state.suppHub.timeMode === 'custom' ? (customTime || null) : null;
+      const prevSchedule = (state.suppHub.schedules || []).find((x) => Number(x.supplement_id) === sid);
+      const prevSlotId = String(prevSchedule?.slot_id || 'morning');
+      const prevCustomTime = normalizeHHMM(prevSchedule?.time_hhmm || '') || null;
+      const nextSlotId = String(state.suppHub.slotId || 'morning');
+      const scheduleChanged = prevSlotId !== nextSlotId || prevCustomTime !== time;
       if (state.suppHub.timeMode === 'custom' && !time) {
         showToast('Введите время HH:MM');
         return false;
@@ -5593,8 +5602,12 @@ function adminField(label, field, value, kind='input') {
       state.suppHub.saving = true;
       try {
         await api('./api/my_supplements/update', { method: 'POST', body: { supplement_id: sid, dose_text: state.suppHub.doseText || '', note_text: state.suppHub.noteText || '' } });
-        await api('./api/schedule/set', { method: 'POST', body: { supplement_id: sid, slot_id: state.suppHub.slotId || 'morning', time_hhmm: time } });
-        await api('./api/reminders/set', { method: 'POST', body: { supplement_id: sid, mode: 'slot', times: [] } });
+        await api('./api/schedule/set', { method: 'POST', body: { supplement_id: sid, slot_id: nextSlotId, time_hhmm: time } });
+        if (scheduleChanged) {
+          await api('./api/reminders/set', { method: 'POST', body: { supplement_id: sid, mode: 'slot', times: [] } });
+        }
+        const restSchedules = (state.suppHub.schedules || []).filter((x) => Number(x.supplement_id) !== sid);
+        state.suppHub.schedules = [...restSchedules, { supplement_id: sid, slot_id: nextSlotId, time_hhmm: time }];
         await Promise.all([loadMySupplements(true), loadToday(true)]);
         if (showSavedToast) showToast('Изменения сохранены');
         return true;

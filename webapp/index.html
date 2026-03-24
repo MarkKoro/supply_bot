@@ -698,6 +698,13 @@
     .survey-help { margin-top:8px; border:1px solid rgba(125,183,255,.35); border-radius:12px; padding:10px; background:rgba(125,183,255,.1); }
     .history-list { display:grid; gap:8px; margin-top:8px; }
     .history-item { border:1px solid rgba(255,255,255,0.14); border-radius:12px; padding:10px; background:rgba(255,255,255,0.05); }
+    .hub-time-mode { margin-top:8px; display:flex; gap:8px; flex-wrap:wrap; }
+    .hub-slot-list { margin-top:8px; display:grid; gap:8px; }
+    .hub-slot-item { width:100%; text-align:left; border-radius:12px; border:1px solid rgba(255,109,129,.45); background: rgba(255,89,119,.12); padding:10px; color:#ffd9df; }
+    .hub-slot-item.active { box-shadow: 0 0 0 1px rgba(255,164,178,.75) inset, 0 0 16px rgba(255,100,130,.25); background: rgba(255,89,119,.22); }
+    .hub-slot-item .muted { color: rgba(255,219,225,.86); }
+    .hub-custom-time { margin-top:8px; display:grid; gap:8px; }
+    .hub-custom-time .input[type="time"] { min-height: 44px; }
     @media (max-width: 560px) { .survey-actions { grid-template-columns: 1fr; } }
 
 
@@ -838,7 +845,7 @@
     unlockToast: { open: false, applying: false, items: [], sparkleTick: 0 },
     mySupplements: { open: false, tab: "active", loading: false, busy: {}, active: [], frozen: [] },
     complexHub: { open: false, loading: false, schedulesLoading: false, slotsLoading: false, itemsLoading: {}, actionBusy: {}, expanded: {}, itemsById: {}, schedules: [], slots: [] },
-    suppHub: { open: false, loading: false, saving: false, item: null, slots: [], slotId: "morning", time: "", timeMode: "slot", customTime: "", doseText: "", noteText: "", remindersMode: "slot", reminderTimes: [], reminderInput: "", historyOpen: false, historyLoading: false, history: null, deleting: false },
+    suppHub: { open: false, loading: false, saving: false, item: null, slots: [], slotId: "morning", time: "", timeMode: "slot", customTime: "", doseText: "", noteText: "", remindersMode: "slot", reminderTimes: [], reminderInput: "", historyOpen: false, historyLoading: false, history: null, deleting: false, scheduleCacheAt: 0, schedules: [] },
     toastTimer: null,
     catalog: {
       q: "", page: 0, items: [], total: 0, loading: false,
@@ -2205,6 +2212,7 @@
     const target = document.getElementById("tabContent");
     if (!target) return;
     const tabKey = String(state.activeTab || "");
+    const prevScrollTop = target.scrollTop;
     let nextHtml = "";
     let binder = null;
 
@@ -2236,11 +2244,13 @@
     }
     renderTopbarActions();
 
-    if (lastRenderedTabKey === tabKey && lastRenderedTabHtml === nextHtml) return;
+    const previousTabKey = lastRenderedTabKey;
+    if (previousTabKey === tabKey && lastRenderedTabHtml === nextHtml) return;
     const focusSnapshot = getFocusableSnapshot(target);
     target.innerHTML = nextHtml;
     lastRenderedTabKey = tabKey;
     lastRenderedTabHtml = nextHtml;
+    target.scrollTop = previousTabKey === tabKey ? prevScrollTop : 0;
     restoreFocusableSnapshot(target, focusSnapshot);
     if (typeof binder === "function") binder();
     requestAnimationFrame(() => {
@@ -2548,7 +2558,7 @@
     const available = sections.filter((s) => String(s.text || '').trim());
     const activeSection = state.catalog.detailSection;
     const sectionButtons = available.map((section) => `
-      <button type="button" class="chip section-tab ${activeSection === section.key ? 'active' : ''}" data-detail-section="${section.key}">${section.title}</button>
+      <button type="button" class="chip section-tab ${activeSection === section.key ? 'active' : ''}" data-detail-section="${section.key}" data-section-title="${esc(section.title)}" data-section-text="${esc(section.text || '')}">${section.title}</button>
     `).join('');
     const openedSection = available.find((s) => s.key === activeSection);
     return `<div class="catalog-modal-overlay" data-detail-close></div>
@@ -2565,7 +2575,7 @@
           <div class="modal-content">
             <div class="modal-summary">${summary || '<p class="muted">Описание скоро появится.</p>'}</div>
             ${available.length ? `<div class="section-tabs">${sectionButtons}</div>` : ''}
-            ${openedSection ? `<div class="section-content">${detailParagraphs(openedSection.text)}</div>` : ''}
+            <div id="catalogSectionContent">${openedSection ? `<div class="section-content">${detailParagraphs(openedSection.text)}</div>` : ''}</div>
             <div class="action-grid">
               <button type="button" class="btn" data-stack-toggle data-id="${item.id}" data-in="${item.in_stack ? '1':'0'}">${item.in_stack ? 'Убрать из стека' : 'Добавить в мой стек'}</button>
               <button type="button" class="btn secondary" data-add-complex data-id="${item.id}">Добавить в комплекс</button>
@@ -2692,7 +2702,15 @@
     appEl.querySelectorAll('[data-detail-section]').forEach((el)=>el.addEventListener('click', ()=>{
       const key = el.dataset.detailSection;
       state.catalog.detailSection = state.catalog.detailSection === key ? null : key;
-      renderActiveTab();
+      appEl.querySelectorAll('[data-detail-section]').forEach((btn) => {
+        btn.classList.toggle('active', btn.dataset.detailSection === state.catalog.detailSection);
+      });
+      const wrap = appEl.querySelector('#catalogSectionContent');
+      if (wrap) {
+        const activeBtn = appEl.querySelector(`[data-detail-section="${state.catalog.detailSection || ''}"]`);
+        const text = activeBtn?.dataset.sectionText || '';
+        wrap.innerHTML = text ? `<div class="section-content">${detailParagraphs(text)}</div>` : '';
+      }
     }));
     appEl.querySelector('[data-add-complex]')?.addEventListener('click', async (e)=>{
       haptic();
@@ -4492,7 +4510,6 @@ function adminField(label, field, value, kind='input') {
     const hub = state.suppHub;
     if (!hub.open) return '';
     const item = hub.item || {};
-    const slotOptions = (hub.slots || []).map((slot) => `<option value="${esc(slot.slot_id || 'morning')}" ${String(slot.slot_id || 'morning') === String(hub.slotId || 'morning') ? 'selected' : ''}>${esc(slot.title_ru || 'Слот')} · ${esc(slot.time_local || '--:--')}</option>`).join('');
     const shownTime = hub.timeMode === 'custom' ? (hub.customTime || '') : (hub.time || '');
     const normTime = normalizeHHMM(shownTime);
     const hasSlotAtTime = !!(hub.slots || []).find((slot) => String(slot.time_local || '') === normTime);
@@ -4514,26 +4531,34 @@ function adminField(label, field, value, kind='input') {
           <div style="margin-top:10px" class="row">
             <strong>Расписание</strong>
           </div>
-          <div style="margin-top:8px">
-            <label class="muted">Вставить в слот</label>
-            <select id="hubSlot" class="select">${slotOptions}</select>
-          </div>
-          <div style="margin-top:8px">
-            <div class="row" style="gap:8px; justify-content:flex-start; margin-bottom:8px;">
+          <div class="hub-time-mode">
+            <label class="muted" style="width:100%">Как выставить время</label>
+            <div class="row" style="gap:8px; justify-content:flex-start;">
               <button class="chip ${hub.timeMode !== 'custom' ? 'green' : ''}" type="button" data-time-mode="slot">Как у слота</button>
               <button class="chip ${hub.timeMode === 'custom' ? 'green' : ''}" type="button" data-time-mode="custom">Своё время</button>
             </div>
-            ${hub.timeMode === 'custom' ? `
-              <label class="muted">Точное время (HH:MM)</label>
-              <input id="hubTime" class="input" value="${esc(shownTime)}" placeholder="08:30" />
-            ` : '<div class="muted">Время и напоминание будут как у выбранного слота.</div>'}
           </div>
-          <div class="row" style="margin-top:8px; justify-content:flex-start; gap:8px; flex-wrap:wrap;">
-            ${hub.timeMode === 'custom' && hub.customTime ? `<button class="btn secondary" type="button" data-clear-custom-time>Очистить своё время</button>` : ''}
-          </div>
+          ${hub.timeMode === 'custom' ? `
+            <div class="hub-custom-time">
+              <label class="muted">Своё время напоминания</label>
+              <input id="hubTime" class="input" type="time" step="60" value="${esc(normalizeHHMM(hub.customTime || hub.time || ''))}" />
+            </div>
+          ` : `
+            <div class="hub-slot-list">
+              <label class="muted">Время слотов</label>
+              ${(hub.slots || []).map((slot) => {
+                const slotId = String(slot.slot_id || 'morning');
+                const active = slotId === String(hub.slotId || 'morning');
+                return `<button type="button" class="hub-slot-item ${active ? 'active' : ''}" data-hub-slot-choice="${esc(slotId)}">
+                  <div><strong>${esc(slot.title_ru || 'Слот')}</strong></div>
+                  <div class="muted">${esc(normalizeHHMM(slot.time_local || '') || '--:--')}</div>
+                </button>`;
+              }).join('') || '<div class="muted">Слоты пока не настроены.</div>'}
+            </div>
+          `}
           ${canCreateSlot ? `<div style="margin-top:8px"><button class="btn secondary" data-schedule-add-slot>Создать отдельный слот на ${esc(normTime)}</button></div>` : ''}
           <div style="margin-top:12px" class="row" >
-            ${hub.timeMode === 'custom' ? `<button class="btn" data-supp-hub-save ${hub.saving ? 'disabled' : ''}>${hub.saving ? 'Сохраняем...' : 'Сохранить'}</button>` : ''}
+            <button class="btn" data-supp-hub-save ${hub.saving ? 'disabled' : ''}>${hub.saving ? 'Сохраняем...' : 'Сохранить'}</button>
             <button class="btn secondary" type="button" data-supp-hub-history>${hub.historyOpen ? 'Скрыть последние приёмы' : 'Мои последние приёмы'}</button>
           </div>
           ${hub.historyOpen ? `<div class="history-list">${hub.historyLoading ? '<div class="muted">Загружаем историю…</div>' : renderSuppHistory(hub.history)}</div>` : ''}
@@ -5044,9 +5069,14 @@ function adminField(label, field, value, kind='input') {
     state.suppHub.deleting = false;
     renderActiveTab();
     try {
-      const scheduleRes = await api('./api/schedule');
+      const cacheAgeMs = Date.now() - Number(state.suppHub.scheduleCacheAt || 0);
+      const scheduleRes = (cacheAgeMs < 30000 && state.suppHub.slots?.length)
+        ? { slots: state.suppHub.slots, schedules: state.suppHub.schedules || [] }
+        : await api('./api/schedule');
       const slots = Array.isArray(scheduleRes.slots) ? scheduleRes.slots : [];
       const schedules = Array.isArray(scheduleRes.schedules) ? scheduleRes.schedules : [];
+      state.suppHub.scheduleCacheAt = Date.now();
+      state.suppHub.schedules = schedules;
       const sch = schedules.find((x) => Number(x.supplement_id) === sid);
       state.suppHub.slots = slots;
       state.suppHub.slotId = sch?.slot_id || 'morning';
@@ -5460,14 +5490,19 @@ function adminField(label, field, value, kind='input') {
 
     document.getElementById('hubDose')?.addEventListener('input', (e) => { state.suppHub.doseText = e.target.value || ''; });
     document.getElementById('hubNote')?.addEventListener('input', (e) => { state.suppHub.noteText = e.target.value || ''; });
-    document.getElementById('hubSlot')?.addEventListener('change', (e) => {
-      state.suppHub.slotId = e.target.value || 'morning';
-      const slot = (state.suppHub.slots || []).find((x) => String(x.slot_id || '') === String(state.suppHub.slotId || ''));
-      const slotTime = normalizeHHMM(slot?.time_local || '');
-      if (state.suppHub.timeMode !== 'custom') {
-        state.suppHub.time = slotTime || '';
-        persistSuppHub();
-      }
+    appEl.querySelectorAll('[data-hub-slot-choice]').forEach((el) => {
+      el.addEventListener('click', async () => {
+        const nextSlotId = String(el.dataset.hubSlotChoice || 'morning');
+        if (String(state.suppHub.slotId || '') === nextSlotId && state.suppHub.timeMode !== 'custom') return;
+        state.suppHub.slotId = nextSlotId;
+        const slot = (state.suppHub.slots || []).find((x) => String(x.slot_id || '') === String(nextSlotId));
+        const slotTime = normalizeHHMM(slot?.time_local || '');
+        if (state.suppHub.timeMode !== 'custom') {
+          state.suppHub.time = slotTime || '';
+          await persistSuppHub();
+        }
+        renderActiveTab();
+      });
     });
 
     appEl.querySelectorAll('[data-time-mode]').forEach((el) => {
@@ -5480,18 +5515,14 @@ function adminField(label, field, value, kind='input') {
           const slot = (state.suppHub.slots || []).find((x) => String(x.slot_id || '') === String(state.suppHub.slotId || ''));
           state.suppHub.time = normalizeHHMM(slot?.time_local || '');
           await persistSuppHub();
+        } else {
+          const slot = (state.suppHub.slots || []).find((x) => String(x.slot_id || '') === String(state.suppHub.slotId || ''));
+          const slotTime = normalizeHHMM(slot?.time_local || '');
+          state.suppHub.customTime = normalizeHHMM(state.suppHub.customTime || state.suppHub.time || slotTime || '');
+          state.suppHub.time = state.suppHub.customTime;
         }
         renderActiveTab();
       });
-    });
-
-    appEl.querySelector('[data-clear-custom-time]')?.addEventListener('click', async () => {
-      state.suppHub.customTime = '';
-      state.suppHub.timeMode = 'slot';
-      const slot = (state.suppHub.slots || []).find((x) => String(x.slot_id || '') === String(state.suppHub.slotId || ''));
-      state.suppHub.time = normalizeHHMM(slot?.time_local || '');
-      await persistSuppHub();
-      renderActiveTab();
     });
 
     appEl.querySelector('[data-supp-hub-history]')?.addEventListener('click', async () => {
@@ -5537,7 +5568,7 @@ function adminField(label, field, value, kind='input') {
       }
     });
     document.getElementById('hubTime')?.addEventListener('input', (e) => {
-      const val = e.target.value || '';
+      const val = normalizeHHMM(e.target.value || '');
       state.suppHub.customTime = val;
       if (state.suppHub.timeMode === 'custom') state.suppHub.time = val;
     });
@@ -5549,6 +5580,8 @@ function adminField(label, field, value, kind='input') {
           const r = await api('./api/schedule/add_slot', { method: 'POST', body: { time_local: time, title_ru: `Слот ${time}` } });
           const s = await api('./api/schedule');
           state.suppHub.slots = Array.isArray(s.slots) ? s.slots : [];
+          state.suppHub.schedules = Array.isArray(s.schedules) ? s.schedules : [];
+          state.suppHub.scheduleCacheAt = Date.now();
           state.suppHub.slotId = r.slot_id || state.suppHub.slotId;
           state.suppHub.timeMode = 'slot';
           state.suppHub.customTime = '';

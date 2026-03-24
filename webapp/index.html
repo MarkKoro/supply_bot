@@ -485,6 +485,24 @@
       line-height: 1.35;
       padding-top: 2px;
     }
+    .today-top-actions {
+      display: flex;
+      justify-content: flex-end;
+      margin-bottom: 8px;
+    }
+    .today-complex-launch {
+      margin-bottom: 10px;
+      display: flex;
+      justify-content: flex-end;
+    }
+    .today-complex-launch .btn { width: min(100%, 240px); }
+    .complex-row-toggle {
+      width: 100%;
+      text-align: left;
+      white-space: normal;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
 
     .status-taken { background: rgba(73,216,141,0.24); border-color: rgba(158,255,205,0.72); box-shadow: 0 0 12px rgba(73,216,141,0.42); }
     .status-skipped { background: rgba(255,107,121,0.24); border-color: rgba(255,167,177,0.65); box-shadow: 0 0 10px rgba(255,107,121,0.35); }
@@ -822,6 +840,7 @@
     ui: { unseenAchCount: 0, achFilter: "all", achQuery: "", microWowLastAt: 0 },
     unlockToast: { open: false, applying: false, items: [], sparkleTick: 0 },
     mySupplements: { open: false, tab: "active", loading: false, busy: {}, active: [], frozen: [] },
+    complexHub: { open: false, loading: false, schedulesLoading: false, slotsLoading: false, itemsLoading: {}, actionBusy: {}, expanded: {}, itemsById: {}, schedules: [], slots: [] },
     suppHub: { open: false, loading: false, saving: false, item: null, slots: [], slotId: "morning", time: "", timeMode: "slot", customTime: "", doseText: "", noteText: "", remindersMode: "slot", reminderTimes: [], reminderInput: "", historyOpen: false, historyLoading: false, history: null, deleting: false },
     toastTimer: null,
     catalog: {
@@ -837,6 +856,7 @@
     bodyMap: null,
     loadingBodyMap: false,
     bodyMapSheet: null,
+    bodyMapHelpOpen: false,
     profile: { data: null, loading: false, saving: false },
     profileLabs: { reports: [], loading: false, saving: false },
     profileNutrients: { items: [], loading: false },
@@ -2334,7 +2354,7 @@
         const already = todaySet.has(Number(r.supplement_id || 0));
         return `<div class="rec-card"><div class="row"><label><input type="checkbox" data-rec-toggle="${r.supplement_id}" ${sv.selected[r.supplement_id] !== false ? 'checked' : ''}/> <strong>${esc(r.name_ru || r.slug)}</strong></label><span class="badge ${r.action==='remove'?'minus':(r.action==='adjust'?'':'plus')}">${r.action==='add'?'+':(r.action==='remove'?'−':'≈')}</span></div><div class="muted" style="margin-top:6px">${esc(r.reason || '')}${already ? ' • уже в плане' : ''}</div></div>`;
       }).join('');
-      return `<div class="card fade"><div class="row survey-head"><div class="survey-title-wrap"><h3 style="margin:0">Рекомендации</h3><button class="btn secondary survey-help-btn" type="button" data-survey-help>?</button></div><div class="survey-target-wrap"><span class="muted" style="font-size:12px">Рекомендация на:</span><div class="segmented" data-survey-target><button class="seg-btn ${sv.target==='today'?'active':''}" data-set-target="today">Сегодня</button><button class="seg-btn ${sv.target==='tomorrow'?'active':''}" data-set-target="tomorrow">Завтра</button></div></div></div>${sv.helpOpen ? `<div class="survey-help muted">Опрос «Сегодня» учитывает текущее время, что вы уже принимали сегодня и вчера, и подсказывает добавки на оставшуюся часть дня. Опрос «Завтра» строит рекомендации заранее на основе вашего стека, истории приёма и выбранной цели.</div>` : ''}${rows || '<div class="muted">Нет рекомендаций</div>'}<div style="margin-top:10px"><button class="btn" id="applyAll" style="width:100%; font-weight:800" ${sv.applying ? 'disabled' : ''}>✅ Применить всё</button></div><div class="survey-actions"><button class="btn secondary" id="applySelected" ${sv.applying ? 'disabled' : ''}>Применить выбранное</button><button class="btn secondary" id="cancelSurvey" ${sv.applying ? 'disabled' : ''}>Отмена</button></div></div>`;
+      return `<div class="card fade"><div class="row survey-head"><div class="survey-title-wrap"><h3 style="margin:0">Рекомендации</h3><button class="btn secondary survey-help-btn" type="button" data-survey-help>?</button></div><div class="survey-target-wrap"><span class="muted" style="font-size:12px">Рекомендация на:</span><div class="segmented" data-survey-target><button class="seg-btn ${sv.target==='today'?'active':''}" data-set-target="today">Сегодня</button><button class="seg-btn ${sv.target==='tomorrow'?'active':''}" data-set-target="tomorrow">Завтра</button></div></div></div>${sv.helpOpen ? `<div class="survey-help muted">Что это значит: опрос «Сегодня» анализирует текущее время, уже отмеченные приёмы за сегодня/вчера, ваши цели и предлагает точечные шаги на оставшуюся часть дня. Режим «Завтра» строит план заранее: учитывает ваш стек, регулярность, цель и контекст ответов. Рекомендации помогают сориентироваться, но не заменяют консультацию врача, особенно при хронических состояниях, беременности или приёме лекарств.</div>` : ''}${rows || '<div class="muted">Нет рекомендаций</div>'}<div style="margin-top:10px"><button class="btn" id="applyAll" style="width:100%; font-weight:800" ${sv.applying ? 'disabled' : ''}>✅ Применить всё</button></div><div class="survey-actions"><button class="btn secondary" id="applySelected" ${sv.applying ? 'disabled' : ''}>Применить выбранное</button><button class="btn secondary" id="cancelSurvey" ${sv.applying ? 'disabled' : ''}>Отмена</button></div></div>`;
     }
     const step = SURVEY_STEPS[sv.step];
     const p = Math.round(((sv.step+1)/SURVEY_STEPS.length)*100);
@@ -2346,7 +2366,7 @@
     } else {
       body = `<textarea id="surveyNote" maxlength="280" class="survey-note" placeholder="Короткая заметка">${esc(sv.answers.note || '')}</textarea><div class="muted" style="margin-top:6px">${(sv.answers.note||'').length}/280</div>`;
     }
-    return `<div class="card fade"><div class="row survey-head"><div class="survey-title-wrap"><strong>${step.title}</strong><button class="btn secondary survey-help-btn" type="button" data-survey-help>?</button></div><div class="survey-target-wrap"><span class="muted" style="font-size:12px">Рекомендация на:</span><div class="segmented" data-survey-target><button class="seg-btn ${sv.target==='today'?'active':''}" data-set-target="today">Сегодня</button><button class="seg-btn ${sv.target==='tomorrow'?'active':''}" data-set-target="tomorrow">Завтра</button></div><span class="muted">${sv.step+1}/${SURVEY_STEPS.length}</span></div></div>${sv.helpOpen ? `<div class="survey-help muted">Опрос «Сегодня» учитывает текущее время, что вы уже принимали сегодня и вчера, и подсказывает добавки на оставшуюся часть дня. Опрос «Завтра» строит рекомендации заранее на основе вашего стека, истории приёма и выбранной цели.</div>` : ''}<div class="progress"><i style="width:${p}%"></i></div>${body}<div class="survey-actions" style="margin-top:12px"><button class="btn secondary" id="surveyBack" ${sv.step===0?'disabled':''}>Назад</button><button class="btn" id="surveyNext">${sv.step===SURVEY_STEPS.length-1?'Получить рекомендации':'Далее'}</button></div></div>`;
+    return `<div class="card fade"><div class="row survey-head"><div class="survey-title-wrap"><strong>${step.title}</strong><button class="btn secondary survey-help-btn" type="button" data-survey-help>?</button></div><div class="survey-target-wrap"><span class="muted" style="font-size:12px">Рекомендация на:</span><div class="segmented" data-survey-target><button class="seg-btn ${sv.target==='today'?'active':''}" data-set-target="today">Сегодня</button><button class="seg-btn ${sv.target==='tomorrow'?'active':''}" data-set-target="tomorrow">Завтра</button></div><span class="muted">${sv.step+1}/${SURVEY_STEPS.length}</span></div></div>${sv.helpOpen ? `<div class="survey-help muted">Что это значит: опрос «Сегодня» анализирует текущее время, уже отмеченные приёмы за сегодня/вчера, ваши цели и предлагает точечные шаги на оставшуюся часть дня. Режим «Завтра» строит план заранее: учитывает ваш стек, регулярность, цель и контекст ответов. Рекомендации помогают сориентироваться, но не заменяют консультацию врача, особенно при хронических состояниях, беременности или приёме лекарств.</div>` : ''}<div class="progress"><i style="width:${p}%"></i></div>${body}<div class="survey-actions" style="margin-top:12px"><button class="btn secondary" id="surveyBack" ${sv.step===0?'disabled':''}>Назад</button><button class="btn" id="surveyNext">${sv.step===SURVEY_STEPS.length-1?'Получить рекомендации':'Далее'}</button></div></div>`;
   }
 
   function bindSurveyEvents() {
@@ -2682,17 +2702,23 @@
       const id=Number(e.currentTarget.dataset.id);
       try {
         if (!state.complexes.length) {
-          const name = prompt('Название нового комплекса');
+          alert('Пока нет созданных комплексов. Давайте создадим первый.');
+          const name = prompt('Введите название нового комплекса');
           if (!name) return;
-          await api('./api/complexes/create',{method:'POST',body:{name}});
+          const created = await api('./api/complexes/create',{method:'POST',body:{name}});
+          await api(`./api/complexes/${created.item.id}/items/add`,{method:'POST',body:{supplement_id:id}});
           await loadComplexes(true);
+          showToast(`Создан комплекс ${name} и добавлен БАД`);
+          return;
         }
-        const names=state.complexes.map((c)=>c.name).join('\n');
-        const pick=prompt('В какой комплекс добавить?\n'+names);
+        const names=state.complexes.map((c)=>`• ${c.name}`).join('\n');
+        const pick=prompt(`В какой комплекс добавить?\n${names}\n\nЕсли ввести новое имя — создастся новый комплекс.`);
         if (!pick) return;
-        let target=state.complexes.find((c)=>c.name===pick);
+        const cleanPick = pick.trim();
+        if (!cleanPick) return;
+        let target=state.complexes.find((c)=>String(c.name || '').trim().toLowerCase()===cleanPick.toLowerCase());
         if (!target) {
-          const r=await api('./api/complexes/create',{method:'POST',body:{name:pick}});
+          const r=await api('./api/complexes/create',{method:'POST',body:{name:cleanPick}});
           target=r.item;
           await loadComplexes(true);
         }
@@ -3333,7 +3359,8 @@ function adminField(label, field, value, kind='input') {
     const maxBurdenSum = Math.max(1, ...systems.map((s) => Number(s.burden_strength_sum || 0)));
     const sheet = state.bodyMapSheet ? renderBodyMapSheet(state.bodyMapSheet) : '';
     return `
-      <div class="card fade"><strong>BodyMap · ${esc(state.bodyMap.day || '')}</strong></div>
+      <div class="row" style="margin-bottom:8px; justify-content:flex-end;"><button class="btn secondary survey-help-btn" type="button" data-bodymap-help-toggle>?</button></div>
+      ${state.bodyMapHelpOpen ? `<div class="survey-help muted" style="margin-bottom:8px">Подсветка показывает ориентировочную пользу от ваших текущих БАДов, красный контур — возможную нагрузку. Оценка строится по вашим активным добавкам, их профилю и истории применения. Это навигатор, чтобы быстрее понять, что поддерживаете и где стоит пересобрать схему вместе с рекомендациями.</div>` : ''}
       <div class="card fade">
         <div class="organs-grid">
           ${BODYMAP_ORDER.map((key)=>{
@@ -3400,6 +3427,10 @@ function adminField(label, field, value, kind='input') {
       state.activeTab='catalog';
       renderMainApp();
       await loadCatalog(true);
+    }));
+    appEl.querySelectorAll('[data-bodymap-help-toggle]').forEach((el)=>el.addEventListener('click', ()=>{
+      state.bodyMapHelpOpen = !state.bodyMapHelpOpen;
+      renderActiveTab();
     }));
     hydrateOrganIcons(BODYMAP_ORDER).then(()=>{});
   }
@@ -4101,6 +4132,51 @@ function adminField(label, field, value, kind='input') {
     } catch {}
   }
 
+  async function loadComplexHubMeta(force) {
+    const hub = state.complexHub;
+    if ((hub.loading || hub.schedulesLoading || hub.slotsLoading) && !force) return;
+    hub.loading = true;
+    hub.schedulesLoading = true;
+    hub.slotsLoading = true;
+    renderActiveTab();
+    try {
+      const [complexRes, scheduleRes, slotsRes] = await Promise.all([
+        api('./api/complexes'),
+        api('./api/complex_schedules').catch(() => ({ items: [] })),
+        api('./api/schedule').catch(() => ({ slots: [] })),
+      ]);
+      state.complexes = Array.isArray(complexRes.items) ? complexRes.items : [];
+      hub.schedules = Array.isArray(scheduleRes.items) ? scheduleRes.items : [];
+      hub.slots = Array.isArray(slotsRes.slots) ? slotsRes.slots : [];
+    } catch {
+      showToast('Не удалось загрузить комплексы');
+    } finally {
+      hub.loading = false;
+      hub.schedulesLoading = false;
+      hub.slotsLoading = false;
+      renderActiveTab();
+    }
+  }
+
+  async function loadComplexItems(complexId, force = false) {
+    const cid = Number(complexId || 0);
+    if (!cid) return;
+    const hub = state.complexHub;
+    if (hub.itemsLoading[cid] && !force) return;
+    if (hub.itemsById[cid] && !force) return;
+    hub.itemsLoading[cid] = true;
+    renderActiveTab();
+    try {
+      const res = await api(`./api/complexes/${cid}/items`);
+      hub.itemsById[cid] = Array.isArray(res.items) ? res.items : [];
+    } catch {
+      showToast('Не удалось загрузить состав комплекса');
+    } finally {
+      hub.itemsLoading[cid] = false;
+      renderActiveTab();
+    }
+  }
+
   function slotProgress(slot) {
     const safeSlot = slot || {};
     const items = Array.isArray(safeSlot.items) ? safeSlot.items : [];
@@ -4299,6 +4375,60 @@ function adminField(label, field, value, kind='input') {
     `;
   }
 
+  function renderComplexHubSheet() {
+    const hub = state.complexHub;
+    if (!hub.open) return '';
+    const complexes = Array.isArray(state.complexes) ? state.complexes : [];
+    return `
+      <div class="sheet-backdrop" data-complex-hub-close></div>
+      <div class="card sheet" role="dialog" style="max-height:80vh">
+        <div class="row"><strong>🧩 Мои комплексы</strong><button class="btn secondary" data-complex-hub-close>✕</button></div>
+        <div class="muted" style="margin-top:8px">Здесь можно открыть состав, изменить название, время, удалить комплекс или отдельную добавку.</div>
+        <div class="row" style="margin-top:10px; justify-content:flex-start; gap:8px; flex-wrap:wrap;">
+          <button class="btn" type="button" data-complex-create ${hub.loading ? 'disabled' : ''}>+ Создать комплекс</button>
+        </div>
+        ${hub.loading ? '<div class="muted" style="margin-top:10px">Загрузка комплексов…</div>' : ''}
+        ${!hub.loading && !complexes.length ? '<div class="sheet-empty" style="margin-top:10px">Пока нет комплексов. Создайте первый и добавляйте туда БАДы.</div>' : ''}
+        <div style="margin-top:10px; display:grid; gap:8px;">
+          ${complexes.map((c) => {
+            const cid = Number(c.id || 0);
+            const expanded = !!hub.expanded[cid];
+            const items = hub.itemsById[cid] || [];
+            const schedule = (hub.schedules || []).find((s) => Number(s.complex_id) === cid);
+            const busy = !!hub.actionBusy[cid];
+            const labelTime = schedule ? `${schedule.slot_id || 'slot'}${schedule.time_local ? ` · ${schedule.time_local}` : ''}` : 'не назначено';
+            return `<div class="item-row" style="display:block">
+              <button type="button" class="btn secondary complex-row-toggle" data-complex-expand="${cid}">
+                <div class="row"><strong>${expanded ? '▾' : '▸'} ${esc(c.name || 'Комплекс')}</strong><span class="muted">${Number(c.items_count || 0)} шт</span></div>
+              </button>
+              ${expanded ? `<div style="margin-top:8px; display:grid; gap:8px;">
+                <div class="muted">⏰ Время: ${esc(labelTime)}</div>
+                <div class="row" style="justify-content:flex-start; gap:8px; flex-wrap:wrap;">
+                  <button class="btn secondary" type="button" data-complex-rename="${cid}" ${busy ? 'disabled' : ''}>Переименовать</button>
+                  <button class="btn secondary" type="button" data-complex-schedule="${cid}" ${busy ? 'disabled' : ''}>Назначить время</button>
+                  <button class="btn secondary" type="button" data-complex-schedule-clear="${cid}" ${busy ? 'disabled' : ''}>Снять время</button>
+                  <button class="btn secondary" type="button" data-complex-add-item="${cid}" ${busy ? 'disabled' : ''}>Добавить БАД</button>
+                  <button class="btn secondary" type="button" data-complex-delete="${cid}" ${busy ? 'disabled' : ''}>Удалить комплекс</button>
+                </div>
+                ${hub.itemsLoading[cid] ? '<div class="muted">Загрузка состава…</div>' : ''}
+                ${!hub.itemsLoading[cid] && !items.length ? '<div class="sheet-empty">В комплексе пока нет активных БАДов.</div>' : ''}
+                ${items.map((item) => `<div class="item-row" style="display:block">
+                  <div class="row" style="align-items:flex-start; gap:8px;">
+                    <button class="btn secondary" type="button" style="flex:1; min-width:0; text-align:left; white-space:normal;" data-complex-open-supp="${item.supplement_id}">
+                      <strong>${esc(item.name_ru || item.slug || item.supplement_id)}</strong>
+                      <div class="muted" style="margin-top:4px">${esc(item.dose_override || 'Доза как в моих БАДах')}</div>
+                    </button>
+                    <button class="btn secondary" type="button" data-complex-remove-item="${cid}" data-supplement-id="${item.supplement_id}" ${busy ? 'disabled' : ''}>Удалить</button>
+                  </div>
+                </div>`).join('')}
+              </div>` : ''}
+            </div>`;
+          }).join('')}
+        </div>
+      </div>
+    `;
+  }
+
   function normalizeHHMM(value) {
     const raw = String(value || '').trim();
     const m = raw.match(/^(\d{1,2}):(\d{2})$/);
@@ -4369,12 +4499,22 @@ function adminField(label, field, value, kind='input') {
   function renderToday() {
     const slots = state.today?.slots || [];
     if (!slots.length) {
-      return `<div class="card">На сегодня приёмов не найдено.</div>`;
+      return `
+        <section class="fade">
+          <div class="today-top-actions"><button type="button" class="btn secondary" data-open-my-supp>Мои БАДы</button></div>
+          <div class="today-complex-launch"><button type="button" class="btn secondary" data-open-complex-hub>Мои комплексы</button></div>
+        </section>
+        <div class="card">На сегодня приёмов не найдено.</div>
+        ${renderMySupplementsSheet()}
+        ${renderComplexHubSheet()}
+        ${renderSuppHubSheet()}
+      `;
     }
 
     return `
-      <section class="card fade">
-        <div class="row"><strong>Сегодняшний план</strong><button type="button" class="btn secondary" data-open-my-supp>Мои БАДы</button></div>
+      <section class="fade">
+        <div class="today-top-actions"><button type="button" class="btn secondary" data-open-my-supp>Мои БАДы</button></div>
+        <div class="today-complex-launch"><button type="button" class="btn secondary" data-open-complex-hub>Мои комплексы</button></div>
       </section>
       ${slots.map((slot) => {
       const items = slot.items || [];
@@ -4412,8 +4552,9 @@ function adminField(label, field, value, kind='input') {
           </div>
         </article>
       `;
-    }).join("")}
+      }).join("")}
       ${renderMySupplementsSheet()}
+      ${renderComplexHubSheet()}
       ${renderSuppHubSheet()}
     `;
   }
@@ -4962,6 +5103,188 @@ function adminField(label, field, value, kind='input') {
         state.mySupplements.tab = "active";
         renderActiveTab();
         await loadMySupplements(true);
+      });
+    });
+
+    appEl.querySelectorAll('[data-open-complex-hub]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        haptic();
+        state.complexHub.open = true;
+        renderActiveTab();
+        await loadComplexHubMeta(true);
+      });
+    });
+
+    appEl.querySelectorAll('[data-complex-hub-close]').forEach((el) => {
+      el.addEventListener('click', () => {
+        state.complexHub.open = false;
+        renderActiveTab();
+      });
+    });
+
+    appEl.querySelectorAll('[data-complex-expand]').forEach((el) => {
+      el.addEventListener('click', async () => {
+        const cid = Number(el.dataset.complexExpand || 0);
+        if (!cid) return;
+        const next = !state.complexHub.expanded[cid];
+        state.complexHub.expanded[cid] = next;
+        renderActiveTab();
+        if (next) await loadComplexItems(cid, true);
+      });
+    });
+
+    appEl.querySelectorAll('[data-complex-create]').forEach((el) => {
+      el.addEventListener('click', async () => {
+        const name = prompt('Введите название нового комплекса');
+        if (!name || !name.trim()) return;
+        try {
+          await api('./api/complexes/create', { method: 'POST', body: { name: name.trim() } });
+          await loadComplexHubMeta(true);
+          showToast('Комплекс создан');
+        } catch {
+          showToast('Не удалось создать комплекс');
+        }
+      });
+    });
+
+    appEl.querySelectorAll('[data-complex-rename]').forEach((el) => {
+      el.addEventListener('click', async () => {
+        const cid = Number(el.dataset.complexRename || 0);
+        const current = state.complexes.find((c) => Number(c.id) === cid);
+        const nextName = prompt('Новое название комплекса', current?.name || '');
+        if (!nextName || !nextName.trim()) return;
+        state.complexHub.actionBusy[cid] = true;
+        renderActiveTab();
+        try {
+          await api('./api/complexes/rename', { method: 'POST', body: { complex_id: cid, new_name: nextName.trim() } });
+          await loadComplexHubMeta(true);
+          showToast('Комплекс переименован');
+        } catch {
+          showToast('Не удалось переименовать комплекс');
+        } finally {
+          delete state.complexHub.actionBusy[cid];
+          renderActiveTab();
+        }
+      });
+    });
+
+    appEl.querySelectorAll('[data-complex-delete]').forEach((el) => {
+      el.addEventListener('click', async () => {
+        const cid = Number(el.dataset.complexDelete || 0);
+        if (!cid) return;
+        if (!confirm('Удалить комплекс целиком?')) return;
+        state.complexHub.actionBusy[cid] = true;
+        renderActiveTab();
+        try {
+          await api('./api/complexes/delete', { method: 'POST', body: { complex_id: cid } });
+          delete state.complexHub.itemsById[cid];
+          delete state.complexHub.expanded[cid];
+          await Promise.all([loadComplexHubMeta(true), loadToday(true)]);
+          showToast('Комплекс удалён');
+        } catch {
+          showToast('Не удалось удалить комплекс');
+        } finally {
+          delete state.complexHub.actionBusy[cid];
+          renderActiveTab();
+        }
+      });
+    });
+
+    appEl.querySelectorAll('[data-complex-schedule]').forEach((el) => {
+      el.addEventListener('click', async () => {
+        const cid = Number(el.dataset.complexSchedule || 0);
+        const slots = state.complexHub.slots || [];
+        const slotHints = slots.map((s) => `${s.slot_id} (${s.time_local || '--:--'})`).join('\n');
+        const slotId = prompt(`Выберите slot_id для комплекса:\n${slotHints}`, slots[0]?.slot_id || 'morning');
+        if (!slotId || !slotId.trim()) return;
+        const time = prompt('Время комплекса HH:MM (можно оставить пустым)', '') || '';
+        state.complexHub.actionBusy[cid] = true;
+        renderActiveTab();
+        try {
+          await api('./api/complex_schedules/set', { method: 'POST', body: { complex_id: cid, slot_id: slotId.trim(), time_local: normalizeHHMM(time) || '' } });
+          await Promise.all([loadComplexHubMeta(true), loadToday(true)]);
+          showToast('Время комплекса обновлено');
+        } catch {
+          showToast('Не удалось назначить время');
+        } finally {
+          delete state.complexHub.actionBusy[cid];
+          renderActiveTab();
+        }
+      });
+    });
+
+    appEl.querySelectorAll('[data-complex-schedule-clear]').forEach((el) => {
+      el.addEventListener('click', async () => {
+        const cid = Number(el.dataset.complexScheduleClear || 0);
+        const schedule = (state.complexHub.schedules || []).find((s) => Number(s.complex_id) === cid);
+        if (!schedule) return showToast('У комплекса нет назначенного времени');
+        state.complexHub.actionBusy[cid] = true;
+        renderActiveTab();
+        try {
+          await api('./api/complex_schedules/remove', { method: 'POST', body: { complex_id: cid, slot_id: schedule.slot_id } });
+          await Promise.all([loadComplexHubMeta(true), loadToday(true)]);
+          showToast('Время комплекса снято');
+        } catch {
+          showToast('Не удалось снять время');
+        } finally {
+          delete state.complexHub.actionBusy[cid];
+          renderActiveTab();
+        }
+      });
+    });
+
+    appEl.querySelectorAll('[data-complex-open-supp]').forEach((el) => {
+      el.addEventListener('click', async () => {
+        const sid = Number(el.dataset.complexOpenSupp || 0);
+        if (!sid) return;
+        await openSupplementHub(sid);
+      });
+    });
+
+    appEl.querySelectorAll('[data-complex-remove-item]').forEach((el) => {
+      el.addEventListener('click', async () => {
+        const cid = Number(el.dataset.complexRemoveItem || 0);
+        const sid = Number(el.dataset.supplementId || 0);
+        if (!cid || !sid) return;
+        state.complexHub.actionBusy[cid] = true;
+        renderActiveTab();
+        try {
+          await api(`./api/complexes/${cid}/items/remove`, { method: 'POST', body: { supplement_id: sid } });
+          await Promise.all([loadComplexItems(cid, true), loadComplexHubMeta(true), loadToday(true)]);
+          showToast('БАД удалён из комплекса');
+        } catch {
+          showToast('Не удалось удалить БАД из комплекса');
+        } finally {
+          delete state.complexHub.actionBusy[cid];
+          renderActiveTab();
+        }
+      });
+    });
+
+    appEl.querySelectorAll('[data-complex-add-item]').forEach((el) => {
+      el.addEventListener('click', async () => {
+        const cid = Number(el.dataset.complexAddItem || 0);
+        if (!cid) return;
+        try {
+          if (!state.mySupplements.active.length) await loadMySupplements(true);
+          const active = state.mySupplements.active || [];
+          if (!active.length) return showToast('Сначала добавьте БАД в «Мои БАДы»');
+          const names = active.map((x) => `• ${x.name_ru || x.name || x.supplement_id}`).join('\n');
+          const pick = prompt(`Введите точное название БАДа для добавления:\n${names}`);
+          if (!pick || !pick.trim()) return;
+          const target = active.find((x) => String(x.name_ru || x.name || '').trim().toLowerCase() === pick.trim().toLowerCase());
+          if (!target) return showToast('Не найден БАД с таким названием');
+          state.complexHub.actionBusy[cid] = true;
+          renderActiveTab();
+          await api(`./api/complexes/${cid}/items/add`, { method: 'POST', body: { supplement_id: Number(target.supplement_id) } });
+          await Promise.all([loadComplexItems(cid, true), loadComplexHubMeta(true), loadToday(true)]);
+          showToast('БАД добавлен в комплекс');
+        } catch {
+          showToast('Не удалось добавить БАД в комплекс');
+        } finally {
+          delete state.complexHub.actionBusy[cid];
+          renderActiveTab();
+        }
       });
     });
 

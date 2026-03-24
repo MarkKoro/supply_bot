@@ -962,7 +962,7 @@
       duplicatesLoading: false,
       duplicateResolveBusy: ""
     },
-    settingsUi: { loadingSchedule: false, savingNotifications: false, slotBusy: {}, sectionsOpen: { general: false, premium: false, schedule: false, stats: false }, slotEdit: { open: false, slotId: "", time: "" } },
+    settingsUi: { loadingSchedule: false, savingNotifications: false, addingSlot: false, slotBusy: {}, sectionsOpen: { general: false, premium: false, schedule: false, stats: false }, slotEdit: { open: false, slotId: "", time: "" } },
     settingsData: { tz_name: 'UTC', reminders_enabled: true, loading: false, offer_url: '', privacy_url: '', offer_version: '', privacy_version: '' },
     settingsSchedule: { slots: [] },
     payment: { pending: null, checking: false, lastStatus: '', modalOpen: false, success: false, successInfo: null, receiptEmail: null, savingEmail: false, emailInput: '', emailError: '', savingReceiptPref: false }
@@ -4753,6 +4753,23 @@ function adminField(label, field, value, kind='input') {
     }
   }
 
+  async function createScheduleSlot(timeLocal, titleRu) {
+    const time = normalizeHHMM(timeLocal || '');
+    if (!time) throw new Error('invalid_time');
+    const title = String(titleRu || '').trim() || `Слот ${time}`;
+    const created = await api('./api/schedule/add_slot', { method: 'POST', body: { time_local: time, title_ru: title } });
+    const scheduleRes = await api('./api/schedule');
+    const nextSlots = Array.isArray(scheduleRes.slots) ? scheduleRes.slots : [];
+    state.settingsSchedule.slots = nextSlots;
+    state.complexHub.slots = nextSlots;
+    if (state.suppHub.open || state.suppHub.slots?.length) {
+      state.suppHub.slots = nextSlots;
+      state.suppHub.schedules = Array.isArray(scheduleRes.schedules) ? scheduleRes.schedules : (state.suppHub.schedules || []);
+      state.suppHub.scheduleCacheAt = Date.now();
+    }
+    return { slotId: String(created?.slot_id || ''), time };
+  }
+
   function renderSettings() {
     const me = state.me || {};
     const accessLabel = me.premium ? "Premium" : (me.starter_trial_active ? "Starter" : "Нет активного доступа");
@@ -4925,7 +4942,10 @@ function adminField(label, field, value, kind='input') {
                 </span>
               </label>
               ${state.complexHub.returnToToday ? '<button class="btn secondary" type="button" data-settings-back-complex style="margin-top:8px;">Вернуться к комплексу на «Сегодня»</button>' : ''}
-              <div class="muted" style="margin-top:6px">Активные слоты: ${enabledSlots.length}/${scheduleSlots.length || 0}</div>
+              <div class="row" style="margin-top:6px;align-items:center;justify-content:space-between;gap:8px;">
+                <div class="muted">Активные слоты: ${enabledSlots.length}/${scheduleSlots.length || 0}</div>
+                <button class="btn secondary" type="button" data-settings-add-slot ${state.settingsUi?.addingSlot ? 'disabled' : ''} title="Добавить слот">+</button>
+              </div>
               <div class="settings-slot-grid">${scheduleSlots.map((slot)=>`<article class="settings-slot-card">
                 <div class="settings-slot-head">
                   <label class="settings-checkbox-row" style="padding:8px 10px;">
@@ -5080,6 +5100,31 @@ function adminField(label, field, value, kind='input') {
         showToast('Не удалось сохранить время слота');
       } finally {
         delete state.settingsUi.slotBusy[slotId];
+      }
+    });
+    document.querySelector('[data-settings-add-slot]')?.addEventListener('click', async () => {
+      if (state.settingsUi.addingSlot) return;
+      const now = new Date();
+      const defaultTime = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+      const picked = prompt('Время нового слота (HH:MM)', defaultTime);
+      const time = normalizeHHMM(picked || '');
+      if (!time) {
+        if (picked != null) showToast('Введите время в формате HH:MM');
+        return;
+      }
+      state.settingsUi.addingSlot = true;
+      try {
+        const out = await createScheduleSlot(time, `Слот ${time}`);
+        if (state.suppHub.open) {
+          state.suppHub.slotId = out.slotId || state.suppHub.slotId;
+          if (state.suppHub.timeMode !== 'custom') state.suppHub.time = out.time;
+        }
+        showToast('Слот создан');
+      } catch {
+        showToast('Не удалось создать слот');
+      } finally {
+        state.settingsUi.addingSlot = false;
+        renderActiveTab();
       }
     });
     document.querySelectorAll('[data-settings-open-premium-plan-stars]').forEach((el) => {
@@ -5708,15 +5753,11 @@ function adminField(label, field, value, kind='input') {
         const time = normalizeHHMM(state.suppHub.timeMode === 'custom' ? state.suppHub.customTime : state.suppHub.time);
         if (!time) return showToast('Укажите корректное время');
         try {
-          const r = await api('./api/schedule/add_slot', { method: 'POST', body: { time_local: time, title_ru: `Слот ${time}` } });
-          const s = await api('./api/schedule');
-          state.suppHub.slots = Array.isArray(s.slots) ? s.slots : [];
-          state.suppHub.schedules = Array.isArray(s.schedules) ? s.schedules : [];
-          state.suppHub.scheduleCacheAt = Date.now();
-          state.suppHub.slotId = r.slot_id || state.suppHub.slotId;
+          const out = await createScheduleSlot(time, `Слот ${time}`);
+          state.suppHub.slotId = out.slotId || state.suppHub.slotId;
           state.suppHub.timeMode = 'slot';
           state.suppHub.customTime = '';
-          state.suppHub.time = time;
+          state.suppHub.time = out.time;
           await persistSuppHub();
           renderActiveTab();
           showToast('Слот создан');

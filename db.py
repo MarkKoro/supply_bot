@@ -7189,6 +7189,33 @@ async def add_item_to_complex(conn: aiosqlite.Connection, tg_user_id: int, compl
            ON CONFLICT(complex_id, supplement_id) DO UPDATE SET dose_override=excluded.dose_override""",
         (int(complex_id), int(supplement_id), str(dose_override or "").strip()[:120], nxt),
     )
+    # Если у комплекса уже назначен слот, новый БАД сразу синхронизируем
+    # с расписанием комплекса и убираем персональные кастом-напоминания,
+    # чтобы не получить дубли в разных режимах.
+    schedule_row = await fetchone(
+        conn,
+        """SELECT slot_id
+           FROM user_complex_schedules
+           WHERE user_id=? AND complex_id=? AND is_enabled=1
+           ORDER BY id DESC
+           LIMIT 1""",
+        (user_id, int(complex_id)),
+    )
+    if schedule_row:
+        slot = str(schedule_row["slot_id"] or "morning").strip() or "morning"
+        await conn.execute(
+            """INSERT INTO user_schedules(user_id, supplement_id, time_hhmm, slot_id, is_enabled)
+               VALUES(?, ?, NULL, ?, 1)
+               ON CONFLICT(user_id, supplement_id) DO UPDATE SET
+                 slot_id=excluded.slot_id,
+                 time_hhmm=NULL,
+                 is_enabled=1""",
+            (user_id, int(supplement_id), slot),
+        )
+        await conn.execute(
+            "DELETE FROM reminders WHERE user_id=? AND supplement_id=?",
+            (int(tg_user_id), int(supplement_id)),
+        )
     await conn.commit()
 
 
@@ -7225,13 +7252,40 @@ async def set_complex_schedule(conn: aiosqlite.Connection, tg_user_id: int, comp
     owner = await fetchone(conn, "SELECT 1 FROM user_complexes WHERE id=? AND user_id=?", (int(complex_id), user_id))
     if not owner:
         raise ValueError("complex_not_found")
+    normalized_slot = str(slot_id or "morning").strip() or "morning"
     await conn.execute(
         """INSERT INTO user_complex_schedules(user_id, complex_id, slot_id, time_local, is_enabled, created_at_utc)
            VALUES(?,?,?,?,1,?)
            ON CONFLICT(user_id, complex_id, slot_id) DO UPDATE SET
              time_local=excluded.time_local,
              is_enabled=1""",
-        (user_id, int(complex_id), str(slot_id or "morning").strip() or "morning", _normalize_hhmm(time_local) or "", utc_now_iso()),
+        (user_id, int(complex_id), normalized_slot, _normalize_hhmm(time_local) or "", utc_now_iso()),
+    )
+    item_rows = await fetchall(
+        conn,
+        "SELECT supplement_id FROM user_complex_items WHERE complex_id=?",
+        (int(complex_id),),
+    )
+    for row in item_rows:
+        sid = int(row["supplement_id"] or 0)
+        if sid <= 0:
+            continue
+        await conn.execute(
+            """INSERT INTO user_schedules(user_id, supplement_id, time_hhmm, slot_id, is_enabled)
+               VALUES(?, ?, NULL, ?, 1)
+               ON CONFLICT(user_id, supplement_id) DO UPDATE SET
+                 slot_id=excluded.slot_id,
+                 time_hhmm=NULL,
+                 is_enabled=1""",
+            (user_id, sid, normalized_slot),
+        )
+        await conn.execute(
+            "DELETE FROM reminders WHERE user_id=? AND supplement_id=?",
+            (int(tg_user_id), sid),
+        )
+    await conn.execute(
+        "DELETE FROM user_complex_schedules WHERE user_id=? AND complex_id=? AND slot_id!=?",
+        (user_id, int(complex_id), normalized_slot),
     )
     await conn.commit()
 

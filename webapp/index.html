@@ -231,7 +231,7 @@
     .ach-item.locked{opacity:.72;}
     .ach-category { margin-top: 10px; }
     .ach-category-title { font-size: 13px; color: var(--muted); margin: 8px 0 6px; text-transform: uppercase; letter-spacing: .02em; }
-    .new-pill { margin-left: 8px; padding: 2px 7px; border-radius: 999px; background: rgba(255,77,109,.18); border:1px solid rgba(255,77,109,.5); color:#ffd7df; font-size:11px; font-weight:800; }
+    .new-pill { margin-left: 8px; padding: 2px 7px; border-radius: 999px; background: rgba(255,77,109,.18); border:1px solid rgba(255,77,109,.5); color:#ffd7df; font-size:11px; font-weight:800; display:inline-flex; align-items:center; max-width:100%; }
     .cos-meta { margin-top:6px; font-size:12px; color: var(--muted); display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
 
     .unlock-overlay {
@@ -697,7 +697,7 @@
     .field-grid.two { grid-template-columns:repeat(2,minmax(0,1fr)); }
     .lab-result-row { border:1px solid rgba(255,255,255,.14); border-radius:12px; padding:8px; margin-bottom:8px; background:rgba(255,255,255,.03); }
     .profile-module-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; margin-bottom:10px; }
-    .profile-module-btn { min-height:98px; border-radius:16px; text-align:left; padding:10px; display:grid; gap:6px; align-content:flex-start; line-height:1.25; overflow:hidden; }
+    .profile-module-btn { min-height:98px; border-radius:16px; text-align:left; padding:10px; display:grid; gap:6px; align-content:flex-start; line-height:1.25; overflow:hidden; white-space:normal; }
     .profile-module-btn strong { display:block; font-size:14px; overflow-wrap:anywhere; }
     .profile-module-btn .muted { font-size:12px; white-space:normal; overflow-wrap:anywhere; }
     .profile-module-btn.active { box-shadow:0 0 0 1px rgba(190,220,255,.65) inset, 0 10px 20px rgba(4,10,30,.45); }
@@ -1222,6 +1222,7 @@
     state.ui = state.ui || {};
     state.ach.unseen_count = 0;
     state.ui.unseenAchCount = 0;
+    refreshProfileUnseenDot();
   }
 
   function getUnlockPatchFromItems(items) {
@@ -1971,6 +1972,20 @@
     </nav>`;
   }
 
+  function refreshProfileUnseenDot() {
+    const showProfileDot = getUnseenAchievementsCount() > 0;
+    const profileTab = appEl.querySelector('.tab[data-tab="profile"] .tab-emoji-wrap');
+    if (!profileTab) return;
+    let dot = profileTab.querySelector('.tab-unseen-dot');
+    if (showProfileDot && !dot) {
+      dot = document.createElement('i');
+      dot.className = 'tab-unseen-dot';
+      dot.setAttribute('aria-hidden', 'true');
+      profileTab.appendChild(dot);
+    }
+    if (!showProfileDot && dot) dot.remove();
+  }
+
   function renderMainApp() {
     appEl.innerHTML = `
       <div class="main-content" id="mainContent">
@@ -2450,7 +2465,7 @@
       <div style="margin-top:8px">Куда/зачем: ${tgts.map(v=>chip(v,filters.targets,'targets',TARGET_LABELS_RU)).join(' ')}</div>
       <div style="margin-top:8px">Нагрузка: ${br.map(v=>chip(v,filters.burdens,'burdens',BURDEN_LABELS_RU)).join(' ')}</div>
       <div style="margin-top:8px"><select id="sortSelect" style="width:100%;padding:8px;border-radius:10px"><option value="alpha" ${filters.sort==='alpha'?'selected':''}>По алфавиту</option><option value="evidence" ${filters.sort==='evidence'?'selected':''}>По доказательности</option><option value="trials" ${filters.sort==='trials'?'selected':''}>По исследованиям</option><option value="effect" ${filters.sort==='effect'?'selected':''}>По эффекту</option></select></div>
-      <div class="row" style="margin-top:10px"><button class="btn" id="applyFilters">Применить</button><button class="btn secondary" id="resetFilters">Сбросить</button></div>
+      <div class="row" style="margin-top:10px"><button class="btn secondary" id="resetFilters">Сбросить</button></div>
     </div>`;
   }
 
@@ -2719,23 +2734,27 @@
     bindDetailModalEvents();
 
     appEl.querySelectorAll('[data-filter-close]').forEach((el)=>el.addEventListener('click',()=>{ state.catalog.filtersOpen=false; renderActiveTab(); }));
-    appEl.querySelectorAll('[data-filter-toggle]').forEach((el)=>el.addEventListener('click',()=>{
+    appEl.querySelectorAll('[data-filter-toggle]').forEach((el)=>el.addEventListener('click', async ()=>{
       const [k,v]=el.dataset.filterToggle.split(':');
       const arr=state.catalog.filters[k];
       const idx=arr.indexOf(v);
       if(idx>=0) arr.splice(idx,1); else arr.push(v);
+      state.catalog.page = 0;
+      state.catalog.hasMore = true;
+      await loadCatalog(true);
       renderActiveTab();
       const s=document.getElementById('sortSelect');
       if(s) s.value=state.catalog.filters.sort;
     }));
 
-    document.getElementById('applyFilters')?.addEventListener('click', async ()=>{
-      const s=document.getElementById('sortSelect');
-      if(s) state.catalog.filters.sort=s.value;
-      state.catalog.filtersOpen=false;
-      state.catalog.page=0;
+    document.getElementById('sortSelect')?.addEventListener('change', async (e)=>{
+      const nextSort = String(e?.target?.value || 'alpha');
+      if (state.catalog.filters.sort === nextSort) return;
+      state.catalog.filters.sort = nextSort;
+      state.catalog.page = 0;
       state.catalog.hasMore = true;
       await loadCatalog(true);
+      renderActiveTab();
     });
 
     document.getElementById('resetFilters')?.addEventListener('click', async ()=>{
@@ -3494,7 +3513,7 @@ function adminField(label, field, value, kind='input') {
     ];
     const firstModuleId = modules[0]?.id || 'organs';
     const active = String(state.profileUi.activeModule || firstModuleId);
-    return `<section class="card fade"><div class="profile-module-grid">${modules.map((m)=>`<button class="btn profile-module-btn ${active===m.id?'active':''}" data-profile-module="${m.id}" ${m.locked ? 'disabled' : ''}><div><strong>${m.title}${m.unseen ? `<span class="new-pill" style="margin-left:6px">NEW ${m.unseen}</span>` : ''}</strong></div><div class="muted">${m.hint}</div></button>`).join('')}</div></section>`;
+    return `<section class="card fade"><div class="profile-module-grid">${modules.map((m)=>`<button class="btn profile-module-btn ${active===m.id?'active':''}" data-profile-module="${m.id}" ${m.locked ? 'disabled' : ''}><div><strong>${m.title}${m.unseen ? `<span class="new-pill" style="margin-left:6px; margin-top:4px;">NEW ${m.unseen}</span>` : ''}</strong></div><div class="muted">${m.hint}</div></button>`).join('')}</div></section>`;
   }
 
   function renderProfileAchievementsModule() {
@@ -3529,7 +3548,7 @@ function adminField(label, field, value, kind='input') {
       ${arr.map((a)=>`<div class="ach-item ${a.unlocked ? "" : "locked"}"><div><strong>${a.unlocked ? '🏆' : '🔒'} ${esc(a.title_ru || '')}</strong></div><div class="muted">${esc(a.desc_ru || '')}</div></div>`).join('')}
       </div></div>`).join('');
     const filterBtn = (key, label) => `<button class="chip ${achFilter===key?'green':''}" data-ach-filter="${key}">${label}</button>`;
-    return `<section class="card fade"><div class="row"><strong>🏆 Достижения${unseenCount ? `<span class="new-pill">NEW ${unseenCount}</span>` : ''}</strong><span class="muted">Открыто: ${unlocked.length} · Закрыто: ${locked.length}</span></div>
+    return `<section class="card fade"><div class="row" style="flex-wrap:wrap; align-items:flex-start;"><strong>🏆 Достижения${unseenCount ? `<span class="new-pill">NEW ${unseenCount}</span>` : ''}</strong><span class="muted">Открыто: ${unlocked.length} · Закрыто: ${locked.length}</span></div>
       ${unseenCount ? `<div style="margin-top:8px"><button class="btn secondary" data-ach-open-new>🔴 Показать новое (${unseenCount})</button></div>` : ''}
       <div class="ios-group" style="margin-top:10px">
         <details open><summary><span>🎯 Дальше по плану</span><span class="ios-arrow">▾</span></summary><div class="ios-content">${next.length ? next.map((item)=>`<div class="ach-item"><div><strong>${esc(item.title_ru || '')}</strong></div><div class="muted">Прогресс: ${Math.max(0, Math.min(100, Number(item.pct || 0)))}%</div>${item.hint_ru ? `<div class="muted">${esc(item.hint_ru)}</div>` : ''}</div>`).join('') : '<div class="muted">Сейчас нет актуальных шагов.</div>'}</div></details>

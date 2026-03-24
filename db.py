@@ -7189,6 +7189,23 @@ async def add_item_to_complex(conn: aiosqlite.Connection, tg_user_id: int, compl
            ON CONFLICT(complex_id, supplement_id) DO UPDATE SET dose_override=excluded.dose_override""",
         (int(complex_id), int(supplement_id), str(dose_override or "").strip()[:120], nxt),
     )
+    # БАД, добавленный в комплекс, должен быть виден во всех разделах:
+    # синхронизируем с "Мои БАДы", даже если добавление произошло из каталога.
+    await conn.execute(
+        """INSERT INTO user_supplements(user_id, supplement_id, is_active, enabled, created_at)
+           VALUES(?,?,1,1,?)
+           ON CONFLICT(user_id, supplement_id) DO UPDATE SET
+             is_active=1,
+             enabled=1""",
+        (user_id, int(supplement_id), utc_now_iso()),
+    )
+    await conn.execute(
+        """INSERT OR IGNORE INTO user_supp_settings(
+             user_id, supplement_id, dose_text, reminder_time, reminder_enabled,
+             taken_date, skip_date, updated_at
+           ) VALUES(?,?,?,?,?,?,?,?)""",
+        (user_id, int(supplement_id), "", "", 0, "", "", utc_now_iso()),
+    )
     # Если у комплекса уже назначен слот, новый БАД сразу синхронизируем
     # с расписанием комплекса и убираем персональные кастом-напоминания,
     # чтобы не получить дубли в разных режимах.
@@ -7239,10 +7256,9 @@ async def list_complex_items(conn: aiosqlite.Connection, tg_user_id: int, comple
                   ci.dose_override
            FROM user_complex_items ci
            JOIN supplements s ON s.id=ci.supplement_id
-           JOIN user_supplements us ON us.user_id=? AND us.supplement_id=ci.supplement_id
-           WHERE ci.complex_id=? AND us.is_active=1 AND us.enabled=1
+           WHERE ci.complex_id=?
            ORDER BY ci.sort_order, name_ru""",
-        (user_id, int(complex_id)),
+        (int(complex_id),),
     )
     return [{"supplement_id": int(r["supplement_id"]), "slug": str(r["slug"] or ""), "name_ru": str(r["name_ru"] or ""), "dose_override": str(r["dose_override"] or "")} for r in rows]
 

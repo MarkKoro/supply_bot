@@ -656,10 +656,20 @@
     .settings-section summary::-webkit-details-marker { display:none; }
     .settings-section .ios-content { padding: 0 14px 12px; display:grid; gap:8px; }
     .settings-slot-grid { display:grid; gap:8px; margin-top:8px; }
-    .settings-slot-card { border: 1px solid rgba(255,255,255,.14); border-radius: 12px; padding: 10px; background: rgba(255,255,255,.03); display:grid; gap:8px; }
+    .settings-slot-card { border: 1px solid rgba(255,255,255,.14); border-radius: 14px; padding: 12px; background: rgba(255,255,255,.04); display:grid; gap:10px; box-shadow: 0 8px 18px rgba(0,0,0,.22), inset 0 1px 0 rgba(255,255,255,.12); }
     .settings-slot-head { display:flex; align-items:center; gap:8px; justify-content:space-between; }
     .settings-slot-time { display:flex; align-items:center; gap:8px; }
     .settings-slot-time .btn { min-width: 34px; padding: 7px 10px; }
+
+    .settings-heading { margin: 0 0 12px; font-size: 20px; font-weight: 800; }
+    .settings-checkbox-row { display:flex; align-items:center; justify-content:space-between; gap:12px; padding: 10px 12px; border-radius: 12px; border:1px solid rgba(255,255,255,.14); background: rgba(255,255,255,.04); cursor:pointer; }
+    .settings-checkbox-label { font-weight: 600; }
+    .settings-checkbox-wrap { position: relative; width: 28px; height: 28px; display:inline-flex; align-items:center; justify-content:center; }
+    .settings-checkbox-wrap input { position:absolute; inset:0; opacity:0; margin:0; cursor:pointer; }
+    .settings-checkbox-custom { width: 26px; height: 26px; border-radius: 8px; border: 2px solid rgba(181,208,255,.62); background: rgba(255,255,255,.08); box-shadow: inset 0 1px 0 rgba(255,255,255,.2); transition: all .18s ease; }
+    .settings-checkbox-wrap input:checked + .settings-checkbox-custom { background: linear-gradient(180deg, rgba(125,183,255,.75), rgba(78,126,214,.85)); border-color: rgba(203,227,255,.98); box-shadow: 0 0 0 3px rgba(125,183,255,.22); }
+    .settings-checkbox-wrap input:checked + .settings-checkbox-custom::after { content: '\2713'; color: #fff; font-size: 15px; font-weight: 900; display:grid; place-items:center; line-height: 1; }
+    .settings-checkbox-wrap input:disabled + .settings-checkbox-custom { opacity: .45; }
 
     .catalog-modal-overlay { position: fixed; inset: 0; z-index: 34; background: rgba(2,5,16,0.62); }
     .catalog-modal-shell { position: fixed; left: 10px; right: 10px; bottom: calc(88px + env(safe-area-inset-bottom)); z-index: 35; display: grid; gap: 8px; max-height: calc(100vh - 130px - env(safe-area-inset-bottom)); }
@@ -844,7 +854,7 @@
     ui: { unseenAchCount: 0, achFilter: "all", achQuery: "", microWowLastAt: 0 },
     unlockToast: { open: false, applying: false, items: [], sparkleTick: 0 },
     mySupplements: { open: false, tab: "active", loading: false, busy: {}, active: [], frozen: [] },
-    complexHub: { open: false, loading: false, schedulesLoading: false, slotsLoading: false, itemsLoading: {}, actionBusy: {}, expanded: {}, itemsById: {}, schedules: [], slots: [] },
+    complexHub: { open: false, loading: false, schedulesLoading: false, slotsLoading: false, itemsLoading: {}, actionBusy: {}, expanded: {}, itemsById: {}, schedules: [], slots: [], returnToToday: false, schedulePicker: { open: false, complexId: 0 } },
     suppHub: { open: false, loading: false, saving: false, item: null, slots: [], slotId: "morning", time: "", timeMode: "slot", customTime: "", doseText: "", noteText: "", remindersMode: "slot", reminderTimes: [], reminderInput: "", historyOpen: false, historyLoading: false, history: null, deleting: false, scheduleCacheAt: 0, schedules: [] },
     toastTimer: null,
     catalog: {
@@ -854,7 +864,9 @@
       error: false,
       filters: { evidence: [], targets: [], burdens: [], sort: "alpha" },
       detail: null, detailLoading: false, filtersOpen: false,
-      detailSection: null
+      detailSection: null,
+      focusSearchOnOpen: false,
+      pickForComplexId: 0
     },
     searchDebounce: null,
     bodyMap: null,
@@ -1377,6 +1389,7 @@
           </div>
         </section>
       </div>
+      ${renderComplexSchedulePicker()}
     `;
   }
 
@@ -1534,6 +1547,7 @@
           </div>
         </section>
       </div>
+      ${renderComplexSchedulePicker()}
     `;
   }
 
@@ -2114,6 +2128,8 @@
         activateTab(tab);
         if (tab === "today") {
           await loadToday(true);
+          if (state.complexHub.open || state.complexHub.returnToToday) await loadComplexHubMeta(true);
+          state.complexHub.returnToToday = false;
         }
         if (tab === "catalog" && !state.catalog.items.length) {
           await loadCatalog();
@@ -2490,10 +2506,13 @@
       ? skeletons
       : (itemsHtml || (!c.error ? '<div class="card">Ничего не найдено.</div>' : ''));
 
+    const pickForComplexId = Number(c.pickForComplexId || 0);
+    const pickComplex = (state.complexes || []).find((x) => Number(x.id || 0) === pickForComplexId);
     return `
+      ${pickForComplexId ? `<div class="card fade"><div class="row" style="gap:8px; align-items:flex-start;"><div><strong>Режим: добавить БАД в комплекс</strong><div class="muted" style="margin-top:4px">Комплекс: ${esc(pickComplex?.name || `#${pickForComplexId}`)}. Нажмите на БАД в списке — он добавится сразу.</div></div><button class="btn secondary" type="button" data-catalog-cancel-complex-pick>Отмена</button></div></div>` : ''}
       <div class="card fade catalog-toolbar">
         <div class="catalog-row">
-          <input id="catalogSearch" class="search-input" placeholder="Поиск RU/EN..." value="${esc(c.q)}"/>
+          <input id="catalogSearch" class="search-input" placeholder="Поиск RU/EN..." value="${esc(c.q)}" ${c.focusSearchOnOpen ? "autofocus" : ""}/>
           <button class="btn" id="catalogFilters">Фильтры</button>
         </div>
         <div class="catalog-quick-grid">
@@ -2713,9 +2732,17 @@
       }
     }));
     appEl.querySelector('[data-add-complex]')?.addEventListener('click', async (e)=>{
+      const preselectedComplexId = Number(state.catalog.pickForComplexId || 0);
       haptic();
       const id=Number(e.currentTarget.dataset.id);
       try {
+        if (preselectedComplexId) {
+          await api(`./api/complexes/${preselectedComplexId}/items/add`,{method:'POST',body:{supplement_id:id}});
+          state.catalog.pickForComplexId = 0;
+          showToast('БАД добавлен в выбранный комплекс');
+          await Promise.all([loadComplexHubMeta(true), loadToday(true)]);
+          return;
+        }
         if (!state.complexes.length) {
           alert('Пока нет созданных комплексов. Давайте создадим первый.');
           const name = prompt('Введите название нового комплекса');
@@ -2752,6 +2779,15 @@
   }
 
   function bindCatalogEvents() {
+    if (state.catalog.focusSearchOnOpen) {
+      requestAnimationFrame(() => {
+        const input = document.getElementById('catalogSearch');
+        input?.focus();
+        input?.setSelectionRange?.(input.value.length, input.value.length);
+      });
+      state.catalog.focusSearchOnOpen = false;
+    }
+
     document.getElementById('catalogSearch')?.addEventListener('input', (e) => {
       state.catalog.q = e.target.value;
       clearTimeout(state.searchDebounce);
@@ -2809,8 +2845,29 @@
 
     appEl.querySelectorAll('[data-catalog-open]').forEach((el)=>el.addEventListener('click', async ()=>{
       haptic();
+      const pickForComplexId = Number(state.catalog.pickForComplexId || 0);
+      if (pickForComplexId) {
+        const slug = String(el.dataset.catalogOpen || '').trim();
+        const fromList = (state.catalog.items || []).find((x) => String(x.slug || '') === slug);
+        const supplementId = Number(fromList?.id || 0);
+        if (!supplementId) return showToast('Не удалось определить БАД');
+        try {
+          await api(`./api/complexes/${pickForComplexId}/items/add`, { method:'POST', body:{ supplement_id: supplementId } });
+          state.catalog.pickForComplexId = 0;
+          await Promise.all([loadComplexHubMeta(true), loadToday(true)]);
+          showToast('БАД добавлен в комплекс');
+          return;
+        } catch {
+          showToast('Не удалось добавить БАД в комплекс');
+          return;
+        }
+      }
       await openSupplementDetail(el.dataset.catalogOpen);
     }));
+    appEl.querySelector('[data-catalog-cancel-complex-pick]')?.addEventListener('click', () => {
+      state.catalog.pickForComplexId = 0;
+      renderActiveTab();
+    });
 
     bindDetailModalEvents();
 
@@ -4439,6 +4496,7 @@ function adminField(label, field, value, kind='input') {
           }).join('')}
         </div>
       </div>
+      ${renderComplexSchedulePicker()}
     `;
   }
 
@@ -4463,7 +4521,8 @@ function adminField(label, field, value, kind='input') {
             const items = hub.itemsById[cid] || [];
             const schedule = (hub.schedules || []).find((s) => Number(s.complex_id) === cid);
             const busy = !!hub.actionBusy[cid];
-            const labelTime = schedule ? `${schedule.slot_id || 'slot'}${schedule.time_local ? ` · ${schedule.time_local}` : ''}` : 'не назначено';
+            const slotLabel = (hub.slots || []).find((slot) => String(slot.slot_id || "") === String(schedule?.slot_id || ""));
+            const labelTime = schedule ? `${slotLabel?.title_ru || schedule.slot_id || 'слот'}${schedule.time_local ? ` · ${schedule.time_local}` : ''}` : 'не назначено';
             return `<div class="item-row" style="display:block">
               <button type="button" class="btn secondary complex-row-toggle" data-complex-expand="${cid}">
                 <div class="row"><strong>${expanded ? '▾' : '▸'} ${esc(c.name || 'Комплекс')}</strong><span class="muted">${Number(c.items_count || 0)} шт</span></div>
@@ -4472,7 +4531,7 @@ function adminField(label, field, value, kind='input') {
                 <div class="muted">⏰ Время: ${esc(labelTime)}</div>
                 <div class="row" style="justify-content:flex-start; gap:8px; flex-wrap:wrap;">
                   <button class="btn secondary" type="button" data-complex-rename="${cid}" ${busy ? 'disabled' : ''}>Переименовать</button>
-                  <button class="btn secondary" type="button" data-complex-schedule="${cid}" ${busy ? 'disabled' : ''}>Назначить время</button>
+                  <button class="btn secondary" type="button" data-complex-schedule="${cid}" ${busy ? 'disabled' : ''}>Выбрать слот</button>
                   <button class="btn secondary" type="button" data-complex-schedule-clear="${cid}" ${busy ? 'disabled' : ''}>Снять время</button>
                   <button class="btn secondary" type="button" data-complex-add-item="${cid}" ${busy ? 'disabled' : ''}>Добавить БАД</button>
                   <button class="btn secondary" type="button" data-complex-delete="${cid}" ${busy ? 'disabled' : ''}>Удалить комплекс</button>
@@ -4493,7 +4552,28 @@ function adminField(label, field, value, kind='input') {
           }).join('')}
         </div>
       </div>
+      ${renderComplexSchedulePicker()}
     `;
+  }
+
+  function renderComplexSchedulePicker() {
+    const picker = state.complexHub?.schedulePicker || { open: false, complexId: 0 };
+    if (!picker.open) return '';
+    const slots = state.complexHub?.slots || [];
+    const cid = Number(picker.complexId || 0);
+    const complex = (state.complexes || []).find((x) => Number(x.id || 0) === cid);
+    return `<div class="modal-overlay" data-complex-schedule-close>
+      <section class="card modal-card" onclick="event.stopPropagation()">
+        <div class="row"><strong>Выберите слот для «${esc(complex?.name || 'комплекса')}»</strong><button class="btn secondary" type="button" data-complex-schedule-close>Закрыть</button></div>
+        <div class="muted" style="margin-top:8px">Выберите готовый слот. Вводить идентификатор и время вручную не нужно.</div>
+        <div style="margin-top:10px; display:grid; gap:8px;">
+          ${(slots || []).map((slot) => `<button class="btn secondary" type="button" data-complex-schedule-slot="${esc(slot.slot_id || '')}" data-complex-id="${cid}"><strong>${esc(slot.title_ru || 'Слот')}</strong> · ${esc(normalizeHHMM(slot.time_local || '') || '--:--')}</button>`).join('') || '<div class="sheet-empty">Слоты пока не настроены.</div>'}
+        </div>
+        <div class="row" style="margin-top:12px; justify-content:flex-start;">
+          <button class="btn" type="button" data-complex-schedule-settings>Открыть «Уведомления и слоты»</button>
+        </div>
+      </section>
+    </div>`;
   }
 
   function normalizeHHMM(value) {
@@ -4567,6 +4647,7 @@ function adminField(label, field, value, kind='input') {
           </div>
         `}
       </div>
+      ${renderComplexSchedulePicker()}
     `;
   }
 
@@ -4798,12 +4879,16 @@ function adminField(label, field, value, kind='input') {
     const topMissText = topMiss.length ? `${topMiss[0].name_ru || topMiss[0].slug || '—'} (${Number(topMiss[0].missed || 0)})` : 'Пока нет';
     const topStreakText = topStreaks.length ? `${topStreaks[0].name_ru || topStreaks[0].slug || '—'} (${Number(topStreaks[0].streak || 0)} дн)` : 'Пока нет';
     return `
+      <h2 class="settings-heading">Настройки</h2>
       <section class="card fade">
-        <div class="row"><strong>⚙️ Настройки аккаунта</strong></div>
-        <div class="muted" style="margin-top:6px"><b>Доступ:</b> ${esc(accessLabel)}</div>
+        <div class="row"><strong>ℹ️ Общая информация</strong></div>
+        <div class="muted" style="margin-top:6px"><b>Имя:</b> ${esc(String(me.first_name || "Пользователь"))}</div>
+        <div class="muted" style="margin-top:4px"><b>ID:</b> ${esc(String(me.id || state.userId || "—"))}</div>
+        <div class="muted" style="margin-top:4px"><b>Часовой пояс:</b> ${esc(state.settingsData?.tz_name || "UTC")}</div>
+        <div class="muted" style="margin-top:4px"><b>Доступ:</b> ${esc(accessLabel)}</div>
         <div class="muted" style="margin-top:4px">${esc(accessHint)}</div>
         <div class="muted" style="margin-top:4px">После подписки: постоянный доступ к WebApp, AI check-in и удобный ежедневный трекинг.</div>
-        <div class="muted" style="margin-top:6px">Документы: ${state.settingsData?.offer_url ? `<a href="${esc(state.settingsData.offer_url)}" target="_blank" rel="noopener noreferrer">Оферта</a>${state.settingsData?.offer_version ? ` (v${esc(state.settingsData.offer_version)})` : ''}` : 'Оферта недоступна'} · ${state.settingsData?.privacy_url ? `<a href="${esc(state.settingsData.privacy_url)}" target="_blank" rel="noopener noreferrer">Privacy Policy</a>${state.settingsData?.privacy_version ? ` (v${esc(state.settingsData.privacy_version)})` : ''}` : 'Privacy Policy недоступна'}</div>
+        <div class="muted" style="margin-top:6px">Документы: ${state.settingsData?.offer_url ? `<a href="${esc(state.settingsData.offer_url)}" target="_blank" rel="noopener noreferrer">Оферта</a>${state.settingsData?.offer_version ? ` (v${esc(state.settingsData.offer_version)})` : ''}` : 'Оферта недоступна'} · ${state.settingsData?.privacy_url ? `<a href="${esc(state.settingsData.privacy_url)}" target="_blank" rel="noopener noreferrer">Политика конфиденциальности</a>${state.settingsData?.privacy_version ? ` (v${esc(state.settingsData.privacy_version)})` : ''}` : 'Политика конфиденциальности недоступна'}</div>
         <div class="settings-sections">
           <div class="settings-section">
             <details ${sectionsOpen.premium ? 'open' : ''} data-settings-section="premium">
@@ -4824,17 +4909,27 @@ function adminField(label, field, value, kind='input') {
           </div>
           <div class="settings-section">
             <details ${sectionsOpen.schedule ? 'open' : ''} data-settings-section="schedule">
-              <summary><span>🕒 Время и расписание</span><span class="ios-arrow">▾</span></summary>
+              <summary><span>🔔 Уведомления и слоты</span><span class="ios-arrow">▾</span></summary>
               <div class="ios-content">
               <label class="muted">Часовой пояс</label>
               <select id="settingsTimezone" class="select">${timezoneOptionsHtml(state.settingsData?.tz_name || 'UTC+03:00')}</select>
-              <label style="display:flex;align-items:center;gap:8px;margin-top:10px;cursor:pointer;"><input type="checkbox" id="settingsNotificationsEnabled" ${state.settingsData?.reminders_enabled ? 'checked' : ''}/> <span class="muted">Включить уведомления</span></label>
+              <label class="settings-checkbox-row" style="margin-top:10px;">
+                <span class="settings-checkbox-label">Включить уведомления</span>
+                <span class="settings-checkbox-wrap">
+                  <input type="checkbox" id="settingsNotificationsEnabled" ${state.settingsData?.reminders_enabled ? 'checked' : ''}/>
+                  <span class="settings-checkbox-custom" aria-hidden="true"></span>
+                </span>
+              </label>
+              ${state.complexHub.returnToToday ? '<button class="btn secondary" type="button" data-settings-back-complex style="margin-top:8px;">Вернуться к комплексу на «Сегодня»</button>' : ''}
               <div class="muted" style="margin-top:6px">Активные слоты: ${enabledSlots.length}/${scheduleSlots.length || 0}</div>
               <div class="settings-slot-grid">${scheduleSlots.map((slot)=>`<article class="settings-slot-card">
                 <div class="settings-slot-head">
-                  <label class="row" style="justify-content:flex-start;gap:8px;cursor:pointer;">
-                    <input type="checkbox" data-slot-enabled="${esc(slot.slot_id || '')}" ${slot.is_enabled ? 'checked' : ''} ${notificationsEnabled ? '' : 'disabled'}/>
+                  <label class="settings-checkbox-row" style="padding:8px 10px;">
                     <span>${esc(slot.title_ru || 'Слот')}</span>
+                    <span class="settings-checkbox-wrap">
+                      <input type="checkbox" data-slot-enabled="${esc(slot.slot_id || '')}" ${slot.is_enabled ? 'checked' : ''} ${notificationsEnabled ? '' : 'disabled'}/>
+                      <span class="settings-checkbox-custom" aria-hidden="true"></span>
+                    </span>
                   </label>
                   <div class="settings-slot-time">
                     <strong>${esc(slot.time_local || '--:--')}</strong>
@@ -4882,6 +4977,12 @@ function adminField(label, field, value, kind='input') {
         state.settingsUi.sectionsOpen = { ...(state.settingsUi.sectionsOpen || {}), [key]: !!el.open };
       });
     });
+    document.querySelector('[data-settings-back-complex]')?.addEventListener('click', async () => {
+      state.complexHub.returnToToday = false;
+      activateTab('today');
+      await Promise.all([loadComplexHubMeta(true), loadToday(true)]);
+    });
+
     document.getElementById('settingsTimezone')?.addEventListener('change', async (e) => {
       const tzName = String(e.target.value || '').trim();
       if (!tzName) return;
@@ -5316,25 +5417,53 @@ function adminField(label, field, value, kind='input') {
     });
 
     appEl.querySelectorAll('[data-complex-schedule]').forEach((el) => {
-      el.addEventListener('click', async () => {
+      el.addEventListener('click', () => {
         const cid = Number(el.dataset.complexSchedule || 0);
-        const slots = state.complexHub.slots || [];
-        const slotHints = slots.map((s) => `${s.slot_id} (${s.time_local || '--:--'})`).join('\n');
-        const slotId = prompt(`Выберите slot_id для комплекса:\n${slotHints}`, slots[0]?.slot_id || 'morning');
-        if (!slotId || !slotId.trim()) return;
-        const time = prompt('Время комплекса HH:MM (можно оставить пустым)', '') || '';
+        if (!cid) return;
+        state.complexHub.schedulePicker = { open: true, complexId: cid };
+        renderActiveTab();
+      });
+    });
+
+    appEl.querySelectorAll('[data-complex-schedule-close]').forEach((el) => {
+      el.addEventListener('click', () => {
+        state.complexHub.schedulePicker = { open: false, complexId: 0 };
+        renderActiveTab();
+      });
+    });
+
+    appEl.querySelectorAll('[data-complex-schedule-slot]').forEach((el) => {
+      el.addEventListener('click', async () => {
+        const cid = Number(el.dataset.complexId || 0);
+        const slotId = String(el.dataset.complexScheduleSlot || '').trim();
+        if (!cid || !slotId) return;
+        const slot = (state.complexHub.slots || []).find((x) => String(x.slot_id || '') === slotId);
         state.complexHub.actionBusy[cid] = true;
         renderActiveTab();
         try {
-          await api('./api/complex_schedules/set', { method: 'POST', body: { complex_id: cid, slot_id: slotId.trim(), time_local: normalizeHHMM(time) || '' } });
+          await api('./api/complex_schedules/set', { method: 'POST', body: { complex_id: cid, slot_id: slotId, time_local: normalizeHHMM(slot?.time_local || '') || '' } });
+          state.complexHub.schedulePicker = { open: false, complexId: 0 };
           await Promise.all([loadComplexHubMeta(true), loadToday(true)]);
-          showToast('Время комплекса обновлено');
+          showToast('Слот для комплекса обновлён');
         } catch {
-          showToast('Не удалось назначить время');
+          showToast('Не удалось назначить слот');
         } finally {
           delete state.complexHub.actionBusy[cid];
           renderActiveTab();
         }
+      });
+    });
+
+    appEl.querySelectorAll('[data-complex-schedule-settings]').forEach((el) => {
+      el.addEventListener('click', async () => {
+        state.complexHub.returnToToday = true;
+        state.complexHub.schedulePicker = { open: false, complexId: 0 };
+        activateTab('settings');
+        try {
+          await Promise.all([loadAchievements(true), loadSettingsData(true), loadScheduleData(true), loadStatsOnly().catch(() => null)]);
+          state.settingsUi.sectionsOpen = { ...(state.settingsUi.sectionsOpen || {}), schedule: true };
+          renderActiveTab();
+        } catch {}
       });
     });
 
@@ -5393,26 +5522,15 @@ function adminField(label, field, value, kind='input') {
       el.addEventListener('click', async () => {
         const cid = Number(el.dataset.complexAddItem || 0);
         if (!cid) return;
-        try {
-          if (!state.mySupplements.active.length) await loadMySupplements(true);
-          const active = state.mySupplements.active || [];
-          if (!active.length) return showToast('Сначала добавьте БАД в «Мои БАДы»');
-          const names = active.map((x) => `• ${x.name_ru || x.name || x.supplement_id}`).join('\n');
-          const pick = prompt(`Введите точное название БАДа для добавления:\n${names}`);
-          if (!pick || !pick.trim()) return;
-          const target = active.find((x) => String(x.name_ru || x.name || '').trim().toLowerCase() === pick.trim().toLowerCase());
-          if (!target) return showToast('Не найден БАД с таким названием');
-          state.complexHub.actionBusy[cid] = true;
-          renderActiveTab();
-          await api(`./api/complexes/${cid}/items/add`, { method: 'POST', body: { supplement_id: Number(target.supplement_id) } });
-          await Promise.all([loadComplexItems(cid, true), loadComplexHubMeta(true), loadToday(true)]);
-          showToast('БАД добавлен в комплекс');
-        } catch {
-          showToast('Не удалось добавить БАД в комплекс');
-        } finally {
-          delete state.complexHub.actionBusy[cid];
-          renderActiveTab();
-        }
+        state.catalog.pickForComplexId = cid;
+        state.catalog.focusSearchOnOpen = true;
+        state.catalog.q = '';
+        state.catalog.page = 0;
+        state.catalog.hasMore = true;
+        state.activeTab = 'catalog';
+        renderMainApp();
+        await loadCatalog(true);
+        showToast('Выберите БАД в каталоге — он добавится в комплекс');
       });
     });
 

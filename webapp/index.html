@@ -91,6 +91,14 @@
       gap: 12px;
       margin-bottom: 12px;
     }
+    .topbar-main { min-width: 0; flex: 1; }
+    .topbar-actions { display: flex; align-items: flex-start; justify-content: flex-end; }
+    .today-header-actions { display: grid; gap: 8px; justify-items: end; }
+    .today-header-actions .btn { min-width: 160px; }
+    @media (max-width: 520px) {
+      .topbar { align-items: flex-start; }
+      .today-header-actions .btn { min-width: 132px; padding: 9px 10px; font-size: 13px; }
+    }
 
     .headline { margin: 0; font-size: 20px; }
     .subline { color: var(--muted); font-size: 13px; margin-top: 3px; }
@@ -485,17 +493,6 @@
       line-height: 1.35;
       padding-top: 2px;
     }
-    .today-top-actions {
-      display: flex;
-      justify-content: flex-end;
-      margin-bottom: 8px;
-    }
-    .today-complex-launch {
-      margin-bottom: 10px;
-      display: flex;
-      justify-content: flex-end;
-    }
-    .today-complex-launch .btn { width: min(100%, 240px); }
     .complex-row-toggle {
       width: 100%;
       text-align: left;
@@ -1765,9 +1762,7 @@
     autoSyncTimer = setInterval(async () => {
       if (document.visibilityState !== 'visible' || !state.me?.webapp_access) return;
       try {
-        if (state.activeTab === 'today') await loadToday(true);
-        if (state.activeTab === 'profile') await loadProfileShell(true);
-        if (state.activeTab === 'settings') await Promise.all([loadSettingsData(true), loadScheduleData(true), loadStatsOnly().catch(() => null)]);
+        if (state.activeTab === 'today') await loadToday({ force: true, silent: true });
       } catch {}
     }, 45000);
   }
@@ -2050,10 +2045,11 @@
     appEl.innerHTML = `
       <div class="main-content" id="mainContent">
         <header class="topbar fade">
-          <div>
+          <div class="topbar-main">
             <div class="topbar-title-row"><h1 class="headline">${APP_NAME}</h1>${(() => { const bid = document.documentElement.dataset.badge || "none"; const b = getBadgeMeta(bid); const label = String(b.title_ru || '').trim(); if (bid === 'none' || !label || label === bid) return ""; return `<span class="badge-pill">${esc(b.emoji || "")} ${esc(label)}</span>`; })()}${(() => { const me = state.me || {}; if (me.starter_trial_active && !me.premium) { return `<span class="chip">🎁 Starter до ${esc(String(me.starter_trial_until_utc || '').slice(0, 10) || '—')}</span>`; } return ''; })()}</div>
             <div class="subline">${formatDate()}</div>
           </div>
+          <div id="topbarActions" class="topbar-actions"></div>
         </header>
         <section id="tabContent" class="fade"></section>
       </div>
@@ -2238,6 +2234,7 @@
       nextHtml = renderSurvey();
       binder = bindSurveyEvents;
     }
+    renderTopbarActions();
 
     if (lastRenderedTabKey === tabKey && lastRenderedTabHtml === nextHtml) return;
     const focusSnapshot = getFocusableSnapshot(target);
@@ -4271,24 +4268,76 @@ function adminField(label, field, value, kind='input') {
     }
   }
 
-  async function loadToday(force) {
+  function digestTodaySnapshot(today, statsSummary) {
+    const slots = Array.isArray(today?.slots) ? today.slots : [];
+    const slotDigest = slots.map((slot) => ({
+      slot_id: String(slot.slot_id || ''),
+      time_local: String(slot.time_local || ''),
+      items: (Array.isArray(slot.items) ? slot.items : []).map((item) => ({
+        supplement_id: Number(item.supplement_id || 0),
+        status: String(item.status || 'none'),
+      })),
+      complexes: (Array.isArray(slot.complexes) ? slot.complexes : []).map((complex) => ({
+        complex_id: Number(complex.complex_id || 0),
+        status: String(complex.status || 'none'),
+        taken_count: Number(complex.taken_count || 0),
+        total_count: Number(complex.total_count || 0),
+        items: (Array.isArray(complex.items) ? complex.items : []).map((item) => ({
+          supplement_id: Number(item.supplement_id || 0),
+          status: String(item.status || 'none'),
+        })),
+      })),
+    }));
+    const stToday = statsSummary?.today || {};
+    const st7 = statsSummary?.last7 || {};
+    const statsDigest = {
+      today: {
+        expected: Number(stToday.expected || 0),
+        taken: Number(stToday.taken || 0),
+        adherence: stToday.adherence == null ? null : Number(stToday.adherence),
+      },
+      last7: {
+        expected: Number(st7.expected || 0),
+        taken: Number(st7.taken || 0),
+        adherence: st7.adherence == null ? null : Number(st7.adherence),
+      },
+    };
+    return JSON.stringify({ slotDigest, statsDigest });
+  }
+
+  async function loadToday(forceOrOptions = false) {
+    const opts = typeof forceOrOptions === 'object' && forceOrOptions !== null
+      ? forceOrOptions
+      : { force: !!forceOrOptions };
+    const force = !!opts.force;
+    const silent = !!opts.silent;
     if (state.loadingToday && !force) return;
-    state.loadingToday = true;
-    state.loadingStats = true;
-    renderActiveTab();
+    const showLoading = !silent && !state.today;
+    if (showLoading) {
+      state.loadingToday = true;
+      state.loadingStats = true;
+      renderActiveTab();
+    }
+    let shouldRender = false;
     try {
       const [today, statsRes] = await Promise.all([
         api("./api/today"),
         api("./api/stats/summary").catch(()=>null),
       ]);
-      state.today = today;
-      state.stats = statsRes?.summary || null;
+      const nextStats = statsRes?.summary || null;
+      const prevDigest = digestTodaySnapshot(state.today, state.stats);
+      const nextDigest = digestTodaySnapshot(today, nextStats);
+      if (force || prevDigest !== nextDigest || !state.today) {
+        state.today = today;
+        state.stats = nextStats;
+        shouldRender = true;
+      }
     } catch (e) {
       if (e.message !== "PREMIUM_REQUIRED") showToast("Не удалось загрузить план");
     } finally {
       state.loadingToday = false;
       state.loadingStats = false;
-      renderActiveTab();
+      if (showLoading || shouldRender) renderActiveTab();
     }
   }
 
@@ -4500,10 +4549,6 @@ function adminField(label, field, value, kind='input') {
     const slots = state.today?.slots || [];
     if (!slots.length) {
       return `
-        <section class="fade">
-          <div class="today-top-actions"><button type="button" class="btn secondary" data-open-my-supp>Мои БАДы</button></div>
-          <div class="today-complex-launch"><button type="button" class="btn secondary" data-open-complex-hub>Мои комплексы</button></div>
-        </section>
         <div class="card">На сегодня приёмов не найдено.</div>
         ${renderMySupplementsSheet()}
         ${renderComplexHubSheet()}
@@ -4512,10 +4557,6 @@ function adminField(label, field, value, kind='input') {
     }
 
     return `
-      <section class="fade">
-        <div class="today-top-actions"><button type="button" class="btn secondary" data-open-my-supp>Мои БАДы</button></div>
-        <div class="today-complex-launch"><button type="button" class="btn secondary" data-open-complex-hub>Мои комплексы</button></div>
-      </section>
       ${slots.map((slot) => {
       const items = slot.items || [];
       const complexes = slot.complexes || [];
@@ -5025,6 +5066,77 @@ function adminField(label, field, value, kind='input') {
     }
   }
 
+  function openMySupplements() {
+    state.mySupplements.open = true;
+    state.mySupplements.tab = "active";
+    renderActiveTab();
+    return loadMySupplements(true);
+  }
+
+  function openComplexHub() {
+    state.complexHub.open = true;
+    renderActiveTab();
+    return loadComplexHubMeta(true);
+  }
+
+  function renderTopbarActions() {
+    const wrap = document.getElementById('topbarActions');
+    if (!wrap) return;
+    if (state.activeTab !== 'today') {
+      wrap.innerHTML = '';
+      return;
+    }
+    wrap.innerHTML = `
+      <div class="today-header-actions">
+        <button type="button" class="btn secondary" data-open-my-supp>Мои БАДы</button>
+        <button type="button" class="btn secondary" data-open-complex-hub>Мои комплексы</button>
+      </div>
+    `;
+    bindTopbarActions();
+  }
+
+  function bindTopbarActions() {
+    document.querySelectorAll("[data-open-my-supp]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        haptic();
+        await openMySupplements();
+      });
+    });
+    document.querySelectorAll('[data-open-complex-hub]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        haptic();
+        await openComplexHub();
+      });
+    });
+  }
+
+  function removeComplexFromToday(complexId) {
+    const cid = Number(complexId || 0);
+    if (!cid || !state.today?.slots) return;
+    for (const slot of state.today.slots) {
+      const complexes = Array.isArray(slot.complexes) ? slot.complexes : [];
+      slot.complexes = complexes.filter((complex) => Number(complex?.complex_id || 0) !== cid);
+    }
+    recalcTodaySnapshot();
+  }
+
+  function removeSupplementFromComplexInToday(complexId, supplementId) {
+    const cid = Number(complexId || 0);
+    const sid = Number(supplementId || 0);
+    if (!cid || !sid || !state.today?.slots) return;
+    for (const slot of state.today.slots) {
+      for (const complex of (slot.complexes || [])) {
+        if (Number(complex?.complex_id || 0) !== cid) continue;
+        const nextItems = (complex.items || []).filter((item) => Number(item?.supplement_id || 0) !== sid);
+        complex.items = nextItems;
+        complex.total_count = Math.max(0, Number(complex.total_count || 0) - 1);
+        complex.taken_count = nextItems.filter((item) => item.status === 'taken').length;
+        complex.status = complex.taken_count > 0 ? 'taken' : 'none';
+      }
+    }
+    recalcTodaySnapshot();
+  }
+
   function bindTodayEvents() {
     appEl.querySelectorAll("[data-item]").forEach((row) => {
       row.addEventListener("click", (e) => {
@@ -5096,25 +5208,6 @@ function adminField(label, field, value, kind='input') {
       });
     });
 
-    appEl.querySelectorAll("[data-open-my-supp]").forEach((btn) => {
-      btn.addEventListener("click", async () => {
-        haptic();
-        state.mySupplements.open = true;
-        state.mySupplements.tab = "active";
-        renderActiveTab();
-        await loadMySupplements(true);
-      });
-    });
-
-    appEl.querySelectorAll('[data-open-complex-hub]').forEach((btn) => {
-      btn.addEventListener('click', async () => {
-        haptic();
-        state.complexHub.open = true;
-        renderActiveTab();
-        await loadComplexHubMeta(true);
-      });
-    });
-
     appEl.querySelectorAll('[data-complex-hub-close]').forEach((el) => {
       el.addEventListener('click', () => {
         state.complexHub.open = false;
@@ -5177,9 +5270,11 @@ function adminField(label, field, value, kind='input') {
         renderActiveTab();
         try {
           await api('./api/complexes/delete', { method: 'POST', body: { complex_id: cid } });
+          state.complexes = (state.complexes || []).filter((c) => Number(c.id || 0) !== cid);
+          state.complexHub.schedules = (state.complexHub.schedules || []).filter((s) => Number(s.complex_id || 0) !== cid);
           delete state.complexHub.itemsById[cid];
           delete state.complexHub.expanded[cid];
-          await Promise.all([loadComplexHubMeta(true), loadToday(true)]);
+          removeComplexFromToday(cid);
           showToast('Комплекс удалён');
         } catch {
           showToast('Не удалось удалить комплекс');
@@ -5250,7 +5345,10 @@ function adminField(label, field, value, kind='input') {
         renderActiveTab();
         try {
           await api(`./api/complexes/${cid}/items/remove`, { method: 'POST', body: { supplement_id: sid } });
-          await Promise.all([loadComplexItems(cid, true), loadComplexHubMeta(true), loadToday(true)]);
+          state.complexHub.itemsById[cid] = (state.complexHub.itemsById[cid] || []).filter((item) => Number(item?.supplement_id || 0) !== sid);
+          const complex = (state.complexes || []).find((x) => Number(x.id || 0) === cid);
+          if (complex) complex.items_count = Math.max(0, Number(complex.items_count || 0) - 1);
+          removeSupplementFromComplexInToday(cid, sid);
           showToast('БАД удалён из комплекса');
         } catch {
           showToast('Не удалось удалить БАД из комплекса');

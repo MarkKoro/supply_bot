@@ -996,8 +996,48 @@
     return state.me?.role && state.me.role !== "none" ? tabs.concat([{ id: "admin", title: "Админ", icon: "🛠" }]) : tabs;
   }
 
-  const themeText = tg?.themeParams?.text_color || "#eef2ff";
-  document.documentElement.style.setProperty("--text", themeText);
+  function parseHexColor(input) {
+    const value = String(input || "").trim();
+    const hex = value.startsWith("#") ? value.slice(1) : value;
+    if (!/^[\da-fA-F]{3}$|^[\da-fA-F]{6}$/.test(hex)) return null;
+    const normalized = hex.length === 3
+      ? hex.split("").map((ch) => ch + ch).join("")
+      : hex;
+    return {
+      r: parseInt(normalized.slice(0, 2), 16),
+      g: parseInt(normalized.slice(2, 4), 16),
+      b: parseInt(normalized.slice(4, 6), 16),
+    };
+  }
+
+  function relativeLuminance({ r, g, b }) {
+    const toLinear = (v) => {
+      const srgb = v / 255;
+      return srgb <= 0.03928 ? srgb / 12.92 : Math.pow((srgb + 0.055) / 1.055, 2.4);
+    };
+    const lr = toLinear(r);
+    const lg = toLinear(g);
+    const lb = toLinear(b);
+    return 0.2126 * lr + 0.7152 * lg + 0.0722 * lb;
+  }
+
+  function pickAppTextColor(themeTextColor) {
+    const fallback = "#eef2ff";
+    const parsed = parseHexColor(themeTextColor);
+    if (!parsed) return fallback;
+    const luminance = relativeLuminance(parsed);
+    // The app surface is intentionally dark; reject dark Telegram text colors
+    // (typical in light Telegram themes) to preserve readability.
+    return luminance < 0.42 ? fallback : themeTextColor;
+  }
+
+  function applyThemeTextColor() {
+    const themeText = tg?.themeParams?.text_color || "";
+    document.documentElement.style.setProperty("--text", pickAppTextColor(themeText));
+  }
+
+  applyThemeTextColor();
+  tg?.onEvent?.("themeChanged", applyThemeTextColor);
 
   function currentProjectBasePath() {
     const path = window.location.pathname || "/";

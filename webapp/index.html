@@ -871,7 +871,8 @@
       detailSection: null,
       focusSearchOnOpen: false,
       pickForComplexId: 0,
-      pickForBodymapSystem: ""
+      pickForBodymapSystem: "",
+      addToComplexModal: { open: false, supplementId: 0, creating: false }
     },
     searchDebounce: null,
     bodyMap: null,
@@ -2544,7 +2545,27 @@
       ${c.loadingMore ? '<div class="catalog-status">Загружаем ещё...</div>' : (!c.hasMore && c.items.length ? '<div class="catalog-status">Конец списка</div>' : '')}
       ${c.filtersOpen ? renderFilterSheet(filters) : ''}
       ${c.detail ? renderDetailModal(c.detail) : ''}
+      ${renderAddToComplexModal()}
     `;
+  }
+
+  function renderAddToComplexModal() {
+    const modal = state.catalog?.addToComplexModal || { open: false, creating: false };
+    if (!modal.open) return '';
+    const complexes = Array.isArray(state.complexes) ? state.complexes : [];
+    const hasComplexes = complexes.length > 0;
+    return `<div class="modal-overlay" data-add-complex-modal-close>
+      <section class="card modal-card" onclick="event.stopPropagation()">
+        <div class="row"><strong>Добавить в комплекс</strong><button class="btn secondary" type="button" data-add-complex-modal-close>Закрыть</button></div>
+        ${!hasComplexes ? `<div class="muted" style="margin-top:8px">У вас пока нет комплексов. Создайте первый:</div>` : `<div class="muted" style="margin-top:8px">Выберите существующий комплекс:</div>`}
+        ${hasComplexes ? `<div style="margin-top:10px; display:grid; gap:8px;">${complexes.map((c) => `<button class="btn secondary" type="button" data-complex-pick-existing="${Number(c.id || 0)}">${esc(c.name || `Комплекс #${c.id}`)}</button>`).join('')}</div>` : ''}
+        ${hasComplexes ? `<div class="row" style="margin-top:10px"><button class="btn" type="button" data-complex-create-start>+ Добавить комплекс</button></div>` : ''}
+        ${(!hasComplexes || modal.creating) ? `<div style="margin-top:10px; display:grid; gap:8px;">
+          <input class="input" id="addComplexNameInput" maxlength="80" placeholder="Название нового комплекса"/>
+          <button class="btn" type="button" data-complex-create-and-add>Создать и добавить</button>
+        </div>` : ''}
+      </section>
+    </div>`;
   }
 
   function renderFilterSheet(filters) {
@@ -2719,9 +2740,24 @@
   }
 
   function bindDetailModalEvents() {
+    const closeAddToComplexModal = () => {
+      state.catalog.addToComplexModal = { open: false, supplementId: 0, creating: false };
+      renderActiveTab();
+    };
+    const openAddToComplexModal = (supplementId) => {
+      state.catalog.addToComplexModal = { open: true, supplementId: Number(supplementId || 0), creating: !(state.complexes || []).length };
+      renderActiveTab();
+    };
+    const addSupplementToComplex = async (complexId, supplementId, successToast = 'БАД добавлен в комплекс') => {
+      await api(`./api/complexes/${Number(complexId)}/items/add`, { method: 'POST', body: { supplement_id: Number(supplementId) } });
+      showToast(successToast);
+      closeAddToComplexModal();
+      await Promise.all([loadComplexHubMeta(true), loadToday(true)]);
+    };
     appEl.querySelectorAll('[data-detail-close]').forEach((el)=>el.addEventListener('click', ()=>{
       state.catalog.detail=null;
       state.catalog.detailSection = null;
+      state.catalog.addToComplexModal = { open: false, supplementId: 0, creating: false };
       renderActiveTab();
     }));
     appEl.querySelector('[data-open-shop]')?.addEventListener('click', ()=>{ const u=state.catalog.detail?.purchase_url; if(u) tg?.openLink?.(u); });
@@ -2750,31 +2786,44 @@
           await Promise.all([loadComplexHubMeta(true), loadToday(true)]);
           return;
         }
-        if (!state.complexes.length) {
-          alert('Пока нет созданных комплексов. Давайте создадим первый.');
-          const name = prompt('Введите название нового комплекса');
-          if (!name) return;
-          const created = await api('./api/complexes/create',{method:'POST',body:{name}});
-          await api(`./api/complexes/${created.item.id}/items/add`,{method:'POST',body:{supplement_id:id}});
-          await loadComplexes(true);
-          showToast(`Создан комплекс ${name} и добавлен БАД`);
-          return;
-        }
-        const names=state.complexes.map((c)=>`• ${c.name}`).join('\n');
-        const pick=prompt(`В какой комплекс добавить?\n${names}\n\nЕсли ввести новое имя — создастся новый комплекс.`);
-        if (!pick) return;
-        const cleanPick = pick.trim();
-        if (!cleanPick) return;
-        let target=state.complexes.find((c)=>String(c.name || '').trim().toLowerCase()===cleanPick.toLowerCase());
-        if (!target) {
-          const r=await api('./api/complexes/create',{method:'POST',body:{name:cleanPick}});
-          target=r.item;
-          await loadComplexes(true);
-        }
-        await api(`./api/complexes/${target.id}/items/add`,{method:'POST',body:{supplement_id:id}});
-        showToast(`Добавлено в комплекс ${target.name}`);
+        await loadComplexes(true);
+        openAddToComplexModal(id);
       } catch { showToast('Не удалось добавить в комплекс'); }
     });
+    appEl.querySelectorAll('[data-add-complex-modal-close]').forEach((el) => el.addEventListener('click', closeAddToComplexModal));
+    appEl.querySelectorAll('[data-complex-pick-existing]').forEach((el) => el.addEventListener('click', async () => {
+      haptic();
+      const complexId = Number(el.dataset.complexPickExisting || 0);
+      const supplementId = Number(state.catalog?.addToComplexModal?.supplementId || 0);
+      if (!complexId || !supplementId) return;
+      try {
+        const target = (state.complexes || []).find((c) => Number(c.id || 0) === complexId);
+        await addSupplementToComplex(complexId, supplementId, `Добавлено в комплекс ${target?.name || ''}`.trim());
+      } catch {
+        showToast('Не удалось добавить в комплекс');
+      }
+    }));
+    appEl.querySelectorAll('[data-complex-create-start]').forEach((el) => el.addEventListener('click', () => {
+      haptic();
+      state.catalog.addToComplexModal.creating = true;
+      renderActiveTab();
+    }));
+    appEl.querySelectorAll('[data-complex-create-and-add]').forEach((el) => el.addEventListener('click', async () => {
+      haptic();
+      const input = document.getElementById('addComplexNameInput');
+      const name = String(input?.value || '').trim();
+      const supplementId = Number(state.catalog?.addToComplexModal?.supplementId || 0);
+      if (!name || !supplementId) return;
+      try {
+        const created = await api('./api/complexes/create', { method:'POST', body:{ name } });
+        await loadComplexes(true);
+        const createdId = Number(created?.item?.id || 0);
+        if (!createdId) throw new Error('COMPLEX_CREATE_FAILED');
+        await addSupplementToComplex(createdId, supplementId, `Создан комплекс ${name} и добавлен БАД`);
+      } catch {
+        showToast('Не удалось создать комплекс');
+      }
+    }));
     appEl.querySelector('[data-stack-toggle]')?.addEventListener('click', async (e)=>{
       const b=e.currentTarget; const id=Number(b.dataset.id); const inStack=b.dataset.in==='1';
       const action=inStack?'remove':'add'; haptic();

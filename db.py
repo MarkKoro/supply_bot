@@ -7007,6 +7007,7 @@ async def get_today_plan_groups(conn: aiosqlite.Connection, tg_user_id: int, loc
         conn,
         """SELECT us.supplement_id,
                   COALESCE(NULLIF(uss.dose_text,''), us.dose_text, '') AS dose_text,
+                  COALESCE(NULLIF(uss.note_text,''), '') AS note_text,
                   s.slug, COALESCE(NULLIF(s.name_ru,''), NULLIF(s.name_en,''), s.name) AS name_ru,
                   sch.slot_id, sch.time_hhmm
            FROM user_supplements us
@@ -7034,14 +7035,16 @@ async def get_today_plan_groups(conn: aiosqlite.Connection, tg_user_id: int, loc
         sid = int(row["supplement_id"] or 0)
         if sid in slot_complex_item_ids.get(str(group["slot_id"]), set()):
             continue
+        note_text = str(row["note_text"] or "").strip()
+        is_assistant_item = note_text.lower().startswith("ai assistant:")
         group["items"].append(
             {
                 "supplement_id": sid,
                 "slug": str(row["slug"] or "").strip(),
                 "name_ru": str(row["name_ru"] or "").strip(),
                 "dose_text": str(row["dose_text"] or "").strip(),
-                "source": "ai",
-                "action": "add",
+                "source": "ai" if is_assistant_item else "",
+                "action": "add" if is_assistant_item else "",
             }
         )
 
@@ -7117,6 +7120,8 @@ async def get_today_plan_groups(conn: aiosqlite.Connection, tg_user_id: int, loc
                 "slug": str(row["slug"] or "").strip(),
                 "name_ru": str(row["name_ru"] or "").strip(),
                 "dose_text": str(row["dose_text"] or "").strip(),
+                "source": "ai",
+                "action": "add",
             }
         )
         present_ids.add(sid)

@@ -5424,6 +5424,7 @@ async def add_user_supplement(conn: aiosqlite.Connection, tg_user_id: int, suppl
         "UPDATE user_schedules SET slot_id='morning' WHERE user_id=? AND supplement_id=? AND (slot_id IS NULL OR slot_id='')",
         (user_id, supplement_id),
     )
+    await conn.commit()
 
 async def add_user_supp(conn: aiosqlite.Connection, user_id: int, supplement_id: int) -> None:
     await add_user_supplement(conn, user_id, supplement_id)
@@ -5438,6 +5439,7 @@ async def remove_user_supplement(conn: aiosqlite.Connection, tg_user_id: int, su
         "DELETE FROM reminders WHERE user_id=? AND supplement_id=?",
         (tg_user_id, supplement_id),
     )
+    await conn.commit()
 
 async def remove_user_supp(conn: aiosqlite.Connection, user_id: int, supplement_id: int) -> None:
     await remove_user_supplement(conn, user_id, supplement_id)
@@ -5462,6 +5464,7 @@ async def remove_user_supplements_bulk(
         f"DELETE FROM reminders WHERE user_id=? AND supplement_id IN ({placeholders})",
         (tg_user_id, *cleaned),
     )
+    await conn.commit()
 
 
 async def get_user_supplement_intake_history(

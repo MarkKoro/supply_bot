@@ -2198,7 +2198,7 @@ async def home(
             onboarding_state = await db.get_onboarding_state(conn, user_id)
             starter_active = await db.is_starter_trial_active(conn, user_id)
             created_row = await db.fetchone(conn, "SELECT created_at_utc FROM users WHERE tg_user_id=?", (int(user_id),))
-            created_at_utc = str((created_row or {}).get("created_at_utc") or "").strip()
+            created_at_utc = str(created_row["created_at_utc"] if created_row and "created_at_utc" in created_row.keys() else "").strip()
             created_dt = db._parse_utc_iso_dt(created_at_utc)
             if created_dt is not None:
                 show_next_step_hint = (datetime.now(timezone.utc) - created_dt) <= timedelta(days=2)

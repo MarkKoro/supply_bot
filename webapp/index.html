@@ -855,7 +855,7 @@
     loadingStats: false,
     stats: null,
     ach: null,
-    ui: { unseenAchCount: 0, achFilter: "all", achQuery: "", achAllExpanded: false, microWowLastAt: 0 },
+    ui: { unseenAchCount: 0, achFilter: "all", achQuery: "", achAllExpanded: false, achNextExpanded: false, achRecentExpanded: false, microWowLastAt: 0 },
     unlockToast: { open: false, applying: false, items: [], sparkleTick: 0 },
     mySupplements: { open: false, tab: "active", loading: false, busy: {}, active: [], frozen: [] },
     complexHub: { open: false, loading: false, schedulesLoading: false, slotsLoading: false, itemsLoading: {}, actionBusy: {}, expanded: {}, itemsById: {}, schedules: [], slots: [], returnToToday: false, schedulePicker: { open: false, complexId: 0 } },
@@ -3749,6 +3749,8 @@ function adminField(label, field, value, kind='input') {
     const achFilter = String(state.ui?.achFilter || "all");
     const achQuery = String(state.ui?.achQuery || "").trim().toLowerCase();
     const achAllExpanded = Boolean(state.ui?.achAllExpanded);
+    const achNextExpanded = Boolean(state.ui?.achNextExpanded);
+    const achRecentExpanded = Boolean(state.ui?.achRecentExpanded);
     const filtered = items.filter((a) => {
       const isNew = Boolean(a.unlocked && !String(a.seen_at_utc || "").trim());
       if (achFilter === "unlocked" && !a.unlocked) return false;
@@ -3774,8 +3776,8 @@ function adminField(label, field, value, kind='input') {
     return `<section class="card fade"><div class="row" style="flex-wrap:wrap; align-items:flex-start;"><strong>🏆 Достижения${unseenCount ? `<span class="new-pill">NEW ${unseenCount}</span>` : ''}</strong><span class="muted">Открыто: ${unlocked.length} · Закрыто: ${locked.length}</span></div>
       ${unseenCount ? `<div style="margin-top:8px"><button class="btn secondary" data-ach-open-new>🔴 Показать новое (${unseenCount})</button></div>` : ''}
       <div class="ios-group" style="margin-top:10px">
-        <details open><summary><span>🎯 Дальше по плану</span><span class="ios-arrow">▾</span></summary><div class="ios-content">${next.length ? next.map((item)=>`<div class="ach-item"><div><strong>${esc(item.title_ru || '')}</strong></div><div class="muted">Прогресс: ${Math.max(0, Math.min(100, Number(item.pct || 0)))}%</div>${item.hint_ru ? `<div class="muted">${esc(item.hint_ru)}</div>` : ''}</div>`).join('') : '<div class="muted">Сейчас нет актуальных шагов.</div>'}</div></details>
-        <details><summary><span>🕒 Последние открытия</span><span class="ios-arrow">▾</span></summary><div class="ios-content">${recent.length ? recent.slice(0,8).map((item)=>`<div class="ach-item"><div><strong>${esc(item.title_ru || '')}</strong>${item.is_unseen ? '<span class="new-pill">NEW</span>' : ''}</div><div class="muted">${esc(formatUtcShort(item.unlocked_at_utc || ''))}</div><div class="muted">${esc(item.desc_ru || 'Описание появится позже')}</div>${Array.isArray(item.reward_verbose) && item.reward_verbose.length ? `<div class="muted" style="margin-top:4px">Награда: ${esc(item.reward_verbose.join(' · '))}</div>` : ''}</div>`).join('') : '<div class="muted">Пока нет новых открытий.</div>'}</div></details>
+        <details ${achNextExpanded ? 'open' : ''} data-ach-next-details><summary><span>🎯 Дальше по плану</span><span class="ios-arrow">▾</span></summary><div class="ios-content">${next.length ? next.map((item)=>`<div class="ach-item"><div><strong>${esc(item.title_ru || '')}</strong></div><div class="muted">Прогресс: ${Math.max(0, Math.min(100, Number(item.pct || 0)))}%</div>${item.hint_ru ? `<div class="muted">${esc(item.hint_ru)}</div>` : ''}</div>`).join('') : '<div class="muted">Сейчас нет актуальных шагов.</div>'}</div></details>
+        <details ${achRecentExpanded ? 'open' : ''} data-ach-recent-details><summary><span>🕒 Последние открытия</span><span class="ios-arrow">▾</span></summary><div class="ios-content">${recent.length ? recent.slice(0,8).map((item)=>`<div class="ach-item"><div><strong>${esc(item.title_ru || '')}</strong>${item.is_unseen ? '<span class="new-pill">NEW</span>' : ''}</div><div class="muted">${esc(formatUtcShort(item.unlocked_at_utc || ''))}</div><div class="muted">${esc(item.desc_ru || 'Описание появится позже')}</div>${Array.isArray(item.reward_verbose) && item.reward_verbose.length ? `<div class="muted" style="margin-top:4px">Награда: ${esc(item.reward_verbose.join(' · '))}</div>` : ''}</div>`).join('') : '<div class="muted">Пока нет новых открытий.</div>'}</div></details>
         <details ${achAllExpanded ? 'open' : ''} data-ach-all-details><summary><span>🏅 Все достижения</span><span class="ios-arrow">▾</span></summary><div class="ios-content"><div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap;">${filterBtn('all','Все')}${filterBtn('unlocked','Открытые')}${filterBtn('locked','Закрытые')}${filterBtn('new','Новые')}</div><div style="margin-top:8px"><input class="input" id="achSearch" placeholder="Поиск по названию или описанию" value="${esc(state.ui?.achQuery || "")}" /></div>${groupedHtml || '<div class="muted" style="margin-top:10px">Ничего не найдено.</div>'}</div></details>
       </div></section>`;
   }
@@ -4233,6 +4235,14 @@ function adminField(label, field, value, kind='input') {
     });
 
     document.querySelector('[data-profile-open-bodymap]')?.addEventListener('click', async () => { await loadBodyMap(true); const target = document.getElementById('tabContent'); target.innerHTML += `<section class="card fade">${renderBodyMap()}</section>`; bindBodyMapEvents(); });
+    document.querySelector('[data-ach-next-details]')?.addEventListener('toggle', (e) => {
+      state.ui = state.ui || {};
+      state.ui.achNextExpanded = !!e.currentTarget?.open;
+    });
+    document.querySelector('[data-ach-recent-details]')?.addEventListener('toggle', (e) => {
+      state.ui = state.ui || {};
+      state.ui.achRecentExpanded = !!e.currentTarget?.open;
+    });
     document.querySelector('[data-ach-all-details]')?.addEventListener('toggle', (e) => {
       state.ui = state.ui || {};
       state.ui.achAllExpanded = !!e.currentTarget?.open;

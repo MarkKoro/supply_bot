@@ -2186,6 +2186,7 @@ async def home(
     show_complexes = False
     onboarding_state = {}
     starter_active = False
+    show_next_step_hint = True
     if user_id:
         settings = context.application.bot_data["settings"]
         conn = await db.connect(settings.DB_PATH)
@@ -2193,9 +2194,14 @@ async def home(
             if user_id in settings.ADMIN_IDS:
                 show_complexes = True
             else:
-                show_complexes = await db.is_premium_active(conn, user_id)
+                show_complexes = await db.has_any_webapp_access(conn, user_id)
             onboarding_state = await db.get_onboarding_state(conn, user_id)
             starter_active = await db.is_starter_trial_active(conn, user_id)
+            created_row = await db.fetchone(conn, "SELECT created_at_utc FROM users WHERE tg_user_id=?", (int(user_id),))
+            created_at_utc = str((created_row or {}).get("created_at_utc") or "").strip()
+            created_dt = db._parse_utc_iso_dt(created_at_utc)
+            if created_dt is not None:
+                show_next_step_hint = (datetime.now(timezone.utc) - created_dt) <= timedelta(days=2)
         finally:
             await conn.close()
 
@@ -2210,6 +2216,7 @@ async def home(
         onboarding_done=(used == 1 and status == "done"),
         starter_active=starter_active,
         entry_reason=entry_reason,
+        show_next_step_hint=show_next_step_hint,
     )
 
     base_menu = main_menu(is_admin=is_admin, show_complexes=show_complexes)
@@ -2249,9 +2256,9 @@ def _premium_plans_payload(s) -> list[dict]:
 
 
 async def _show_complexes_hub(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, tg_uid: int) -> None:
-    active = tg_uid in context.application.bot_data["settings"].ADMIN_IDS or await db.is_premium_active(conn, tg_uid)
+    active = tg_uid in context.application.bot_data["settings"].ADMIN_IDS or await db.has_any_webapp_access(conn, tg_uid)
     if not active:
-        await show(update, context, "Комплексы доступны в Premium.", premium_upsell_kb(), route="menu:premium")
+        await show(update, context, "Комплексы доступны при активном Premium или Starter.", premium_upsell_kb(), route="menu:premium")
         return
     back_cb = str(context.user_data.get(COMPLEXES_BACK_ROUTE_KEY) or "menu:settings")
     items = await db.list_complexes(conn, tg_uid)
@@ -2287,7 +2294,13 @@ async def _show_complex_detail(update: Update, context: ContextTypes.DEFAULT_TYP
     await show(update, context, "\n".join(lines), InlineKeyboardMarkup(kb_rows), route=f"cx:open:{int(complex_id)}")
 
 
-async def _show_premium_hub(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def _show_premium_hub(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    back_cb: str = "menu:home",
+    route: str = "menu:premium",
+) -> None:
     s = context.application.bot_data["settings"]
     plans = _premium_plans_payload(s)
     text = (
@@ -2295,7 +2308,7 @@ async def _show_premium_hub(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         "С Premium открывается полный WebApp: удобный Today, карта органов, Нутриентный помощник, AI check-in и гибкая настройка напоминаний.\n\n"
         "Выберите срок — кнопка сразу откроет оплату в WebApp."
     )
-    await show(update, context, text, premium_plans_kb(plans, s.WEBAPP_URL), route="menu:premium")
+    await show(update, context, text, premium_plans_kb(plans, s.WEBAPP_URL, back_cb=back_cb), route=route)
 
 async def _show_starter_trial_offer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     lines = [
@@ -2348,7 +2361,7 @@ async def require_premium_or_upsell(update: Update, context: ContextTypes.DEFAUL
         return True
     conn = await db.connect(s.DB_PATH)
     try:
-        active = await db.is_premium_active(conn, tg_uid)
+        active = await db.has_any_webapp_access(conn, tg_uid)
     finally:
         await conn.close()
     if active:
@@ -2356,7 +2369,7 @@ async def require_premium_or_upsell(update: Update, context: ContextTypes.DEFAUL
     await show(
         update,
         context,
-        f"🔒 <b>{feature_name}</b> доступно только с Premium.",
+        f"🔒 <b>{feature_name}</b> доступно только с активным доступом (Premium или Starter).",
         premium_upsell_kb(),
         route="menu:premium_required",
     )
@@ -2511,6 +2524,7 @@ def _home_text(
     onboarding_done: bool = False,
     starter_active: bool = False,
     entry_reason: str = "",
+    show_next_step_hint: bool = True,
 ) -> str:
     next_step = "Начни со стартового подбора или открой каталог."
     if has_unfinished_onboarding:
@@ -2538,13 +2552,39 @@ def _home_text(
             "• AI check-in и персональные подсказки;",
             "• Нутриентный помощник и расширенные Premium-функции.",
         ]
+    next_step_block = f"Следующий шаг: {next_step}" if show_next_step_hint else "Открой нужный раздел в меню ниже."
     return (
         "💊 <b>Supply Bot</b>\n\n"
         "• Каталог: быстро найди добавку и проверь совместимость.\n"
         "• Мои БАДы: собери свой список и настрой напоминания.\n"
         "• AI / WebApp: стартовый подбор и удобный ежедневный трекинг.\n\n"
-        f"Следующий шаг: {next_step}"
+        f"{next_step_block}"
         + ("\n".join(contextual_lines) if contextual_lines else "")
+    )
+
+
+def _subscription_expired_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("💳 Перейти к оплате", callback_data="premium:expired:pay")],
+            [InlineKeyboardButton("🏠 Вернуться в меню", callback_data="menu:home")],
+        ]
+    )
+
+
+def _subscription_expired_text() -> str:
+    return (
+        "⚠️ <b>Ваш доступ закончился</b>\n\n"
+        "Starter/Premium больше не активны.\n\n"
+        "Что остаётся в базовой версии:\n"
+        "• Каталог добавок и карточки;\n"
+        "• Мои БАДы и ручные отметки;\n"
+        "• Базовые разделы меню.\n\n"
+        "Что временно недоступно без подписки:\n"
+        "• ежедневный AI-опрос;\n"
+        "• комплексы;\n"
+        "• автоматические напоминания из расширенного помощника и Premium-функций.\n\n"
+        "Продлите подписку, чтобы снова включить полный режим."
     )
 
 def _initial_pick_prompt_text(prefix: str | None = None) -> str:
@@ -2706,6 +2746,7 @@ async def reminders_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def daily_rollover_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     s = context.application.bot_data["settings"]
+    expired_due: list[dict] = []
     conn = await db.connect(s.DB_PATH)
     try:
         rows = await db.fetchall(
@@ -2725,8 +2766,47 @@ async def daily_rollover_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 updates,
             )
             await conn.commit()
+        expired_due = await db.list_users_with_access_expired_notice_due(conn, limit=300)
     finally:
         await conn.close()
+
+    for row in expired_due:
+        tg_user_id = int(row.get("tg_user_id") or 0)
+        if tg_user_id <= 0:
+            continue
+        last_chat_id = int(row.get("last_chat_id") or 0) or tg_user_id
+        conn_u = await db.connect(s.DB_PATH)
+        try:
+            prev_mid, _prev_screen, _prev_payload = await db.get_ui_state(conn_u, tg_user_id)
+        finally:
+            await conn_u.close()
+        if int(prev_mid or 0) > 0:
+            try:
+                await context.bot.delete_message(chat_id=last_chat_id, message_id=int(prev_mid))
+            except Exception:
+                pass
+        try:
+            msg = await context.bot.send_message(
+                chat_id=last_chat_id,
+                text=_subscription_expired_text(),
+                reply_markup=_subscription_expired_kb(),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+        except Exception:
+            continue
+        conn_u = await db.connect(s.DB_PATH)
+        try:
+            await db.save_ui_state(conn_u, tg_user_id, msg.message_id, "premium:expired:notice", "{}")
+            await db.set_user_last_msg(conn_u, tg_user_id, last_chat_id, msg.message_id)
+            await db.mark_access_expired_notice_sent(
+                conn_u,
+                tg_user_id,
+                row.get("premium_until_utc"),
+                row.get("starter_trial_until_utc"),
+            )
+        finally:
+            await conn_u.close()
 
 async def reminder_fire_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     data = context.job.data or {}
@@ -3064,6 +3144,12 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if data == "menu:premium":
             await _show_premium_hub(update, context)
             return
+        if data == "premium:expired:notice":
+            await show(update, context, _subscription_expired_text(), _subscription_expired_kb(), route="premium:expired:notice")
+            return
+        if data == "premium:expired:pay":
+            await _show_premium_hub(update, context, back_cb="premium:expired:notice", route="premium:from_expired")
+            return
         if data == "premium:about":
             await show(
                 update,
@@ -3083,12 +3169,18 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if data == "premium:stars_menu":
             s_cfg = context.application.bot_data["settings"]
             plans = _premium_plans_payload(s_cfg)
+            current_route = str(context.user_data.get("last_route") or "")
+            stars_back = "menu:premium"
+            stars_route = "menu:premium"
+            if current_route == "premium:from_expired":
+                stars_back = "premium:expired:notice"
+                stars_route = "premium:from_expired"
             await show(
                 update,
                 context,
                 "⭐ <b>Оплата в звёздах</b>\n\nВыберите срок подписки:",
-                premium_stars_kb(plans, back_cb="menu:premium"),
-                route="menu:premium",
+                premium_stars_kb(plans, back_cb=stars_back),
+                route=stars_route,
             )
             return
         if data.startswith("premium:buy:"):

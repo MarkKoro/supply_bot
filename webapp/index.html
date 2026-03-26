@@ -1797,6 +1797,12 @@
 
   function renderPaywall() {
     const plans = state.me?.plans || [];
+    const starterUsed = Boolean(state.me?.starter_trial_used);
+    const starterExpired = starterUsed && !state.me?.starter_trial_active;
+    const title = starterExpired ? "Ваш Starter Pack закончился" : "Оформите доступ к Premium";
+    const subtitle = starterExpired
+      ? "Продлите подписку, чтобы снова открыть ежедневный опрос, комплексы и расширенные напоминания."
+      : "База добавок доступна бесплатно, а полный режим открывается по подписке.";
     const plansHtml = plans.map((p) => {
       const rub = p.price_rub ? Math.round(p.price_rub / 100) : null;
       const planLabel = planNameRu(p.plan_id, p.months);
@@ -1816,21 +1822,9 @@
     appEl.innerHTML = `
       <div class="main-content">
         <div class="card fade">
-          <h2 style="margin:0 0 4px">В боте можно начать бесплатно</h2>
-          <div class="muted">База добавок, базовый стек и стартовый подбор уже доступны.</div>
-        </div>
-        <div class="card fade">
-          <h2 style="margin:0 0 4px">Premium — всё важное в одном месте</h2>
-          <div class="muted">Today • Каталог • Карта органов • Нутриентный помощник • AI check-in</div>
-          <div class="muted" style="margin-top:6px"><i>На бесплатном 3-дневном Starter Нутриентный помощник остаётся закрыт.</i></div>
-        </div>
-
-        <div class="preview-grid">
-          ${["Today: быстрые отметки и прогресс", "Catalog: быстрый поиск и фильтры", "BodyMap: органы и протоколы", "AI check-in: рекомендации на день"].map(t => `<div class="preview-card">${t}<br><span class="muted">С Premium это заметно удобнее в ежедневном режиме</span></div>`).join("")}
-        </div>
-
-        <div class="cta-sticky">
-          <div class="card" style="margin-top:12px; margin-bottom:8px;"><b>Выберите удобный формат доступа</b><div class="muted">Starter помогает попробовать рутину, Premium — закрепить её на постоянной основе</div></div>
+          <h2 style="margin:0 0 4px">${title}</h2>
+          <div class="muted">${subtitle}</div>
+          <div class="muted" style="margin-top:8px">Что даёт Premium: Today • Каталог • Карта органов • Нутриентный помощник • AI check-in.</div>
         </div>
 
         <div class="plans">${plansHtml || '<div class="card">Планы пока недоступны.</div>'}</div>

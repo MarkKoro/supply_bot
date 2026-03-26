@@ -887,7 +887,13 @@ def supplement_time_kb(supplement_id: int, slots: list[dict]) -> InlineKeyboardM
     return InlineKeyboardMarkup(rows)
 
 
-def premium_plans_kb(plans: list[dict], webapp_base_url: str) -> InlineKeyboardMarkup:
+def premium_plans_kb(
+    plans: list[dict],
+    webapp_base_url: str,
+    *,
+    back_cb: str = "menu:home",
+    show_about: bool = True,
+) -> InlineKeyboardMarkup:
     clean = str(webapp_base_url or "").rstrip("/")
     rows: list[list[InlineKeyboardButton]] = []
     for plan in plans:
@@ -899,8 +905,9 @@ def premium_plans_kb(plans: list[dict], webapp_base_url: str) -> InlineKeyboardM
         else:
             rows.append([InlineKeyboardButton(title, callback_data=f"premium:buy:{plan_id}:yookassa")])
     rows.append([InlineKeyboardButton("⭐ Купить в звездах", callback_data="premium:stars_menu")])
-    rows.append([InlineKeyboardButton("📦 Что входит", callback_data="premium:about")])
-    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")])
+    if show_about:
+        rows.append([InlineKeyboardButton("📦 Что входит", callback_data="premium:about")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=back_cb)])
     return InlineKeyboardMarkup(rows)
 
 

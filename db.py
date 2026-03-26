@@ -522,6 +522,7 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     await _ensure_column(conn, "users", "starter_trial_started_at_utc", "TEXT NOT NULL DEFAULT ''")
     await _ensure_column(conn, "users", "starter_trial_until_utc", "TEXT NOT NULL DEFAULT ''")
     await _ensure_column(conn, "users", "starter_trial_source", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "users", "access_expired_notice_key", "TEXT NOT NULL DEFAULT ''")
     await _ensure_column(conn, "users", "consent_given", "INTEGER NOT NULL DEFAULT 0")
     await _ensure_column(conn, "users", "consent_given_at_utc", "TEXT NOT NULL DEFAULT ''")
     await _ensure_column(conn, "users", "consent_offer_version", "TEXT NOT NULL DEFAULT ''")
@@ -713,6 +714,9 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     )
     await conn.execute(
         "UPDATE users SET starter_trial_source='' WHERE starter_trial_source IS NULL"
+    )
+    await conn.execute(
+        "UPDATE users SET access_expired_notice_key='' WHERE access_expired_notice_key IS NULL"
     )
     await conn.execute(
         "UPDATE users SET consent_given=0 WHERE consent_given IS NULL"
@@ -2649,6 +2653,54 @@ async def has_any_webapp_access(conn: aiosqlite.Connection, tg_user_id: int) -> 
     if await is_premium_active(conn, tg_user_id):
         return True
     return await is_starter_trial_active(conn, tg_user_id)
+
+
+def _access_expiry_notice_key(premium_until_utc: str | None, starter_until_utc: str | None) -> str:
+    return f"{str(premium_until_utc or '').strip()}|{str(starter_until_utc or '').strip()}"
+
+
+async def list_users_with_access_expired_notice_due(
+    conn: aiosqlite.Connection,
+    now_iso: str | None = None,
+    limit: int = 200,
+) -> list[dict]:
+    now = str(now_iso or utc_now_iso())
+    rows = await fetchall(
+        conn,
+        """SELECT tg_user_id, last_chat_id, premium_until_utc, starter_trial_until_utc, access_expired_notice_key
+           FROM users
+           WHERE (
+              CASE WHEN TRIM(COALESCE(premium_until_utc,''))='' THEN 0 ELSE CASE WHEN premium_until_utc > ? THEN 1 ELSE 0 END END
+           ) = 0
+             AND (
+              CASE WHEN TRIM(COALESCE(starter_trial_until_utc,''))='' THEN 0 ELSE CASE WHEN starter_trial_until_utc > ? THEN 1 ELSE 0 END END
+           ) = 0
+             AND (TRIM(COALESCE(premium_until_utc,''))!='' OR TRIM(COALESCE(starter_trial_until_utc,''))!='')
+           ORDER BY tg_user_id ASC
+           LIMIT ?""",
+        (now, now, int(limit)),
+    )
+    due: list[dict] = []
+    for row in rows:
+        key = _access_expiry_notice_key(row["premium_until_utc"], row["starter_trial_until_utc"])
+        if str(row["access_expired_notice_key"] or "").strip() == key:
+            continue
+        due.append(dict(row))
+    return due
+
+
+async def mark_access_expired_notice_sent(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    premium_until_utc: str | None,
+    starter_until_utc: str | None,
+) -> None:
+    key = _access_expiry_notice_key(premium_until_utc, starter_until_utc)
+    await conn.execute(
+        "UPDATE users SET access_expired_notice_key=? WHERE tg_user_id=?",
+        (key, int(tg_user_id)),
+    )
+    await conn.commit()
 
 async def purge_user_data(conn: aiosqlite.Connection, tg_user_id: int) -> dict:
     row = await fetchone(conn, "SELECT id FROM users WHERE tg_user_id=?", (int(tg_user_id),))

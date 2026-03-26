@@ -7007,7 +7007,7 @@ async def get_today_plan_groups(conn: aiosqlite.Connection, tg_user_id: int, loc
         conn,
         """SELECT us.supplement_id,
                   COALESCE(NULLIF(uss.dose_text,''), us.dose_text, '') AS dose_text,
-                  COALESCE(NULLIF(uss.note_text,''), '') AS note_text,
+                  COALESCE(NULLIF(us.note_text,''), NULLIF(us.notes,''), '') AS note_text,
                   s.slug, COALESCE(NULLIF(s.name_ru,''), NULLIF(s.name_en,''), s.name) AS name_ru,
                   sch.slot_id, sch.time_hhmm
            FROM user_supplements us

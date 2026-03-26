@@ -493,6 +493,9 @@
       line-height: 1.35;
       padding-top: 2px;
     }
+    .today-ai-pill { margin-left:8px; padding:2px 8px; border-radius:999px; font-size:11px; font-weight:700; border:1px solid rgba(125,183,255,.6); background:rgba(125,183,255,.15); color:#d9e8ff; }
+    .today-item-row.blocked { opacity:.72; background: rgba(140,148,165,.16); border-color: rgba(170,176,194,.28); }
+    .today-item-row.blocked .status-pill { background: rgba(173,179,194,.28); color:#e5e8ef; }
     .complex-row-toggle {
       width: 100%;
       text-align: left;
@@ -577,10 +580,10 @@
     }
 
     .legend-grid { display:grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap:8px; margin-top:8px; }
-    .legend-pill { border-radius: 12px; padding: 8px; font-size: 12px; text-align:center; background: rgba(255,255,255,0.06); }
-    .legend-benefit { box-shadow: 0 0 14px rgba(73,216,141,0.55); }
-    .legend-burden { box-shadow: 0 0 14px rgba(255,107,121,0.6); }
-    .legend-mixed { box-shadow: 0 0 14px rgba(255,191,92,0.7); }
+    .legend-pill { border-radius: 12px; padding: 8px; font-size: 12px; text-align:center; background: rgba(255,255,255,0.06); border: 1px solid transparent; }
+    .legend-benefit { border-color: rgba(73,216,141,0.75); color:#c5ffdf; }
+    .legend-burden { border-color: rgba(255,107,121,0.8); color:#ffd3d8; }
+    .legend-mixed { border-color: rgba(255,191,92,0.82); color:#ffe8bc; }
     .organs-grid { display:grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 12px; margin-top: 12px; }
     @media (min-width: 860px) {
       .organs-grid { grid-template-columns: repeat(3, minmax(0,1fr)); }
@@ -592,18 +595,13 @@
       gap: 10px;
       text-align:left;
       border-radius:16px;
-      border: 1px solid rgba(255,255,255,0.18);
+      border: 2px solid rgba(255,255,255,0.18);
       padding: 10px;
       background: linear-gradient(160deg, rgba(25,34,66,0.95), rgba(14,18,36,0.92));
       box-shadow:
         inset 0 1px 0 rgba(255,255,255,0.2),
-        inset 0 -12px 22px rgba(125,183,255, calc(0.08 + var(--bI) * 0.24)),
-        0 8px 24px rgba(0,0,0,0.35),
-        0 0 calc(20px * var(--bI)) rgba(116,225,170, calc(0.14 + var(--bI) * 0.3)),
-        0 0 calc(20px * var(--rI)) rgba(255,90,111, calc(0.10 + var(--rI) * 0.25));
-      outline: 2px solid rgba(255,90,111, calc(var(--rI) * 0.6));
-      outline-offset: -1px;
-      transition: transform .16s ease, box-shadow .18s ease;
+        0 8px 24px rgba(0,0,0,0.35);
+      transition: transform .16s ease, box-shadow .18s ease, border-color .18s ease;
       cursor: pointer;
     }
     .organ-tile:hover { transform: translateY(-2px); }
@@ -615,14 +613,18 @@
       border-radius: 12px;
       display:grid;
       place-items:center;
-      background: rgba(125,183,255, calc(0.08 + var(--bI) * 0.18));
-      border: 1px solid rgba(255,90,111, calc(0.22 + var(--rI) * 0.68));
-      box-shadow:
-        inset 0 1px 0 rgba(255,255,255,0.22),
-        0 0 calc(10px + 20px * var(--rI)) rgba(255,90,111, calc(0.10 + var(--rI) * 0.45));
-      color: rgba(125,183,255, calc(0.35 + var(--bI) * 0.65));
-      filter: drop-shadow(0 0 calc(18px * var(--bI)) rgba(125,183,255, calc(0.16 + var(--bI) * 0.35)));
+      background: rgba(125,183,255, 0.12);
+      border: 1px solid rgba(255,255,255,0.18);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.22);
+      color: rgba(160,198,255, 0.92);
+      filter: none;
     }
+    .organ-tile.state-benefit { border-color: rgba(73,216,141,0.88); }
+    .organ-tile.state-burden { border-color: rgba(255,107,121,0.9); }
+    .organ-tile.state-balanced { border-color: rgba(255,191,92,0.9); }
+    .organ-tile.state-benefit .organ-icon { border-color: rgba(73,216,141,0.72); color: rgba(125,255,188,0.95); }
+    .organ-tile.state-burden .organ-icon { border-color: rgba(255,107,121,0.8); color: rgba(255,174,182,0.95); }
+    .organ-tile.state-balanced .organ-icon { border-color: rgba(255,191,92,0.8); color: rgba(255,221,158,0.98); }
     .organ-icon svg { width: 26px; height: 26px; display:block; color: inherit; fill: currentColor; stroke: currentColor; }
     .organ-text { min-width:0; flex:1; }
     .organ-text .title { font-weight:700; }
@@ -866,7 +868,8 @@
       detail: null, detailLoading: false, filtersOpen: false,
       detailSection: null,
       focusSearchOnOpen: false,
-      pickForComplexId: 0
+      pickForComplexId: 0,
+      pickForBodymapSystem: ""
     },
     searchDebounce: null,
     bodyMap: null,
@@ -2377,7 +2380,9 @@
       }
       const rows = (sv.recommendations || []).map((r) => {
         const already = todaySet.has(Number(r.supplement_id || 0));
-        return `<div class="rec-card"><div class="row"><label><input type="checkbox" data-rec-toggle="${r.supplement_id}" ${sv.selected[r.supplement_id] !== false ? 'checked' : ''}/> <strong>${esc(r.name_ru || r.slug)}</strong></label><span class="badge ${r.action==='remove'?'minus':(r.action==='adjust'?'':'plus')}">${r.action==='add'?'+':(r.action==='remove'?'−':'≈')}</span></div><div class="muted" style="margin-top:6px">${esc(r.reason || '')}${already ? ' • уже в плане' : ''}</div></div>`;
+        const removeTaken = r.action === 'remove' && already;
+        const checked = removeTaken ? false : (sv.selected[r.supplement_id] !== false);
+        return `<div class="rec-card"><div class="row"><label><input type="checkbox" data-rec-toggle="${r.supplement_id}" ${checked ? 'checked' : ''} ${removeTaken ? 'disabled' : ''}/> <strong>${esc(r.name_ru || r.slug)}</strong></label><span class="badge ${r.action==='remove'?'minus':(r.action==='adjust'?'':'plus')}">${r.action==='add'?'+':(r.action==='remove'?'−':'≈')}</span></div><div class="muted" style="margin-top:6px">${esc(r.reason || '')}${removeTaken ? ' • уже выпито сегодня — убирать не нужно' : (already ? ' • уже в плане' : '')}</div></div>`;
       }).join('');
       return `<div class="card fade"><div class="row survey-head"><div class="survey-title-wrap"><h3 style="margin:0">Рекомендации</h3><button class="btn secondary survey-help-btn" type="button" data-survey-help>?</button></div><div class="survey-target-wrap"><span class="muted" style="font-size:12px">Рекомендация на:</span><div class="segmented" data-survey-target><button class="seg-btn ${sv.target==='today'?'active':''}" data-set-target="today">Сегодня</button><button class="seg-btn ${sv.target==='tomorrow'?'active':''}" data-set-target="tomorrow">Завтра</button></div></div></div>${sv.helpOpen ? `<div class="survey-help muted">Что это значит: ИИ анализирует ваши ответы, текущий стек, фактические приёмы за последние дни и предлагает, что сделать сегодня/на завтра. После опроса вы получите персональные действия: что добавить в стек, что временно убрать или перенести по времени, чтобы план лучше соответствовал вашей цели и самочувствию.</div>` : ''}${rows || '<div class="muted">Нет рекомендаций</div>'}<div style="margin-top:10px"><button class="btn" id="applyAll" style="width:100%; font-weight:800" ${sv.applying ? 'disabled' : ''}>✅ Применить всё</button></div><div class="survey-actions"><button class="btn secondary" id="applySelected" ${sv.applying ? 'disabled' : ''}>Применить выбранное</button><button class="btn secondary" id="cancelSurvey" ${sv.applying ? 'disabled' : ''}>Отмена</button></div></div>`;
     }
@@ -2447,6 +2452,7 @@
         if (out.date_local === localDateISO()) showToast('✅ Применено к плану: сегодня');
         else showToast('✅ Применено на завтра');
         if (out.date_local === localDateISO()) {
+          await loadToday(true);
           state.activeTab='today';
           renderActiveTab();
         } else {
@@ -2470,6 +2476,7 @@
         if (out.date_local === localDateISO()) showToast('✅ Применено к плану: сегодня');
         else showToast('✅ Применено на завтра');
         if (out.date_local === localDateISO()) {
+          await loadToday(true);
           state.activeTab='today';
           renderActiveTab();
         } else {
@@ -2512,6 +2519,7 @@
     const pickComplex = (state.complexes || []).find((x) => Number(x.id || 0) === pickForComplexId);
     return `
       ${pickForComplexId ? `<div class="card fade"><div class="row" style="gap:8px; align-items:flex-start;"><div><strong>Режим: добавить БАД в комплекс</strong><div class="muted" style="margin-top:4px">Комплекс: ${esc(pickComplex?.name || `#${pickForComplexId}`)}. Нажмите на БАД в списке — он добавится сразу.</div></div><button class="btn secondary" type="button" data-catalog-cancel-complex-pick>Отмена</button></div></div>` : ''}
+      ${c.pickForBodymapSystem ? `<div class="card fade"><div class="row" style="gap:8px; align-items:flex-start;"><div><strong>Режим: добавить для органа</strong><div class="muted" style="margin-top:4px">Фильтр по системе: ${esc(SYSTEM_LABELS[c.pickForBodymapSystem] || c.pickForBodymapSystem)}. Нажмите на БАД — он сразу добавится в стек, а карта обновится.</div></div><button class="btn secondary" type="button" data-catalog-cancel-bodymap-pick>Отмена</button></div></div>` : ''}
       <div class="card fade catalog-toolbar">
         <div class="catalog-row">
           <input id="catalogSearch" class="search-input" placeholder="Поиск RU/EN..." value="${esc(c.q)}" ${c.focusSearchOnOpen ? "autofocus" : ""}/>
@@ -2775,7 +2783,7 @@
       const action=inStack?'remove':'add'; haptic();
       const detail=state.catalog.detail; const prev=detail.in_stack; detail.in_stack=!inStack;
       const listItem=state.catalog.items.find(i=>i.id===id); if(listItem) listItem.in_stack=detail.in_stack; renderActiveTab();
-      try { const r=await api('./api/my_supplements/toggle',{method:'POST',body:{supplement_id:id,action}}); detail.in_stack=!!r.in_stack; if(listItem) listItem.in_stack=detail.in_stack; showToast(detail.in_stack?'Добавлено в стек':'Убрано из стека'); renderActiveTab(); }
+      try { const r=await api('./api/my_supplements/toggle',{method:'POST',body:{supplement_id:id,action}}); detail.in_stack=!!r.in_stack; if(listItem) listItem.in_stack=detail.in_stack; await Promise.all([loadToday(true), loadBodyMap(true)]); showToast(detail.in_stack?'Добавлено в стек':'Убрано из стека'); renderActiveTab(); }
       catch { detail.in_stack=prev; if(listItem) listItem.in_stack=prev; renderActiveTab(); showToast('Не удалось обновить стек'); }
     });
   }
@@ -2848,10 +2856,10 @@
     appEl.querySelectorAll('[data-catalog-open]').forEach((el)=>el.addEventListener('click', async ()=>{
       haptic();
       const pickForComplexId = Number(state.catalog.pickForComplexId || 0);
+      const slug = String(el.dataset.catalogOpen || '').trim();
+      const fromList = (state.catalog.items || []).find((x) => String(x.slug || '') === slug);
+      const supplementId = Number(fromList?.id || 0);
       if (pickForComplexId) {
-        const slug = String(el.dataset.catalogOpen || '').trim();
-        const fromList = (state.catalog.items || []).find((x) => String(x.slug || '') === slug);
-        const supplementId = Number(fromList?.id || 0);
         if (!supplementId) return showToast('Не удалось определить БАД');
         try {
           await api(`./api/complexes/${pickForComplexId}/items/add`, { method:'POST', body:{ supplement_id: supplementId } });
@@ -2864,10 +2872,31 @@
           return;
         }
       }
+      if (state.catalog.pickForBodymapSystem) {
+        if (!supplementId) return showToast('Не удалось определить БАД');
+        try {
+          const currentInStack = !!fromList?.in_stack;
+          if (!currentInStack) {
+            await api('./api/my_supplements/toggle', { method:'POST', body:{ supplement_id: supplementId, action:'add' } });
+          }
+          state.catalog.pickForBodymapSystem = '';
+          await Promise.all([loadToday(true), loadBodyMap(true)]);
+          renderActiveTab();
+          showToast(currentInStack ? 'БАД уже был в стеке' : 'БАД добавлен в стек');
+          return;
+        } catch {
+          showToast('Не удалось добавить БАД в стек');
+          return;
+        }
+      }
       await openSupplementDetail(el.dataset.catalogOpen);
     }));
     appEl.querySelector('[data-catalog-cancel-complex-pick]')?.addEventListener('click', () => {
       state.catalog.pickForComplexId = 0;
+      renderActiveTab();
+    });
+    appEl.querySelector('[data-catalog-cancel-bodymap-pick]')?.addEventListener('click', () => {
+      state.catalog.pickForBodymapSystem = '';
       renderActiveTab();
     });
 
@@ -3434,7 +3463,7 @@ function adminField(label, field, value, kind='input') {
     const sheet = state.bodyMapSheet ? renderBodyMapSheet(state.bodyMapSheet) : '';
     return `
       <div class="row" style="margin-bottom:8px; justify-content:flex-end;"><button class="btn secondary survey-help-btn" type="button" data-bodymap-help-toggle>?</button></div>
-      ${state.bodyMapHelpOpen ? `<div class="survey-help muted" style="margin-bottom:8px">Подсветка показывает ориентировочную пользу от ваших текущих БАДов, красный контур — возможную нагрузку. Оценка строится по вашим активным добавкам, их профилю и истории применения. Это навигатор, чтобы быстрее понять, что поддерживаете и где стоит пересобрать схему вместе с рекомендациями.</div>` : ''}
+      ${state.bodyMapHelpOpen ? `<div class="survey-help muted" style="margin-bottom:8px">Контур показывает баланс по системе: зелёный — пользы больше, жёлтый — баланс, красный — нагрузки больше. Оценка строится по вашим активным добавкам, их профилю и истории применения. Это навигатор, чтобы быстрее понять, что поддерживаете и где стоит пересобрать схему вместе с рекомендациями.</div>` : ''}
       <div class="card fade">
         <div class="organs-grid">
           ${BODYMAP_ORDER.map((key)=>{
@@ -3443,14 +3472,14 @@ function adminField(label, field, value, kind='input') {
             const burdenSum = Number(s.burden_strength_sum || 0);
             const mixedCount = Number(s.mixed_count || 0);
             const total = Number(s.benefit_count || 0) + Number(s.burden_count || 0) + mixedCount;
-            const mixedBalanced = mixedCount > 0 && Number(s.benefit_count || 0) === Number(s.burden_count || 0);
-            const benefitI = benefitSum > 0 ? clamp(benefitSum / maxBenefitSum, 0.12, 1) : 0;
-            const burdenI = burdenSum > 0 ? clamp(burdenSum / maxBurdenSum, 0.12, 1) : 0;
-            const colorBias = mixedBalanced ? 0.44 : null;
-            const tileBenefitI = colorBias === null ? benefitI : colorBias;
-            const tileBurdenI = colorBias === null ? burdenI : colorBias;
-            
-            return `<button class="organ-tile" data-system="${key}" data-total="${total}" style="--bI:${tileBenefitI.toFixed(3)};--rI:${tileBurdenI.toFixed(3)};">
+            const benefitCount = Number(s.benefit_count || 0);
+            const burdenCount = Number(s.burden_count || 0);
+            const mixedBalanced = mixedCount > 0 && benefitCount === burdenCount;
+            let tileState = 'state-balanced';
+            if (benefitCount > burdenCount) tileState = 'state-benefit';
+            else if (burdenCount > benefitCount) tileState = 'state-burden';
+
+            return `<button class="organ-tile ${tileState}" data-system="${key}" data-total="${total}">
               <div class="organ-icon" data-organ-icon="${key}"></div>
               <div class="organ-text">
                 <div class="title">${SYSTEM_LABELS[key] || key}</div>
@@ -3463,9 +3492,9 @@ function adminField(label, field, value, kind='input') {
       </div>
       <div class="card fade">
         <div class="legend-grid">
-          <div class="legend-pill legend-benefit">Свечение = польза</div>
-          <div class="legend-pill legend-burden">Красный контур = нагрузка</div>
-          <div class="legend-pill legend-mixed">Нажмите плитку для деталей</div>
+          <div class="legend-pill legend-benefit">Зелёный контур = пользы больше</div>
+          <div class="legend-pill legend-burden">Красный контур = нагрузки больше</div>
+          <div class="legend-pill legend-mixed">Жёлтый контур = баланс</div>
         </div>
       </div>
       ${sheet}
@@ -3498,6 +3527,8 @@ function adminField(label, field, value, kind='input') {
       state.catalog.q='';
       state.catalog.page=0;
       state.catalog.filters.targets=[el.dataset.bodymapCatalog];
+      state.catalog.pickForComplexId = 0;
+      state.catalog.pickForBodymapSystem = String(el.dataset.bodymapCatalog || '');
       state.activeTab='catalog';
       renderMainApp();
       await loadCatalog(true);
@@ -4692,12 +4723,15 @@ function adminField(label, field, value, kind='input') {
                 </details>
               </div>
             `).join('')}
-            ${items.map((item) => `
-              <button type="button" class="item-row today-item-row" data-item="${item.supplement_id}" data-next="${item.status === "taken" ? "none" : "taken"}">
-                <span class="status-pill ${statusClass(item.status)}">${statusText(item.status)}</span>
-                <span class="today-item-name">${item.name}</span>
-              </button>
-            `).join("")}
+            ${items.map((item) => {
+              const isBlocked = !!item.blocked;
+              const aiAdd = item.source === 'ai' && item.action === 'add';
+              const next = item.status === "taken" ? "none" : "taken";
+              return `<button type="button" class="item-row today-item-row ${isBlocked ? 'blocked' : ''}" data-item="${item.supplement_id}" data-next="${next}" ${isBlocked ? 'disabled' : ''}>
+                <span class="status-pill ${statusClass(isBlocked ? 'skipped' : item.status)}">${isBlocked ? 'Не пить' : statusText(item.status)}</span>
+                <span class="today-item-name">${item.name}${aiAdd ? '<span class="today-ai-pill">AI</span>' : ''}${isBlocked ? '<span class="today-ai-pill">AI: пауза</span>' : ''}</span>
+              </button>${isBlocked ? `<div class="muted" style="margin:4px 0 8px 12px">На сегодня предложено не пить от ИИ${item.blocked_reason ? `: ${esc(item.blocked_reason)}` : ''}</div>` : ''}`;
+            }).join("")}
           </div>
         </article>
       `;

@@ -1292,7 +1292,16 @@ async def _today_payload(tg_user_id: int) -> dict:
             items = []
             for item in list(group.get("items") or []):
                 sid = int(item.get("supplement_id") or 0)
-                items.append({"supplement_id": sid, "name": str(item.get("name_ru") or item.get("slug") or ""), "slug": str(item.get("slug") or ""), "status": status_map.get(sid, "none")})
+                items.append({
+                    "supplement_id": sid,
+                    "name": str(item.get("name_ru") or item.get("slug") or ""),
+                    "slug": str(item.get("slug") or ""),
+                    "status": status_map.get(sid, "none"),
+                    "source": str(item.get("source") or ""),
+                    "action": str(item.get("action") or ""),
+                    "blocked": bool(item.get("blocked")),
+                    "blocked_reason": str(item.get("blocked_reason") or ""),
+                })
             complexes = []
             for c in list(group.get("complexes") or []):
                 c_items = []
@@ -2705,6 +2714,32 @@ async def api_checkin(body: CheckinBody, x_telegram_init_data: str = Header(defa
                 stack_slugs=stack_slugs,
                 candidate_slugs=candidate_slugs,
             )
+
+            # safeguard: when user selected goals, ensure at least one add suggestion exists
+            if mapped_goals and not any(str(r.get("action") or "") == "add" for r in recs):
+                fallback_adds: list[dict] = []
+                for cand in catalog_candidates:
+                    slug = str(cand.get("slug") or "").strip().lower()
+                    if not slug or slug in stack_slugs:
+                        continue
+                    row = await db.fetchone(conn, "SELECT id, slug, COALESCE(NULLIF(name_ru,''), NULLIF(name_en,''), name) AS name_ru FROM supplements WHERE slug=?", (slug,))
+                    if not row:
+                        continue
+                    fallback_adds.append({
+                        "action": "add",
+                        "slug": str(row["slug"]),
+                        "name_ru": str(row["name_ru"] or ""),
+                        "reason": "Подобрано по цели из опроса",
+                        "priority": 2,
+                        "suggested_time": now_local.strftime("%H:00"),
+                        "suggested_slot_id": None,
+                        "prefer_existing_time": True,
+                        "supplement_id": int(row["id"]),
+                    })
+                    if len(fallback_adds) >= 2:
+                        break
+                recs.extend(fallback_adds)
+
             await db.save_ai_result(conn, checkin_id, recs, p_hash)
             return JSONResponse({"ok": True, "checkin_id": checkin_id, "recommendations": recs, "meta": meta, "date_local": local_date, "target": target})
         except Exception:
@@ -2733,8 +2768,16 @@ async def api_checkin_apply(body: CheckinApplyBody, x_telegram_init_data: str = 
             selected = set(int(x) for x in (body.selected_ids or []))
             picked = [x for x in recs if int(x.get("supplement_id") or 0) in selected]
         tz_name = await db.get_user_tz(conn, tg_user_id)
-        _, local_date, _ = _resolve_target_day(tz_name, None)
-        target_date = str(checkin.get("date_local") or "").strip() or local_date
+        _, today_local, _ = _resolve_target_day(tz_name, "today")
+        target_date = str(checkin.get("date_local") or "").strip() or today_local
+        status_map = await db.get_day_status_map(conn, tg_user_id, target_date)
+        picked = [
+            x for x in picked
+            if not (
+                str(x.get("action") or "").strip().lower() == "remove"
+                and str(status_map.get(int(x.get("supplement_id") or 0)) or "") == "taken"
+            )
+        ]
         user_id = await db.get_or_create_user(conn, tg_user_id, tz_name="")
         prepared, created_times = await engine.assign_slots_by_time(
             conn,

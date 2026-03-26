@@ -6564,15 +6564,21 @@ async def apply_recommendations_to_today(
     _ = mode
     now = utc_now_iso()
     existing_today = set(await get_today_supplement_ids(conn, tg_user_id, local_date))
+    taken_map = await get_day_status_map(conn, tg_user_id, local_date)
     details: list[dict] = []
-    applied = 0
+    applied_add = 0
+    applied_remove = 0
     skipped_existing = 0
+    skipped_taken_remove = 0
     unknown_slugs = 0
 
     for raw in list(recs or []):
         action = str(raw.get("action") or "add").strip().lower()
-        if action != "add":
-            continue
+        if action not in {"add", "remove", "adjust"}:
+            action = "add"
+        if action == "adjust":
+            action = "add"
+
         supplement_id = int(raw.get("supplement_id") or 0)
         slug = str(raw.get("slug") or "").strip().lower()
         if supplement_id <= 0 and slug:
@@ -6580,7 +6586,7 @@ async def apply_recommendations_to_today(
             supplement_id = int(row["id"]) if row else 0
         if supplement_id <= 0:
             unknown_slugs += 1
-            details.append({"slug": slug, "result": "unknown", "slot_id": None})
+            details.append({"slug": slug, "result": "unknown", "action": action, "slot_id": None})
             continue
 
         time_local = _normalize_hhmm(str(raw.get("suggested_time") or raw.get("time_local") or "").strip())
@@ -6593,27 +6599,61 @@ async def apply_recommendations_to_today(
         if not slot_id:
             slot_id = "morning"
 
-        if supplement_id in existing_today:
-            skipped_existing += 1
-            details.append({"slug": slug, "result": "skipped", "slot_id": slot_id})
+        if action == "add":
+            if supplement_id in existing_today:
+                skipped_existing += 1
+                details.append({"slug": slug, "result": "skipped", "action": "add", "slot_id": slot_id})
+                continue
+
+            row_s = await fetchone(
+                conn,
+                "SELECT COALESCE(NULLIF(dose_text,''), '') AS dose_text FROM user_supp_settings WHERE user_id=? AND supplement_id=?",
+                (user_id, supplement_id),
+            )
+            dose_text = str((row_s["dose_text"] if row_s else "") or "").strip() or None
+
+            await conn.execute(
+                """INSERT INTO day_plan_items(
+                     user_id, date_local, supplement_id, action, dose_text, time_hint, slot_id, time_local, reason, source, created_at_utc
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(user_id, date_local, supplement_id, action) DO UPDATE SET
+                     dose_text=COALESCE(excluded.dose_text, day_plan_items.dose_text),
+                     time_hint=excluded.time_hint,
+                     slot_id=excluded.slot_id,
+                     time_local=excluded.time_local,
+                     reason=excluded.reason,
+                     source='ai',
+                     created_at_utc=excluded.created_at_utc""",
+                (
+                    user_id,
+                    local_date,
+                    supplement_id,
+                    "add",
+                    dose_text,
+                    normalized_time,
+                    slot_id,
+                    normalized_time,
+                    str(raw.get("reason") or raw.get("reason_ru") or "").strip() or None,
+                    "ai",
+                    now,
+                ),
+            )
+            existing_today.add(supplement_id)
+            applied_add += 1
+            details.append({"slug": slug, "result": "added", "action": "add", "slot_id": slot_id})
             continue
 
-        row_s = await fetchone(
-            conn,
-            "SELECT COALESCE(NULLIF(dose_text,''), '') AS dose_text FROM user_supp_settings WHERE user_id=? AND supplement_id=?",
-            (user_id, supplement_id),
-        )
-        dose_text = str((row_s["dose_text"] if row_s else "") or "").strip() or None
+        # remove action
+        if str(taken_map.get(supplement_id) or "") == "taken":
+            skipped_taken_remove += 1
+            details.append({"slug": slug, "result": "taken_skip", "action": "remove", "slot_id": None})
+            continue
 
         await conn.execute(
             """INSERT INTO day_plan_items(
                  user_id, date_local, supplement_id, action, dose_text, time_hint, slot_id, time_local, reason, source, created_at_utc
                ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(user_id, date_local, supplement_id, action) DO UPDATE SET
-                 dose_text=COALESCE(excluded.dose_text, day_plan_items.dose_text),
-                 time_hint=excluded.time_hint,
-                 slot_id=excluded.slot_id,
-                 time_local=excluded.time_local,
                  reason=excluded.reason,
                  source='ai',
                  created_at_utc=excluded.created_at_utc""",
@@ -6621,24 +6661,26 @@ async def apply_recommendations_to_today(
                 user_id,
                 local_date,
                 supplement_id,
-                "add",
-                dose_text,
-                normalized_time,
-                slot_id,
-                normalized_time,
+                "remove",
+                None,
+                None,
+                None,
+                None,
                 str(raw.get("reason") or raw.get("reason_ru") or "").strip() or None,
                 "ai",
                 now,
             ),
         )
-        existing_today.add(supplement_id)
-        applied += 1
-        details.append({"slug": slug, "result": "added", "slot_id": slot_id})
+        applied_remove += 1
+        details.append({"slug": slug, "result": "blocked", "action": "remove", "slot_id": None})
 
     await conn.commit()
     return {
-        "applied": applied,
+        "applied": applied_add + applied_remove,
+        "applied_add": applied_add,
+        "applied_remove": applied_remove,
         "skipped_existing": skipped_existing,
+        "skipped_taken_remove": skipped_taken_remove,
         "unknown_slugs": unknown_slugs,
         "details": details,
     }
@@ -6946,6 +6988,8 @@ async def get_today_plan_groups(conn: aiosqlite.Connection, tg_user_id: int, loc
                 "slug": str(row["slug"] or "").strip(),
                 "name_ru": str(row["name_ru"] or "").strip(),
                 "dose_text": str(row["dose_text"] or "").strip(),
+                "source": "ai",
+                "action": "add",
             }
         )
 
@@ -6956,6 +7000,33 @@ async def get_today_plan_groups(conn: aiosqlite.Connection, tg_user_id: int, loc
         for cx in list(group.get("complexes") or []):
             for ci in list(cx.get("items") or []):
                 present_ids.add(int(ci.get("supplement_id") or 0))
+
+    status_map = await get_day_status_map(conn, tg_user_id, local_date)
+    remove_rows = await fetchall(
+        conn,
+        """SELECT supplement_id, COALESCE(reason,'') AS reason
+           FROM day_plan_items
+           WHERE user_id=? AND date_local=? AND action='remove'""",
+        (user_id, local_date),
+    )
+    blocked_map: dict[int, str] = {}
+    for row in remove_rows:
+        sid = int(row["supplement_id"] or 0)
+        if sid <= 0:
+            continue
+        if str(status_map.get(sid) or "") == "taken":
+            continue
+        blocked_map[sid] = str(row["reason"] or "").strip()
+
+    for group in by_time.values():
+        next_items = []
+        for item in list(group.get("items") or []):
+            sid = int(item.get("supplement_id") or 0)
+            if sid in blocked_map:
+                blocked_reason = blocked_map[sid]
+                item = {**item, "blocked": True, "blocked_reason": blocked_reason, "source": "ai", "action": "remove"}
+            next_items.append(item)
+        group["items"] = next_items
 
     ai_rows = await fetchall(
         conn,

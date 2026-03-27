@@ -78,6 +78,8 @@ from keyboards import (
     admin_paychecks_kb,
     complexes_hub_kb,
     complex_open_kb,
+    complex_add_menu_kb,
+    complex_add_mine_kb,
     complex_add_results_kb,
     complex_item_actions_kb,
     complex_schedule_kb,
@@ -703,14 +705,15 @@ async def _show_supplement_time_screen(
     slot_title = str(slot.get("title_ru") or "Утро") if slot else "Утро"
     slot_time = str(slot.get("time_local") or "--:--") if slot else "--:--"
     override = str(current.get("time_hhmm") or "").strip()
-    mode = f"своё ({override})" if override else f"как у слота ({slot_time})"
+    effective_time = override or slot_time
     title = (supplement["name_ru"] or supplement["name"] or "").strip()
     text = (
         f"⏰ <b>Время приёма</b>\n\n"
         f"💊 {title}\n"
         f"Слот: {slot_title} · {slot_time}\n"
-        f"Режим времени: {mode}\n\n"
-        "Выбери режим: «Как у слота» или «Назначить своё время»."
+        f"Текущее время: {effective_time}\n"
+        "Напоминание ставится автоматически на это время.\n\n"
+        "Можно назначить своё время или выбрать один из слотов."
     )
     await show(update, context, text, supplement_time_kb(supplement_id, slots), route=f"supplement:set_time:{supplement_id}")
 
@@ -3246,10 +3249,54 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await db.add_item_to_complex(conn, tg_uid, int(cx_id), int(supp_id), dose_override="")
             await _show_complex_detail(update, context, conn, tg_uid, int(cx_id))
             return
+        if data.startswith("cx:add:mine:"):
+            _, _, _, cx_id, page_raw = data.split(":", 4)
+            complex_id = int(cx_id)
+            page = max(0, int(page_raw) if str(page_raw).isdigit() else 0)
+            rows, total = await db.list_user_supplements_page(conn, tg_uid, q=None, page=page, page_size=8)
+            if not rows:
+                await show(
+                    update,
+                    context,
+                    "В твоём списке пока нет БАДов. Сначала добавь их в «Мои БАДы» или выбери из каталога.",
+                    complex_add_menu_kb(complex_id),
+                    route=f"cx:add:{complex_id}",
+                )
+                return
+            await show(
+                update,
+                context,
+                "Выбери БАД из уже добавленных в твой список:",
+                complex_add_mine_kb(
+                    complex_id,
+                    rows,
+                    page,
+                    has_prev=page > 0,
+                    has_next=((page + 1) * 8) < int(total or 0),
+                ),
+                route=f"cx:add:mine:{complex_id}:{page}",
+            )
+            return
+        if data.startswith("cx:add:catalog:"):
+            complex_id = int(data.split(":")[-1])
+            context.user_data[WAITING_KEY] = f"cx:add_query:{complex_id}"
+            await show(
+                update,
+                context,
+                "Введи название БАДа для добавления из каталога.",
+                InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"cx:add:{complex_id}")]]),
+                route=f"cx:add:{complex_id}",
+            )
+            return
         if data.startswith("cx:add:"):
             complex_id = int(data.split(":", 2)[2])
-            context.user_data[WAITING_KEY] = f"cx:add_query:{complex_id}"
-            await show(update, context, "Введи название БАДа для добавления в комплекс.", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ К комплексу", callback_data=f"cx:open:{complex_id}")]]), route=f"cx:add:{complex_id}")
+            await show(
+                update,
+                context,
+                "Как добавить БАД в комплекс?",
+                complex_add_menu_kb(complex_id),
+                route=f"cx:add:{complex_id}",
+            )
             return
         if data.startswith("cx:item:open:"):
             _, _, _, _, cx_id, supp_id = data.split(":", 5)
@@ -6624,7 +6671,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             complex_id = int(waiting.split(":", 2)[2])
             rows, _ = await db.search_supplements(conn, txt, page=0, page_size=15)
             if not rows:
-                await show(update, context, "Не нашёл в каталоге.", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ К комплексу", callback_data=f"cx:open:{complex_id}")]]), route=f"cx:add:{complex_id}")
+                await show(update, context, "Не нашёл в каталоге.", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"cx:add:{complex_id}")]]), route=f"cx:add:{complex_id}")
             else:
                 await show(update, context, "Выбери добавку для комплекса:", complex_add_results_kb(complex_id, rows), route=f"cx:add:{complex_id}")
             context.user_data.pop(WAITING_KEY, None)
@@ -8735,9 +8782,6 @@ async def show_my_supp_hub(
             return
         await db.ensure_daily_rollover(conn, user_id)
         today_status = await db.get_today_status(conn, user_id, supplement_id)
-        reminders = await db.list_reminders_for_user(conn, user_id)
-        reminder_times = [r["time_local"] for r in reminders if int(r["supplement_id"]) == supplement_id]
-        reminder_list = ", ".join(reminder_times) if reminder_times else "нет"
 
         name_ru = (row["name_ru"] or row["name"] or "").strip()
         name_en = (row["name_en"] or "").strip()
@@ -8756,7 +8800,7 @@ async def show_my_supp_hub(
             f"{name_line}\n\n"
             f"Доза: {dose_text}\n"
             f"Статус на сегодня: {status_text}\n"
-            f"Напоминания: {reminder_list}\n"
+            "Напоминание: автоматически по времени приёма\n"
         )
         await show(
             update,

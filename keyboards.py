@@ -702,7 +702,6 @@ def my_supplement_hub(
     supplement_id: int,
 ) -> InlineKeyboardMarkup:
     btns = [
-        [InlineKeyboardButton("⏰ Напоминания", callback_data=f"mysupp:rem:{supplement_id}")],
         [InlineKeyboardButton("🧾 Доза", callback_data=f"mysupp:set_dose:{supplement_id}")],
         [InlineKeyboardButton("⏰ Время приёма", callback_data=f"supplement:set_time:{supplement_id}")],
         [InlineKeyboardButton("🗑 Удалить из моих", callback_data=f"mysupp:remove:{supplement_id}")],
@@ -826,6 +825,41 @@ def complex_open_kb(complex_id: int, *, list_back_cb: str = "cx:list") -> Inline
     ])
 
 
+def complex_add_menu_kb(complex_id: int) -> InlineKeyboardMarkup:
+    cid = int(complex_id)
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📦 Выбрать из моих БАДов", callback_data=f"cx:add:mine:{cid}:0")],
+        [InlineKeyboardButton("📚 Перейти в каталог", callback_data=f"cx:add:catalog:{cid}")],
+        [InlineKeyboardButton("⬅️ К комплексу", callback_data=f"cx:open:{cid}")],
+    ])
+
+
+def complex_add_mine_kb(
+    complex_id: int,
+    rows: list[dict],
+    page: int,
+    *,
+    has_prev: bool,
+    has_next: bool,
+) -> InlineKeyboardMarkup:
+    cid = int(complex_id)
+    btns: list[list[InlineKeyboardButton]] = []
+    for item in rows:
+        sid = int(item.get("id") or 0)
+        title = str(item.get("name") or item.get("name_ru") or item.get("name_en") or f"ID {sid}")
+        btns.append([InlineKeyboardButton(f"• {title}", callback_data=f"cx:add_pick:{cid}:{sid}")])
+    nav: list[InlineKeyboardButton] = []
+    if has_prev:
+        nav.append(InlineKeyboardButton("◀️", callback_data=f"cx:add:mine:{cid}:{max(page - 1, 0)}"))
+    if has_next:
+        nav.append(InlineKeyboardButton("▶️", callback_data=f"cx:add:mine:{cid}:{page + 1}"))
+    if nav:
+        btns.append(nav)
+    btns.append([InlineKeyboardButton("📚 Перейти в каталог", callback_data=f"cx:add:catalog:{cid}")])
+    btns.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"cx:add:{cid}")])
+    return InlineKeyboardMarkup(btns)
+
+
 def complex_add_results_kb(complex_id: int, rows: list[dict]) -> InlineKeyboardMarkup:
     cid = int(complex_id)
     btns: list[list[InlineKeyboardButton]] = []
@@ -878,7 +912,6 @@ def schedule_slots_pick_kb(slots: list[dict], prefix: str = "schedule:slot_time_
 
 def supplement_time_kb(supplement_id: int, slots: list[dict]) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
-    rows.append([InlineKeyboardButton("⏰ Как у слота", callback_data=f"supplement:clear_override:{supplement_id}")])
     rows.append([InlineKeyboardButton("✍️ Назначить своё время", callback_data=f"supplement:set_override:{supplement_id}")])
     for slot in slots:
         rows.append([InlineKeyboardButton(f"Слот: {slot.get('title_ru','Слот')} ({slot.get('time_local','--:--')})", callback_data=f"supplement:set_slot:{supplement_id}:{slot.get('slot_id','')}")])

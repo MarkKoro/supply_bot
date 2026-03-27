@@ -2584,11 +2584,25 @@ async def extend_premium(
         raise ValueError("months must be > 0")
     now = datetime.now(timezone.utc)
     current_until = _parse_utc_iso_dt(await get_premium_until(conn, tg_user_id))
+    starter_until = _parse_utc_iso_dt(await get_starter_trial_until(conn, tg_user_id))
     baseline = now
     if current_until is not None and current_until > now:
         baseline = current_until
+    starter_carryover = timedelta(0)
+    if starter_until is not None and starter_until > now:
+        starter_carryover = starter_until - now
     new_until = _add_months_utc(baseline, months)
-    return await set_premium_until(conn, tg_user_id, new_until, source, plan_id)
+    if starter_carryover.total_seconds() > 0:
+        new_until = new_until + starter_carryover
+    until_value = await set_premium_until(conn, tg_user_id, new_until, source, plan_id)
+    if starter_carryover.total_seconds() > 0:
+        now_iso = _to_utc_iso(now)
+        await conn.execute(
+            "UPDATE users SET starter_trial_until_utc=? WHERE tg_user_id=?",
+            (now_iso, int(tg_user_id)),
+        )
+        await conn.commit()
+    return until_value
 
 
 async def get_starter_trial_until(conn: aiosqlite.Connection, tg_user_id: int) -> str | None:

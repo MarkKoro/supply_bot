@@ -1543,12 +1543,19 @@
     const planName = String(info.plan_id || 'Premium').trim() || 'Premium';
     const untilIso = String(info.premium_until_utc || state.me?.premium_until_utc || '').trim();
     const untilLabel = untilIso ? new Date(untilIso.replace(' ', 'T')).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric' }) : '—';
+    const fromStarter = Boolean(info.started_from_starter);
+    const carriedStarterDays = Number(info.carried_starter_days || 0);
+    const carryoverNote = fromStarter
+      ? `Оставшиеся дни Starter добавлены к сроку Premium${carriedStarterDays > 0 ? ` (≈ ${Math.ceil(carriedStarterDays)} дн.)` : ''}.`
+      : 'Доступ к Premium и внутреннему помощнику открыт сразу после оплаты.';
     return `
       <div class="payment-success-overlay" data-payment-success-overlay>
         <section class="payment-success-card">
           <h3 style="margin:0 0 8px">🎉 Оплата прошла успешно</h3>
           <div class="muted">Вы активировали тариф <strong>${esc(planName)}</strong>.</div>
           <div class="muted" style="margin-top:6px">Подписка активна до: <strong>${esc(untilLabel)}</strong>.</div>
+          <div class="muted" style="margin-top:6px">${esc(carryoverNote)}</div>
+          <div class="muted" style="margin-top:6px">🧪 Внутренний помощник уже доступен в разделе «Профиль».</div>
           <div style="margin-top:12px" class="row">
             <button class="btn" data-payment-success-close>Отлично</button>
           </div>
@@ -1852,6 +1859,7 @@
     const prevText = btnEl.textContent;
     btnEl.textContent = "Создаю счёт...";
     btnEl.disabled = true;
+    const starterActiveBeforePurchase = Boolean(state.me?.starter_trial_active);
     try {
       const data = await api("api/billing/create_invoice_link", {
         method: "POST",
@@ -1864,6 +1872,13 @@
           try {
             state.me = await api("api/me");
             if (state.me.webapp_access) {
+              state.payment.successInfo = {
+                plan_id: planId || "Premium",
+                premium_until_utc: state.me?.premium_until_utc || "",
+                started_from_starter: starterActiveBeforePurchase,
+                carried_starter_days: 0
+              };
+              state.activeTab = "today";
               renderMainApp();
               await loadToday();
             } else {

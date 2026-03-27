@@ -2495,7 +2495,9 @@ async def on_success_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await msg.reply_text("Не удалось определить тариф для активации.")
         return
     conn = await db.connect(s.DB_PATH)
+    starter_active_before_purchase = False
     try:
+        starter_active_before_purchase = await db.is_starter_trial_active(conn, update.effective_user.id)
         is_new = await db.log_payment_paid(
             conn,
             update.effective_user.id,
@@ -2513,7 +2515,19 @@ async def on_success_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
     finally:
         await conn.close()
 
-    await msg.reply_text(f"Оплата прошла успешно! Premium активен до: {until_iso}")
+    if starter_active_before_purchase:
+        await msg.reply_text(
+            "Оплата прошла успешно! Premium активирован сразу, "
+            "а оставшиеся дни Starter добавлены к сроку.\n"
+            f"Подписка активна до: {until_iso}\n"
+            "🧪 Внутренний помощник уже открыт."
+        )
+    else:
+        await msg.reply_text(
+            "Оплата прошла успешно!\n"
+            f"Premium активен до: {until_iso}\n"
+            "🧪 Внутренний помощник уже открыт."
+        )
     context.user_data["home_entry_reason"] = "premium_activated"
     await home(update, context)
 

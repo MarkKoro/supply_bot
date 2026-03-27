@@ -660,6 +660,7 @@ async def api_me(x_telegram_init_data: str = Header(default="", alias="X-Telegra
         await conn.close()
     return JSONResponse({
         "ok": True,
+        "tg_user_id": int(tg_user_id),
         "premium": premium,
         "premium_until_utc": premium_until,
         "starter_trial_active": bool(starter_trial_active),

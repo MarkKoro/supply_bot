@@ -1012,7 +1012,7 @@
     { id: "settings", title: "Настройки", icon: "⚙️" }
   ];
   const GUIDE_KEYS = { main: 'main_tabs', survey: 'survey_tab', profile: 'profile_tab' };
-  const GUIDE_VERSION = { main_tabs: 2, survey_tab: 2, profile_tab: 2 };
+  const GUIDE_VERSION = { main_tabs: 3, survey_tab: 2, profile_tab: 3 };
   const GUIDE_TEXT = {
     main_tabs: [
       { selector: '.tab[data-tab="today"]', title: 'Сегодня', text: 'Здесь вы отмечаете приём БАДов на сегодня и видите текущий дневной план.' },
@@ -3744,13 +3744,35 @@ function adminField(label, field, value, kind='input') {
     const unseen = getUnseenAchievementsCount();
     const modules = [
       { id: 'organs', title: '🫀 Карта органов', hint: 'Как добавки влияют на системы', locked: false },
-      { id: 'assistant', title: '🧪 Помощник', hint: hasPaidPremium ? 'Персональные рекомендации (обновляется)' : 'Доступен при покупке Premium', locked: !hasPaidPremium },
+      { id: 'assistant', title: '🧪 Помощник', hint: hasPaidPremium ? 'Персональные рекомендации (обновляется)' : 'Показываем модуль сразу, открыть расчёт можно после Premium', locked: false },
       { id: 'achievements', title: '🏆 Достижения', hint: 'Ваш прогресс и открытия', locked: false, unseen },
       { id: 'cosmetics', title: '🎨 Косметика', hint: 'Тема, вкладки и бейдж', locked: false }
     ];
     const firstModuleId = modules[0]?.id || 'organs';
     const active = String(state.profileUi.activeModule || firstModuleId);
     return `<section class="card fade"><div class="profile-module-grid">${modules.map((m)=>`<button class="btn profile-module-btn ${active===m.id?'active':''}" data-profile-module="${m.id}" ${m.locked ? 'disabled' : ''}><div><strong>${m.title}${m.unseen ? `<span class="new-pill" style="margin-left:6px; margin-top:4px;">NEW ${m.unseen}</span>` : ''}</strong></div><div class="muted">${m.hint}</div></button>`).join('')}</div></section>`;
+  }
+
+  function renderAssistantLockedModule() {
+    const plans = [...(state.me?.plans || [])].sort((a, b) => Number(a.months || 0) - Number(b.months || 0));
+    const priceHint = plans
+      .filter((p) => p.rub_enabled)
+      .map((p) => {
+        const rub = Number(p.price_rub || 0);
+        const months = Number(p.months || 0);
+        if (!rub || !months) return '';
+        return `${months} мес — ${Math.round(rub / 100)} ₽`;
+      })
+      .filter(Boolean)
+      .slice(0, 2)
+      .join(' · ');
+    return `<section class="card fade">
+      <div class="row"><strong>🧪 Нутриентный помощник</strong></div>
+      <div class="muted" style="margin-top:8px">Модуль доступен в интерфейсе для всех, чтобы было понятно, что он делает и где находится.</div>
+      <div class="muted" style="margin-top:6px">Для запуска персональных расчётов нужен Premium.</div>
+      ${priceHint ? `<div class="muted" style="margin-top:6px">Тарифы: ${esc(priceHint)}</div>` : ''}
+      <div class="row" style="margin-top:10px"><button class="btn" data-assistant-open-premium>Открыть Premium</button></div>
+    </section>`;
   }
 
   function renderProfileAchievementsModule() {
@@ -3959,7 +3981,7 @@ function adminField(label, field, value, kind='input') {
     if (activeModule === 'organs') moduleHtml = `<section class="card fade">${renderBodyMap()}</section>`;
     if (activeModule === 'achievements') moduleHtml = renderProfileAchievementsModule();
     if (activeModule === 'cosmetics') moduleHtml = renderProfileCosmeticsModule();
-    if (activeModule === 'assistant' && hasPaidPremium) moduleHtml = renderAssistantModule(p, labs);
+    if (activeModule === 'assistant') moduleHtml = hasPaidPremium ? renderAssistantModule(p, labs) : renderAssistantLockedModule();
     if (!moduleHtml) moduleHtml = `<section class="card fade">${renderBodyMap()}</section>`;
 
     return `${renderProfileModulesGrid()}${moduleHtml}${renderProfileEditorModal()}${renderLabsModal('manual')}${renderLabsModal('upload')}${renderReviewModal()}`;
@@ -4042,6 +4064,12 @@ function adminField(label, field, value, kind='input') {
     document.querySelectorAll('[data-close-upload]').forEach((el)=>el.addEventListener('click', ()=>{ state.profileUi.uploadOpen=false; renderActiveTab(); }));
     document.querySelectorAll('[data-close-review]').forEach((el)=>el.addEventListener('click', ()=>{ state.profileUi.reviewOpen=false; renderActiveTab(); }));
     document.querySelectorAll('[data-open-review]').forEach((el)=>el.addEventListener('click', ()=>{ state.profileUi.selectedReportId=Number(el.dataset.openReview); state.profileUi.reviewOpen=true; renderActiveTab(); }));
+    document.querySelector('[data-assistant-open-premium]')?.addEventListener('click', () => {
+      haptic();
+      state.activeTab = "settings";
+      state.settingsUi.sectionsOpen = { ...(state.settingsUi.sectionsOpen || {}), premium: true };
+      renderMainApp();
+    });
     document.querySelector('[data-assistant-add-lab]')?.addEventListener('click', ()=>{
       syncExpandedAssistantLabRow();
       const current = state.nutrientAssistant.manualLabs[Number(state.nutrientAssistant.expandedLabIdx || 0)] || {};

@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json
+from datetime import datetime, timedelta
 import aiosqlite
 import db
 from rules import DEFAULT_CLASS_RULES
@@ -46,19 +47,49 @@ async def assign_slots_by_time(
     user_id: int,
     items: list[dict],
     *,
+    target_day: str,
     action_field: str,
     add_actions: set[str],
     time_field: str,
     slot_field: str,
 ) -> tuple[list[dict], set[str]]:
-    default_time = await _preferred_user_time(conn, user_id)
     slots = await db.get_user_slots(conn, user_id)
+    enabled_slots = [s for s in slots if int(s.get("is_enabled", 1)) == 1]
+    ordered_slots = enabled_slots or slots
+    ordered_slots.sort(key=lambda s: str(s.get("time_local") or "99:99"))
+
+    first_slot_id = ""
+    first_slot_time = DEFAULT_AI_TIME
+    for slot in ordered_slots:
+        slot_id = str(slot.get("slot_id") or "").strip()
+        hhmm = db._normalize_hhmm(str(slot.get("time_local") or "").strip())
+        if slot_id and hhmm:
+            first_slot_id = slot_id
+            first_slot_time = hhmm
+            break
+    if not first_slot_id:
+        default_time = await _preferred_user_time(conn, user_id)
+        first_slot_time = default_time
+
     by_time: dict[str, str] = {}
     for slot in slots:
         hhmm = db._normalize_hhmm(str(slot.get("time_local") or "").strip())
         slot_id = str(slot.get("slot_id") or "").strip()
         if hhmm and slot_id and hhmm not in by_time:
             by_time[hhmm] = slot_id
+
+    now_local_hhmm = None
+    if target_day == "today":
+        user_row = await db.fetchone(conn, "SELECT tz_name FROM users WHERE id=?", (user_id,))
+        tz_name = str(user_row["tz_name"] or "").strip() if user_row else ""
+        now_local_hhmm = datetime.now(db.parse_utc_tz(tz_name)).strftime("%H:%M")
+
+    def _next_logical_time(now_hhmm: str) -> str:
+        now_dt = datetime.strptime(now_hhmm, "%H:%M")
+        rounded = now_dt.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+        if rounded.date() != now_dt.date():
+            return "23:59"
+        return rounded.strftime("%H:%M")
 
     created_times: set[str] = set()
     prepared: list[dict] = []
@@ -68,12 +99,32 @@ async def assign_slots_by_time(
         if action not in add_actions:
             prepared.append(item)
             continue
-        hhmm = db._normalize_hhmm(str(item.get(time_field) or "").strip()) or default_time
+        requested_hhmm = db._normalize_hhmm(str(item.get(time_field) or "").strip())
+        hhmm = requested_hhmm or first_slot_time
         slot_id = by_time.get(hhmm)
+        if target_day == "today" and now_local_hhmm:
+            future_slots = [
+                (str(slot.get("time_local") or ""), str(slot.get("slot_id") or ""))
+                for slot in ordered_slots
+                if str(slot.get("time_local") or "") >= now_local_hhmm and str(slot.get("slot_id") or "")
+            ]
+            if future_slots:
+                nearest_time, nearest_slot_id = future_slots[0]
+                slot_id = nearest_slot_id
+                hhmm = nearest_time
+            elif not slot_id:
+                logical_time = _next_logical_time(now_local_hhmm)
+                slot_id = await db.add_custom_slot(conn, user_id, logical_time, logical_time)
+                by_time[logical_time] = slot_id
+                created_times.add(logical_time)
+                hhmm = logical_time
         if not slot_id:
-            slot_id = await db.add_custom_slot(conn, user_id, hhmm, hhmm)
-            by_time[hhmm] = slot_id
-            created_times.add(hhmm)
+            slot_id = first_slot_id or by_time.get(first_slot_time)
+            if not slot_id:
+                slot_id = await db.add_custom_slot(conn, user_id, first_slot_time, first_slot_time)
+                by_time[first_slot_time] = slot_id
+                created_times.add(first_slot_time)
+            hhmm = first_slot_time
         item[time_field] = hhmm
         item[slot_field] = slot_id
         prepared.append(item)
@@ -113,6 +164,7 @@ async def apply_day_plan_actions_with_slots(
     user_id: int,
     tg_user_id: int,
     date_local: str,
+    target_day: str = "today",
     ai_actions: dict,
     selected_ids: set[str] | None = None,
 ) -> int:
@@ -129,10 +181,11 @@ async def apply_day_plan_actions_with_slots(
             continue
         picked.append(dict(action))
 
-    prepared, created_times = await assign_slots_by_time(
+    prepared, _created_times = await assign_slots_by_time(
         conn,
         user_id,
         picked,
+        target_day=target_day,
         action_field="type",
         add_actions={"add", "adjust"},
         time_field="suggested_time",
@@ -175,7 +228,7 @@ async def apply_day_plan_actions_with_slots(
         add_actions={"add", "adjust"},
         supplement_field="supplement_id",
         time_field="suggested_time",
-        only_times=created_times,
+        only_times=None,
     )
     await conn.commit()
     return inserted

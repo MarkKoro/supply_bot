@@ -5225,6 +5225,7 @@ async def on_ai_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 user_id=user_id,
                 tg_user_id=tg_uid,
                 date_local=date_local,
+                target_day=str(state.get("target_day") or "today"),
                 ai_actions=payload,
             )
         finally:
@@ -5252,6 +5253,7 @@ async def on_ai_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 user_id=user_id,
                 tg_user_id=tg_uid,
                 date_local=date_local,
+                target_day=str(state.get("target_day") or "today"),
                 ai_actions=payload,
                 selected_ids=set(selected),
             )

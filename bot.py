@@ -2189,6 +2189,7 @@ async def home(
     show_complexes = False
     onboarding_state = {}
     starter_active = False
+    ai_checkin_access = False
     show_next_step_hint = True
     if user_id:
         settings = context.application.bot_data["settings"]
@@ -2200,6 +2201,7 @@ async def home(
                 show_complexes = await db.has_any_webapp_access(conn, user_id)
             onboarding_state = await db.get_onboarding_state(conn, user_id)
             starter_active = await db.is_starter_trial_active(conn, user_id)
+            ai_checkin_access = (user_id in settings.ADMIN_IDS) or await db.has_any_webapp_access(conn, user_id)
             created_row = await db.fetchone(conn, "SELECT created_at_utc FROM users WHERE tg_user_id=?", (int(user_id),))
             created_at_utc = str(created_row["created_at_utc"] if created_row and "created_at_utc" in created_row.keys() else "").strip()
             created_dt = db._parse_utc_iso_dt(created_at_utc)
@@ -2222,7 +2224,11 @@ async def home(
         show_next_step_hint=show_next_step_hint,
     )
 
-    base_menu = main_menu(is_admin=is_admin, show_complexes=show_complexes)
+    base_menu = main_menu(
+        is_admin=is_admin,
+        show_complexes=show_complexes,
+        show_ai_checkin=ai_checkin_access,
+    )
     rows = [list(row) for row in base_menu.inline_keyboard]
     if has_unfinished:
         rows.insert(3, [InlineKeyboardButton("✨ Продолжить подбор", callback_data="onboard:results")])
@@ -2357,16 +2363,22 @@ async def _complete_onboarding_flow(
     await home(update, context)
 
 
-async def require_premium_or_upsell(update: Update, context: ContextTypes.DEFAULT_TYPE, feature_name: str) -> bool:
+async def _has_ai_checkin_access(context: ContextTypes.DEFAULT_TYPE, tg_uid: int) -> bool:
+    if tg_uid <= 0:
+        return False
     s = context.application.bot_data["settings"]
-    tg_uid = update.effective_user.id if update.effective_user else 0
     if tg_uid in s.ADMIN_IDS:
         return True
     conn = await db.connect(s.DB_PATH)
     try:
-        active = await db.has_any_webapp_access(conn, tg_uid)
+        return await db.has_any_webapp_access(conn, tg_uid)
     finally:
         await conn.close()
+
+
+async def require_premium_or_upsell(update: Update, context: ContextTypes.DEFAULT_TYPE, feature_name: str) -> bool:
+    tg_uid = update.effective_user.id if update.effective_user else 0
+    active = await _has_ai_checkin_access(context, tg_uid)
     if active:
         return True
     await show(
@@ -5422,7 +5434,10 @@ async def on_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     "✅ Часовой пояс сохранён: "
                     f"{label}\n"
                     f"Текущее время у тебя: {local_now}",
-                    main_menu(is_admin=(await _get_role_perms_ctx(context, update.effective_user.id if update.effective_user else 0))[0] != db.ROLE_NONE),
+                    main_menu(
+                        is_admin=(await _get_role_perms_ctx(context, update.effective_user.id if update.effective_user else 0))[0] != db.ROLE_NONE,
+                        show_ai_checkin=await _has_ai_checkin_access(context, tg_uid),
+                    ),
                     route="menu:home",
                 )
         finally:
@@ -6164,6 +6179,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 pass
             return
         if ui_screen == AI_CHECKIN_VOICE_ROUTE:
+            if not await require_premium_or_upsell(update, context, "AI check-in"):
+                return
             try:
                 payload_data = json.loads(ui_payload) if ui_payload else {}
             except json.JSONDecodeError:
@@ -6749,6 +6766,9 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
                 await _render_ai_suggestions(update, context, conn, txt, raw)
         elif waiting == AI_CHECKIN_TEXT_WAIT:
+            if not await require_premium_or_upsell(update, context, "AI check-in"):
+                context.user_data.pop(WAITING_KEY, None)
+                return
             context.user_data.pop(WAITING_KEY, None)
             if not s.OPENAI_API_KEY:
                 await show(
@@ -6825,6 +6845,8 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await conn.close()
 
     if ui_screen == AI_CHECKIN_VOICE_ROUTE:
+        if not await require_premium_or_upsell(update, context, "AI check-in"):
+            return
         try:
             payload_data = json.loads(ui_payload) if ui_payload else {}
         except json.JSONDecodeError:

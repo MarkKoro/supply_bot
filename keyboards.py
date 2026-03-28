@@ -3,13 +3,19 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 
 import tz
 
-def main_menu(*, is_admin: bool = False, show_complexes: bool = False) -> InlineKeyboardMarkup:
+def main_menu(
+    *,
+    is_admin: bool = False,
+    show_complexes: bool = False,
+    show_ai_checkin: bool = True,
+) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton("📅 Сегодня", callback_data="menu:today")],
         [InlineKeyboardButton("💊 Мои БАДы", callback_data="menu:my")],
         [InlineKeyboardButton("📚 Каталог БАДов", callback_data="menu:catalog")],
-        [InlineKeyboardButton("📝 Ежедневный опрос", callback_data="menu:checkin_ai")],
     ]
+    if show_ai_checkin:
+        rows.append([InlineKeyboardButton("📝 Ежедневный опрос", callback_data="menu:checkin_ai")])
     if is_admin:
         rows.append([InlineKeyboardButton("🛠 Админ-меню", callback_data="admin:home")])
     rows.append([InlineKeyboardButton("⚙️ Настройки", callback_data="menu:settings")])

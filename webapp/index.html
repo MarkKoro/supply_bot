@@ -913,6 +913,7 @@
     bodyMap: null,
     loadingBodyMap: false,
     bodyMapSheet: null,
+    bodyMapSheetFocusRatio: 0.5,
     bodyMapHelpOpen: false,
     profile: { data: null, loading: false, saving: false },
     profileLabs: { reports: [], loading: false, saving: false },
@@ -3613,40 +3614,60 @@ function adminField(label, field, value, kind='input') {
           <div class="legend-pill legend-mixed">Жёлтый контур = баланс</div>
         </div>
       </div>
-      ${state.bodyMapSheet ? '<div id="bodymap-sheet-anchor" aria-hidden="true"></div>' : ''}
       ${sheet}
       ${state.catalog.detail ? renderDetailModal(state.catalog.detail) : ""}
     `;
   }
 
-  function scrollMainContentToElementCenter(el) {
-    if (!el) return;
+  function scrollMainContentToElement(el, align = 'center') {
+    if (!el || !el.getBoundingClientRect) return;
     const container = appEl.querySelector('.main-content');
     if (!container) return;
     const containerRect = container.getBoundingClientRect();
     const elementRect = el.getBoundingClientRect();
-    const visibleCenter = containerRect.top + (containerRect.height / 2);
-    const elementCenter = elementRect.top + (elementRect.height / 2);
-    const delta = elementCenter - visibleCenter;
+    let delta = 0;
+    if (align === 'nearest') {
+      const pad = 16;
+      const visibleTop = containerRect.top + pad;
+      const visibleBottom = containerRect.bottom - pad;
+      if (elementRect.top < visibleTop) delta = elementRect.top - visibleTop;
+      else if (elementRect.bottom > visibleBottom) delta = elementRect.bottom - visibleBottom;
+    } else {
+      const visibleCenter = containerRect.top + (containerRect.height / 2);
+      const elementCenter = elementRect.top + (elementRect.height / 2);
+      delta = elementCenter - visibleCenter;
+    }
+    if (Math.abs(delta) < 2) return;
     container.scrollTo({
       top: container.scrollTop + delta,
       behavior: 'smooth'
     });
   }
 
-  function focusBodyMapSheet() {
+  function positionBodyMapSheet() {
     requestAnimationFrame(() => {
-      const anchor = appEl.querySelector('#bodymap-sheet-anchor');
-      if (anchor) {
-        scrollMainContentToElementCenter(anchor);
-      }
+      const sheet = appEl.querySelector('.sheet[data-bodymap-sheet]');
+      if (!sheet) return;
+      const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+      if (!viewportHeight) return;
+      const ratio = Math.max(0, Math.min(1, Number(state.bodyMapSheetFocusRatio || 0.5)));
+      const minTop = 66;
+      const maxBottomOffset = 92;
+      const availableBottom = viewportHeight - maxBottomOffset;
+      const sheetHeight = Math.min(sheet.offsetHeight || 0, Math.max(220, viewportHeight * 0.66));
+      const desiredCenter = viewportHeight * ratio;
+      const rawTop = desiredCenter - (sheetHeight / 2);
+      const maxTop = Math.max(minTop, availableBottom - sheetHeight);
+      const top = Math.max(minTop, Math.min(maxTop, rawTop));
+      sheet.style.top = `${Math.round(top)}px`;
+      sheet.style.bottom = 'auto';
     });
   }
 
   function renderBodyMapSheet(systemKey) {
     const data = bodyMapSystem(systemKey);
     const list = data.top || [];
-    return `<div class="sheet-backdrop" data-sheet-close></div><div class="card sheet" role="dialog">
+    return `<div class="sheet-backdrop" data-sheet-close></div><div class="card sheet" role="dialog" data-bodymap-sheet>
       <div class="row"><strong>${SYSTEM_LABELS[systemKey] || systemKey}</strong><button class="btn secondary" data-sheet-close>Закрыть</button></div>
       <div class="row" style="margin-top:8px"><span class="badge plus">Польза: ${data.benefit_count || 0}</span><span class="badge minus">Нагрузка: ${data.burden_count || 0}</span>${(data.mixed_count || 0) > 0 ? `<span class="badge mixed">Смешанное: ${data.mixed_count || 0}</span>` : ''}</div>
       <div style="margin-top:10px">${list.length ? list.map((item)=>{ const cls = item.direction==='burden' ? 'minus' : (item.direction==='mixed' ? 'mixed' : 'plus'); const sign = item.direction==='burden' ? '-' : (item.direction==='mixed' ? '±' : '+'); return `<button class="item-row" data-bodymap-open="${esc(item.slug)}"><span class="badge ${cls}">${sign}</span><span>${esc(item.name_ru || item.slug)}</span></button>`; }).join('') : '<div class="sheet-empty">нет данных</div>'}</div>
@@ -3659,9 +3680,21 @@ function adminField(label, field, value, kind='input') {
     bindDetailModalEvents();
     appEl.querySelectorAll('[data-system]').forEach((el)=>el.addEventListener('click', ()=>{
       haptic();
+      const container = appEl.querySelector('.main-content');
+      if (container) {
+        const containerRect = container.getBoundingClientRect();
+        const tileRect = el.getBoundingClientRect();
+        const tileCenter = tileRect.top + (tileRect.height / 2);
+        const ratio = (tileCenter - containerRect.top) / Math.max(1, containerRect.height);
+        state.bodyMapSheetFocusRatio = Math.max(0.12, Math.min(0.88, ratio));
+      } else {
+        state.bodyMapSheetFocusRatio = 0.5;
+      }
       state.bodyMapSheet = el.dataset.system;
       renderActiveTab();
-      focusBodyMapSheet();
+      const selectedTile = appEl.querySelector(`[data-system="${String(state.bodyMapSheet || '')}"]`);
+      scrollMainContentToElement(selectedTile, 'nearest');
+      positionBodyMapSheet();
     }));
     appEl.querySelectorAll('[data-sheet-close]').forEach((el)=>el.addEventListener('click', ()=>{ state.bodyMapSheet = null; renderActiveTab(); }));
     appEl.querySelectorAll('[data-bodymap-open]').forEach((el)=>el.addEventListener('click', async ()=>{
@@ -3683,6 +3716,7 @@ function adminField(label, field, value, kind='input') {
       state.bodyMapHelpOpen = !state.bodyMapHelpOpen;
       renderActiveTab();
     }));
+    if (state.bodyMapSheet) positionBodyMapSheet();
     hydrateOrganIcons(BODYMAP_ORDER).then(()=>{});
   }
 

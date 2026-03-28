@@ -1814,6 +1814,8 @@ async def api_profile_nutrient_assistant_compute(
     x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
 ):
     tg_user_id = await _auth_user_id(x_telegram_init_data)
+    role, _ = await _get_role_and_perms(tg_user_id)
+    is_admin_unlimited = role in {db.ROLE_OWNER, db.ROLE_ADMIN}
     if not await _paid_premium_guard(tg_user_id):
         return JSONResponse({"ok": False, "code": "PAID_PREMIUM_REQUIRED"}, status_code=403)
     if not s.OPENAI_API_KEY:
@@ -1825,7 +1827,7 @@ async def api_profile_nutrient_assistant_compute(
             return JSONResponse({"ok": False, "code": "DAILY_LIMIT_ONE_REQUEST"}, status_code=429)
         history = await db.list_llm_assistant_runs(conn, tg_user_id, limit=10)
         active_history = [h for h in history if str(h.get("status") or "") in {"ok", "applied", "cancelled"}]
-        if len(active_history) >= 3:
+        if not is_admin_unlimited and len(active_history) >= 3:
             replace_run_id = int(body.replace_run_id or 0)
             if replace_run_id <= 0:
                 return JSONResponse(

@@ -91,6 +91,7 @@
       gap: 12px;
       margin-bottom: 12px;
     }
+    .topbar.topbar-hidden { display: none; margin-bottom: 0; }
     .topbar.topbar-today {
       flex-direction: column;
       align-items: stretch;
@@ -263,7 +264,7 @@
     .tabs[data-skin="pulse2"] .tab.active { box-shadow: 0 0 0 1px rgba(255,170,200,.55) inset, 0 0 18px rgba(255,126,184,.28); animation: pulse2Active 1.4s ease-in-out infinite; }
     @keyframes pulse2Active { 0% { transform: translateY(0); } 50% { transform: translateY(-1px); } 100% { transform: translateY(0); } }
     .tab { position: relative; }
-    .topbar-title-row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+    .topbar-title-row { display:flex; align-items:center; justify-content:center; gap:8px; flex-wrap:wrap; width:100%; text-align:center; }
     .badge-pill { font-size:11px; padding:5px 10px; border-radius:999px; border:1px solid rgba(130,167,255,.55); background:linear-gradient(170deg, rgba(125,183,255,0.26), rgba(73,109,198,0.16)); box-shadow: 0 1px 0 rgba(255,255,255,.2) inset; white-space:nowrap; }
     .ach-grid{display:grid;gap:8px;margin-top:8px;}
     .ach-item{border:1px solid rgba(255,255,255,.14);border-radius:12px;padding:8px;background:rgba(255,255,255,.05);}
@@ -451,6 +452,7 @@
       transition: transform .08s ease, box-shadow .12s ease, border-color .12s ease;
       box-shadow: 0 10px 22px rgba(0,0,0,0.25), 0 1px 0 rgba(255,255,255,0.12) inset;
     }
+    .select option { background: #ffffff; color: #1c2236; }
     .textarea { min-height: 88px; resize: vertical; }
 
     .btn, .chip, .card, .tab, .input, .select, .textarea, .search-input {
@@ -756,6 +758,8 @@
     .profile-hero { display:grid; grid-template-columns: 64px 1fr; gap:12px; align-items:center; cursor:pointer; }
     .profile-avatar { width:64px; height:64px; border-radius:18px; background:linear-gradient(160deg, rgba(125,183,255,.35), rgba(255,255,255,.12)); display:grid; place-items:center; font-size:28px; border:1px solid rgba(255,255,255,.3); }
     .profile-summary-grid { margin-top:10px; display:grid; gap:6px; grid-template-columns:repeat(2,minmax(0,1fr)); }
+    .profile-summary-grid .muted { overflow-wrap:anywhere; word-break:break-word; line-height:1.3; }
+    @media (max-width: 520px) { .profile-summary-grid { grid-template-columns:1fr; } }
     .profile-stat-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; margin-top:10px; }
     .profile-stat { border:1px solid rgba(255,255,255,.14); border-radius:12px; padding:8px; background:rgba(255,255,255,.04); }
     .modal-overlay { position:fixed; inset:0; background:rgba(2,6,18,.64); z-index:40; display:flex; align-items:flex-end; padding:0 10px calc(92px + env(safe-area-inset-bottom)); }
@@ -2130,16 +2134,13 @@
   }
 
   function renderMainApp() {
+    const topbarBadgeHtml = renderTopbarBadgeHtml();
     appEl.innerHTML = `
       <div class="main-content" id="mainContent">
         <header class="topbar fade" id="topbarMain">
           <div class="topbar-main">
-            <div class="topbar-title-row">${(() => { const bid = document.documentElement.dataset.badge || "none"; const b = getBadgeMeta(bid); const label = String(b.title_ru || '').trim(); if (bid === 'none' || !label || label === bid) return ""; return `<span class="badge-pill">${esc(b.emoji || "")} ${esc(label)}</span>`; })()}</div>
-            <div class="topbar-meta-row">
-              <span class="topbar-meta-item">📅 ${esc(formatDate())}</span>
-              <span class="topbar-meta-item">🕒 ${esc(formatTime())}</span>
-              <span class="topbar-meta-item">💳 ${esc(topbarAccessText())}</span>
-            </div>
+            <div class="topbar-title-row" id="topbarTitleRow">${topbarBadgeHtml}</div>
+            <div class="topbar-meta-row" id="topbarMetaRow"></div>
           </div>
           <div id="topbarActions" class="topbar-actions"></div>
         </header>
@@ -3682,31 +3683,31 @@ function adminField(label, field, value, kind='input') {
     country_code:[['RU','Россия'],['KZ','Казахстан'],['BY','Беларусь'],['UA','Украина'],['AM','Армения'],['UZ','Узбекистан'],['KG','Кыргызстан'],['other','Другая страна']]
   };
   const ANALYTE_PRESETS = [
-    {code:'25ohd', title:'Витамин D (25-OH)', units:['ng/mL','nmol/L']},
-    {code:'vitamin_b12', title:'Витамин B12', units:['pg/mL','pmol/L']},
-    {code:'ferritin', title:'Ферритин', units:['ng/mL','µg/L']},
-    {code:'serum_iron', title:'Железо сывороточное', units:['µmol/L','µg/dL']},
-    {code:'folate', title:'Фолат', units:['ng/mL','nmol/L']},
-    {code:'zinc', title:'Цинк', units:['µmol/L','µg/dL']},
-    {code:'magnesium', title:'Магний', units:['mmol/L','mg/dL']},
-    {code:'calcium', title:'Кальций', units:['mmol/L','mg/dL']}
+    {code:'25ohd', title:'Витамин D (25-OH)', units:['ng/mL','нг/мл','nmol/L','нмоль/л']},
+    {code:'vitamin_b12', title:'Витамин B12', units:['pg/mL','пг/мл','pmol/L','пмоль/л']},
+    {code:'ferritin', title:'Ферритин', units:['ng/mL','нг/мл','µg/L','ug/L','мкг/л']},
+    {code:'serum_iron', title:'Железо сывороточное', units:['µmol/L','umol/L','мкмоль/л','µg/dL','ug/dL','мкг/дл']},
+    {code:'folate', title:'Фолат', units:['ng/mL','нг/мл','nmol/L','нмоль/л']},
+    {code:'zinc', title:'Цинк', units:['µmol/L','umol/L','мкмоль/л','µg/dL','ug/dL','мкг/дл']},
+    {code:'magnesium', title:'Магний', units:['mmol/L','ммоль/л','mg/dL','мг/дл']},
+    {code:'calcium', title:'Кальций', units:['mmol/L','ммоль/л','mg/dL','мг/дл']}
   ];
   const ASSISTANT_ANALYTE_PRESETS = [
-    { code:'vitamin_d_25oh', name:'25(OH)D', units:['ng/mL','nmol/L'] },
-    { code:'vitamin_b12', name:'Витамин B12', units:['pg/mL','pmol/L'] },
-    { code:'ferritin', name:'Ферритин', units:['ng/mL','µg/L'] },
-    { code:'serum_iron', name:'Железо сывороточное', units:['µmol/L','µg/dL'] },
-    { code:'hemoglobin', name:'Гемоглобин', units:['g/L','g/dL'] },
-    { code:'folate', name:'Фолат', units:['ng/mL','nmol/L'] },
-    { code:'magnesium_serum', name:'Магний (сыворотка)', units:['mmol/L','mg/dL'] },
-    { code:'zinc', name:'Цинк', units:['µmol/L','µg/dL'] },
-    { code:'selenium', name:'Селен', units:['µg/L','µmol/L'] },
-    { code:'tsh', name:'ТТГ', units:['mIU/L','µIU/mL'] },
-    { code:'free_t4', name:'Свободный T4', units:['pmol/L','ng/dL'] },
-    { code:'free_t3', name:'Свободный T3', units:['pmol/L','pg/mL'] },
-    { code:'crp', name:'СРБ', units:['mg/L','mg/dL'] },
-    { code:'hba1c', name:'HbA1c', units:['%','mmol/mol'] },
-    { code:'glucose_fasting', name:'Глюкоза натощак', units:['mmol/L','mg/dL'] },
+    { code:'vitamin_d_25oh', name:'25(OH)D', units:['ng/mL','нг/мл','nmol/L','нмоль/л'] },
+    { code:'vitamin_b12', name:'Витамин B12', units:['pg/mL','пг/мл','pmol/L','пмоль/л'] },
+    { code:'ferritin', name:'Ферритин', units:['ng/mL','нг/мл','µg/L','ug/L','мкг/л'] },
+    { code:'serum_iron', name:'Железо сывороточное', units:['µmol/L','umol/L','мкмоль/л','µg/dL','ug/dL','мкг/дл'] },
+    { code:'hemoglobin', name:'Гемоглобин', units:['g/L','г/л','g/dL','г/дл'] },
+    { code:'folate', name:'Фолат', units:['ng/mL','нг/мл','nmol/L','нмоль/л'] },
+    { code:'magnesium_serum', name:'Магний (сыворотка)', units:['mmol/L','ммоль/л','mg/dL','мг/дл'] },
+    { code:'zinc', name:'Цинк', units:['µmol/L','umol/L','мкмоль/л','µg/dL','ug/dL','мкг/дл'] },
+    { code:'selenium', name:'Селен', units:['µg/L','ug/L','мкг/л','µmol/L','umol/L','мкмоль/л'] },
+    { code:'tsh', name:'ТТГ', units:['mIU/L','мМЕ/л','µIU/mL','uIU/mL','мкМЕ/мл'] },
+    { code:'free_t4', name:'Свободный T4', units:['pmol/L','пмоль/л','ng/dL','нг/дл'] },
+    { code:'free_t3', name:'Свободный T3', units:['pmol/L','пмоль/л','pg/mL','пг/мл'] },
+    { code:'crp', name:'СРБ', units:['mg/L','мг/л','mg/dL','мг/дл'] },
+    { code:'hba1c', name:'HbA1c', units:['%','mmol/mol','ммоль/моль'] },
+    { code:'glucose_fasting', name:'Глюкоза натощак', units:['mmol/L','ммоль/л','mg/dL','мг/дл'] },
     { code:'omega3_index', name:'Омега-3 индекс', units:['%'] }
   ];
 
@@ -3972,7 +3973,7 @@ function adminField(label, field, value, kind='input') {
     const history = Array.isArray(a.history) ? a.history : [];
     const nutrients = Array.isArray(result?.nutrient_plan) ? result.nutrient_plan : [];
     return `
-      <section class="card fade"><div class="row"><strong>🧪 Нутриентный помощник</strong><button class="btn secondary" data-open-edit>Редактировать профиль</button></div><div class="profile-summary-grid" style="margin-top:8px">${summary}</div></section>
+      <section class="card fade"><div class="row" style="flex-wrap:wrap; align-items:flex-start;"><strong>🧪 Нутриентный помощник</strong><button class="btn secondary" data-open-edit>Редактировать профиль</button></div><div class="profile-summary-grid" style="margin-top:8px">${summary}</div></section>
       <section class="card fade">
         <div class="row"><strong>Данные для расчёта</strong></div>
         <div class="field-grid two" style="margin-top:8px">
@@ -3997,9 +3998,9 @@ function adminField(label, field, value, kind='input') {
       </section>
       <section class="card fade">
         <div class="row"><strong>Анализы</strong></div>
-        <div class="muted" style="margin-top:6px">Заполните показатель, значение и единицу. После заполнения появится кнопка «Добавить ещё».</div>
+        <div class="muted" style="margin-top:6px">Можно добавлять строки анализов в любой момент. Для расчёта обязательно заполните показатель, значение и единицу.</div>
         <div id="assistantLabRows" style="margin-top:8px">${(a.manualLabs||[]).map((row,idx)=>renderAssistantLabRow(idx,row, Number(a.expandedLabIdx ?? 0) === idx)).join('')}</div>
-        ${assistantLabRowReady((a.manualLabs||[])[Number(a.expandedLabIdx ?? 0)] || {}) ? `<div class="row" style="margin-top:8px"><button class="btn secondary" data-assistant-add-lab>Добавить ещё</button></div>` : ''}
+        <div class="row" style="margin-top:8px"><button class="btn secondary" data-assistant-add-lab>Добавить ещё</button></div>
         <div class="row" style="margin-top:10px"><button class="btn" data-assistant-compute>${a.computing?'Считаем…':'Рассчитать'}</button></div>
       </section>
       ${result ? `<section class="card fade"><div class="row"><strong>Результат</strong><div style="display:flex;gap:8px"><button class="btn" data-assistant-apply>${a.applying?'Применяем…':'Принять'}</button><button class="btn secondary" data-assistant-cancel>${a.cancelling?'Отменяем…':'Отменить'}</button></div></div>
@@ -4126,11 +4127,6 @@ function adminField(label, field, value, kind='input') {
     });
     document.querySelector('[data-assistant-add-lab]')?.addEventListener('click', ()=>{
       syncExpandedAssistantLabRow();
-      const current = state.nutrientAssistant.manualLabs[Number(state.nutrientAssistant.expandedLabIdx || 0)] || {};
-      if (!assistantLabRowReady(current)) {
-        showToast('Сначала заполните текущий показатель (минимум показатель и значение)');
-        return;
-      }
       state.nutrientAssistant.manualLabs.push({ analyte_code: "", value: "", unit: "", measured_at: "" });
       state.nutrientAssistant.expandedLabIdx = state.nutrientAssistant.manualLabs.length - 1;
       renderActiveTab();
@@ -5459,9 +5455,28 @@ function adminField(label, field, value, kind='input') {
   function renderTopbarActions() {
     const wrap = document.getElementById('topbarActions');
     const header = document.getElementById('topbarMain');
+    const titleRow = document.getElementById('topbarTitleRow');
+    const metaRow = document.getElementById('topbarMetaRow');
+    const showTodayActions = state.activeTab === 'today';
+    const showSettingsMeta = state.activeTab === 'settings';
+    const badgeHtml = renderTopbarBadgeHtml();
+    const hasBadge = Boolean(badgeHtml);
+    const showTopbar = showTodayActions || hasBadge || showSettingsMeta;
     if (!wrap) return;
-    if (header) header.classList.toggle('topbar-today', state.activeTab === 'today');
-    if (state.activeTab !== 'today') {
+    if (titleRow) titleRow.innerHTML = badgeHtml;
+    if (metaRow) {
+      metaRow.innerHTML = showSettingsMeta ? `
+        <span class="topbar-meta-item">📅 ${esc(formatDate())}</span>
+        <span class="topbar-meta-item">🕒 ${esc(formatTime())}</span>
+        <span class="topbar-meta-item">💳 ${esc(topbarAccessText())}</span>
+      ` : '';
+      metaRow.style.display = showSettingsMeta ? 'flex' : 'none';
+    }
+    if (header) {
+      header.classList.toggle('topbar-today', showTodayActions);
+      header.classList.toggle('topbar-hidden', !showTopbar);
+    }
+    if (!showTodayActions) {
       wrap.innerHTML = '';
       return;
     }
@@ -5472,6 +5487,14 @@ function adminField(label, field, value, kind='input') {
       </div>
     `;
     bindTopbarActions();
+  }
+
+  function renderTopbarBadgeHtml() {
+    const badgeId = document.documentElement.dataset.badge || "none";
+    const badge = getBadgeMeta(badgeId);
+    const label = String(badge.title_ru || '').trim();
+    if (badgeId === 'none' || !label || label === badgeId) return '';
+    return `<span class="badge-pill">${esc(badge.emoji || "")} ${esc(label)}</span>`;
   }
 
   function bindTopbarActions() {

@@ -1012,7 +1012,7 @@
     { id: "settings", title: "Настройки", icon: "⚙️" }
   ];
   const GUIDE_KEYS = { main: 'main_tabs', survey: 'survey_tab', profile: 'profile_tab' };
-  const GUIDE_VERSION = { main_tabs: 3, survey_tab: 3, profile_tab: 3 };
+  const GUIDE_VERSION = { main_tabs: 5, survey_tab: 5, profile_tab: 5 };
   const GUIDE_TEXT = {
     main_tabs: [
       { selector: '.tab[data-tab="today"]', title: 'Сегодня', text: 'Здесь вы отмечаете приём БАДов на сегодня и видите текущий дневной план.' },
@@ -1696,11 +1696,15 @@
     renderMainApp();
   }
 
+  function availableGuideSteps(name) {
+    const steps = Array.isArray(GUIDE_TEXT[name]) ? GUIDE_TEXT[name] : [];
+    return steps.filter((step) => !!findGuideTarget(step));
+  }
+
   function maybeStartGuide(name) {
     if (state.guide.active || hasSeenGuide(name)) return;
-    const steps = GUIDE_TEXT[name] || [];
+    const steps = availableGuideSteps(name);
     if (!steps.length) return;
-    if (!steps.some((step) => findGuideTarget(step))) return;
     startGuide(name, steps);
   }
 
@@ -1751,7 +1755,7 @@
         renderPaywall();
       } else {
         if (sp.tutorial === "main_reset") {
-          localStorage.removeItem(guideStorageKey(GUIDE_KEYS.main));
+          Object.values(GUIDE_KEYS).forEach((key) => localStorage.removeItem(guideStorageKey(key)));
         }
         try { await loadAchievements(); } catch {}
         renderMainApp();

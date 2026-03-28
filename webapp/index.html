@@ -3613,9 +3613,34 @@ function adminField(label, field, value, kind='input') {
           <div class="legend-pill legend-mixed">Жёлтый контур = баланс</div>
         </div>
       </div>
+      ${state.bodyMapSheet ? '<div id="bodymap-sheet-anchor" aria-hidden="true"></div>' : ''}
       ${sheet}
       ${state.catalog.detail ? renderDetailModal(state.catalog.detail) : ""}
     `;
+  }
+
+  function scrollMainContentToElementCenter(el) {
+    if (!el) return;
+    const container = appEl.querySelector('.main-content');
+    if (!container) return;
+    const containerRect = container.getBoundingClientRect();
+    const elementRect = el.getBoundingClientRect();
+    const visibleCenter = containerRect.top + (containerRect.height / 2);
+    const elementCenter = elementRect.top + (elementRect.height / 2);
+    const delta = elementCenter - visibleCenter;
+    container.scrollTo({
+      top: container.scrollTop + delta,
+      behavior: 'smooth'
+    });
+  }
+
+  function focusBodyMapSheet() {
+    requestAnimationFrame(() => {
+      const anchor = appEl.querySelector('#bodymap-sheet-anchor');
+      if (anchor) {
+        scrollMainContentToElementCenter(anchor);
+      }
+    });
   }
 
   function renderBodyMapSheet(systemKey) {
@@ -3632,7 +3657,12 @@ function adminField(label, field, value, kind='input') {
   function bindBodyMapEvents() {
 
     bindDetailModalEvents();
-    appEl.querySelectorAll('[data-system]').forEach((el)=>el.addEventListener('click', ()=>{ haptic(); state.bodyMapSheet = el.dataset.system; renderActiveTab(); }));
+    appEl.querySelectorAll('[data-system]').forEach((el)=>el.addEventListener('click', ()=>{
+      haptic();
+      state.bodyMapSheet = el.dataset.system;
+      renderActiveTab();
+      focusBodyMapSheet();
+    }));
     appEl.querySelectorAll('[data-sheet-close]').forEach((el)=>el.addEventListener('click', ()=>{ state.bodyMapSheet = null; renderActiveTab(); }));
     appEl.querySelectorAll('[data-bodymap-open]').forEach((el)=>el.addEventListener('click', async ()=>{
       haptic();

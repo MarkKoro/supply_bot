@@ -669,21 +669,6 @@
     .badge.mixed { background: rgba(255,191,92,0.26); color:#ffe1b0; }
     .sheet-backdrop { position: fixed; inset:0; background: rgba(2,5,16,0.58); z-index: 32; }
     .sheet { position: fixed; left:10px; right:10px; bottom: calc(82px + env(safe-area-inset-bottom)); z-index: 33; max-height: 66vh; overflow: auto; opacity:1; transform: translateY(0); transition: all .18s ease; }
-    .sheet-center-overlay {
-      position: fixed;
-      inset: 0;
-      z-index: 33;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 12px;
-    }
-    .sheet-center-card {
-      width: min(560px, calc(100vw - 24px));
-      max-height: min(72vh, calc(100vh - 24px));
-      overflow: auto;
-      margin: 0;
-    }
     .sheet-empty { padding:12px; border-radius: 14px; background: rgba(255,255,255,0.05); color: var(--muted); text-align:center; }
 
     .progress { height:8px; border-radius:999px; background: rgba(255,255,255,.15); overflow:hidden; margin-top:8px; }
@@ -3636,12 +3621,12 @@ function adminField(label, field, value, kind='input') {
   function renderBodyMapSheet(systemKey) {
     const data = bodyMapSystem(systemKey);
     const list = data.top || [];
-    return `<div class="sheet-backdrop" data-sheet-close></div><div class="sheet-center-overlay" data-sheet-close><div class="card sheet-center-card" role="dialog" onclick="event.stopPropagation()">
+    return `<div class="sheet-backdrop" data-sheet-close></div><div class="card sheet" role="dialog">
       <div class="row"><strong>${SYSTEM_LABELS[systemKey] || systemKey}</strong><button class="btn secondary" data-sheet-close>Закрыть</button></div>
       <div class="row" style="margin-top:8px"><span class="badge plus">Польза: ${data.benefit_count || 0}</span><span class="badge minus">Нагрузка: ${data.burden_count || 0}</span>${(data.mixed_count || 0) > 0 ? `<span class="badge mixed">Смешанное: ${data.mixed_count || 0}</span>` : ''}</div>
       <div style="margin-top:10px">${list.length ? list.map((item)=>{ const cls = item.direction==='burden' ? 'minus' : (item.direction==='mixed' ? 'mixed' : 'plus'); const sign = item.direction==='burden' ? '-' : (item.direction==='mixed' ? '±' : '+'); return `<button class="item-row" data-bodymap-open="${esc(item.slug)}"><span class="badge ${cls}">${sign}</span><span>${esc(item.name_ru || item.slug)}</span></button>`; }).join('') : '<div class="sheet-empty">нет данных</div>'}</div>
       <div class="row" style="margin-top:10px"><button class="btn" data-bodymap-catalog="${systemKey}">Что добавить</button></div>
-    </div></div>`;
+    </div>`;
   }
 
   function bindBodyMapEvents() {

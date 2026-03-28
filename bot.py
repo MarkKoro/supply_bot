@@ -3368,40 +3368,12 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             return
         if data == "settings:initial_pick":
-            if not s.OPENAI_API_KEY:
-                await show(
-                    update,
-                    context,
-                    "Начальный подбор недоступен: добавь OPENAI_API_KEY в .env.",
-                    settings_menu(),
-                    route="menu:settings",
-                )
-                return
             await show(
                 update,
                 context,
-                "Перезапустить стартовый подбор? Это очистит предыдущие рекомендации.",
-                InlineKeyboardMarkup(
-                    [
-                        [InlineKeyboardButton("✅ Да, перезапустить", callback_data="onboard:restart_apply")],
-                        [InlineKeyboardButton("⬅️ Назад", callback_data="menu:settings")],
-                    ]
-                ),
+                "Опция «Начальный подбор» больше недоступна в настройках.",
+                settings_menu(),
                 route="menu:settings",
-            )
-            return
-        if data == "settings:initial_pick:confirm":
-            existing_ids = await db.get_user_initial_stack_ids(conn, tg_uid)
-            if existing_ids:
-                await db.remove_user_supplements_bulk(conn, tg_uid, existing_ids)
-            await db.set_user_initial_stack_ids(conn, tg_uid, [])
-            await db.clear_onboarding_state(conn, tg_uid)
-            await db.start_onboarding_state(conn, tg_uid)
-            await _start_initial_pick(
-                update,
-                context,
-                prefix="🔄 Начинаем новый подбор. Предыдущий список очищен.",
-                back_cb="menu:settings",
             )
             return
         if data == "settings:tz":

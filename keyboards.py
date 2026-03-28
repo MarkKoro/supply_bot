@@ -779,7 +779,6 @@ def reminder_actions(supplement_id: int) -> InlineKeyboardMarkup:
 def settings_menu(*, show_starter_activation: bool = False) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton("🕒 Часовой пояс", callback_data="settings:tz")],
-        [InlineKeyboardButton("✨ Начальный подбор", callback_data="settings:initial_pick")],
         [InlineKeyboardButton("🔔 Уведомления", callback_data="settings:notifications")],
         [InlineKeyboardButton("📈 Статистика", callback_data="menu:stats")],
         [InlineKeyboardButton("⭐ Премиум", callback_data="menu:premium")],

@@ -867,7 +867,7 @@ def _format_link_names(items: list[dict]) -> str:
     labels = []
     for item in items:
         label = item.get("name_ru") or item.get("name_en") or "Без названия"
-        labels.append(f"• {label}")
+        labels.append(f"• {html.escape(str(label))}")
     return "\n".join(labels)
 
 async def ensure_timezone_or_redirect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -8376,6 +8376,7 @@ async def render_supplement_card(
     participants = engine.metric_or_no_data(row.get("participants_total_est"))
     avg_effect = engine.metric_or_no_data(row.get("avg_effect_percent_est"))
     short_desc = str(row.get("summary_ru") or "").strip()
+    esc = lambda value: html.escape(str(value or "").strip())
 
     dose_raw = row.get("dose_ru")
     dose_typical = ""
@@ -8450,7 +8451,7 @@ async def render_supplement_card(
         top_limit = 5
         top_synergy = await db.list_linked_supplements(conn, links["synergy"][:top_limit])
         top_antag = await db.list_linked_supplements(conn, links["antagonists"][:top_limit])
-        lines = [f"<b>{title}</b>"]
+        lines = [f"<b>{esc(title)}</b>"]
         if show_added:
             lines.append("✅ Добавлено в «Мои БАДы»")
         lines.extend(["", f"Доказательность: {evidence_grade_text}"])
@@ -8459,10 +8460,10 @@ async def render_supplement_card(
         summary_theoretical = str(row.get("summary_theoretical") or "").strip()
         molecular_mechanisms = str(row.get("molecular_mechanisms") or "").strip()
         effect_text = summary_verified or short_desc or summary_theoretical or molecular_mechanisms
-        lines.append(effect_text or "нет данных")
+        lines.append(esc(effect_text) or "нет данных")
         lines.extend(["", "На что обратить внимание:"])
         safety_block = safety_ru or timing_comment or "нет данных"
-        lines.append(safety_block)
+        lines.append(esc(safety_block))
         lines.extend([
             "",
             "Топ совместимости:",
@@ -8472,25 +8473,25 @@ async def render_supplement_card(
             _format_link_names(top_antag),
         ])
     elif tab == "dose":
-        lines = [f"<b>{title}</b> — 💊 Как принимать"]
+        lines = [f"<b>{esc(title)}</b> — 💊 Как принимать"]
         if timing_ru:
-            lines.append(f"Время приёма: {timing_ru}")
+            lines.append(f"Время приёма: {esc(timing_ru)}")
         if with_food:
-            lines.append(f"С едой/натощак: {with_food}")
+            lines.append(f"С едой/натощак: {esc(with_food)}")
         if dose_typical:
-            lines.append(f"Рекомендуемая доза: {dose_typical}")
+            lines.append(f"Рекомендуемая доза: {esc(dose_typical)}")
         if dose_range:
-            lines.append(f"Диапазон: {dose_range}")
+            lines.append(f"Диапазон: {esc(dose_range)}")
         if course_ru:
-            lines.append(f"Курс: {course_ru}")
+            lines.append(f"Курс: {esc(course_ru)}")
         if dose_notes:
-            lines.append(f"Примечания: {dose_notes}")
+            lines.append(f"Примечания: {esc(dose_notes)}")
         if safety_ru:
-            lines.append(f"Безопасность: {safety_ru}")
+            lines.append(f"Безопасность: {esc(safety_ru)}")
         if len(lines) == 1:
             lines.append("нет данных")
     elif tab == "evidence":
-        lines = [f"<b>{title}</b> — 📊 Доказательность"]
+        lines = [f"<b>{esc(title)}</b> — 📊 Доказательность"]
         lines.append(f"Уровень базы: {evidence_grade_text}")
         lines.append(f"Уверенность: {confidence_text}")
         lines.append(f"Исследования на людях: {human_trials}")
@@ -8512,10 +8513,10 @@ async def render_supplement_card(
         list_lines = []
         for item in linked_items:
             label = item.get("name_ru") or item.get("name_en") or "Без названия"
-            list_lines.append(f"• {label}")
+            list_lines.append(f"• {esc(label)}")
         if tab == "synergy":
             lines = [
-                f"<b>{title}</b> — 🤝 Совместимость",
+                f"<b>{esc(title)}</b> — 🤝 Совместимость",
                 "С чем чаще всего сочетают:",
             ]
             if list_lines:
@@ -8524,7 +8525,7 @@ async def render_supplement_card(
                 lines.append("Пока нет данных. Добавим по мере наполнения базы.")
         else:
             lines = [
-                f"<b>{title}</b> — ⚠️ Антагонисты",
+                f"<b>{esc(title)}</b> — ⚠️ Антагонисты",
                 "С чем лучше НЕ сочетать:",
             ]
             if list_lines:

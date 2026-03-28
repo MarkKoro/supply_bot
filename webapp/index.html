@@ -91,17 +91,48 @@
       gap: 12px;
       margin-bottom: 12px;
     }
+    .topbar.topbar-today {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 10px;
+    }
     .topbar-main { min-width: 0; flex: 1; }
     .topbar-actions { display: flex; align-items: flex-start; justify-content: flex-end; }
-    .today-header-actions { display: grid; gap: 8px; justify-items: end; }
-    .today-header-actions .btn { min-width: 160px; }
+    .topbar.topbar-today .topbar-actions { width: 100%; justify-content: stretch; }
+    .today-header-actions {
+      width: 100%;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .today-header-actions .btn {
+      width: 100%;
+      min-width: 0;
+    }
+    .today-header-actions .btn:first-child { justify-self: start; }
+    .today-header-actions .btn:last-child { justify-self: end; }
     @media (max-width: 520px) {
       .topbar { align-items: flex-start; }
-      .today-header-actions .btn { min-width: 132px; padding: 9px 10px; font-size: 13px; }
+      .topbar.topbar-today { align-items: stretch; }
+      .today-header-actions .btn { padding: 9px 10px; font-size: 13px; }
     }
 
     .headline { margin: 0; font-size: 20px; }
     .subline { color: var(--muted); font-size: 13px; margin-top: 3px; }
+    .topbar-meta-row { display:flex; flex-wrap: wrap; gap: 8px; margin-top: 2px; }
+    .topbar-meta-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 10px;
+      border-radius: 999px;
+      border: 1px solid rgba(255,255,255,0.15);
+      background: rgba(255,255,255,0.06);
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.15;
+      white-space: nowrap;
+    }
 
     .btn, .chip {
       border: 1px solid rgba(255,255,255,0.18);
@@ -1416,6 +1447,21 @@
   function formatDate() {
     return new Date().toLocaleDateString("ru-RU", { weekday: "short", day: "2-digit", month: "short" });
   }
+  function formatTime() {
+    return new Date().toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
+  }
+  function topbarAccessText() {
+    const me = state.me || {};
+    if (me.premium) {
+      const until = String(me.premium_until_utc || '').slice(0, 10);
+      return until ? `Premium до ${until}` : 'Premium активен';
+    }
+    if (me.starter_trial_active) {
+      const until = String(me.starter_trial_until_utc || '').slice(0, 10);
+      return until ? `Starter до ${until}` : 'Starter активен';
+    }
+    return 'Без активной подписки';
+  }
   function formatRuDate(value) {
     const raw = String(value || "").trim();
     if (!raw) return "без даты";
@@ -2086,10 +2132,14 @@
   function renderMainApp() {
     appEl.innerHTML = `
       <div class="main-content" id="mainContent">
-        <header class="topbar fade">
+        <header class="topbar fade" id="topbarMain">
           <div class="topbar-main">
-            <div class="topbar-title-row"><h1 class="headline">${APP_NAME}</h1>${(() => { const bid = document.documentElement.dataset.badge || "none"; const b = getBadgeMeta(bid); const label = String(b.title_ru || '').trim(); if (bid === 'none' || !label || label === bid) return ""; return `<span class="badge-pill">${esc(b.emoji || "")} ${esc(label)}</span>`; })()}${(() => { const me = state.me || {}; if (me.starter_trial_active && !me.premium) { return `<span class="chip">🎁 Starter до ${esc(String(me.starter_trial_until_utc || '').slice(0, 10) || '—')}</span>`; } return ''; })()}</div>
-            <div class="subline">${formatDate()}</div>
+            <div class="topbar-title-row">${(() => { const bid = document.documentElement.dataset.badge || "none"; const b = getBadgeMeta(bid); const label = String(b.title_ru || '').trim(); if (bid === 'none' || !label || label === bid) return ""; return `<span class="badge-pill">${esc(b.emoji || "")} ${esc(label)}</span>`; })()}</div>
+            <div class="topbar-meta-row">
+              <span class="topbar-meta-item">📅 ${esc(formatDate())}</span>
+              <span class="topbar-meta-item">🕒 ${esc(formatTime())}</span>
+              <span class="topbar-meta-item">💳 ${esc(topbarAccessText())}</span>
+            </div>
           </div>
           <div id="topbarActions" class="topbar-actions"></div>
         </header>
@@ -5408,7 +5458,9 @@ function adminField(label, field, value, kind='input') {
 
   function renderTopbarActions() {
     const wrap = document.getElementById('topbarActions');
+    const header = document.getElementById('topbarMain');
     if (!wrap) return;
+    if (header) header.classList.toggle('topbar-today', state.activeTab === 'today');
     if (state.activeTab !== 'today') {
       wrap.innerHTML = '';
       return;

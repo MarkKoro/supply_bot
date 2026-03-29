@@ -954,7 +954,8 @@
       history: [],
       loadingHistory: false,
       pendingOverwriteRuns: [],
-      pendingComputePayload: null
+      pendingComputePayload: null,
+      prefilledFromRunId: null
     },
     profileUi: { editOpen: false, manualOpen: false, uploadOpen: false, reviewOpen: false, selectedReportId: null, uploading: false, savingManual: false, savingReview: false, activeModule: "organs" },
     guide: { active: null, step: 0, steps: [], rect: null, card: null, arrow: null },
@@ -3758,6 +3759,15 @@ function adminField(label, field, value, kind='input') {
   ];
   const ASSISTANT_ANALYTE_PRESETS = [
     { code:'vitamin_d_25oh', name:'25(OH)D', units:['ng/mL','нг/мл','nmol/L','нмоль/л'] },
+    { code:'vitamin_a', name:'Витамин A (ретинол)', units:['µg/L','ug/L','мкг/л','µmol/L','umol/L','мкмоль/л'] },
+    { code:'vitamin_c', name:'Витамин C', units:['mg/L','мг/л','µmol/L','umol/L','мкмоль/л'] },
+    { code:'vitamin_b1', name:'Витамин B1 (тиамин)', units:['nmol/L','нмоль/л','µg/L','ug/L','мкг/л'] },
+    { code:'vitamin_b2', name:'Витамин B2 (рибофлавин)', units:['nmol/L','нмоль/л','µg/L','ug/L','мкг/л'] },
+    { code:'vitamin_b3', name:'Витамин B3 (ниацин)', units:['µmol/L','umol/L','мкмоль/л','mg/L','мг/л'] },
+    { code:'vitamin_b5', name:'Витамин B5 (пантотеновая)', units:['µmol/L','umol/L','мкмоль/л','mg/L','мг/л'] },
+    { code:'vitamin_b6', name:'Витамин B6', units:['nmol/L','нмоль/л','µg/L','ug/L','мкг/л'] },
+    { code:'vitamin_b7', name:'Витамин B7 (биотин)', units:['ng/L','нг/л','nmol/L','нмоль/л'] },
+    { code:'vitamin_b9', name:'Витамин B9 (фолиевая кислота)', units:['ng/mL','нг/мл','nmol/L','нмоль/л'] },
     { code:'vitamin_b12', name:'Витамин B12', units:['pg/mL','пг/мл','pmol/L','пмоль/л'] },
     { code:'ferritin', name:'Ферритин', units:['ng/mL','нг/мл','µg/L','ug/L','мкг/л'] },
     { code:'serum_iron', name:'Железо сывороточное', units:['µmol/L','umol/L','мкмоль/л','µg/dL','ug/dL','мкг/дл'] },
@@ -3774,6 +3784,55 @@ function adminField(label, field, value, kind='input') {
     { code:'glucose_fasting', name:'Глюкоза натощак', units:['mmol/L','ммоль/л','mg/dL','мг/дл'] },
     { code:'omega3_index', name:'Омега-3 индекс', units:['%'] }
   ];
+
+  function normalizeProfileSexDependentFields(payload = {}) {
+    const next = { ...payload };
+    if (String(next.sex_at_birth || '').toLowerCase() === 'm') {
+      next.pregnancy_status = 'na';
+      next.lactation_status = 'na';
+    }
+    return next;
+  }
+
+  function hydrateAssistantStateFromRun(run = null) {
+    if (!run || !run.input_snapshot_json || state.nutrientAssistant.prefilledFromRunId === Number(run.id || 0)) return;
+    const snapshot = run.input_snapshot_json || {};
+    const userProfile = snapshot.user_profile || {};
+    const labs = Array.isArray(snapshot.labs) ? snapshot.labs : [];
+    const savedForm = {
+      ...(state.nutrientAssistant.form || {}),
+      menstrual_status: userProfile.menstrual_status || (isAssistantMale(state.profile.data) ? "not_applicable" : "unknown"),
+      heavy_menstrual_bleeding: !!userProfile.heavy_menstrual_bleeding,
+      fish_intake_frequency: userProfile.fish_intake_frequency || "unknown",
+      meat_intake_frequency: userProfile.meat_intake_frequency || "unknown",
+      dairy_intake_frequency: userProfile.dairy_intake_frequency || "unknown",
+      egg_intake_frequency: userProfile.egg_intake_frequency || "unknown",
+      sunscreen_use: userProfile.sunscreen_use || "unknown",
+      sleep_quality: userProfile.sleep_quality || "unknown",
+      stress_level: userProfile.stress_level || "unknown",
+      symptoms: Array.isArray(userProfile.symptoms) ? userProfile.symptoms : [],
+      primary_goal: userProfile.primary_goal || "",
+      gi_problems_text: Array.isArray(userProfile.gi_problems) ? userProfile.gi_problems.join('\n') : "",
+      thyroid_conditions_text: Array.isArray(userProfile.thyroid_conditions) ? userProfile.thyroid_conditions.join('\n') : "",
+      allergies_or_restrictions_text: Array.isArray(userProfile.allergies_or_restrictions) ? userProfile.allergies_or_restrictions.join('\n') : "",
+      known_past_deficiencies_text: Array.isArray(userProfile.known_past_deficiencies) ? userProfile.known_past_deficiencies.join('\n') : "",
+      kidney_conditions_text: Array.isArray(userProfile.kidney_conditions) ? userProfile.kidney_conditions.join('\n') : "",
+      liver_conditions_text: Array.isArray(userProfile.liver_conditions) ? userProfile.liver_conditions.join('\n') : "",
+      malabsorption_risk: !!userProfile.malabsorption_risk,
+      bariatric_or_gi_surgery_history: !!userProfile.bariatric_or_gi_surgery_history
+    };
+    state.nutrientAssistant.form = savedForm;
+    if (labs.length) {
+      state.nutrientAssistant.manualLabs = labs.map((item)=>({
+        analyte_code: String(item.analyte_code || ''),
+        value: String(item.value ?? ''),
+        unit: String(item.unit || ''),
+        measured_at: String(item.measured_at || '')
+      }));
+      state.nutrientAssistant.expandedLabIdx = 0;
+    }
+    state.nutrientAssistant.prefilledFromRunId = Number(run.id || 0);
+  }
 
   function yearsOptions(selected) {
     const yearNow = new Date().getFullYear();
@@ -3822,6 +3881,7 @@ function adminField(label, field, value, kind='input') {
     try {
       const res = await api('./api/profile/nutrient-assistant/plans');
       state.nutrientAssistant.history = Array.isArray(res.runs) ? res.runs : [];
+      if (state.nutrientAssistant.history.length) hydrateAssistantStateFromRun(state.nutrientAssistant.history[0]);
     } catch {}
     state.nutrientAssistant.loadingHistory = false;
   }
@@ -3829,14 +3889,15 @@ function adminField(label, field, value, kind='input') {
   function renderProfileEditorModal() {
     if (!state.profileUi.editOpen) return '';
     const p=state.profile.data||{};
+    const isMale = String(p.sex_at_birth || '').toLowerCase() === 'm';
     return `<div class="modal-overlay" data-close-edit><section class="card modal-card" onclick="event.stopPropagation()"><div class="row"><strong>Редактирование профиля</strong><button class="btn secondary" data-close-edit>Закрыть</button></div>
       <div class="field-grid" style="margin-top:8px">
         <label class="muted">Пол<select class="select" data-profile-field="sex_at_birth">${selectOptions(PROFILE_SELECTS.sex_at_birth,p.sex_at_birth)}</select></label>
         <label class="muted">Год рождения<select class="select" data-profile-field="birth_year">${yearsOptions(p.birth_year)}</select></label>
         <div class="field-grid two"><label class="muted">Рост, см<input inputmode="numeric" class="input" data-profile-field="height_cm" placeholder="Например, 175" value="${esc(p.height_cm??'')}"/></label><label class="muted">Вес, кг<input inputmode="numeric" class="input" data-profile-field="weight_kg" placeholder="Например, 70" value="${esc(p.weight_kg??'')}"/></label></div>
         <div class="field-grid two"><label class="muted">Страна<select class="select" data-profile-field="country_code">${selectOptions(PROFILE_SELECTS.country_code,p.country_code)}</select></label><label class="muted">Город<input class="input" data-profile-field="city" value="${esc(p.city||'')}"/></label></div>
-        <label class="muted">Беременность<select class="select" data-profile-field="pregnancy_status">${selectOptions(PROFILE_SELECTS.pregnancy_status,p.pregnancy_status)}</select></label>
-        <label class="muted">Лактация<select class="select" data-profile-field="lactation_status">${selectOptions(PROFILE_SELECTS.lactation_status,p.lactation_status)}</select></label>
+        <label class="muted" style="${isMale?'opacity:.65;':''}">Беременность<select class="select" data-profile-field="pregnancy_status" ${isMale?'disabled':''}>${selectOptions(PROFILE_SELECTS.pregnancy_status,isMale?'na':p.pregnancy_status)}</select></label>
+        <label class="muted" style="${isMale?'opacity:.65;':''}">Лактация<select class="select" data-profile-field="lactation_status" ${isMale?'disabled':''}>${selectOptions(PROFILE_SELECTS.lactation_status,isMale?'na':p.lactation_status)}</select></label>
         <label class="muted">Тип питания<select class="select" data-profile-field="diet_type">${selectOptions(PROFILE_SELECTS.diet_type,p.diet_type)}</select></label>
         <div class="field-grid two"><label class="muted">Тренировок в неделю<input inputmode="numeric" class="input" data-profile-field="training_sessions_per_week" value="${esc(p.training_sessions_per_week??'')}"/></label><label class="muted">Минут тренировок в неделю<input inputmode="numeric" class="input" data-profile-field="training_minutes_per_week" value="${esc(p.training_minutes_per_week??'')}"/></label></div>
         <label class="muted">Рабочих часов в неделю<input inputmode="numeric" class="input" data-profile-field="work_hours_per_week" value="${esc(p.work_hours_per_week??'')}"/></label>
@@ -4323,11 +4384,22 @@ function adminField(label, field, value, kind='input') {
       renderActiveTab();
     });
 
+    document.querySelector('[data-profile-field="sex_at_birth"]')?.addEventListener('change', (e) => {
+      const sex = String(e.target?.value || '').toLowerCase();
+      if (sex === 'm') {
+        state.profile.data = normalizeProfileSexDependentFields({ ...(state.profile.data || {}), sex_at_birth: 'm' });
+      } else {
+        state.profile.data = { ...(state.profile.data || {}), sex_at_birth: e.target?.value || '' };
+      }
+      renderActiveTab();
+    });
+
     document.querySelector('[data-profile-save]')?.addEventListener('click', async () => {
       if (state.profile.saving) return;
       state.profile.saving = true;
-      const payload = {};
+      let payload = {};
       document.querySelectorAll('[data-profile-field]').forEach((el) => payload[el.dataset.profileField] = el.value);
+      payload = normalizeProfileSexDependentFields(payload);
       document.querySelectorAll('[data-profile-lines]').forEach((el)=>payload[el.dataset.profileLines]=parseLinesToJson(el.value));
       try {
         const by = Number(payload.birth_year||0); if (by && (by<1900 || by>new Date().getFullYear()-10)) throw new Error('Год рождения вне диапазона');

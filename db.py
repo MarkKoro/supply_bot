@@ -9062,18 +9062,18 @@ async def list_llm_assistant_runs(conn: aiosqlite.Connection, tg_user_id: int, l
     user_id = await get_or_create_user(conn, int(tg_user_id))
     rows = await fetchall(
         conn,
-        """SELECT id, created_at, prompt_version, model_name, response_json, status, is_active, applied_at
+        """SELECT id, created_at, prompt_version, model_name, input_snapshot_json, response_json, status, is_active, applied_at
            FROM llm_assistant_runs WHERE user_id=? ORDER BY id DESC LIMIT ?""",
         (user_id, max(1, int(limit))),
     )
     out: list[dict] = []
     for row in rows:
         item = dict(row)
-        try:
-            resp = json.loads(str(item.get("response_json") or "{}"))
-        except Exception:
-            resp = {}
-        item["response_json"] = resp
+        for key, fallback in (("input_snapshot_json", {}), ("response_json", {})):
+            try:
+                item[key] = json.loads(str(item.get(key) or "{}"))
+            except Exception:
+                item[key] = fallback
         out.append(item)
     return out
 
@@ -9213,6 +9213,26 @@ async def activate_assistant_run(conn: aiosqlite.Connection, tg_user_id: int, ru
     await conn.execute(
         "UPDATE llm_assistant_runs SET is_active=1, status='applied', applied_at=?, updated_at=? WHERE user_id=? AND id=?",
         (now, now, user_id, int(run_id)),
+    )
+
+
+async def supersede_applied_actions_for_nutrients(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    keep_run_id: int,
+    nutrient_codes: list[str],
+) -> None:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    normalized = sorted({str(code or "").strip().lower() for code in list(nutrient_codes or []) if str(code or "").strip()})
+    if not normalized:
+        return
+    placeholders = ",".join("?" for _ in normalized)
+    now = utc_now_iso()
+    await conn.execute(
+        f"""UPDATE llm_assistant_plan_actions
+            SET status='superseded', updated_at=?
+            WHERE user_id=? AND run_id!=? AND status='applied' AND nutrient_code IN ({placeholders})""",
+        (now, user_id, int(keep_run_id), *normalized),
     )
 
 

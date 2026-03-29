@@ -2101,12 +2101,11 @@ async def api_profile_nutrient_assistant_apply(
         run = await db.get_llm_assistant_run(conn, tg_user_id, int(body.run_id))
         if not run:
             raise HTTPException(status_code=404, detail="Assistant run not found")
-        old_applied_actions = await db.list_applied_actions_from_other_runs(conn, tg_user_id, int(body.run_id))
         actions = await db.list_llm_assistant_plan_actions(conn, tg_user_id, int(body.run_id))
         applied: list[dict] = []
         skipped: list[dict] = []
-        newly_applied_supplement_ids: set[int] = set()
         processed_supplements: set[int] = set()
+        applied_nutrient_codes: set[str] = set()
         for item in actions:
             action = str(item.get("recommend_action") or "")
             nutrient_code = str(item.get("nutrient_code") or "").strip().lower()
@@ -2132,24 +2131,17 @@ async def api_profile_nutrient_assistant_apply(
                 if reminders:
                     await db.set_reminders_for_supplement(conn, tg_user_id, supplement_id, "custom", reminders)
                 await db.mark_llm_assistant_plan_action_status(conn, tg_user_id, int(body.run_id), int(item["id"]), "applied", supplement_id=supplement_id)
-                newly_applied_supplement_ids.add(supplement_id)
+                if nutrient_code:
+                    applied_nutrient_codes.add(nutrient_code)
                 applied.append({"action_id": int(item["id"]), "supplement_id": supplement_id, "name_ru": str(supp.get("name_ru") or supp.get("name") or ""), "action": action, "reminders": reminders})
             elif action == "stop":
                 await db.remove_user_supplement(conn, tg_user_id, supplement_id)
                 await db.mark_llm_assistant_plan_action_status(conn, tg_user_id, int(body.run_id), int(item["id"]), "applied", supplement_id=supplement_id)
-                newly_applied_supplement_ids.add(supplement_id)
+                if nutrient_code:
+                    applied_nutrient_codes.add(nutrient_code)
                 applied.append({"action_id": int(item["id"]), "supplement_id": supplement_id, "name_ru": str(supp.get("name_ru") or supp.get("name") or ""), "action": action})
 
-        for prev in old_applied_actions:
-            prev_supplement_id = int(prev.get("supplement_id") or 0)
-            if prev_supplement_id <= 0 or prev_supplement_id in newly_applied_supplement_ids:
-                continue
-            prev_action = str(prev.get("recommend_action") or "")
-            if prev_action in {"start", "continue"}:
-                await db.remove_user_supplement(conn, tg_user_id, prev_supplement_id)
-                await db.delete_reminders_for_supplement(conn, tg_user_id, prev_supplement_id)
-
-        await db.deactivate_other_assistant_runs(conn, tg_user_id, int(body.run_id))
+        await db.supersede_applied_actions_for_nutrients(conn, tg_user_id, int(body.run_id), sorted(applied_nutrient_codes))
         await db.activate_assistant_run(conn, tg_user_id, int(body.run_id))
         await conn.commit()
         return JSONResponse({"ok": True, "run_id": int(body.run_id), "applied": applied, "skipped": skipped})

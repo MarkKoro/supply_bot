@@ -9476,7 +9476,7 @@ async def create_nutrient_plan_run(
             last_rebuild_at_utc, lifecycle_status, recommend_action, supplement_id,
             course_started_at_utc, course_ends_at_utc, pause_days, review_due_at_utc, retest_due_at_utc, cancelled_at_utc,
             created_at_utc, updated_at_utc, is_active
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)""",
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)""",
         (
             user_id,
             str(nutrient_code or "").lower(),

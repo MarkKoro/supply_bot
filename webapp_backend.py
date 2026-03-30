@@ -352,7 +352,70 @@ def _parse_labs_text(raw_text: str) -> tuple[list[dict], str]:
     return parsed, status
 
 
-ASSISTANT_PROMPT_VERSION = "v3"
+ASSISTANT_PROMPT_VERSION = "v4"
+
+
+def _norm_unit(value: str) -> str:
+    unit = str(value or "").strip().lower()
+    unit = unit.replace("μ", "µ")
+    unit = unit.replace("мкг", "ug").replace("мкмоль", "umol").replace("ммоль", "mmol").replace("мг", "mg").replace("пг", "pg").replace("нг", "ng")
+    unit = unit.replace("л", "l").replace("дл", "dl")
+    unit = unit.replace("ме", "iu")
+    return unit
+
+
+ASSISTANT_ANALYTE_REGISTRY: dict[str, dict] = {
+    "vitamin_d_25oh": {"name_ru": "Витамин D (25-OH)", "nutrient_code": "vitamin_d", "units": ["ng/ml", "nmol/l"], "aliases": ["25ohd", "25_ohd"], "default_unit": "ng/mL", "ref_ranges": {"any": {"ng/ml": (30.0, 100.0), "nmol/l": (75.0, 250.0)}}},
+    "vitamin_b12": {"name_ru": "Витамин B12", "nutrient_code": "vitamin_b12", "units": ["pg/ml", "pmol/l"], "aliases": ["b12"], "default_unit": "pg/mL", "ref_ranges": {"any": {"pg/ml": (200.0, 900.0), "pmol/l": (148.0, 665.0)}}},
+    "folate": {"name_ru": "Фолат", "nutrient_code": "folate", "units": ["ng/ml", "nmol/l"], "aliases": ["vitamin_b9"], "default_unit": "ng/mL", "ref_ranges": {"any": {"ng/ml": (3.0, 17.0), "nmol/l": (7.0, 39.0)}}},
+    "ferritin": {"name_ru": "Ферритин", "nutrient_code": "iron", "units": ["ng/ml", "ug/l"], "default_unit": "ng/mL", "ref_ranges": {"female": {"ng/ml": (15.0, 150.0), "ug/l": (15.0, 150.0)}, "male": {"ng/ml": (30.0, 400.0), "ug/l": (30.0, 400.0)}, "any": {"ng/ml": (15.0, 400.0), "ug/l": (15.0, 400.0)}}},
+    "serum_iron": {"name_ru": "Железо сывороточное", "nutrient_code": "iron", "units": ["umol/l", "ug/dl"], "default_unit": "µmol/L", "ref_ranges": {"any": {"umol/l": (9.0, 30.0), "ug/dl": (50.0, 170.0)}}},
+    "hemoglobin": {"name_ru": "Гемоглобин", "nutrient_code": "iron", "units": ["g/l", "g/dl"], "default_unit": "g/L", "ref_ranges": {"female": {"g/l": (120.0, 150.0), "g/dl": (12.0, 15.0)}, "male": {"g/l": (130.0, 170.0), "g/dl": (13.0, 17.0)}, "any": {"g/l": (120.0, 170.0), "g/dl": (12.0, 17.0)}}},
+    "magnesium_serum": {"name_ru": "Магний (сыворотка)", "nutrient_code": "magnesium", "units": ["mmol/l", "mg/dl"], "aliases": ["magnesium"], "default_unit": "mmol/L", "ref_ranges": {"any": {"mmol/l": (0.75, 1.05), "mg/dl": (1.8, 2.6)}}},
+    "zinc": {"name_ru": "Цинк", "nutrient_code": "zinc", "units": ["umol/l", "ug/dl"], "default_unit": "µmol/L", "ref_ranges": {"any": {"umol/l": (10.7, 18.4), "ug/dl": (70.0, 120.0)}}},
+    "selenium": {"name_ru": "Селен", "nutrient_code": "selenium", "units": ["ug/l", "umol/l"], "default_unit": "µg/L", "ref_ranges": {"any": {"ug/l": (70.0, 150.0), "umol/l": (0.89, 1.90)}}},
+    "vitamin_a": {"name_ru": "Витамин A (ретинол)", "nutrient_code": "vitamin_a", "units": ["ug/l", "umol/l"], "default_unit": "µg/L", "ref_ranges": {"any": {"ug/l": (300.0, 900.0), "umol/l": (1.05, 3.14)}}},
+    "vitamin_b1": {"name_ru": "Витамин B1 (тиамин)", "nutrient_code": "vitamin_b1", "units": ["nmol/l", "ug/l"], "default_unit": "nmol/L", "ref_ranges": {"any": {"nmol/l": (70.0, 180.0), "ug/l": (21.0, 54.0)}}},
+    "calcium": {"name_ru": "Кальций", "nutrient_code": "calcium", "units": ["mmol/l", "mg/dl"], "default_unit": "mmol/L", "ref_ranges": {"any": {"mmol/l": (2.15, 2.55), "mg/dl": (8.6, 10.2)}}},
+    "vitamin_e": {"name_ru": "Витамин E", "nutrient_code": "vitamin_e", "units": ["mg/l", "umol/l"], "default_unit": "mg/L", "ref_ranges": {"any": {"mg/l": (5.0, 20.0), "umol/l": (12.0, 46.0)}}},
+    "vitamin_c": {"name_ru": "Витамин C", "nutrient_code": "vitamin_c", "units": ["mg/l", "umol/l"], "default_unit": "mg/L", "ref_ranges": {"any": {"mg/l": (4.0, 20.0), "umol/l": (23.0, 114.0)}}},
+    "vitamin_b2": {"name_ru": "Витамин B2 (рибофлавин)", "nutrient_code": "vitamin_b2", "units": ["nmol/l", "ug/l"], "default_unit": "nmol/L", "ref_ranges": {"any": {"nmol/l": (200.0, 500.0)}}},
+    "vitamin_b3": {"name_ru": "Витамин B3 (ниацин)", "nutrient_code": "vitamin_b3", "units": ["umol/l", "mg/l"], "default_unit": "µmol/L", "ref_ranges": {"any": {"umol/l": (10.0, 50.0)}}},
+    "vitamin_b5": {"name_ru": "Витамин B5 (пантотеновая кислота)", "nutrient_code": "vitamin_b5", "units": ["umol/l", "mg/l"], "default_unit": "µmol/L", "ref_ranges": {"any": {"umol/l": (1.0, 8.0)}}},
+    "vitamin_b6": {"name_ru": "Витамин B6", "nutrient_code": "vitamin_b6", "units": ["nmol/l", "ug/l"], "default_unit": "nmol/L", "ref_ranges": {"any": {"nmol/l": (20.0, 125.0)}}},
+    "vitamin_b7": {"name_ru": "Витамин B7 (биотин)", "nutrient_code": "vitamin_b7", "units": ["ng/l", "nmol/l"], "default_unit": "ng/L", "ref_ranges": {"any": {"ng/l": (200.0, 1200.0)}}},
+    "tsh": {"name_ru": "ТТГ", "nutrient_code": "", "units": ["miu/l", "uiu/ml"], "default_unit": "mIU/L", "ref_ranges": {"any": {"miu/l": (0.4, 4.0), "uiu/ml": (0.4, 4.0)}}},
+    "free_t4": {"name_ru": "Свободный T4", "nutrient_code": "", "units": ["pmol/l", "ng/dl"], "default_unit": "pmol/L", "ref_ranges": {"any": {"pmol/l": (10.0, 23.0), "ng/dl": (0.8, 1.8)}}},
+    "free_t3": {"name_ru": "Свободный T3", "nutrient_code": "", "units": ["pmol/l", "pg/ml"], "default_unit": "pmol/L", "ref_ranges": {"any": {"pmol/l": (3.1, 6.8), "pg/ml": (2.0, 4.4)}}},
+    "crp": {"name_ru": "С-реактивный белок", "nutrient_code": "", "units": ["mg/l", "mg/dl"], "default_unit": "mg/L", "ref_ranges": {"any": {"mg/l": (0.0, 5.0), "mg/dl": (0.0, 0.5)}}},
+    "hba1c": {"name_ru": "HbA1c", "nutrient_code": "", "units": ["%"], "default_unit": "%", "ref_ranges": {"any": {"%": (4.0, 5.6)}}},
+    "glucose_fasting": {"name_ru": "Глюкоза натощак", "nutrient_code": "", "units": ["mmol/l", "mg/dl"], "default_unit": "mmol/L", "ref_ranges": {"any": {"mmol/l": (3.9, 5.5), "mg/dl": (70.0, 99.0)}}},
+    "omega3_index": {"name_ru": "Омега-3 индекс", "nutrient_code": "omega_3", "units": ["%"], "default_unit": "%", "ref_ranges": {"any": {"%": (8.0, 12.0)}}},
+}
+
+
+_ANALYTE_ALIAS_MAP: dict[str, str] = {}
+for _code, _meta in ASSISTANT_ANALYTE_REGISTRY.items():
+    _ANALYTE_ALIAS_MAP[_code] = _code
+    for _alias in list(_meta.get("aliases") or []):
+        _ANALYTE_ALIAS_MAP[_normalize_analyte_code(str(_alias))] = _code
+
+
+def _canonical_analyte_code(raw_code: str) -> str:
+    normalized = _normalize_analyte_code(raw_code)
+    return _ANALYTE_ALIAS_MAP.get(normalized, normalized)
+
+
+def _pick_ref_range(registry_item: dict, sex_key: str, unit: str) -> tuple[float | None, float | None]:
+    ref_ranges = dict(registry_item.get("ref_ranges") or {})
+    unit_key = _norm_unit(unit)
+    preferred = [sex_key, "any"]
+    for key in preferred:
+        per_sex = dict(ref_ranges.get(key) or {})
+        if unit_key in per_sex:
+            low, high = per_sex[unit_key]
+            return _safe_float(low), _safe_float(high)
+    return None, None
 
 
 def _safe_json_loads(raw: str) -> dict | None:
@@ -459,9 +522,10 @@ def _to_iso_date(raw: str | None) -> str:
     return ""
 
 
-def _normalize_assistant_lab_item(item: dict) -> dict:
-    analyte_code = _normalize_analyte_code(str(item.get("analyte_code") or item.get("code") or ""))
-    analyte_name = str(item.get("analyte_name_ru") or item.get("analyte_name") or analyte_code).strip()
+def _normalize_assistant_lab_item(item: dict, sex_key: str = "any") -> dict:
+    analyte_code = _canonical_analyte_code(str(item.get("analyte_code") or item.get("code") or ""))
+    registry_item = ASSISTANT_ANALYTE_REGISTRY.get(analyte_code) or {}
+    analyte_name = str(item.get("analyte_name_ru") or item.get("analyte_name") or registry_item.get("name_ru") or analyte_code).strip()
     value_raw = item.get("value_num")
     if value_raw is None:
         value_raw = item.get("value")
@@ -469,8 +533,21 @@ def _normalize_assistant_lab_item(item: dict) -> dict:
         value_raw = item.get("value_text")
     value_text = str(value_raw if value_raw is not None else "").strip()
     value_num = _safe_float(str(value_text).replace(",", ".")) if value_text else None
-    ref_low = _safe_float(item.get("ref_low"))
-    ref_high = _safe_float(item.get("ref_high"))
+    input_ref_low = _safe_float(item.get("ref_low"))
+    input_ref_high = _safe_float(item.get("ref_high"))
+    unit = str(item.get("unit") or "").strip()
+    registry_ref_low, registry_ref_high = _pick_ref_range(registry_item, sex_key, unit)
+    ref_source = "unknown"
+    ref_low = None
+    ref_high = None
+    if input_ref_low is not None or input_ref_high is not None:
+        ref_low = input_ref_low
+        ref_high = input_ref_high
+        ref_source = "user"
+    elif registry_ref_low is not None or registry_ref_high is not None:
+        ref_low = registry_ref_low
+        ref_high = registry_ref_high
+        ref_source = "registry"
     reference_known = ref_low is not None or ref_high is not None
     below_ref = bool(value_num is not None and ref_low is not None and value_num < ref_low)
     above_ref = bool(value_num is not None and ref_high is not None and value_num > ref_high)
@@ -479,7 +556,7 @@ def _normalize_assistant_lab_item(item: dict) -> dict:
         "analyte_code": analyte_code,
         "analyte_name_ru": analyte_name,
         "value": value_text,
-        "unit": str(item.get("unit") or "").strip(),
+        "unit": unit,
         "ref_low": ref_low,
         "ref_high": ref_high,
         "measured_at": _to_iso_date(str(item.get("measured_at") or "")),
@@ -487,6 +564,11 @@ def _normalize_assistant_lab_item(item: dict) -> dict:
         "below_ref": below_ref,
         "above_ref": above_ref,
         "in_ref": in_ref,
+        "reference_source": ref_source,
+        "canonical_analyte_name_ru": str(registry_item.get("name_ru") or analyte_name),
+        "canonical_nutrient_code": str(registry_item.get("nutrient_code") or ""),
+        "interpreted_status_pre_llm": "low" if below_ref else ("high" if above_ref else ("normal" if in_ref else "unclear")),
+        "interpretation_hint_ru": "Статус определён по пользовательскому референсу." if ref_source == "user" else ("Статус определён по каноническому референсу справочника." if ref_source == "registry" else "Надёжный референс для этого анализа/единицы не найден."),
     }
 
 
@@ -2109,9 +2191,10 @@ async def api_profile_nutrient_assistant_compute(
         stage = "load_profile"
         profile = await db.get_user_health_profile(conn, tg_user_id)
         stack = await db.get_user_supplements_with_enabled(conn, tg_user_id)
+        sex_key = {"m": "male", "f": "female"}.get(str(profile.get("sex_at_birth") or "").lower(), "any")
         stage = "normalize_labs"
         if body.labs:
-            labs = [_normalize_assistant_lab_item(dict(x or {})) for x in list(body.labs)]
+            labs = [_normalize_assistant_lab_item(dict(x or {}), sex_key=sex_key) for x in list(body.labs)]
         else:
             latest = await db.list_latest_lab_results(conn, tg_user_id, limit=80)
             labs = [
@@ -2123,7 +2206,7 @@ async def api_profile_nutrient_assistant_compute(
                     "ref_low": x.get("ref_low"),
                     "ref_high": x.get("ref_high"),
                     "measured_at": _to_iso_date(str(x.get("measured_at") or "")),
-                })
+                }, sex_key=sex_key)
                 for x in latest
             ]
         labs_count = len(labs)
@@ -2421,13 +2504,33 @@ async def api_profile_nutrient_onboarding_post(x_telegram_init_data: str = Heade
 @app.get("/api/profile/nutrient-assistant/registry-summary")
 async def api_profile_nutrient_registry_summary(x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
     await _auth_user_id(x_telegram_init_data)
-    return JSONResponse({"ok": False, "code": "NUTRIENT_ASSISTANT_DISABLED"}, status_code=410)
+    items = []
+    for code, meta in ASSISTANT_ANALYTE_REGISTRY.items():
+        items.append(
+            {
+                "code": code,
+                "name_ru": str(meta.get("name_ru") or code),
+                "nutrient_code": str(meta.get("nutrient_code") or ""),
+                "units": list(meta.get("units") or []),
+                "default_unit": str(meta.get("default_unit") or ""),
+                "aliases": list(meta.get("aliases") or []),
+            }
+        )
+    return JSONResponse({"ok": True, "prompt_version": ASSISTANT_PROMPT_VERSION, "analytes": items})
 
 
 @app.get("/api/profile/nutrient-assistant/coverage-report")
 async def api_profile_nutrient_coverage_report(x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
     await _auth_user_id(x_telegram_init_data)
-    return JSONResponse({"ok": False, "code": "NUTRIENT_ASSISTANT_DISABLED"}, status_code=410)
+    mapped = [x for x in ASSISTANT_ANALYTE_REGISTRY.values() if str(x.get("nutrient_code") or "")]
+    return JSONResponse(
+        {
+            "ok": True,
+            "analytes_total": len(ASSISTANT_ANALYTE_REGISTRY),
+            "nutrient_mapped_total": len(mapped),
+            "unmapped_codes": sorted([code for code, meta in ASSISTANT_ANALYTE_REGISTRY.items() if not str(meta.get("nutrient_code") or "")]),
+        }
+    )
 
 
 @app.get("/api/profile/nutrient-assistant/packs")

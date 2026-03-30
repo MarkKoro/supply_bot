@@ -2098,6 +2098,11 @@ async def api_profile_nutrient_assistant_apply(
         return JSONResponse({"ok": False, "code": "PAID_PREMIUM_REQUIRED"}, status_code=403)
     conn = await db.connect(s.DB_PATH)
     try:
+        user_id = await db.get_or_create_user(conn, tg_user_id)
+        slots = await db.get_user_slots(conn, user_id)
+        enabled_slots = [slot for slot in slots if bool(slot.get("is_enabled", True))]
+        target_slot_id = str((enabled_slots[0] if enabled_slots else (slots[0] if slots else {"slot_id": "morning"})).get("slot_id") or "morning").strip() or "morning"
+
         run = await db.get_llm_assistant_run(conn, tg_user_id, int(body.run_id))
         if not run:
             raise HTTPException(status_code=404, detail="Assistant run not found")
@@ -2114,6 +2119,7 @@ async def api_profile_nutrient_assistant_apply(
             if not supp:
                 skipped.append({"action_id": int(item["id"]), "reason": "supplement_not_found", "nutrient_code": nutrient_code, "nutrient_name_ru": nutrient_name})
                 continue
+            supp_name_ru = str(supp["name_ru"] or supp["name"] or "")
             supplement_id = int(supp["id"])
             if supplement_id in processed_supplements:
                 continue
@@ -2127,19 +2133,20 @@ async def api_profile_nutrient_assistant_apply(
                     str(item.get("dose_text") or ""),
                     f"AI assistant: {str(item.get('duration_text') or '')}. Стоп/пауза: {str(item.get('stop_or_pause_rule_ru') or '')}".strip(),
                 )
+                await db.set_schedule_slot(conn, user_id, supplement_id, target_slot_id)
                 reminders = list(item.get("reminders") or [])
                 if reminders:
                     await db.set_reminders_for_supplement(conn, tg_user_id, supplement_id, "custom", reminders)
                 await db.mark_llm_assistant_plan_action_status(conn, tg_user_id, int(body.run_id), int(item["id"]), "applied", supplement_id=supplement_id)
                 if nutrient_code:
                     applied_nutrient_codes.add(nutrient_code)
-                applied.append({"action_id": int(item["id"]), "supplement_id": supplement_id, "name_ru": str(supp.get("name_ru") or supp.get("name") or ""), "action": action, "reminders": reminders})
+                applied.append({"action_id": int(item["id"]), "supplement_id": supplement_id, "name_ru": supp_name_ru, "action": action, "reminders": reminders, "slot_id": target_slot_id})
             elif action == "stop":
                 await db.remove_user_supplement(conn, tg_user_id, supplement_id)
                 await db.mark_llm_assistant_plan_action_status(conn, tg_user_id, int(body.run_id), int(item["id"]), "applied", supplement_id=supplement_id)
                 if nutrient_code:
                     applied_nutrient_codes.add(nutrient_code)
-                applied.append({"action_id": int(item["id"]), "supplement_id": supplement_id, "name_ru": str(supp.get("name_ru") or supp.get("name") or ""), "action": action})
+                applied.append({"action_id": int(item["id"]), "supplement_id": supplement_id, "name_ru": supp_name_ru, "action": action})
 
         await db.supersede_applied_actions_for_nutrients(conn, tg_user_id, int(body.run_id), sorted(applied_nutrient_codes))
         await db.activate_assistant_run(conn, tg_user_id, int(body.run_id))

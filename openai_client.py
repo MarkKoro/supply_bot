@@ -56,6 +56,9 @@ NUTRIENT_ASSISTANT_SYSTEM_PROMPT = """Ты — осторожный нутрие
 - если есть основания не рекомендовать нутриент, ты всё равно можешь вернуть его в nutrient_plan со статусом likely_ok или unclear и с recommend_action do_not_start или retest_only, чтобы ответ был честным и понятным;
 - каждый входной анализ из массива labs обязан присутствовать в labs_review;
 - нельзя молча пропускать анализы, даже если по ним нет практического назначения в nutrient_plan;
+- если во входном анализе есть interpreted_status_pre_llm и reference_known=true, используй это как базу, а не пиши автоматически "нет референсов";
+- если reference_source=registry или reference_source=user, считай что опора на референс есть;
+- формулировку про нехватку референсов используй только когда reference_known=false и interpreted_status_pre_llm=unclear;
 - если данных по анализу недостаточно, в labs_review ставь actionability=insufficient_data и дай короткое объяснение;
 - не используй markdown;
 - не добавляй пояснения вне JSON;

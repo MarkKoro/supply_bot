@@ -3941,6 +3941,14 @@ function adminField(label, field, value, kind='input') {
     return res.draft || null;
   }
 
+  function updateAssistantDraftTimestampUi() {
+    if (String(state.profileUi?.activeModule || '') !== 'assistant') return;
+    const el = document.querySelector('[data-assistant-draft-updated-at]');
+    if (!el) return;
+    const stamp = String(state.nutrientAssistant.draftUpdatedAt || '');
+    el.textContent = `Текущий черновик: ${stamp ? formatUtcShort(stamp) : 'ещё не сохранён'}`;
+  }
+
   function scheduleAssistantDraftAutosave(delayMs = 650){
     clearTimeout(state.nutrientAssistant.autosaveTimer);
     state.nutrientAssistant.autosaveTimer = setTimeout(async ()=>{
@@ -3949,8 +3957,8 @@ function adminField(label, field, value, kind='input') {
       state.nutrientAssistant.form = collectAssistantForm();
       const labs = collectAssistantLabs();
       state.nutrientAssistant.manualLabs = normalizeAssistantLabs(state.nutrientAssistant.manualLabs || []);
-      await saveNutrientDraft({ assistant_profile: state.nutrientAssistant.form, labs }).catch(()=>null);
-      renderActiveTab();
+      const draft = await saveNutrientDraft({ assistant_profile: state.nutrientAssistant.form, labs }).catch(()=>null);
+      if (draft?.updated_at_utc) updateAssistantDraftTimestampUi();
     }, delayMs);
   }
 
@@ -4219,7 +4227,7 @@ function adminField(label, field, value, kind='input') {
           <div class="muted">Референс можно не указывать — расчёт всё равно выполнится.</div>
           <div class="muted">Когда появятся новые данные, план легко пересчитать.</div>
         </div>` : ''}
-        <div class="muted" style="margin-top:4px">Текущий черновик: ${a.draftUpdatedAt ? esc(formatUtcShort(a.draftUpdatedAt)) : 'ещё не сохранён'}</div>
+        <div class="muted" style="margin-top:4px" data-assistant-draft-updated-at>Текущий черновик: ${a.draftUpdatedAt ? esc(formatUtcShort(a.draftUpdatedAt)) : 'ещё не сохранён'}</div>
         <div class="muted" style="margin-top:6px">${draftFromHistory ? 'Черновик собран на основе прошлого расчёта. Проверьте и обновите показатели перед новым запуском.' : 'Для расчёта укажите показатель, значение, единицу и по возможности референс.'}</div>
         <div id="assistantLabRows" style="margin-top:8px">${draftLabs.map((row,idx)=>renderAssistantLabRow(idx,row, Number(a.expandedLabIdx ?? 0) === idx)).join('')}</div>
         <div class="row" style="margin-top:8px; gap:6px; flex-wrap:wrap; align-items:stretch">

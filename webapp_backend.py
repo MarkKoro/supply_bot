@@ -1,5 +1,6 @@
 import hashlib
 import json
+import logging
 import os
 import re
 import uuid
@@ -32,6 +33,7 @@ app = FastAPI(title="ГУДы БАДы WebApp")
 app.mount("/assets", StaticFiles(directory=str(ASSETS_DIR)), name="assets")
 s = get_settings()
 BOT_TOKEN = s.TG_TOKEN
+log = logging.getLogger(__name__)
 
 
 async def _get_role_and_perms(tg_user_id: int) -> tuple[str, dict[str, bool]]:
@@ -1957,7 +1959,13 @@ async def api_profile_nutrient_assistant_compute(
     body: NutrientAssistantComputeBody,
     x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
 ):
+    debug_id = uuid.uuid4().hex[:12]
+    stage = "init"
+    prepared_actions_count = 0
+    labs_count = len(list(body.labs or []))
+    replace_run_id = int(body.replace_run_id or 0) if body.replace_run_id is not None else None
     tg_user_id = await _auth_user_id(x_telegram_init_data)
+    stage = "validate_access"
     role, _ = await _get_role_and_perms(tg_user_id)
     is_admin_unlimited = role in {db.ROLE_OWNER, db.ROLE_ADMIN}
     if not await _paid_premium_guard(tg_user_id):
@@ -1967,13 +1975,14 @@ async def api_profile_nutrient_assistant_compute(
 
     conn = await db.connect(s.DB_PATH)
     try:
+        stage = "check_daily_limit"
         if await db.has_llm_assistant_cancel_today(conn, tg_user_id):
             return JSONResponse({"ok": False, "code": "DAILY_LIMIT_ONE_REQUEST"}, status_code=429)
+        stage = "load_history"
         history = await db.list_llm_assistant_runs(conn, tg_user_id, limit=10)
         active_history = [h for h in history if str(h.get("status") or "") in {"ok", "applied", "cancelled"}]
         if not is_admin_unlimited and len(active_history) >= 3:
-            replace_run_id = int(body.replace_run_id or 0)
-            if replace_run_id <= 0:
+            if (replace_run_id or 0) <= 0:
                 return JSONResponse(
                     {
                         "ok": False,
@@ -1986,12 +1995,15 @@ async def api_profile_nutrient_assistant_compute(
             target = next((r for r in active_history if int(r.get("id") or 0) == replace_run_id), None)
             if not target:
                 return JSONResponse({"ok": False, "code": "INVALID_REPLACE_RUN"}, status_code=400)
+            stage = "replace_run"
             ok = await db.replace_llm_assistant_run(conn, tg_user_id, replace_run_id)
             if not ok:
                 return JSONResponse({"ok": False, "code": "INVALID_REPLACE_RUN"}, status_code=400)
 
+        stage = "load_profile"
         profile = await db.get_user_health_profile(conn, tg_user_id)
         stack = await db.get_user_supplements_with_enabled(conn, tg_user_id)
+        stage = "normalize_labs"
         if body.labs:
             labs = [_normalize_assistant_lab_item(dict(x or {})) for x in list(body.labs)]
         else:
@@ -2008,11 +2020,13 @@ async def api_profile_nutrient_assistant_compute(
                 })
                 for x in latest
             ]
+        labs_count = len(labs)
 
         birth_year = int(profile.get("birth_year") or 0) if str(profile.get("birth_year") or "").isdigit() else None
         current_year = int(db.get_user_local_date(None).split("-")[0])
         age = current_year - birth_year if birth_year and 1900 <= birth_year <= current_year else None
         assistant_profile = dict(body.assistant_profile or {})
+        stage = "save_draft_before_compute"
         await db.upsert_nutrient_assistant_draft(
             conn,
             tg_user_id,
@@ -2091,8 +2105,10 @@ async def api_profile_nutrient_assistant_compute(
             },
         }
         cfg = OpenAIConfig(api_key=s.OPENAI_API_KEY, model=s.OPENAI_MODEL)
+        stage = "call_llm"
         raw_response, parsed, invalid_reason = await _compute_assistant_with_retry(cfg, llm_payload, retries=2)
         if not parsed:
+            stage = "save_invalid_run"
             run_id = await db.create_llm_assistant_run(
                 conn, tg_user_id,
                 prompt_version=ASSISTANT_PROMPT_VERSION,
@@ -2105,6 +2121,7 @@ async def api_profile_nutrient_assistant_compute(
             return JSONResponse({"ok": False, "code": "LLM_INVALID_CONTRACT", "reason": invalid_reason, "run_id": run_id}, status_code=422)
         complete_labs, missing_labs = _labs_review_coverage(parsed, labs)
         if not complete_labs:
+            stage = "call_llm_strict_retry"
             stronger_payload = dict(llm_payload)
             stronger_context = dict(stronger_payload.get("assistant_context") or {})
             stronger_context["strict_labs_review_required_codes"] = sorted({str(x.get("analyte_code") or "") for x in labs if str(x.get("analyte_code") or "")})
@@ -2121,6 +2138,7 @@ async def api_profile_nutrient_assistant_compute(
                 raw_response = retry_raw
                 parsed = retry_parsed
             else:
+                stage = "save_incomplete_run"
                 run_id = await db.create_llm_assistant_run(
                     conn, tg_user_id,
                     prompt_version=ASSISTANT_PROMPT_VERSION,
@@ -2132,6 +2150,7 @@ async def api_profile_nutrient_assistant_compute(
                 await conn.commit()
                 return JSONResponse({"ok": False, "code": "LLM_INCOMPLETE_LABS_COVERAGE", "missing_labs": retry_missing or missing_labs, "run_id": run_id}, status_code=422)
 
+        stage = "create_run"
         run_id = await db.create_llm_assistant_run(
             conn, tg_user_id,
             prompt_version=ASSISTANT_PROMPT_VERSION,
@@ -2140,6 +2159,7 @@ async def api_profile_nutrient_assistant_compute(
             response_json=parsed,
             status="ok",
         )
+        stage = "save_draft_after_compute"
         await db.upsert_nutrient_assistant_draft(
             conn,
             tg_user_id,
@@ -2150,6 +2170,7 @@ async def api_profile_nutrient_assistant_compute(
         )
         prepared_actions: list[dict] = []
         seen_action_keys: set[tuple[str, str]] = set()
+        stage = "prepare_actions"
         for item in list(parsed.get("nutrient_plan") or []):
             action = str(item.get("recommend_action") or "")
             if action not in {"start", "continue", "stop"}:
@@ -2185,7 +2206,27 @@ async def api_profile_nutrient_assistant_compute(
                     "status": "prepared",
                 }
             )
+        prepared_actions_count = len(prepared_actions)
+        stage = "schema_guard_materialization"
+        schema_ok, schema_missing = await db.check_nutrient_assistant_materialization_schema(conn)
+        if not schema_ok:
+            await conn.rollback()
+            log.error(
+                "nutrient assistant schema mismatch debug_id=%s tg_user_id=%s stage=%s replace_run_id=%s labs_count=%s prepared_actions_count=%s missing=%s",
+                debug_id,
+                tg_user_id,
+                stage,
+                replace_run_id,
+                labs_count,
+                prepared_actions_count,
+                ",".join(schema_missing),
+            )
+            return JSONResponse(
+                {"ok": False, "code": "ASSISTANT_SCHEMA_MISMATCH", "stage": stage, "debug_id": debug_id},
+                status_code=503,
+            )
         now_utc = datetime.now(timezone.utc).replace(microsecond=0)
+        stage = "materialize_plan_runs"
         for action in prepared_actions:
             code = str(action.get("nutrient_code") or "")
             supp = await db.find_supplement_by_slug_or_name(conn, code or None, str(action.get("nutrient_name_ru") or "") or None)
@@ -2215,6 +2256,7 @@ async def api_profile_nutrient_assistant_compute(
                 "latest_lab_at_utc": max([str(x.get("created_at_utc") or "") for x in (await db.list_latest_lab_results(conn, tg_user_id, limit=1))] or [""]),
                 "stack_updated_at_utc": now_utc.isoformat(),
             }
+            stage = "create_plan_run"
             plan_run_id = await db.create_nutrient_plan_run(conn, tg_user_id, code, None, preview_snapshot, plan_snapshot)
             action["nutrient_plan_run_id"] = plan_run_id
             followups = []
@@ -2223,16 +2265,35 @@ async def api_profile_nutrient_assistant_compute(
             if plan_snapshot["retest_due_at_utc"]:
                 followups.append({"item_type": "retest", "title_ru": "Повторный анализ", "due_date_utc": plan_snapshot["retest_due_at_utc"], "details": {"message_ru": "Пора повторно сдать анализы."}})
             if followups:
+                stage = "save_followups"
                 await db.save_nutrient_followup_items(conn, tg_user_id, plan_run_id, code, followups)
                 candidates = [{"candidate_type": str(f["item_type"]), "trigger_date_utc": str(f["due_date_utc"]), "payload": dict(f.get("details") or {})} for f in followups]
+                stage = "save_reminder_candidates"
                 await db.save_nutrient_reminder_candidates(conn, tg_user_id, plan_run_id, code, candidates)
+                stage = "activate_reminders"
                 await db.activate_nutrient_reminders_for_plan(conn, tg_user_id, plan_run_id)
+        stage = "save_actions"
         await db.save_llm_assistant_plan_actions(conn, tg_user_id, run_id, prepared_actions)
+        stage = "commit"
         await conn.commit()
         return JSONResponse({"ok": True, "run_id": run_id, "result": parsed, "prepared_actions": prepared_actions})
-    except Exception:
+    except Exception as exc:
         await conn.rollback()
-        return JSONResponse({"ok": False, "code": "ASSISTANT_COMPUTE_ERROR"}, status_code=500)
+        log.exception(
+            "nutrient assistant compute failed debug_id=%s stage=%s tg_user_id=%s replace_run_id=%s labs_count=%s prepared_actions_count=%s exc_type=%s exc_msg=%s",
+            debug_id,
+            stage,
+            tg_user_id,
+            replace_run_id,
+            labs_count,
+            prepared_actions_count,
+            type(exc).__name__,
+            str(exc),
+        )
+        return JSONResponse(
+            {"ok": False, "code": "ASSISTANT_COMPUTE_ERROR", "stage": stage, "debug_id": debug_id},
+            status_code=500,
+        )
     finally:
         await conn.close()
 

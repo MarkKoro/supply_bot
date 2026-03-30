@@ -942,7 +942,7 @@
         malabsorption_risk: false,
         bariatric_or_gi_surgery_history: false
       },
-      manualLabs: [{ analyte_code: "", analyte_name_ru: "", value: "", unit: "", ref_low: "", ref_high: "", measured_at: "" }],
+      manualLabs: [],
       expandedLabIdx: 0,
       helpOpenKey: "",
       computing: false,
@@ -3789,6 +3789,33 @@ function adminField(label, field, value, kind='input') {
     { code:'glucose_fasting', name:'Глюкоза натощак', units:['mmol/L','ммоль/л','mg/dL','мг/дл'] },
     { code:'omega3_index', name:'Омега-3 индекс', units:['%'] }
   ];
+  function createEmptyAssistantLabItem() {
+    return { analyte_code: "", analyte_name_ru: "", value: "", unit: "", ref_low: "", ref_high: "", measured_at: "", referenceOpen: false };
+  }
+  function normalizeAssistantLabItem(item = {}, opts = {}) {
+    const keepUnit = !!opts.keepUnit;
+    const rawCode = String(item.analyte_code || item.code || '').trim().toLowerCase();
+    const preset = ASSISTANT_ANALYTE_PRESETS.find((x)=>String(x.code)===rawCode);
+    const rawName = String(item.analyte_name_ru || item.analyte_name || '').trim();
+    const nextUnit = String(item.unit || '').trim();
+    const normalized = {
+      analyte_code: rawCode,
+      analyte_name_ru: preset?.name || rawName || rawCode,
+      value: String(item.value ?? item.value_num ?? item.value_text ?? '').trim(),
+      unit: keepUnit ? nextUnit : (nextUnit || String(preset?.units?.[0] || '').trim()),
+      ref_low: String(item.ref_low ?? '').trim(),
+      ref_high: String(item.ref_high ?? '').trim(),
+      measured_at: String(item.measured_at || '').trim(),
+      referenceOpen: !!item.referenceOpen
+    };
+    if (!normalized.analyte_code && !normalized.value && !normalized.unit && !normalized.ref_low && !normalized.ref_high && !normalized.measured_at) {
+      normalized.analyte_name_ru = '';
+    }
+    return normalized;
+  }
+  function normalizeAssistantLabs(labs = []) {
+    return (Array.isArray(labs) ? labs : []).map((item)=>normalizeAssistantLabItem(item));
+  }
 
   function normalizeProfileSexDependentFields(payload = {}) {
     const next = { ...payload };
@@ -3828,19 +3855,7 @@ function adminField(label, field, value, kind='input') {
     };
     state.nutrientAssistant.form = savedForm;
     if (labs.length) {
-      state.nutrientAssistant.manualLabs = labs.map((item)=>{
-        const code = String(item.analyte_code || '');
-        const preset = ASSISTANT_ANALYTE_PRESETS.find((x)=>String(x.code)===code);
-        return {
-          analyte_code: code,
-          analyte_name_ru: String(item.analyte_name_ru || item.analyte_name || preset?.name || ''),
-          value: String(item.value ?? ''),
-          unit: String(item.unit || preset?.units?.[0] || ''),
-          ref_low: String(item.ref_low ?? ''),
-          ref_high: String(item.ref_high ?? ''),
-          measured_at: String(item.measured_at || '')
-        };
-      });
+      state.nutrientAssistant.manualLabs = normalizeAssistantLabs(labs);
       state.nutrientAssistant.expandedLabIdx = 0;
     }
     state.nutrientAssistant.prefilledFromRunId = Number(run.id || 0);
@@ -3903,9 +3918,7 @@ function adminField(label, field, value, kind='input') {
       const res = await api('./api/profile/nutrient-assistant/draft');
       const draft = res.draft || {};
       state.nutrientAssistant.form = { ...(state.nutrientAssistant.form || {}), ...(draft.assistant_profile || {}) };
-      state.nutrientAssistant.manualLabs = Array.isArray(draft.labs) && draft.labs.length
-        ? draft.labs
-        : [{ analyte_code: "", analyte_name_ru: "", value: "", unit: "", ref_low: "", ref_high: "", measured_at: "" }];
+      state.nutrientAssistant.manualLabs = normalizeAssistantLabs(draft.labs || []);
       state.nutrientAssistant.draftUpdatedAt = String(draft.updated_at_utc || '');
       state.nutrientAssistant.draftSourceRunId = Number(draft.source_run_id || 0) || null;
     } catch {}
@@ -3935,7 +3948,7 @@ function adminField(label, field, value, kind='input') {
       syncExpandedAssistantLabRow();
       state.nutrientAssistant.form = collectAssistantForm();
       const labs = collectAssistantLabs();
-      state.nutrientAssistant.manualLabs = labs.length ? labs : state.nutrientAssistant.manualLabs;
+      state.nutrientAssistant.manualLabs = normalizeAssistantLabs(state.nutrientAssistant.manualLabs || []);
       await saveNutrientDraft({ assistant_profile: state.nutrientAssistant.form, labs }).catch(()=>null);
       renderActiveTab();
     }, delayMs);
@@ -4079,8 +4092,8 @@ function adminField(label, field, value, kind='input') {
       .replace(/^_+|_+$/g, '');
   }
   function assistantLabTitle(row){
-    const preset = ASSISTANT_ANALYTE_PRESETS.find((x)=>String(x.code)===String(row?.analyte_code || ''));
-    return String(row?.analyte_name_ru || '').trim() || preset?.name || row?.analyte_code || 'Новый показатель';
+    const normalized = normalizeAssistantLabItem(row || {});
+    return String(normalized.analyte_name_ru || '').trim() || normalized.analyte_code || 'Новый показатель';
   }
   function assistantLabRowReady(row){
     return String(row?.analyte_code || '').trim() && String(row?.value || '').trim();
@@ -4128,21 +4141,25 @@ function adminField(label, field, value, kind='input') {
     return `${esc(title)} <button class="btn secondary survey-help-btn" type="button" data-assistant-help-toggle="${esc(helpKey)}">?</button>${isOpen ? `<div class="survey-help muted" data-assistant-help-close="${esc(helpKey)}">${esc(helpText)}</div>` : ''}`;
   }
   function renderAssistantLabRow(idx, row = {}, expanded = false) {
-    const code = row.analyte_code || '';
+    const normalizedRow = normalizeAssistantLabItem(row || {}, { keepUnit: true });
+    const code = normalizedRow.analyte_code || '';
+    const referenceOpen = !!normalizedRow.referenceOpen;
     if (!expanded) {
       return `<button class="item-row" type="button" data-assistant-edit-lab="${idx}">
-        <span><strong>${esc(assistantLabTitle(row))}</strong><div class="muted">Значение: ${esc(row.value || '—')} ${esc(row.unit || '')}</div><div class="muted">Референс: ${esc(row.ref_low || '—')}–${esc(row.ref_high || '—')}</div></span>
+        <span><strong>${esc(assistantLabTitle(normalizedRow))}</strong><div class="muted">Значение: ${esc(normalizedRow.value || '—')} ${esc(normalizedRow.unit || '')}</div><div class="muted">Референс: ${esc(normalizedRow.ref_low || '—')}–${esc(normalizedRow.ref_high || '—')}</div></span>
         <span class="muted">Открыть</span>
       </button>`;
     }
     return `<div class="field-grid two lab-result-row" data-assistant-lab-row="${idx}">
       <label class="muted">Показатель<select class="select" data-assistant-lab="analyte_code" data-idx="${idx}">${assistantAnalyteOptions(code)}</select></label>
-      <label class="muted">Название<input class="input" data-assistant-lab="analyte_name_ru" data-idx="${idx}" value="${esc(row.analyte_name_ru || '')}" placeholder="Название показателя"/></label>
-      <label class="muted">Значение<input class="input" data-assistant-lab="value" data-idx="${idx}" value="${esc(row.value || '')}" placeholder="Например, 19.8"/></label>
-      <label class="muted">Единица<select class="select" data-assistant-lab="unit" data-idx="${idx}">${assistantUnitOptions(code, row.unit || '')}</select></label>
-      <label class="muted">Референс от<input class="input" data-assistant-lab="ref_low" data-idx="${idx}" value="${esc(row.ref_low || '')}" placeholder="Например, 12"/></label>
-      <label class="muted">Референс до<input class="input" data-assistant-lab="ref_high" data-idx="${idx}" value="${esc(row.ref_high || '')}" placeholder="Например, 150"/></label>
-      <label class="muted">Дата анализа<input type="date" class="input" data-assistant-lab="measured_at" data-idx="${idx}" value="${esc(row.measured_at || '')}"/></label>
+      <label class="muted">Значение<input class="input" data-assistant-lab="value" data-idx="${idx}" value="${esc(normalizedRow.value || '')}" placeholder="Например, 19.8"/></label>
+      <label class="muted">Единица<select class="select" data-assistant-lab="unit" data-idx="${idx}">${assistantUnitOptions(code, normalizedRow.unit || '')}</select></label>
+      <label class="muted">Дата анализа<input type="date" class="input" data-assistant-lab="measured_at" data-idx="${idx}" value="${esc(normalizedRow.measured_at || '')}"/></label>
+      <div style="grid-column:1/-1">
+        <button type="button" class="btn secondary" data-assistant-toggle-ref="${idx}">${referenceOpen ? 'Скрыть референс' : 'Добавить референс (необязательно)'}</button>
+      </div>
+      ${referenceOpen ? `<label class="muted">Референс от<input class="input" data-assistant-lab="ref_low" data-idx="${idx}" value="${esc(normalizedRow.ref_low || '')}" placeholder="Например, 12"/></label>
+      <label class="muted">Референс до<input class="input" data-assistant-lab="ref_high" data-idx="${idx}" value="${esc(normalizedRow.ref_high || '')}" placeholder="Например, 150"/></label>` : ''}
     </div>`;
   }
 
@@ -4154,7 +4171,7 @@ function adminField(label, field, value, kind='input') {
     const result = a.result || null;
     const summary = profileSummary(profile).map((x)=>`<div class="muted">${x}</div>`).join('');
     const history = Array.isArray(a.history) ? a.history : [];
-    const draftLabs = Array.isArray(a.manualLabs) ? a.manualLabs : [];
+    const draftLabs = normalizeAssistantLabs(Array.isArray(a.manualLabs) ? a.manualLabs : []);
     const hasHistory = history.length > 0;
     const hasAnyDraftLabs = draftLabs.some((row)=>String(row?.analyte_code || row?.analyte_name_ru || row?.value || row?.unit || '').trim());
     const hasValidDraftLabs = draftLabs.some((row)=>assistantLabRowReady(row));
@@ -4163,7 +4180,7 @@ function adminField(label, field, value, kind='input') {
     const assistantUiState = (!hasHistory && !hasAnyDraftLabs && !resultOpened)
       ? 'first_empty'
       : (resultOpened ? 'result_opened' : (draftFromHistory ? 'draft_from_history' : (hasHistory ? 'history_available' : 'draft_started')));
-    const primaryAddLabel = assistantUiState === 'first_empty' ? 'Добавить первый анализ' : 'Добавить анализ';
+    const primaryAddLabel = assistantUiState === 'first_empty' ? 'Добавить первый анализ' : 'Добавить ещё';
     const nutrients = Array.isArray(result?.nutrient_plan) ? result.nutrient_plan : [];
     const labsReview = Array.isArray(result?.labs_review) ? result.labs_review : [];
     const basisRun = history.find((x)=>Number(x.id)===Number(a.basisRunId || a.currentRunId || 0)) || null;
@@ -4195,13 +4212,19 @@ function adminField(label, field, value, kind='input') {
       </section>
       <section class="card fade">
         <div class="row"><strong>Анализы</strong></div>
-        ${assistantUiState === 'first_empty' ? `<div class="muted" style="margin-top:6px">Добавьте первый анализ, и помощник соберёт персональный план. Позже вы сможете дополнять набор и пересчитывать рекомендации.</div>` : ''}
+        ${assistantUiState === 'first_empty' ? `<div class="item-row" style="display:block; margin-top:8px">
+          <div><strong>Как это работает</strong></div>
+          <div class="muted" style="margin-top:6px">Помощник собирает персональный план по вашим анализам.</div>
+          <div class="muted">Можно добавлять показатели по одному или сразу несколько.</div>
+          <div class="muted">Референс можно не указывать — расчёт всё равно выполнится.</div>
+          <div class="muted">Когда появятся новые данные, план легко пересчитать.</div>
+        </div>` : ''}
         <div class="muted" style="margin-top:4px">Текущий черновик: ${a.draftUpdatedAt ? esc(formatUtcShort(a.draftUpdatedAt)) : 'ещё не сохранён'}</div>
         <div class="muted" style="margin-top:6px">${draftFromHistory ? 'Черновик собран на основе прошлого расчёта. Проверьте и обновите показатели перед новым запуском.' : 'Для расчёта укажите показатель, значение, единицу и по возможности референс.'}</div>
-        <div id="assistantLabRows" style="margin-top:8px">${(a.manualLabs||[]).map((row,idx)=>renderAssistantLabRow(idx,row, Number(a.expandedLabIdx ?? 0) === idx)).join('')}</div>
+        <div id="assistantLabRows" style="margin-top:8px">${draftLabs.map((row,idx)=>renderAssistantLabRow(idx,row, Number(a.expandedLabIdx ?? 0) === idx)).join('')}</div>
         <div class="row" style="margin-top:8px; gap:6px; flex-wrap:wrap; align-items:stretch">
           <button class="btn secondary" data-assistant-add-lab>${primaryAddLabel}</button>
-          ${hasValidDraftLabs ? `<button class="btn" data-assistant-compute>${a.computing?'Считаем…':'Рассчитать план'}</button>` : ''}
+          ${hasAnyDraftLabs && hasValidDraftLabs ? `<button class="btn" data-assistant-compute>${a.computing?'Считаем…':'Рассчитать'}</button>` : ''}
           ${hasAnyDraftLabs ? `<button class="btn secondary" data-assistant-clear-labs>Очистить черновик</button>` : ''}
           ${(hasHistory || hasAnyDraftLabs) ? `<details><summary class="btn secondary" style="list-style:none">Ещё</summary><div class="row" style="margin-top:6px; gap:6px; flex-wrap:wrap">
             ${hasHistory ? `<button class="btn secondary" data-assistant-use-latest-labs>Взять набор из прошлого расчёта</button>` : ''}
@@ -4255,33 +4278,26 @@ function adminField(label, field, value, kind='input') {
   function collectLabRows(containerId){ const rows=[]; document.querySelectorAll(`#${containerId} [data-lab-row]`).forEach((rowEl)=>{ const idx=rowEl.dataset.labRow; const analyte_code=document.querySelector(`[data-lab-field="analyte_code"][data-idx="${idx}"]`)?.value||''; const preset=ANALYTE_PRESETS.find((x)=>x.code===analyte_code); const value=document.querySelector(`[data-lab-field="value_num"][data-idx="${idx}"]`)?.value||''; rows.push({ analyte_code, analyte_name:preset?.title||analyte_code, value_text:String(value), value_num:Number(String(value).replace(',','.'))||null, unit:document.querySelector(`[data-lab-field="unit"][data-idx="${idx}"]`)?.value||'', ref_low:Number(document.querySelector(`[data-lab-field="ref_low"][data-idx="${idx}"]`)?.value||'')||null, ref_high:Number(document.querySelector(`[data-lab-field="ref_high"][data-idx="${idx}"]`)?.value||'')||null }); }); return rows.filter((x)=>x.analyte_code); }
   function collectAssistantLabs(){
     syncExpandedAssistantLabRow();
-    const rows = [];
-    (state.nutrientAssistant.manualLabs || []).forEach((item)=>{
-      if (String(item.analyte_code || '').trim()) {
-        const preset = ASSISTANT_ANALYTE_PRESETS.find((x)=>String(x.code)===String(item.analyte_code || '').trim());
-        rows.push({
-          analyte_code: String(item.analyte_code || '').trim(),
-          analyte_name_ru: String(item.analyte_name_ru || item.analyte_name || preset?.name || '').trim(),
-          value: item.value || '',
-          unit: item.unit || '',
-          ref_low: item.ref_low ?? '',
-          ref_high: item.ref_high ?? '',
-          measured_at: item.measured_at || ''
-        });
-      }
-    });
-    return rows;
+    return normalizeAssistantLabs(state.nutrientAssistant.manualLabs || []).filter((item)=>String(item.analyte_code || '').trim()).map((item)=>({
+      analyte_code: item.analyte_code,
+      analyte_name_ru: item.analyte_name_ru,
+      value: item.value || '',
+      unit: item.unit || '',
+      ref_low: item.ref_low ?? '',
+      ref_high: item.ref_high ?? '',
+      measured_at: item.measured_at || ''
+    }));
   }
   function syncExpandedAssistantLabRow(){
     const idx = Number(state.nutrientAssistant.expandedLabIdx || 0);
     if (!Array.isArray(state.nutrientAssistant.manualLabs)) state.nutrientAssistant.manualLabs = [];
     if (!state.nutrientAssistant.manualLabs[idx]) return;
     const next = { ...state.nutrientAssistant.manualLabs[idx] };
-    ['analyte_code','analyte_name_ru','value','unit','ref_low','ref_high','measured_at'].forEach((f)=>{
+    ['analyte_code','value','unit','ref_low','ref_high','measured_at'].forEach((f)=>{
       const val = document.querySelector(`[data-assistant-lab="${f}"][data-idx="${idx}"]`)?.value;
       if (val !== undefined) next[f] = val;
     });
-    state.nutrientAssistant.manualLabs[idx] = next;
+    state.nutrientAssistant.manualLabs[idx] = normalizeAssistantLabItem(next, { keepUnit: true });
   }
   function collectAssistantForm(){
     const next = { ...(state.nutrientAssistant.form || {}) };
@@ -4341,12 +4357,12 @@ function adminField(label, field, value, kind='input') {
     });
     document.querySelector('[data-assistant-add-lab]')?.addEventListener('click', ()=>{
       syncExpandedAssistantLabRow();
-      state.nutrientAssistant.manualLabs.push({ analyte_code: "", analyte_name_ru: "", value: "", unit: "", ref_low: "", ref_high: "", measured_at: "" });
+      state.nutrientAssistant.manualLabs.push(createEmptyAssistantLabItem());
       state.nutrientAssistant.expandedLabIdx = state.nutrientAssistant.manualLabs.length - 1;
       renderActiveTab();
     });
     document.querySelector('[data-assistant-clear-labs]')?.addEventListener('click', async ()=>{
-      state.nutrientAssistant.manualLabs = [{ analyte_code: "", analyte_name_ru: "", value: "", unit: "", ref_low: "", ref_high: "", measured_at: "" }];
+      state.nutrientAssistant.manualLabs = [];
       state.nutrientAssistant.expandedLabIdx = 0;
       state.nutrientAssistant.draftSourceRunId = null;
       await saveNutrientDraft({ labs: [], source_run_id: null }).catch(()=>null);
@@ -4356,10 +4372,10 @@ function adminField(label, field, value, kind='input') {
       const latest = (state.nutrientAssistant.history || [])[0];
       const labs = Array.isArray(latest?.input_snapshot_json?.labs) ? latest.input_snapshot_json.labs : [];
       if (!labs.length) return;
-      state.nutrientAssistant.manualLabs = labs;
+      state.nutrientAssistant.manualLabs = normalizeAssistantLabs(labs);
       state.nutrientAssistant.expandedLabIdx = 0;
       state.nutrientAssistant.draftSourceRunId = Number(latest.id || 0) || null;
-      await saveNutrientDraft({ labs, source_run_id: Number(latest.id || 0) || null }).catch(()=>null);
+      await saveNutrientDraft({ labs: collectAssistantLabs(), source_run_id: Number(latest.id || 0) || null }).catch(()=>null);
       renderActiveTab();
     });
     document.querySelector('[data-assistant-save-draft]')?.addEventListener('click', async ()=>{
@@ -4410,7 +4426,7 @@ function adminField(label, field, value, kind='input') {
         const labs = collectAssistantLabs();
         const replace_run_id = Number(state.nutrientAssistant.pendingComputePayload?.replace_run_id || 0) || null;
         state.nutrientAssistant.form = assistant_profile;
-        state.nutrientAssistant.manualLabs = labs.length ? labs : state.nutrientAssistant.manualLabs;
+        state.nutrientAssistant.manualLabs = normalizeAssistantLabs(state.nutrientAssistant.manualLabs || []);
         await saveNutrientDraft({ assistant_profile, labs }).catch(()=>null);
         const res = await api('./api/profile/nutrient-assistant/compute', { method:'POST', body: { assistant_profile, labs, replace_run_id } });
         state.nutrientAssistant.result = res.result || null;
@@ -4489,27 +4505,30 @@ function adminField(label, field, value, kind='input') {
       const labs = Array.isArray(input.labs) ? input.labs : [];
       const assistant_profile = input.user_profile || {};
       state.nutrientAssistant.form = { ...(state.nutrientAssistant.form || {}), ...assistant_profile };
-      state.nutrientAssistant.manualLabs = labs.length ? labs : [{ analyte_code: "", analyte_name_ru: "", value: "", unit: "", ref_low: "", ref_high: "", measured_at: "" }];
+      state.nutrientAssistant.manualLabs = normalizeAssistantLabs(labs);
       state.nutrientAssistant.expandedLabIdx = 0;
       state.nutrientAssistant.draftSourceRunId = id;
-      await saveNutrientDraft({ assistant_profile, labs, source_run_id: id }).catch(()=>null);
+      await saveNutrientDraft({ assistant_profile, labs: collectAssistantLabs(), source_run_id: id }).catch(()=>null);
       showToast('Черновик обновлён на основе выбранного расчёта');
       renderActiveTab();
     }));
     document.querySelectorAll('[data-assistant-lab="analyte_code"]').forEach((el)=>el.addEventListener('change',(e)=>{
       const idx = e.target.dataset.idx;
-      const code = e.target.value || '';
-      const row = state.nutrientAssistant.manualLabs[Number(idx)] || {};
-      row.analyte_code = code;
-      const preset = ASSISTANT_ANALYTE_PRESETS.find((x)=>String(x.code)===String(code));
-      if (preset && !String(row.analyte_name_ru || '').trim()) row.analyte_name_ru = String(preset.name || '');
+      const code = String(e.target.value || '').trim().toLowerCase();
+      const row = normalizeAssistantLabItem({ ...(state.nutrientAssistant.manualLabs[Number(idx)] || {}), analyte_code: code });
       state.nutrientAssistant.manualLabs[Number(idx)] = row;
       const unitEl = document.querySelector(`[data-assistant-lab="unit"][data-idx="${idx}"]`);
       if (unitEl) {
-        const nextUnit = row.unit || preset?.units?.[0] || '';
+        const nextUnit = row.unit || '';
         unitEl.innerHTML = assistantUnitOptions(code, nextUnit);
       }
       scheduleAssistantDraftAutosave();
+    }));
+    document.querySelectorAll('[data-assistant-toggle-ref]').forEach((el)=>el.addEventListener('click', (e)=>{
+      const idx = Number(e.currentTarget.dataset.assistantToggleRef || 0);
+      const current = normalizeAssistantLabItem(state.nutrientAssistant.manualLabs[idx] || {});
+      state.nutrientAssistant.manualLabs[idx] = { ...current, referenceOpen: !current.referenceOpen };
+      renderActiveTab();
     }));
     document.querySelectorAll('[data-assistant-lab]').forEach((el)=>el.addEventListener('input', ()=>{
       syncExpandedAssistantLabRow();

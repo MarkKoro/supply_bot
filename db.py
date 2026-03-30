@@ -9286,6 +9286,58 @@ async def save_llm_assistant_plan_actions(conn: aiosqlite.Connection, tg_user_id
     return inserted
 
 
+async def check_nutrient_assistant_materialization_schema(conn: aiosqlite.Connection) -> tuple[bool, list[str]]:
+    requirements: dict[str, set[str]] = {
+        "nutrient_plan_runs": {
+            "id",
+            "user_id",
+            "nutrient_code",
+            "preview_snapshot_json",
+            "plan_snapshot_json",
+            "lifecycle_status",
+            "recommend_action",
+            "supplement_id",
+            "course_started_at_utc",
+            "course_ends_at_utc",
+            "pause_days",
+            "review_due_at_utc",
+            "retest_due_at_utc",
+            "is_active",
+        },
+        "nutrient_followup_items": {"id", "plan_run_id", "user_id", "nutrient_code", "item_type", "details_json"},
+        "nutrient_reminder_candidates": {"id", "plan_run_id", "user_id", "nutrient_code", "candidate_type", "payload_json"},
+        "nutrient_followup_reminders": {"id", "user_id", "plan_run_id", "nutrient_code", "reminder_type", "scheduled_for_utc", "status"},
+        "llm_assistant_plan_actions": {
+            "id",
+            "run_id",
+            "user_id",
+            "nutrient_code",
+            "recommend_action",
+            "nutrient_plan_run_id",
+            "frequency_per_day",
+            "explicit_times_json",
+            "timing_context",
+            "course_days",
+            "pause_days",
+            "auto_stop_at_end",
+            "reevaluate_after_days",
+            "retest_after_days",
+            "followup_kind",
+            "followup_message",
+        },
+    }
+    missing: list[str] = []
+    for table, cols in requirements.items():
+        if not await _table_exists(conn, table):
+            missing.append(f"table:{table}")
+            continue
+        table_cols = await _table_columns(conn, table)
+        for col in sorted(cols):
+            if col not in table_cols:
+                missing.append(f"column:{table}.{col}")
+    return (len(missing) == 0, missing)
+
+
 async def list_llm_assistant_plan_actions(conn: aiosqlite.Connection, tg_user_id: int, run_id: int) -> list[dict]:
     user_id = await get_or_create_user(conn, int(tg_user_id))
     rows = await fetchall(

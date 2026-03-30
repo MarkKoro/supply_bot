@@ -1008,6 +1008,17 @@ async def _ensure_profile_foundation_tables(conn: aiosqlite.Connection) -> None:
     )
     await conn.execute("CREATE INDEX IF NOT EXISTS idx_llm_assistant_runs_user_created ON llm_assistant_runs(user_id, id DESC)")
     await conn.execute(
+        """CREATE TABLE IF NOT EXISTS nutrient_assistant_drafts (
+          user_id INTEGER PRIMARY KEY,
+          assistant_profile_json TEXT NOT NULL DEFAULT '{}',
+          labs_json TEXT NOT NULL DEFAULT '[]',
+          compute_scope_json TEXT NOT NULL DEFAULT '{}',
+          source_run_id INTEGER,
+          created_at_utc TEXT NOT NULL,
+          updated_at_utc TEXT NOT NULL
+        )"""
+    )
+    await conn.execute(
         """CREATE TABLE IF NOT EXISTS llm_assistant_plan_actions (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           run_id INTEGER NOT NULL,
@@ -1059,9 +1070,29 @@ async def _ensure_profile_foundation_tables(conn: aiosqlite.Connection) -> None:
     await _ensure_column(conn, "nutrient_plan_runs", "based_on_latest_lab_at_utc", "TEXT")
     await _ensure_column(conn, "nutrient_plan_runs", "based_on_stack_updated_at_utc", "TEXT")
     await _ensure_column(conn, "nutrient_plan_runs", "last_rebuild_at_utc", "TEXT")
+    await _ensure_column(conn, "nutrient_plan_runs", "lifecycle_status", "TEXT NOT NULL DEFAULT 'review_required'")
+    await _ensure_column(conn, "nutrient_plan_runs", "recommend_action", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "nutrient_plan_runs", "supplement_id", "INTEGER")
+    await _ensure_column(conn, "nutrient_plan_runs", "course_started_at_utc", "TEXT")
+    await _ensure_column(conn, "nutrient_plan_runs", "course_ends_at_utc", "TEXT")
+    await _ensure_column(conn, "nutrient_plan_runs", "pause_days", "INTEGER")
+    await _ensure_column(conn, "nutrient_plan_runs", "review_due_at_utc", "TEXT")
+    await _ensure_column(conn, "nutrient_plan_runs", "retest_due_at_utc", "TEXT")
+    await _ensure_column(conn, "nutrient_plan_runs", "cancelled_at_utc", "TEXT")
     await _ensure_column(conn, "nutrient_plan_explanations", "is_active", "INTEGER NOT NULL DEFAULT 1")
     await _ensure_column(conn, "nutrient_followup_reminders", "source_type", "TEXT NOT NULL DEFAULT 'nutrient_assistant'")
     await _ensure_column(conn, "nutrient_plan_rebuild_jobs", "status", "TEXT NOT NULL DEFAULT 'queued'")
+    await _ensure_column(conn, "llm_assistant_plan_actions", "nutrient_plan_run_id", "INTEGER")
+    await _ensure_column(conn, "llm_assistant_plan_actions", "frequency_per_day", "INTEGER")
+    await _ensure_column(conn, "llm_assistant_plan_actions", "explicit_times_json", "TEXT NOT NULL DEFAULT '[]'")
+    await _ensure_column(conn, "llm_assistant_plan_actions", "timing_context", "TEXT")
+    await _ensure_column(conn, "llm_assistant_plan_actions", "course_days", "INTEGER")
+    await _ensure_column(conn, "llm_assistant_plan_actions", "pause_days", "INTEGER")
+    await _ensure_column(conn, "llm_assistant_plan_actions", "auto_stop_at_end", "INTEGER NOT NULL DEFAULT 0")
+    await _ensure_column(conn, "llm_assistant_plan_actions", "reevaluate_after_days", "INTEGER")
+    await _ensure_column(conn, "llm_assistant_plan_actions", "retest_after_days", "INTEGER")
+    await _ensure_column(conn, "llm_assistant_plan_actions", "followup_kind", "TEXT")
+    await _ensure_column(conn, "llm_assistant_plan_actions", "followup_message", "TEXT")
 
 async def _ensure_achievements_tables(conn: aiosqlite.Connection) -> None:
     await conn.execute(
@@ -2980,7 +3011,7 @@ def parse_utc_tz(tz_name: str | None):
     value = str(tz_name).strip()
     if value.upper() in {"UTC", "GMT"}:
         return timezone.utc
-    match = re.fullmatch(r"(?:UTC|GMT)?([+-](?:0\d|1\d|2[0-3])):([0-5]\d)", value)
+    match = re.fullmatch(r"(?:UTC|GMT)?([+-](?:0\d|1[0-4])):([0-5]\d)", value)
     if match:
         sign_hours, minutes_str = match.groups()
         sign = 1 if sign_hours[0] == "+" else -1
@@ -2992,6 +3023,21 @@ def parse_utc_tz(tz_name: str | None):
         return ZoneInfo(value)
     except Exception:
         return timezone.utc
+
+
+def is_valid_timezone_name(tz_name: str | None) -> bool:
+    value = str(tz_name or "").strip()
+    if not value:
+        return False
+    if value.upper() in {"UTC", "GMT"}:
+        return True
+    if re.fullmatch(r"(?:UTC|GMT)?[+-](?:0\d|1[0-4]):[0-5]\d", value, flags=re.IGNORECASE):
+        return True
+    try:
+        ZoneInfo(value)
+        return True
+    except Exception:
+        return False
 
 def parse_offset_tz(tz_name: str | None):
     return parse_utc_tz(tz_name)
@@ -9039,6 +9085,79 @@ async def create_llm_assistant_run(
     return int(cur.lastrowid)
 
 
+async def get_nutrient_assistant_draft(conn: aiosqlite.Connection, tg_user_id: int) -> dict | None:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    row = await fetchone(
+        conn,
+        """SELECT user_id, assistant_profile_json, labs_json, compute_scope_json, source_run_id, created_at_utc, updated_at_utc
+           FROM nutrient_assistant_drafts WHERE user_id=? LIMIT 1""",
+        (user_id,),
+    )
+    if not row:
+        return None
+    out = dict(row)
+    out["assistant_profile"] = _decode_json_or_default(out.pop("assistant_profile_json", "{}"), {})
+    out["labs"] = _decode_json_or_default(out.pop("labs_json", "[]"), [])
+    out["compute_scope"] = _decode_json_or_default(out.pop("compute_scope_json", "{}"), {})
+    return out
+
+
+async def upsert_nutrient_assistant_draft(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    *,
+    assistant_profile: dict,
+    labs: list[dict],
+    compute_scope: dict | None = None,
+    source_run_id: int | None = None,
+) -> dict:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    now = utc_now_iso()
+    await conn.execute(
+        """INSERT INTO nutrient_assistant_drafts(
+            user_id, assistant_profile_json, labs_json, compute_scope_json, source_run_id, created_at_utc, updated_at_utc
+        ) VALUES(?,?,?,?,?,?,?)
+        ON CONFLICT(user_id) DO UPDATE SET
+          assistant_profile_json=excluded.assistant_profile_json,
+          labs_json=excluded.labs_json,
+          compute_scope_json=excluded.compute_scope_json,
+          source_run_id=COALESCE(excluded.source_run_id, nutrient_assistant_drafts.source_run_id),
+          updated_at_utc=excluded.updated_at_utc""",
+        (
+            user_id,
+            json.dumps(assistant_profile or {}, ensure_ascii=False),
+            json.dumps(labs or [], ensure_ascii=False),
+            json.dumps(compute_scope or {}, ensure_ascii=False),
+            int(source_run_id) if source_run_id else None,
+            now,
+            now,
+        ),
+    )
+    await conn.commit()
+    return (await get_nutrient_assistant_draft(conn, tg_user_id)) or {"assistant_profile": {}, "labs": [], "compute_scope": {}, "source_run_id": source_run_id, "updated_at_utc": now}
+
+
+async def ensure_nutrient_assistant_draft(conn: aiosqlite.Connection, tg_user_id: int) -> dict:
+    existing = await get_nutrient_assistant_draft(conn, tg_user_id)
+    if existing:
+        return existing
+    profile = await get_user_health_profile(conn, tg_user_id)
+    history = await list_llm_assistant_runs(conn, tg_user_id, limit=1)
+    if history:
+        latest = history[0]
+        input_snapshot = latest.get("input_snapshot_json") if isinstance(latest, dict) else {}
+        if isinstance(input_snapshot, dict):
+            return await upsert_nutrient_assistant_draft(
+                conn,
+                tg_user_id,
+                assistant_profile=dict((input_snapshot.get("user_profile") or {})),
+                labs=list(input_snapshot.get("labs") or []),
+                compute_scope={},
+                source_run_id=int(latest.get("id") or 0) or None,
+            )
+    return await upsert_nutrient_assistant_draft(conn, tg_user_id, assistant_profile=profile or {}, labs=[], compute_scope={}, source_run_id=None)
+
+
 async def get_llm_assistant_run(conn: aiosqlite.Connection, tg_user_id: int, run_id: int) -> dict | None:
     user_id = await get_or_create_user(conn, int(tg_user_id))
     row = await fetchone(
@@ -9128,8 +9247,10 @@ async def save_llm_assistant_plan_actions(conn: aiosqlite.Connection, tg_user_id
             """INSERT INTO llm_assistant_plan_actions(
                 run_id, user_id, nutrient_code, nutrient_name_ru, recommend_action,
                 supplement_id, supplement_name, dose_text, frequency_text, duration_text, timing_text,
-                stop_or_pause_rule_ru, with_food, reminders_json, status, created_at, updated_at
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                stop_or_pause_rule_ru, with_food, reminders_json, status, created_at, updated_at,
+                nutrient_plan_run_id, frequency_per_day, explicit_times_json, timing_context,
+                course_days, pause_days, auto_stop_at_end, reevaluate_after_days, retest_after_days, followup_kind, followup_message
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 int(run_id),
                 user_id,
@@ -9148,6 +9269,17 @@ async def save_llm_assistant_plan_actions(conn: aiosqlite.Connection, tg_user_id
                 str(item.get("status") or "prepared"),
                 now,
                 now,
+                item.get("nutrient_plan_run_id"),
+                item.get("frequency_per_day"),
+                json.dumps(item.get("explicit_times") or [], ensure_ascii=False),
+                str(item.get("timing_context") or ""),
+                item.get("course_days"),
+                item.get("pause_days"),
+                1 if bool(item.get("auto_stop_at_end")) else 0,
+                item.get("reevaluate_after_days"),
+                item.get("retest_after_days"),
+                str(item.get("followup_kind") or ""),
+                str(item.get("followup_message") or ""),
             ),
         )
         inserted += 1
@@ -9160,7 +9292,9 @@ async def list_llm_assistant_plan_actions(conn: aiosqlite.Connection, tg_user_id
         conn,
         """SELECT id, run_id, nutrient_code, nutrient_name_ru, recommend_action, supplement_id, supplement_name,
                   dose_text, frequency_text, duration_text, timing_text, stop_or_pause_rule_ru, with_food,
-                  reminders_json, status, created_at, updated_at
+                  reminders_json, status, created_at, updated_at,
+                  nutrient_plan_run_id, frequency_per_day, explicit_times_json, timing_context,
+                  course_days, pause_days, auto_stop_at_end, reevaluate_after_days, retest_after_days, followup_kind, followup_message
            FROM llm_assistant_plan_actions WHERE user_id=? AND run_id=? ORDER BY id ASC""",
         (user_id, int(run_id)),
     )
@@ -9171,7 +9305,12 @@ async def list_llm_assistant_plan_actions(conn: aiosqlite.Connection, tg_user_id
             item["reminders"] = json.loads(str(item.get("reminders_json") or "[]"))
         except Exception:
             item["reminders"] = []
+        try:
+            item["explicit_times"] = json.loads(str(item.get("explicit_times_json") or "[]"))
+        except Exception:
+            item["explicit_times"] = []
         item["with_food"] = bool(item.get("with_food"))
+        item["auto_stop_at_end"] = bool(item.get("auto_stop_at_end"))
         out.append(item)
     return out
 
@@ -9282,8 +9421,10 @@ async def create_nutrient_plan_run(
             plan_mode, plan_phase, confidence_level,
             freshness_status, stale_reason_codes_json,
             based_on_profile_updated_at_utc, based_on_latest_lab_at_utc, based_on_stack_updated_at_utc,
-            last_rebuild_at_utc, created_at_utc, updated_at_utc, is_active
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)""",
+            last_rebuild_at_utc, lifecycle_status, recommend_action, supplement_id,
+            course_started_at_utc, course_ends_at_utc, pause_days, review_due_at_utc, retest_due_at_utc, cancelled_at_utc,
+            created_at_utc, updated_at_utc, is_active
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)""",
         (
             user_id,
             str(nutrient_code or "").lower(),
@@ -9299,6 +9440,15 @@ async def create_nutrient_plan_run(
             str(preview_snapshot.get("latest_lab_at_utc") or ""),
             str(preview_snapshot.get("stack_updated_at_utc") or ""),
             now,
+            str(plan_snapshot.get("lifecycle_status") or "review_required"),
+            str(plan_snapshot.get("recommend_action") or ""),
+            int(plan_snapshot.get("supplement_id")) if str(plan_snapshot.get("supplement_id") or "").isdigit() else None,
+            str(plan_snapshot.get("course_started_at_utc") or ""),
+            str(plan_snapshot.get("course_ends_at_utc") or ""),
+            int(plan_snapshot.get("pause_days")) if str(plan_snapshot.get("pause_days") or "").isdigit() else None,
+            str(plan_snapshot.get("review_due_at_utc") or ""),
+            str(plan_snapshot.get("retest_due_at_utc") or ""),
+            str(plan_snapshot.get("cancelled_at_utc") or ""),
             now,
             now,
         ),
@@ -9374,7 +9524,8 @@ async def get_latest_active_nutrient_plan(conn: aiosqlite.Connection, tg_user_id
         """SELECT id, nutrient_code, source_report_id, plan_mode, plan_phase, confidence_level,
                   freshness_status, stale_reason_codes_json,
                   based_on_profile_updated_at_utc, based_on_latest_lab_at_utc, based_on_stack_updated_at_utc,
-                  last_rebuild_at_utc,
+                  last_rebuild_at_utc, lifecycle_status, recommend_action, supplement_id,
+                  course_started_at_utc, course_ends_at_utc, pause_days, review_due_at_utc, retest_due_at_utc, cancelled_at_utc,
                   preview_snapshot_json, plan_snapshot_json, created_at_utc, updated_at_utc, is_active
            FROM nutrient_plan_runs
            WHERE user_id=? AND nutrient_code=? AND is_active=1
@@ -9396,6 +9547,8 @@ async def list_user_nutrient_plans(conn: aiosqlite.Connection, tg_user_id: int, 
         conn,
         """SELECT id, nutrient_code, source_report_id, plan_mode, plan_phase, confidence_level,
                   freshness_status, stale_reason_codes_json, last_rebuild_at_utc,
+                  lifecycle_status, recommend_action, supplement_id,
+                  course_started_at_utc, course_ends_at_utc, pause_days, review_due_at_utc, retest_due_at_utc, cancelled_at_utc,
                   created_at_utc, updated_at_utc, is_active
            FROM nutrient_plan_runs WHERE user_id=? ORDER BY id DESC LIMIT ?""",
         (user_id, int(limit)),
@@ -9410,7 +9563,8 @@ async def get_user_nutrient_plan_by_id(conn: aiosqlite.Connection, tg_user_id: i
         """SELECT id, nutrient_code, source_report_id, plan_mode, plan_phase, confidence_level,
                   freshness_status, stale_reason_codes_json,
                   based_on_profile_updated_at_utc, based_on_latest_lab_at_utc, based_on_stack_updated_at_utc,
-                  last_rebuild_at_utc,
+                  last_rebuild_at_utc, lifecycle_status, recommend_action, supplement_id,
+                  course_started_at_utc, course_ends_at_utc, pause_days, review_due_at_utc, retest_due_at_utc, cancelled_at_utc,
                   preview_snapshot_json, plan_snapshot_json, created_at_utc, updated_at_utc, is_active
            FROM nutrient_plan_runs WHERE user_id=? AND id=? LIMIT 1""",
         (user_id, int(plan_id)),
@@ -9704,6 +9858,98 @@ async def mark_nutrient_followup_reminder_sent(conn: aiosqlite.Connection, remin
     return int(cur.rowcount or 0) > 0
 
 
+async def process_due_nutrient_lifecycle(conn: aiosqlite.Connection, limit: int = 200) -> dict:
+    now_dt = datetime.now(timezone.utc).replace(microsecond=0)
+    now_iso = now_dt.isoformat()
+    changed = 0
+    reminders_created = 0
+    rows = await fetchall(
+        conn,
+        """SELECT id, user_id, nutrient_code, supplement_id, lifecycle_status, recommend_action,
+                  course_ends_at_utc, pause_days, review_due_at_utc, retest_due_at_utc,
+                  plan_snapshot_json
+           FROM nutrient_plan_runs
+           WHERE is_active=1
+             AND lifecycle_status IN ('active','review_required','retest_due')
+           ORDER BY id ASC
+           LIMIT ?""",
+        (int(limit),),
+    )
+    for row in rows:
+        plan_id = int(row["id"])
+        lifecycle_status = str(row["lifecycle_status"] or "")
+        plan_snapshot = _decode_json_or_default(row["plan_snapshot_json"], {})
+        auto_stop = bool(plan_snapshot.get("auto_stop_at_end"))
+        course_end = _parse_iso_utc_or_none(row["course_ends_at_utc"])
+        review_due = _parse_iso_utc_or_none(row["review_due_at_utc"])
+        retest_due = _parse_iso_utc_or_none(row["retest_due_at_utc"])
+
+        next_status = None
+        if lifecycle_status == "active" and course_end and course_end <= now_dt:
+            pause_days = int(row["pause_days"] or 0)
+            if auto_stop:
+                next_status = "completed"
+            elif pause_days > 0:
+                next_status = "paused"
+            else:
+                next_status = "review_required"
+            await conn.execute(
+                "UPDATE nutrient_plan_runs SET lifecycle_status=?, updated_at_utc=? WHERE id=?",
+                (next_status, now_iso, plan_id),
+            )
+            changed += 1
+            if auto_stop and int(row["supplement_id"] or 0) > 0 and str(row["recommend_action"] or "") in {"start", "continue"}:
+                await conn.execute(
+                    "UPDATE user_supplements SET is_active=0, enabled=0 WHERE user_id=? AND supplement_id=?",
+                    (int(row["user_id"]), int(row["supplement_id"])),
+                )
+            await conn.execute(
+                """INSERT OR IGNORE INTO nutrient_followup_reminders(
+                    user_id, plan_run_id, followup_item_id, nutrient_code, reminder_type, source_type,
+                    scheduled_for_utc, delivered_at_utc, status, payload_json, created_at_utc, updated_at_utc
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    int(row["user_id"]), plan_id, None, str(row["nutrient_code"] or ""), "course_completed", "nutrient_assistant",
+                    now_iso, "", "scheduled",
+                    json.dumps({"message_ru": "Курс завершён. Обновим план или подождём новые данные?"}, ensure_ascii=False),
+                    now_iso, now_iso,
+                ),
+            )
+            reminders_created += 1
+        if lifecycle_status in {"active", "review_required"} and review_due and review_due <= now_dt:
+            await conn.execute("UPDATE nutrient_plan_runs SET lifecycle_status='review_required', updated_at_utc=? WHERE id=?", (now_iso, plan_id))
+            await conn.execute(
+                """INSERT OR IGNORE INTO nutrient_followup_reminders(
+                    user_id, plan_run_id, followup_item_id, nutrient_code, reminder_type, source_type,
+                    scheduled_for_utc, delivered_at_utc, status, payload_json, created_at_utc, updated_at_utc
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    int(row["user_id"]), plan_id, None, str(row["nutrient_code"] or ""), "followup_review", "nutrient_assistant",
+                    now_iso, "", "scheduled",
+                    json.dumps({"message_ru": "Пора пересмотреть план. Пересобрать рекомендации?"}, ensure_ascii=False),
+                    now_iso, now_iso,
+                ),
+            )
+            reminders_created += 1
+        if retest_due and retest_due <= now_dt:
+            await conn.execute("UPDATE nutrient_plan_runs SET lifecycle_status='retest_due', updated_at_utc=? WHERE id=?", (now_iso, plan_id))
+            await conn.execute(
+                """INSERT OR IGNORE INTO nutrient_followup_reminders(
+                    user_id, plan_run_id, followup_item_id, nutrient_code, reminder_type, source_type,
+                    scheduled_for_utc, delivered_at_utc, status, payload_json, created_at_utc, updated_at_utc
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    int(row["user_id"]), plan_id, None, str(row["nutrient_code"] or ""), "retest_due", "nutrient_assistant",
+                    now_iso, "", "scheduled",
+                    json.dumps({"message_ru": "Пора повторно сдать анализы по этому нутриенту."}, ensure_ascii=False),
+                    now_iso, now_iso,
+                ),
+            )
+            reminders_created += 1
+    await conn.commit()
+    return {"changed": changed, "reminders_created": reminders_created}
+
+
 async def count_nutrient_reminders_sent_today(conn: aiosqlite.Connection, tg_user_id: int, tz_name: str | None) -> int:
     user_id = await get_or_create_user(conn, int(tg_user_id))
     local_day = get_local_date_str(tz_name or None)
@@ -9766,6 +10012,15 @@ async def mark_active_plans_stale(conn: aiosqlite.Connection, tg_user_id: int, n
 
     await conn.commit()
     return int(cur.rowcount or 0)
+
+
+async def mark_all_active_plans_stale(conn: aiosqlite.Connection, tg_user_id: int, reason_code: str) -> int:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    rows = await fetchall(conn, "SELECT DISTINCT nutrient_code FROM nutrient_plan_runs WHERE user_id=? AND is_active=1", (user_id,))
+    nutrient_codes = [str(r["nutrient_code"] or "") for r in rows if str(r["nutrient_code"] or "").strip()]
+    if not nutrient_codes:
+        return 0
+    return await mark_active_plans_stale(conn, tg_user_id, nutrient_codes, [reason_code])
 
 
 async def enqueue_nutrient_rebuild_job(

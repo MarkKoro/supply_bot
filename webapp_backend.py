@@ -413,9 +413,9 @@ def _validate_assistant_response(data: dict) -> tuple[bool, str]:
         if not isinstance(item, dict):
             return False, f"invalid_nutrient_item:{idx}"
         required_item = [
-            "nutrient_code", "nutrient_name_ru", "recommend_action", "dose_text_ru", "with_food",
-            "followup_kind", "followup_message", "confidence", "safety_flags", "physician_flags",
-            "missing_data", "rationale_short_ru",
+            "nutrient_code", "nutrient_name_ru", "status", "recommend_action", "dose_text_ru",
+            "frequency_text_ru", "duration_text_ru", "timing_text_ru", "with_food", "reason_ru",
+            "monitor_ru", "retest_after_text_ru", "stop_or_pause_rule_ru", "cautions_ru", "interactions_ru",
         ]
         for field in required_item:
             if field not in item:
@@ -423,12 +423,6 @@ def _validate_assistant_response(data: dict) -> tuple[bool, str]:
         action = str(item.get("recommend_action") or "")
         if action not in {"start", "continue", "stop", "do_not_start", "discuss_with_physician", "retest_only"}:
             return False, f"invalid_action:{idx}"
-        if item.get("course_days") is not None:
-            try:
-                if int(item.get("course_days")) <= 0:
-                    return False, f"invalid_course_days:{idx}"
-            except Exception:
-                return False, f"invalid_course_days:{idx}"
     return True, ""
 
 
@@ -518,6 +512,118 @@ def _safe_int_or_none(value) -> int | None:
         return iv
     except Exception:
         return None
+
+
+def _extract_first_int(text: str, *, min_value: int = 1, max_value: int = 3650) -> int | None:
+    m = re.search(r"\b(\d{1,4})\b", str(text or ""))
+    if not m:
+        return None
+    value = _safe_int_or_none(m.group(1))
+    if value is None:
+        return None
+    if value < min_value or value > max_value:
+        return None
+    return value
+
+
+def _derive_frequency_per_day(frequency_text_ru: str) -> int | None:
+    text = str(frequency_text_ru or "").lower()
+    if "трижды" in text:
+        return 3
+    if "дважды" in text:
+        return 2
+    if "через день" in text:
+        return 1
+    m = re.search(r"(\d)\s*(?:x|раз[а]?)\s*(?:в\s*д[её]нь|/день)?", text)
+    if m:
+        value = _safe_int_or_none(m.group(1))
+        if value and 1 <= value <= 6:
+            return value
+    if "ежеднев" in text or "каждый день" in text or "1 раз" in text:
+        return 1
+    return None
+
+
+def _derive_timing_context(timing_text_ru: str) -> str | None:
+    text = str(timing_text_ru or "").strip().lower()
+    if not text:
+        return None
+    if "натощак" in text:
+        return "fasting"
+    if "после" in text and "ед" in text:
+        return "after_food"
+    if "во время" in text and "ед" in text:
+        return "with_food"
+    if "до" in text and "ед" in text:
+        return "before_food"
+    if "утр" in text:
+        return "morning"
+    if "вечер" in text or "ноч" in text:
+        return "evening"
+    return None
+
+
+def _derive_course_days(duration_text_ru: str) -> int | None:
+    text = str(duration_text_ru or "").lower()
+    if not text:
+        return None
+    value = _extract_first_int(text, min_value=1, max_value=3650)
+    if value is None:
+        return None
+    if any(token in text for token in ("нед", "week")):
+        return value * 7
+    if any(token in text for token in ("мес", "месяц", "month")):
+        return value * 30
+    return value
+
+
+def _derive_followup_kind(action: str) -> str:
+    return "followup_review" if action in {"start", "continue"} else "followup_manual"
+
+
+def enrich_nutrient_plan_items_for_execution(parsed: dict, context: dict | None = None) -> dict:
+    data = dict(parsed or {})
+    items = list(data.get("nutrient_plan") or [])
+    enriched: list[dict] = []
+    for raw in items:
+        item = dict(raw or {})
+        action = str(item.get("recommend_action") or "")
+        frequency_text = str(item.get("frequency_text_ru") or "")
+        duration_text = str(item.get("duration_text_ru") or "")
+        timing_text = str(item.get("timing_text_ru") or "")
+        retest_text = str(item.get("retest_after_text_ru") or "")
+
+        frequency_per_day = _derive_frequency_per_day(frequency_text)
+        explicit_times = _extract_reminder_times(frequency_text) if frequency_per_day else []
+        timing_context = _derive_timing_context(timing_text)
+        course_days = _derive_course_days(duration_text)
+        retest_after_days = _derive_course_days(retest_text)
+        reevaluate_after_days = course_days if action in {"start", "continue"} else None
+        auto_stop_at_end = bool(course_days) and action in {"start", "continue"}
+        followup_kind = _derive_followup_kind(action)
+        followup_message = ""
+        if action in {"start", "continue"} and course_days:
+            followup_message = f"Пересмотреть план через {course_days} дн."
+        elif retest_after_days:
+            followup_message = f"Повторить анализы через {retest_after_days} дн."
+
+        item.update(
+            {
+                "frequency_per_day": frequency_per_day,
+                "explicit_times": explicit_times,
+                "timing_context": timing_context,
+                "course_days": course_days,
+                "pause_days": None,
+                "auto_stop_at_end": auto_stop_at_end,
+                "reevaluate_after_days": reevaluate_after_days,
+                "retest_after_days": retest_after_days,
+                "followup_kind": followup_kind,
+                "followup_message": followup_message,
+            }
+        )
+        enriched.append(item)
+    data["nutrient_plan"] = enriched
+    return data
 
 
 def _days_since_iso(raw: str | None) -> int | None:
@@ -2149,6 +2255,8 @@ async def api_profile_nutrient_assistant_compute(
                 )
                 await conn.commit()
                 return JSONResponse({"ok": False, "code": "LLM_INCOMPLETE_LABS_COVERAGE", "missing_labs": retry_missing or missing_labs, "run_id": run_id}, status_code=422)
+        stage = "enrich_execution_fields"
+        parsed = enrich_nutrient_plan_items_for_execution(parsed, context={"labs": labs, "assistant_profile": assistant_profile})
 
         stage = "create_run"
         run_id = await db.create_llm_assistant_run(
@@ -2290,10 +2398,10 @@ async def api_profile_nutrient_assistant_compute(
             type(exc).__name__,
             str(exc),
         )
-        return JSONResponse(
-            {"ok": False, "code": "ASSISTANT_COMPUTE_ERROR", "stage": stage, "debug_id": debug_id},
-            status_code=500,
-        )
+        payload = {"ok": False, "code": "ASSISTANT_COMPUTE_ERROR", "stage": stage, "debug_id": debug_id}
+        if str(stage).startswith("call_llm"):
+            payload["message_ru"] = "Не удалось получить ответ ассистента. Попробуйте ещё раз через минуту."
+        return JSONResponse(payload, status_code=500)
     finally:
         await conn.close()
 

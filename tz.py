@@ -3,6 +3,10 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 TZ_CITY = {
+    -8: "Лос-Анджелес",
+    -5: "Нью-Йорк",
+    0: "Лондон",
+    1: "Берлин",
     2: "Калининград",
     3: "Москва",
     4: "Самара",
@@ -22,7 +26,7 @@ def now_utc_hhmm() -> str:
 
 
 def catalog() -> list[int]:
-    return sorted(TZ_CITY.keys())
+    return list(range(-12, 15))
 
 
 def format_offset_tag(hours: int) -> str:

@@ -54,6 +54,9 @@ NUTRIENT_ASSISTANT_SYSTEM_PROMPT = """Ты — осторожный нутрие
 - если данных мало, можно рекомендовать retest_only или do_not_start;
 - если уже есть релевантная добавка в активном стеке, сначала оцени continue, stop, do_not_start, retest_only или осторожную корректировку, а не автоматически start;
 - если есть основания не рекомендовать нутриент, ты всё равно можешь вернуть его в nutrient_plan со статусом likely_ok или unclear и с recommend_action do_not_start или retest_only, чтобы ответ был честным и понятным;
+- каждый входной анализ из массива labs обязан присутствовать в labs_review;
+- нельзя молча пропускать анализы, даже если по ним нет практического назначения в nutrient_plan;
+- если данных по анализу недостаточно, в labs_review ставь actionability=insufficient_data и дай короткое объяснение;
 - не используй markdown;
 - не добавляй пояснения вне JSON;
 - возвращай только валидный JSON.
@@ -102,9 +105,45 @@ NUTRIENT_ASSISTANT_JSON_CONTRACT = """{
       "interactions_ru": ["string"]
     }
   ],
+  "labs_review": [
+    {
+      "analyte_code": "string",
+      "analyte_name_ru": "string",
+      "value": "string",
+      "unit": "string",
+      "ref_low": "string|number|null",
+      "ref_high": "string|number|null",
+      "interpretation_status": "low|normal|high|unclear",
+      "mapped_nutrient_code": "string",
+      "actionability": "actionable|watch|retest|insufficient_data",
+      "short_reason_ru": "string"
+    }
+  ],
   "next_steps_ru": ["string"],
   "disclaimer_ru": "string"
 }"""
+
+NUTRIENT_ASSISTANT_JSON_SCHEMA = {
+    "name": "nutrient_assistant_plan",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "summary_ru": {"type": "string"},
+            "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
+            "safety_flags": {"type": "array", "items": {"type": "string"}},
+            "physician_flags": {"type": "array", "items": {"type": "string"}},
+            "labs_used": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
+            "missing_data": {"type": "array", "items": {"type": "string"}},
+            "nutrient_plan": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
+            "labs_review": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
+            "next_steps_ru": {"type": "array", "items": {"type": "string"}},
+            "disclaimer_ru": {"type": "string"},
+        },
+        "required": ["summary_ru", "confidence", "safety_flags", "physician_flags", "labs_used", "missing_data", "nutrient_plan", "labs_review", "next_steps_ru", "disclaimer_ru"],
+    },
+}
 
 SUGGEST_STACK_JSON_SCHEMA = {
     "name": "supplement_stack_suggestion",
@@ -261,6 +300,7 @@ def _sync_call_nutrient_assistant(
         "instructions": instructions,
         "input": payload_json,
         "temperature": 0.1,
+        "text": {"format": NUTRIENT_ASSISTANT_JSON_SCHEMA},
     }
     if max_output_tokens is not None:
         params["max_output_tokens"] = max_output_tokens

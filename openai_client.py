@@ -170,21 +170,11 @@ NUTRIENT_ASSISTANT_JSON_SCHEMA = {
                         "stop_or_pause_rule_ru": {"type": "string"},
                         "cautions_ru": {"type": "array", "items": {"type": "string"}},
                         "interactions_ru": {"type": "array", "items": {"type": "string"}},
-                        "followup_kind": {"type": "string"},
-                        "followup_message": {"type": "string"},
-                        "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
-                        "safety_flags": {"type": "array", "items": {"type": "string"}},
-                        "physician_flags": {"type": "array", "items": {"type": "string"}},
-                        "missing_data": {"type": "array", "items": {"type": "string"}},
-                        "rationale_short_ru": {"type": "string"},
-                        "course_days": {"type": ["integer", "null"], "minimum": 1},
                     },
                     "required": [
                         "nutrient_code", "nutrient_name_ru", "status", "recommend_action", "dose_text_ru",
                         "frequency_text_ru", "duration_text_ru", "timing_text_ru", "with_food", "reason_ru",
                         "monitor_ru", "retest_after_text_ru", "stop_or_pause_rule_ru", "cautions_ru", "interactions_ru",
-                        "followup_kind", "followup_message", "confidence", "safety_flags", "physician_flags",
-                        "missing_data", "rationale_short_ru",
                     ],
                 },
             },
@@ -217,6 +207,43 @@ NUTRIENT_ASSISTANT_JSON_SCHEMA = {
         "required": ["summary_ru", "confidence", "safety_flags", "physician_flags", "labs_used", "missing_data", "nutrient_plan", "labs_review", "next_steps_ru", "disclaimer_ru"],
     },
 }
+
+
+def _validate_strict_schema_consistency(schema: dict, path: str = "schema") -> None:
+    if not isinstance(schema, dict):
+        return
+    node_type = schema.get("type")
+    if node_type == "object":
+        if schema.get("additionalProperties") is not False:
+            raise RuntimeError(f"Invalid strict schema at {path}: object node must set additionalProperties=false")
+        properties = schema.get("properties")
+        if not isinstance(properties, dict):
+            raise RuntimeError(f"Invalid strict schema at {path}: object node must define properties object")
+        required = schema.get("required")
+        if not isinstance(required, list):
+            raise RuntimeError(f"Invalid strict schema at {path}: object node must define required array")
+        prop_keys = set(properties.keys())
+        req_keys = {str(x) for x in required}
+        if req_keys != prop_keys:
+            missing_in_required = sorted(prop_keys - req_keys)
+            unknown_required = sorted(req_keys - prop_keys)
+            raise RuntimeError(
+                f"Invalid strict schema at {path}: required must match properties exactly; "
+                f"missing_in_required={missing_in_required}; unknown_required={unknown_required}"
+            )
+        for key, child in properties.items():
+            _validate_strict_schema_consistency(child, path=f"{path}.properties.{key}")
+    elif node_type == "array":
+        _validate_strict_schema_consistency(schema.get("items"), path=f"{path}.items")
+    else:
+        for key in ("anyOf", "oneOf", "allOf"):
+            variants = schema.get(key)
+            if isinstance(variants, list):
+                for idx, child in enumerate(variants):
+                    _validate_strict_schema_consistency(child, path=f"{path}.{key}[{idx}]")
+
+
+_validate_strict_schema_consistency(NUTRIENT_ASSISTANT_JSON_SCHEMA["schema"], path="NUTRIENT_ASSISTANT_JSON_SCHEMA.schema")
 
 SUGGEST_STACK_JSON_SCHEMA = {
     "name": "supplement_stack_suggestion",

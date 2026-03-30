@@ -1550,6 +1550,7 @@
       if (errPayload && typeof errPayload === 'object') {
         if (errPayload.code) err.code = String(errPayload.code);
         if (errPayload.message) err.serverMessage = String(errPayload.message);
+        if (errPayload.stage) err.stage = String(errPayload.stage);
       }
       throw err;
     }
@@ -4189,6 +4190,11 @@ function adminField(label, field, value, kind='input') {
       ? 'first_empty'
       : (resultOpened ? 'result_opened' : (draftFromHistory ? 'draft_from_history' : (hasHistory ? 'history_available' : 'draft_started')));
     const primaryAddLabel = assistantUiState === 'first_empty' ? 'Добавить первый анализ' : 'Добавить ещё';
+    const overflowActions = [];
+    if (hasHistory) overflowActions.push('use_latest');
+    if (hasAnyDraftLabs) overflowActions.push('save_draft', 'delete_draft');
+    const showOverflowMenu = overflowActions.length >= 2;
+    const showDirectUseLatest = !showOverflowMenu && hasHistory;
     const nutrients = Array.isArray(result?.nutrient_plan) ? result.nutrient_plan : [];
     const labsReview = Array.isArray(result?.labs_review) ? result.labs_review : [];
     const basisRun = history.find((x)=>Number(x.id)===Number(a.basisRunId || a.currentRunId || 0)) || null;
@@ -4233,10 +4239,11 @@ function adminField(label, field, value, kind='input') {
         <div class="row" style="margin-top:8px; gap:6px; flex-wrap:wrap; align-items:stretch">
           <button class="btn secondary" data-assistant-add-lab>${primaryAddLabel}</button>
           ${hasAnyDraftLabs && hasValidDraftLabs ? `<button class="btn" data-assistant-compute>${a.computing?'Считаем…':'Рассчитать'}</button>` : ''}
-          ${hasAnyDraftLabs ? `<button class="btn secondary" data-assistant-clear-labs>Очистить черновик</button>` : ''}
-          ${(hasHistory || hasAnyDraftLabs) ? `<details><summary class="btn secondary" style="list-style:none">Ещё</summary><div class="row" style="margin-top:6px; gap:6px; flex-wrap:wrap">
+          ${showDirectUseLatest ? `<button class="btn secondary" data-assistant-use-latest-labs>Взять набор из прошлого расчёта</button>` : ''}
+          ${showOverflowMenu ? `<details><summary class="btn secondary" style="list-style:none">Ещё</summary><div class="row" style="margin-top:6px; gap:6px; flex-wrap:wrap">
             ${hasHistory ? `<button class="btn secondary" data-assistant-use-latest-labs>Взять набор из прошлого расчёта</button>` : ''}
             ${hasAnyDraftLabs ? `<button class="btn secondary" data-assistant-save-draft>Сохранить черновик</button>` : ''}
+            ${hasAnyDraftLabs ? `<button class="btn secondary" data-assistant-clear-labs>Удалить черновик</button>` : ''}
           </div></details>` : ''}
         </div>
         ${!hasValidDraftLabs ? '<div class="muted" style="margin-top:8px">Чтобы рассчитать план, добавьте хотя бы один анализ с показателем и значением.</div>' : ''}
@@ -4453,6 +4460,8 @@ function adminField(label, field, value, kind='input') {
           showToast('Выберите версию для перезаписи');
         } else if (e.message === 'DAILY_LIMIT_ONE_REQUEST') {
           showToast('Лимит: после отмены доступен только 1 запрос в день');
+        } else if ((e.code || e.message) === 'ASSISTANT_COMPUTE_ERROR' && String(e.stage || '') === 'call_llm') {
+          showToast('Не удалось запустить расчёт. Исправляем формат ответа модели.');
         } else {
           showToast(e.message || 'Не удалось выполнить расчёт');
         }

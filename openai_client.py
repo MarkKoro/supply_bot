@@ -300,7 +300,14 @@ def _sync_call_nutrient_assistant(
         "instructions": instructions,
         "input": payload_json,
         "temperature": 0.1,
-        "text": {"format": NUTRIENT_ASSISTANT_JSON_SCHEMA},
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "name": NUTRIENT_ASSISTANT_JSON_SCHEMA["name"],
+                "strict": NUTRIENT_ASSISTANT_JSON_SCHEMA["strict"],
+                "schema": NUTRIENT_ASSISTANT_JSON_SCHEMA["schema"],
+            }
+        },
     }
     if max_output_tokens is not None:
         params["max_output_tokens"] = max_output_tokens

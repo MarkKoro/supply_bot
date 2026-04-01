@@ -2080,14 +2080,20 @@ async def api_profile_labs_upload(
 
 @app.get("/api/profile/nutrients")
 async def api_profile_nutrients_get(x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
-    await _auth_user_id(x_telegram_init_data)
-    return JSONResponse({"ok": False, "code": "NUTRIENT_ASSISTANT_DISABLED"}, status_code=410)
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    if not await _paid_premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "code": "PAID_PREMIUM_REQUIRED"}, status_code=403)
+    conn = await db.connect(s.DB_PATH)
+    try:
+        runs = await db.list_llm_assistant_runs(conn, tg_user_id, limit=20)
+        return JSONResponse({"ok": True, "runs": runs})
+    finally:
+        await conn.close()
 
 
 @app.get("/api/profile/nutrient-assistant/overview")
 async def api_profile_nutrient_overview_get(x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
-    await _auth_user_id(x_telegram_init_data)
-    return JSONResponse({"ok": False, "code": "NUTRIENT_ASSISTANT_DISABLED"}, status_code=410)
+    return await api_profile_nutrient_dashboard_get(x_telegram_init_data=x_telegram_init_data)
 
 
 @app.get("/api/profile/nutrient-assistant/dashboard")
@@ -2536,26 +2542,33 @@ async def api_profile_nutrient_coverage_report(x_telegram_init_data: str = Heade
 @app.get("/api/profile/nutrient-assistant/packs")
 async def api_profile_nutrient_packs_get(x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
     await _auth_user_id(x_telegram_init_data)
-    return JSONResponse({"ok": False, "code": "NUTRIENT_ASSISTANT_DISABLED"}, status_code=410)
+    return JSONResponse({"ok": True, "packs": []})
 
 
 @app.get("/api/profile/nutrient-assistant/packs/{pack_id}")
 async def api_profile_nutrient_pack_detail_get(pack_id: str, x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
     _ = pack_id
     await _auth_user_id(x_telegram_init_data)
-    return JSONResponse({"ok": False, "code": "NUTRIENT_ASSISTANT_DISABLED"}, status_code=410)
+    return JSONResponse({"ok": True, "pack": None})
 
 
 @app.post("/api/profile/nutrient-assistant/preview")
 async def api_profile_nutrient_preview(x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
-    await _auth_user_id(x_telegram_init_data)
-    return JSONResponse({"ok": False, "code": "NUTRIENT_ASSISTANT_DISABLED"}, status_code=410)
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    if not await _paid_premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "code": "PAID_PREMIUM_REQUIRED"}, status_code=403)
+    conn = await db.connect(s.DB_PATH)
+    try:
+        draft = await db.ensure_nutrient_assistant_draft(conn, tg_user_id)
+        runs = await db.list_llm_assistant_runs(conn, tg_user_id, limit=1)
+        return JSONResponse({"ok": True, "draft": draft, "last_run": (runs[0] if runs else None)})
+    finally:
+        await conn.close()
 
 
 @app.post("/api/profile/nutrient-assistant/plan")
 async def api_profile_nutrient_plan(x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
-    await _auth_user_id(x_telegram_init_data)
-    return JSONResponse({"ok": False, "code": "NUTRIENT_ASSISTANT_DISABLED"}, status_code=410)
+    return await api_profile_nutrient_preview(x_telegram_init_data=x_telegram_init_data)
 
 
 @app.get("/api/profile/nutrient-assistant/plans")
@@ -2699,41 +2712,67 @@ async def api_profile_nutrient_assistant_cancel(
 @app.post("/api/profile/nutrient-assistant/explain")
 async def api_profile_nutrient_explain(x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
     await _auth_user_id(x_telegram_init_data)
-    return JSONResponse({"ok": False, "code": "NUTRIENT_ASSISTANT_DISABLED"}, status_code=410)
+    return JSONResponse({"ok": True, "text_ru": "План сформирован на основе профиля, истории и анализов. Для деталей откройте карточку запуска плана."})
 
 
 @app.post("/api/profile/nutrient-assistant/plan/{plan_id}/activate-reminders")
 async def api_profile_nutrient_plan_activate_reminders(plan_id: int, x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
-    _ = plan_id
-    await _auth_user_id(x_telegram_init_data)
-    return JSONResponse({"ok": False, "code": "NUTRIENT_ASSISTANT_DISABLED"}, status_code=410)
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    if not await _paid_premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "code": "PAID_PREMIUM_REQUIRED"}, status_code=403)
+    conn = await db.connect(s.DB_PATH)
+    try:
+        activated = await db.activate_nutrient_reminders_for_plan(conn, tg_user_id, int(plan_id))
+        return JSONResponse({"ok": True, "activated": activated})
+    finally:
+        await conn.close()
 
 
 @app.get("/api/profile/nutrient-assistant/reminders")
 async def api_profile_nutrient_reminders_get(x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
-    await _auth_user_id(x_telegram_init_data)
-    return JSONResponse({"ok": False, "code": "NUTRIENT_ASSISTANT_DISABLED"}, status_code=410)
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    if not await _paid_premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "code": "PAID_PREMIUM_REQUIRED"}, status_code=403)
+    conn = await db.connect(s.DB_PATH)
+    try:
+        await db.process_due_nutrient_lifecycle(conn, limit=300)
+        reminders = await db.list_nutrient_followup_reminders(conn, tg_user_id, limit=100)
+        return JSONResponse({"ok": True, "reminders": reminders})
+    finally:
+        await conn.close()
 
 
 @app.post("/api/profile/nutrient-assistant/reminders/{reminder_id}/complete")
 async def api_profile_nutrient_reminder_complete(reminder_id: int, x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
-    _ = reminder_id
-    await _auth_user_id(x_telegram_init_data)
-    return JSONResponse({"ok": False, "code": "NUTRIENT_ASSISTANT_DISABLED"}, status_code=410)
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    conn = await db.connect(s.DB_PATH)
+    try:
+        ok = await db.update_nutrient_followup_reminder_status(conn, tg_user_id, int(reminder_id), "done")
+        return JSONResponse({"ok": bool(ok)})
+    finally:
+        await conn.close()
 
 
 @app.post("/api/profile/nutrient-assistant/reminders/{reminder_id}/dismiss")
 async def api_profile_nutrient_reminder_dismiss(reminder_id: int, x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
-    _ = reminder_id
-    await _auth_user_id(x_telegram_init_data)
-    return JSONResponse({"ok": False, "code": "NUTRIENT_ASSISTANT_DISABLED"}, status_code=410)
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    conn = await db.connect(s.DB_PATH)
+    try:
+        ok = await db.update_nutrient_followup_reminder_status(conn, tg_user_id, int(reminder_id), "dismissed")
+        return JSONResponse({"ok": bool(ok)})
+    finally:
+        await conn.close()
 
 
 @app.post("/api/profile/nutrient-assistant/reminders/{reminder_id}/snooze")
 async def api_profile_nutrient_reminder_snooze(reminder_id: int, x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
-    _ = reminder_id
-    await _auth_user_id(x_telegram_init_data)
-    return JSONResponse({"ok": False, "code": "NUTRIENT_ASSISTANT_DISABLED"}, status_code=410)
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    conn = await db.connect(s.DB_PATH)
+    try:
+        item = await db.snooze_nutrient_followup_reminder(conn, tg_user_id, int(reminder_id), days=2)
+        return JSONResponse({"ok": bool(item), "reminder": item})
+    finally:
+        await conn.close()
 
 
 @app.get("/api/body_map")
@@ -3331,7 +3370,6 @@ async def api_checkin_apply(body: CheckinApplyBody, x_telegram_init_data: str = 
             add_actions={"add", "adjust"},
             supplement_field="supplement_id",
             time_field="suggested_time",
-            only_times=created_times,
         )
         summary["new_time_groups"] = sorted(created_times)
         summary["reminders_added"] = reminders_added
@@ -3379,7 +3417,6 @@ async def api_recommendations_apply_all(body: RecommendationsApplyBody, x_telegr
             add_actions={"add", "adjust"},
             supplement_field="supplement_id",
             time_field="suggested_time",
-            only_times=created_times,
         )
         summary["new_time_groups"] = sorted(created_times)
         summary["reminders_added"] = reminders_added

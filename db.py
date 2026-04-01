@@ -9915,6 +9915,9 @@ async def process_due_nutrient_lifecycle(conn: aiosqlite.Connection, limit: int 
     now_iso = now_dt.isoformat()
     changed = 0
     reminders_created = 0
+    supplement_updates = 0
+    reminders_deleted = 0
+    reminders_restored = 0
     rows = await fetchall(
         conn,
         """SELECT id, user_id, nutrient_code, supplement_id, lifecycle_status, recommend_action,
@@ -9922,7 +9925,7 @@ async def process_due_nutrient_lifecycle(conn: aiosqlite.Connection, limit: int 
                   plan_snapshot_json
            FROM nutrient_plan_runs
            WHERE is_active=1
-             AND lifecycle_status IN ('active','review_required','retest_due')
+             AND lifecycle_status IN ('active','review_required','retest_due','paused')
            ORDER BY id ASC
            LIMIT ?""",
         (int(limit),),
@@ -9939,15 +9942,21 @@ async def process_due_nutrient_lifecycle(conn: aiosqlite.Connection, limit: int 
         next_status = None
         if lifecycle_status == "active" and course_end and course_end <= now_dt:
             pause_days = int(row["pause_days"] or 0)
+            review_due_next = ""
             if auto_stop:
-                next_status = "completed"
+                if pause_days > 0:
+                    next_status = "paused"
+                    review_due_next = (now_dt + timedelta(days=pause_days)).replace(microsecond=0).isoformat()
+                else:
+                    next_status = "completed"
             elif pause_days > 0:
                 next_status = "paused"
+                review_due_next = (now_dt + timedelta(days=pause_days)).replace(microsecond=0).isoformat()
             else:
                 next_status = "review_required"
             await conn.execute(
-                "UPDATE nutrient_plan_runs SET lifecycle_status=?, updated_at_utc=? WHERE id=?",
-                (next_status, now_iso, plan_id),
+                "UPDATE nutrient_plan_runs SET lifecycle_status=?, review_due_at_utc=?, updated_at_utc=? WHERE id=?",
+                (next_status, review_due_next, now_iso, plan_id),
             )
             changed += 1
             if auto_stop and int(row["supplement_id"] or 0) > 0 and str(row["recommend_action"] or "") in {"start", "continue"}:
@@ -9955,6 +9964,12 @@ async def process_due_nutrient_lifecycle(conn: aiosqlite.Connection, limit: int 
                     "UPDATE user_supplements SET is_active=0, enabled=0 WHERE user_id=? AND supplement_id=?",
                     (int(row["user_id"]), int(row["supplement_id"])),
                 )
+                await conn.execute(
+                    "DELETE FROM reminders WHERE user_id=? AND supplement_id=?",
+                    (int(row["user_id"]), int(row["supplement_id"])),
+                )
+                supplement_updates += 1
+                reminders_deleted += 1
             await conn.execute(
                 """INSERT OR IGNORE INTO nutrient_followup_reminders(
                     user_id, plan_run_id, followup_item_id, nutrient_code, reminder_type, source_type,
@@ -9968,6 +9983,36 @@ async def process_due_nutrient_lifecycle(conn: aiosqlite.Connection, limit: int 
                 ),
             )
             reminders_created += 1
+        if lifecycle_status == "paused" and review_due and review_due <= now_dt:
+            supplement_id = int(row["supplement_id"] or 0)
+            recommend_action = str(row["recommend_action"] or "")
+            if supplement_id > 0 and recommend_action in {"start", "continue"}:
+                await conn.execute(
+                    "UPDATE user_supplements SET is_active=1, enabled=1 WHERE user_id=? AND supplement_id=?",
+                    (int(row["user_id"]), supplement_id),
+                )
+                reminder_profile = await get_effective_reminders_for_supplement(conn, int(row["user_id"]), supplement_id)
+                for hhmm in list(reminder_profile.get("times") or []):
+                    norm_hhmm = _normalize_hhmm(str(hhmm or "").strip())
+                    if not norm_hhmm:
+                        continue
+                    await conn.execute(
+                        """INSERT INTO reminders(user_id, supplement_id, time_local, enabled, created_at)
+                           VALUES(?,?,?,?,?)
+                           ON CONFLICT(user_id, supplement_id, time_local) DO UPDATE SET enabled=excluded.enabled""",
+                        (int(row["user_id"]), supplement_id, norm_hhmm, 1, now_iso),
+                    )
+                    reminders_restored += 1
+                supplement_updates += 1
+            course_days = int(plan_snapshot.get("course_days") or 0) if str(plan_snapshot.get("course_days") or "").isdigit() else 0
+            next_end_iso = (now_dt + timedelta(days=course_days)).replace(microsecond=0).isoformat() if course_days > 0 else ""
+            await conn.execute(
+                """UPDATE nutrient_plan_runs
+                   SET lifecycle_status='active', course_started_at_utc=?, course_ends_at_utc=?, review_due_at_utc='', updated_at_utc=?
+                   WHERE id=?""",
+                (now_iso, next_end_iso, now_iso, plan_id),
+            )
+            changed += 1
         if lifecycle_status in {"active", "review_required"} and review_due and review_due <= now_dt:
             await conn.execute("UPDATE nutrient_plan_runs SET lifecycle_status='review_required', updated_at_utc=? WHERE id=?", (now_iso, plan_id))
             await conn.execute(
@@ -9999,7 +10044,13 @@ async def process_due_nutrient_lifecycle(conn: aiosqlite.Connection, limit: int 
             )
             reminders_created += 1
     await conn.commit()
-    return {"changed": changed, "reminders_created": reminders_created}
+    return {
+        "changed": changed,
+        "reminders_created": reminders_created,
+        "supplement_updates": supplement_updates,
+        "reminders_deleted": reminders_deleted,
+        "reminders_restored": reminders_restored,
+    }
 
 
 async def count_nutrient_reminders_sent_today(conn: aiosqlite.Connection, tg_user_id: int, tz_name: str | None) -> int:

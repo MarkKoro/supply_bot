@@ -967,7 +967,11 @@
       detailLoading: false,
       myNutrientsOpen: false,
       myPlans: [],
-      myPlansLoading: false
+      myPlansLoading: false,
+      usageLimit: 5,
+      usageCurrentMonth: 0,
+      stage: 1,
+      introOpen: false
     },
     profileUi: { editOpen: false, manualOpen: false, uploadOpen: false, reviewOpen: false, selectedReportId: null, uploading: false, savingManual: false, savingReview: false, activeModule: "organs" },
     guide: { active: null, step: 0, steps: [], rect: null, card: null, arrow: null },
@@ -3921,6 +3925,7 @@ function adminField(label, field, value, kind='input') {
     try {
       const res = await api('./api/profile/nutrient-assistant/dashboard');
       state.nutrientAssistant.history = Array.isArray(res.history) ? res.history : [];
+      state.nutrientAssistant.usageCurrentMonth = assistantUsageInCurrentMonth(state.nutrientAssistant.history);
     } catch {}
     state.nutrientAssistant.loadingHistory = false;
   }
@@ -3930,6 +3935,7 @@ function adminField(label, field, value, kind='input') {
     try {
       const res = await api('./api/profile/nutrient-assistant/plans');
       state.nutrientAssistant.history = Array.isArray(res.runs) ? res.runs : [];
+      state.nutrientAssistant.usageCurrentMonth = assistantUsageInCurrentMonth(state.nutrientAssistant.history);
     } catch {}
     state.nutrientAssistant.loadingHistory = false;
   }
@@ -3950,6 +3956,7 @@ function adminField(label, field, value, kind='input') {
       const draft = res.draft || {};
       state.nutrientAssistant.form = { ...(state.nutrientAssistant.form || {}), ...(draft.assistant_profile || {}) };
       state.nutrientAssistant.manualLabs = normalizeAssistantLabs(draft.labs || []);
+      state.nutrientAssistant.stage = detectAssistantStage(state.nutrientAssistant.form, state.nutrientAssistant.manualLabs);
       state.nutrientAssistant.draftUpdatedAt = String(draft.updated_at_utc || '');
       state.nutrientAssistant.draftSourceRunId = Number(draft.source_run_id || 0) || null;
     } catch {}
@@ -4329,6 +4336,30 @@ function adminField(label, field, value, kind='input') {
     return `<div class="modal-overlay" data-assistant-close-my-nutrients><section class="card modal-card" onclick="event.stopPropagation()"><div class="row"><strong>Мои нутриенты</strong><button class="btn secondary" data-assistant-close-my-nutrients>Закрыть</button></div><div class="muted" style="margin-top:8px">Активные протоколы и текущие рекомендации по нутриентам.</div><div style="margin-top:10px">${a.myPlansLoading ? '<div class="muted">Загружаем…</div>' : (plans.length ? plans.map((plan)=>`<div class="item-row" style="display:block"><div class="row"><strong>${esc(assistantNutrientNameRu(plan.nutrient_name_ru, plan.nutrient_code))}</strong><span class="chip">${esc(assistantStatusRu(plan.lifecycle_status) !== '—' ? assistantStatusRu(plan.lifecycle_status) : assistantOutcomeLabel(plan.recommend_action))}</span></div><div class="muted">Действие: ${esc(assistantOutcomeLabel(plan.recommend_action))} · До: ${esc(plan.course_ends_at_utc ? formatUtcShort(plan.course_ends_at_utc) : '—')}</div><div class="muted">Обновлено: ${esc(formatUtcShort(plan.updated_at_utc || plan.created_at_utc || ''))}</div><div class="row" style="margin-top:8px"><button class="btn secondary" data-assistant-remove-my-nutrient="${esc(plan.nutrient_code || '')}">Отменить нутриент</button></div></div>`).join('') : '<div class="muted">Активных нутриентов пока нет</div>')}</div></section></div>`;
   }
 
+  function assistantUsageInCurrentMonth(history = []){
+    const now = new Date();
+    const monthKey = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
+    return (Array.isArray(history) ? history : []).filter((row)=>String(row?.created_at || '').startsWith(monthKey)).length;
+  }
+  function detectAssistantStage(form = {}, draftLabs = []){
+    const hasPersonal = ['sleep_quality', 'stress_level', 'menstrual_status', 'heavy_menstrual_bleeding'].some((k)=>{
+      const value = form?.[k];
+      if (k === 'heavy_menstrual_bleeding') return value === true;
+      return String(value || '').trim() && String(value || '').trim() !== 'unknown' && String(value || '').trim() !== 'false';
+    });
+    if (!hasPersonal) return 1;
+    const hasNutrition = ['fish_intake_frequency', 'meat_intake_frequency', 'dairy_intake_frequency', 'egg_intake_frequency'].some((k)=>String(form?.[k] || '').trim() && String(form?.[k] || '').trim() !== 'unknown');
+    if (!hasNutrition) return 2;
+    const hasSymptoms = !!String(form?.primary_goal || '').trim() || (Array.isArray(form?.symptoms) && form.symptoms.length > 0) || !!String(form?.gi_problems_text || '').trim() || !!String(form?.thyroid_conditions_text || '').trim();
+    if (!hasSymptoms) return 3;
+    const hasLabs = (Array.isArray(draftLabs) ? draftLabs : []).some((row)=>assistantLabRowReady(row));
+    return hasLabs ? 4 : 3;
+  }
+  function assistantLimitResetDateRu(now = new Date()){
+    const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1, 0, 0, 0));
+    return d.toLocaleDateString('ru-RU', { day:'2-digit', month:'2-digit', year:'numeric', timeZone:'UTC' });
+  }
+
   function renderAssistantModule(profile, labs) {
     const a = state.nutrientAssistant;
     const form = a.form || {};
@@ -4360,31 +4391,46 @@ function adminField(label, field, value, kind='input') {
     const basisInput = selectedRun?.input_snapshot_json || {};
     const basisLabs = Array.isArray(basisInput?.labs) ? basisInput.labs : [];
     const detailActions = Array.isArray(a.detailPreparedActions) ? a.detailPreparedActions : [];
+    const usageLimit = Number(a.usageLimit || 5);
+    const usedThisMonth = assistantUsageInCurrentMonth(history);
+    const usageLeft = Math.max(0, usageLimit - usedThisMonth);
+    const shouldUseStepFlow = !hasHistory;
+    const visibleStage = shouldUseStepFlow ? Math.max(1, Number(a.stage || detectAssistantStage(form, draftLabs) || 1)) : 4;
+    const limitExhausted = usedThisMonth >= usageLimit;
+    const resetDateRu = assistantLimitResetDateRu();
     return `
-      <section class="card fade"><div class="row" style="flex-wrap:wrap; align-items:flex-start;"><strong>🧪 Нутриентный помощник</strong><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn secondary" data-assistant-open-my-nutrients>Мои нутриенты</button><button class="btn secondary" data-open-edit>Редактировать профиль</button></div></div><div class="profile-summary-grid" style="margin-top:8px">${summary}</div></section>
+      <section class="card fade"><div class="row" style="flex-wrap:wrap; align-items:flex-start;"><strong>🧪 Нутриентный помощник</strong><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn secondary" data-assistant-open-help>Как пользоваться</button><button class="btn secondary" data-assistant-open-my-nutrients>Мои нутриенты</button><button class="btn secondary" data-open-edit>Редактировать профиль</button></div></div><div class="profile-summary-grid" style="margin-top:8px">${summary}</div><div class="muted" style="margin-top:8px">Лимит: ${usedThisMonth}/${usageLimit} запросов в этом месяце · осталось ${usageLeft}</div></section>
+      ${limitExhausted ? `<section class="card fade"><div class="row"><strong>Лимит запросов исчерпан</strong></div><div class="muted" style="margin-top:8px">Новые расчёты снова станут доступны с ${esc(resetDateRu)} (UTC).</div></section>` : ''}
       <section class="card fade">
-        <div class="row"><strong>Данные для расчёта</strong></div>
+        <div class="row"><strong>${shouldUseStepFlow ? 'Шаг 1/3 · Личная информация' : 'Личная информация'}</strong>${(shouldUseStepFlow && visibleStage > 1) ? '<span class="chip">Сохранено</span>' : ''}</div>
         <div class="field-grid two" style="margin-top:8px">
           ${isMale ? '' : `<label class="muted">${assistantFieldLabel('Менструальный статус','menstrual_status',helpOpenKey)}<select class="select" data-assistant-field="menstrual_status">${selectOptions([['regular','Регулярный'],['irregular','Нерегулярный'],['postmenopause','Постменопауза'],['not_applicable','Неактуально'],['unknown','Неизвестно']], form.menstrual_status)}</select></label>`}
           ${isMale ? '' : `<label class="muted">${assistantFieldLabel('Обильные менструации','heavy_menstrual_bleeding',helpOpenKey)}<select class="select" data-assistant-field="heavy_menstrual_bleeding">${selectOptions([['false','Нет'],['true','Да']], String(!!form.heavy_menstrual_bleeding), 'Выберите')}</select></label>`}
+          <label class="muted">${assistantFieldLabel('Сон','sleep_quality',helpOpenKey)}<select class="select" data-assistant-field="sleep_quality">${selectOptions([['poor','Плохой'],['fair','Средний'],['good','Хороший'],['unknown','Неизвестно']], form.sleep_quality)}</select></label>
+          <label class="muted">${assistantFieldLabel('Стресс','stress_level',helpOpenKey)}<select class="select" data-assistant-field="stress_level">${selectOptions([['low','Низкий'],['medium','Средний'],['high','Высокий'],['unknown','Неизвестно']], form.stress_level)}</select></label>
+        </div>
+        ${(shouldUseStepFlow && visibleStage <= 1) ? '<div class="row" style="margin-top:8px"><button class="btn" data-assistant-stage-save="1">Сохранить и перейти к шагу 2</button></div>' : ''}
+      </section>
+      ${visibleStage >= 2 ? `<section class="card fade">
+        <div class="row"><strong>${shouldUseStepFlow ? 'Шаг 2/3 · Питание' : 'Питание'}</strong>${(shouldUseStepFlow && visibleStage > 2) ? '<span class="chip">Сохранено</span>' : ''}</div>
+        <div class="field-grid two" style="margin-top:8px">
           <label class="muted">${assistantFieldLabel('Рыба','fish_intake_frequency',helpOpenKey)}<select class="select" data-assistant-field="fish_intake_frequency">${selectOptions([['none','Не ем'],['rare','Редко'],['weekly','Еженедельно'],['often','Часто'],['unknown','Неизвестно']], form.fish_intake_frequency)}</select></label>
           <label class="muted">${assistantFieldLabel('Мясо','meat_intake_frequency',helpOpenKey)}<select class="select" data-assistant-field="meat_intake_frequency">${selectOptions([['none','Не ем'],['rare','Редко'],['weekly','Еженедельно'],['often','Часто'],['unknown','Неизвестно']], form.meat_intake_frequency)}</select></label>
           <label class="muted">${assistantFieldLabel('Молочные','dairy_intake_frequency',helpOpenKey)}<select class="select" data-assistant-field="dairy_intake_frequency">${selectOptions([['none','Не ем'],['rare','Редко'],['weekly','Еженедельно'],['often','Часто'],['unknown','Неизвестно']], form.dairy_intake_frequency)}</select></label>
           <label class="muted">${assistantFieldLabel('Яйца','egg_intake_frequency',helpOpenKey)}<select class="select" data-assistant-field="egg_intake_frequency">${selectOptions([['none','Не ем'],['rare','Редко'],['weekly','Еженедельно'],['often','Часто'],['unknown','Неизвестно']], form.egg_intake_frequency)}</select></label>
-          <label class="muted">${assistantFieldLabel('Сон','sleep_quality',helpOpenKey)}<select class="select" data-assistant-field="sleep_quality">${selectOptions([['poor','Плохой'],['fair','Средний'],['good','Хороший'],['unknown','Неизвестно']], form.sleep_quality)}</select></label>
-          <label class="muted">${assistantFieldLabel('Стресс','stress_level',helpOpenKey)}<select class="select" data-assistant-field="stress_level">${selectOptions([['low','Низкий'],['medium','Средний'],['high','Высокий'],['unknown','Неизвестно']], form.stress_level)}</select></label>
         </div>
-      </section>
-      <section class="card fade">
-        <div class="row"><strong>Симптомы и цель</strong></div>
+        ${(shouldUseStepFlow && visibleStage <= 2) ? '<div class="row" style="margin-top:8px"><button class="btn" data-assistant-stage-save="2">Сохранить и перейти к шагу 3</button></div>' : ''}
+      </section>` : ''}
+      ${visibleStage >= 3 ? `<section class="card fade">
+        <div class="row"><strong>${shouldUseStepFlow ? 'Шаг 3/3 · Симптомы и цель' : 'Симптомы и цель'}</strong></div>
         <div class="field-grid" style="margin-top:8px">
           <label class="muted">${assistantFieldLabel('Симптомы','symptoms',helpOpenKey)}<textarea class="textarea" data-assistant-field="symptoms">${esc((form.symptoms||[]).join('\n'))}</textarea></label>
           <label class="muted">${assistantFieldLabel('Главная цель','primary_goal',helpOpenKey)}<input class="input" data-assistant-field="primary_goal" value="${esc(form.primary_goal || '')}" placeholder="Например, больше энергии"/></label>
           <label class="muted">${assistantFieldLabel('ЖКТ','gi_problems_text',helpOpenKey)}<input class="input" data-assistant-field="gi_problems_text" value="${esc(form.gi_problems_text || '')}"/></label>
           <label class="muted">${assistantFieldLabel('Щитовидка','thyroid_conditions_text',helpOpenKey)}<input class="input" data-assistant-field="thyroid_conditions_text" value="${esc(form.thyroid_conditions_text || '')}"/></label>
         </div>
-      </section>
-      <section class="card fade">
+      </section>` : ''}
+      ${visibleStage >= 3 ? `<section class="card fade">
         <div class="row"><strong>Анализы</strong></div>
         ${assistantUiState === 'first_empty' ? `<div class="item-row" style="display:block; margin-top:8px">
           <div><strong>Как это работает</strong></div>
@@ -4398,7 +4444,7 @@ function adminField(label, field, value, kind='input') {
         <div id="assistantLabRows" style="margin-top:8px">${draftLabs.map((row,idx)=>renderAssistantLabRow(idx,row, Number(a.expandedLabIdx ?? 0) === idx)).join('')}</div>
         <div class="row" style="margin-top:8px; gap:6px; flex-wrap:wrap; align-items:stretch">
           <button class="btn secondary" data-assistant-add-lab>${primaryAddLabel}</button>
-          ${hasAnyDraftLabs && hasValidDraftLabs ? `<button class="btn" data-assistant-compute>${a.computing?'Считаем…':'Рассчитать'}</button>` : ''}
+          ${hasAnyDraftLabs && hasValidDraftLabs ? `<button class="btn" data-assistant-compute ${limitExhausted ? 'disabled' : ''}>${a.computing?'Считаем…':(limitExhausted ? 'Лимит исчерпан' : 'Рассчитать')}</button>` : ''}
           ${showDirectUseLatest ? `<button class="btn secondary" data-assistant-use-latest-labs>Взять набор из прошлого расчёта</button>` : ''}
           ${showOverflowMenu ? `<details><summary class="btn secondary" style="list-style:none">Ещё</summary><div class="row" style="margin-top:6px; gap:6px; flex-wrap:wrap">
             ${hasHistory ? `<button class="btn secondary" data-assistant-use-latest-labs>Взять набор из прошлого расчёта</button>` : ''}
@@ -4407,7 +4453,8 @@ function adminField(label, field, value, kind='input') {
           </div></details>` : ''}
         </div>
         ${!hasValidDraftLabs ? '<div class="muted" style="margin-top:8px">Чтобы рассчитать план, добавьте хотя бы один анализ с показателем и значением.</div>' : ''}
-      </section>
+      </section>` : ''}
+      ${a.introOpen ? `<div class="modal-overlay" data-assistant-close-help><section class="card modal-card" onclick="event.stopPropagation()"><div class="row"><strong>Вам доступно только 5 запросов в месяц</strong><button class="btn secondary" data-assistant-close-help>Закрыть</button></div><div class="muted" style="margin-top:8px">1) Заполните шаг 1 (личная информация) и нажмите сохранить.</div><div class="muted">2) Заполните шаг 2 (питание) и нажмите сохранить.</div><div class="muted">3) На шаге 3 добавьте симптомы/цель и затем анализы.</div><div class="muted">4) Нажмите «Рассчитать», чтобы получить план и рекомендации.</div></section></div>` : ''}
       ${resultData ? `<section class="card fade">
         <div class="row"><strong>Расчёт #${esc(selectedRun?.id || a.currentRunId || '—')}</strong><span class="chip">${esc(formatUtcShort(selectedRun?.created_at || ''))}</span></div>
         <div class="row" style="margin-top:8px"><strong>Результат помощника</strong></div>
@@ -4568,6 +4615,22 @@ function adminField(label, field, value, kind='input') {
       showToast('Черновик сохранён');
       renderActiveTab();
     });
+    document.querySelector('[data-assistant-open-help]')?.addEventListener('click', ()=>{
+      state.nutrientAssistant.introOpen = true;
+      renderActiveTab();
+    });
+    document.querySelectorAll('[data-assistant-close-help]').forEach((el)=>el.addEventListener('click', ()=>{
+      state.nutrientAssistant.introOpen = false;
+      renderActiveTab();
+    }));
+    document.querySelectorAll('[data-assistant-stage-save]').forEach((el)=>el.addEventListener('click', async ()=>{
+      const step = Number(el.dataset.assistantStageSave || 0);
+      state.nutrientAssistant.form = collectAssistantForm();
+      await saveNutrientDraft({ assistant_profile: state.nutrientAssistant.form }).catch(()=>null);
+      if (step >= 1 && state.nutrientAssistant.stage < 2) state.nutrientAssistant.stage = 2;
+      if (step >= 2 && state.nutrientAssistant.stage < 3) state.nutrientAssistant.stage = 3;
+      renderActiveTab();
+    }));
     document.querySelectorAll('[data-assistant-help-toggle]').forEach((el)=>el.addEventListener('click', (e)=>{
       e.preventDefault();
       e.stopPropagation();
@@ -4635,6 +4698,8 @@ function adminField(label, field, value, kind='input') {
           showToast('Выберите версию для перезаписи');
         } else if (e.message === 'DAILY_LIMIT_ONE_REQUEST') {
           showToast('Лимит: после отмены доступен только 1 запрос в день');
+        } else if (e.message === 'ASSISTANT_MONTHLY_LIMIT_REACHED') {
+          showToast('Достигнут лимит: 5 запросов в месяц');
         } else if ((e.code || e.message) === 'ASSISTANT_COMPUTE_ERROR' && String(e.stage || '') === 'call_llm') {
           showToast('Не удалось запустить расчёт. Исправляем формат ответа модели.');
         } else if ((e.code || e.message) === 'ASSISTANT_UPSTREAM_TIMEOUT' || Number(e.httpStatus || 0) === 504 || String(e.message || '') === 'HTTP_504') {
@@ -4721,8 +4786,14 @@ function adminField(label, field, value, kind='input') {
       scheduleAssistantDraftAutosave();
     }));
     document.querySelectorAll('[data-assistant-field]').forEach((el)=>{
-      el.addEventListener('input', scheduleAssistantDraftAutosave);
-      el.addEventListener('change', scheduleAssistantDraftAutosave);
+      const stagedAutosave = ()=>{
+        const preview = collectAssistantForm();
+        const autoStage = detectAssistantStage(preview, normalizeAssistantLabs(state.nutrientAssistant.manualLabs || []));
+        state.nutrientAssistant.stage = Math.max(Number(state.nutrientAssistant.stage || 1), autoStage);
+        scheduleAssistantDraftAutosave();
+      };
+      el.addEventListener('input', stagedAutosave);
+      el.addEventListener('change', stagedAutosave);
     });
     document.querySelectorAll('[data-assistant-overwrite]').forEach((el)=>el.addEventListener('click', ()=>{
       state.nutrientAssistant.pendingComputePayload = { replace_run_id: Number(el.dataset.assistantOverwrite || 0) };

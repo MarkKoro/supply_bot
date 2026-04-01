@@ -16,6 +16,7 @@ class Settings:
     AUTO_SEED_ON_START: bool
     OPENAI_API_KEY: str | None
     OPENAI_MODEL: str
+    OPENAI_NUTRIENT_ASSISTANT_MODEL: str
     OPENAI_TRANSCRIBE_MODEL: str
     OPENAI_STT_MODEL: str
     AI_MAX_PER_DAY: int
@@ -150,6 +151,7 @@ def get_settings() -> Settings:
         AUTO_SEED_ON_START=bool(int(os.getenv("AUTO_SEED_ON_START", "1").strip() or "1")),
         OPENAI_API_KEY=os.getenv("OPENAI_API_KEY", "").strip() or None,
         OPENAI_MODEL=os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip(),
+        OPENAI_NUTRIENT_ASSISTANT_MODEL=os.getenv("OPENAI_NUTRIENT_ASSISTANT_MODEL", "gpt-5-mini").strip(),
         OPENAI_TRANSCRIBE_MODEL=os.getenv("OPENAI_TRANSCRIBE_MODEL", "whisper-1").strip(),
         OPENAI_STT_MODEL=(
             os.getenv("OPENAI_STT_MODEL", "").strip()

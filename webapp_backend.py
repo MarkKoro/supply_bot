@@ -2310,7 +2310,7 @@ async def api_profile_nutrient_assistant_compute(
     conn = await db.connect(s.DB_PATH)
     try:
         stage = "check_daily_limit"
-        if await db.has_llm_assistant_cancel_today(conn, tg_user_id):
+        if (not is_admin_unlimited) and await db.has_llm_assistant_cancel_today(conn, tg_user_id):
             return JSONResponse({"ok": False, "code": "DAILY_LIMIT_ONE_REQUEST"}, status_code=429)
         stage = "load_history"
         history = await db.list_llm_assistant_runs_meta(conn, tg_user_id, limit=10)

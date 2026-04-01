@@ -4393,13 +4393,14 @@ function adminField(label, field, value, kind='input') {
     const detailActions = Array.isArray(a.detailPreparedActions) ? a.detailPreparedActions : [];
     const usageLimit = Number(a.usageLimit || 5);
     const usedThisMonth = assistantUsageInCurrentMonth(history);
+    const isAssistantAdminUnlimited = ['owner', 'admin'].includes(String(state.me?.role || '').toLowerCase());
     const usageLeft = Math.max(0, usageLimit - usedThisMonth);
     const shouldUseStepFlow = !hasHistory;
     const visibleStage = shouldUseStepFlow ? Math.max(1, Number(a.stage || detectAssistantStage(form, draftLabs) || 1)) : 4;
-    const limitExhausted = usedThisMonth >= usageLimit;
+    const limitExhausted = !isAssistantAdminUnlimited && usedThisMonth >= usageLimit;
     const resetDateRu = assistantLimitResetDateRu();
     return `
-      <section class="card fade"><div class="row" style="flex-wrap:wrap; align-items:flex-start;"><strong>🧪 Нутриентный помощник</strong><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn secondary" data-assistant-open-help>Как пользоваться</button><button class="btn secondary" data-assistant-open-my-nutrients>Мои нутриенты</button><button class="btn secondary" data-open-edit>Редактировать профиль</button></div></div><div class="profile-summary-grid" style="margin-top:8px">${summary}</div><div class="muted" style="margin-top:8px">Лимит: ${usedThisMonth}/${usageLimit} запросов в этом месяце · осталось ${usageLeft}</div></section>
+      <section class="card fade"><div class="row" style="flex-wrap:wrap; align-items:flex-start;"><strong>🧪 Нутриентный помощник</strong><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn secondary" data-assistant-open-help>Как пользоваться</button><button class="btn secondary" data-assistant-open-my-nutrients>Мои нутриенты</button><button class="btn secondary" data-open-edit>Редактировать профиль</button></div></div><div class="profile-summary-grid" style="margin-top:8px">${summary}</div><div class="muted" style="margin-top:8px">${isAssistantAdminUnlimited ? 'Для вашей роли лимиты запросов отключены.' : `Лимит: ${usedThisMonth}/${usageLimit} запросов в этом месяце · осталось ${usageLeft}`}</div></section>
       ${limitExhausted ? `<section class="card fade"><div class="row"><strong>Лимит запросов исчерпан</strong></div><div class="muted" style="margin-top:8px">Новые расчёты снова станут доступны с ${esc(resetDateRu)} (UTC).</div></section>` : ''}
       <section class="card fade">
         <div class="row"><strong>${shouldUseStepFlow ? 'Шаг 1/3 · Личная информация' : 'Личная информация'}</strong>${(shouldUseStepFlow && visibleStage > 1) ? '<span class="chip">Сохранено</span>' : ''}</div>

@@ -355,6 +355,7 @@ def _parse_labs_text(raw_text: str) -> tuple[list[dict], str]:
 
 
 ASSISTANT_PROMPT_VERSION = "v4"
+NUTRIENT_ASSISTANT_MONTHLY_LIMIT = 5
 
 
 def _norm_unit(value: str) -> str:
@@ -2309,10 +2310,25 @@ async def api_profile_nutrient_assistant_compute(
     conn = await db.connect(s.DB_PATH)
     try:
         stage = "check_daily_limit"
-        if await db.has_llm_assistant_cancel_today(conn, tg_user_id):
+        if (not is_admin_unlimited) and await db.has_llm_assistant_cancel_today(conn, tg_user_id):
             return JSONResponse({"ok": False, "code": "DAILY_LIMIT_ONE_REQUEST"}, status_code=429)
         stage = "load_history"
         history = await db.list_llm_assistant_runs_meta(conn, tg_user_id, limit=10)
+        month_key = datetime.now(timezone.utc).strftime("%Y-%m")
+        monthly_runs_count = sum(1 for h in history if str(h.get("created_at") or "").startswith(month_key))
+        if not is_admin_unlimited and monthly_runs_count >= NUTRIENT_ASSISTANT_MONTHLY_LIMIT:
+            reset_at_utc = (datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0) + timedelta(days=32)).replace(day=1)
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "code": "ASSISTANT_MONTHLY_LIMIT_REACHED",
+                    "limit": NUTRIENT_ASSISTANT_MONTHLY_LIMIT,
+                    "used": monthly_runs_count,
+                    "period": month_key,
+                    "reset_at_utc": reset_at_utc.isoformat(),
+                },
+                status_code=429,
+            )
         active_history = [h for h in history if str(h.get("status") or "") in {"ok", "applied", "cancelled"}]
         if not is_admin_unlimited and len(active_history) >= 3:
             if (replace_run_id or 0) <= 0:
@@ -2439,7 +2455,8 @@ async def api_profile_nutrient_assistant_compute(
             },
         }
         llm_payload = _prune_for_llm(llm_payload_raw) or {}
-        cfg = OpenAIConfig(api_key=s.OPENAI_API_KEY, model=s.OPENAI_MODEL)
+        assistant_model = (s.OPENAI_NUTRIENT_ASSISTANT_MODEL or "").strip() or s.OPENAI_MODEL
+        cfg = OpenAIConfig(api_key=s.OPENAI_API_KEY, model=assistant_model)
         stage = "call_llm"
         used_timeout_fallback = False
         try:
@@ -2466,7 +2483,7 @@ async def api_profile_nutrient_assistant_compute(
             run_id = await db.create_llm_assistant_run(
                 conn, tg_user_id,
                 prompt_version=ASSISTANT_PROMPT_VERSION,
-                model_name=s.OPENAI_MODEL,
+                model_name=assistant_model,
                 input_snapshot=llm_payload,
                 response_json={"raw_text": raw_response, "reason": invalid_reason},
                 status="invalid_contract" if invalid_reason != "invalid_json" else "invalid_json",
@@ -2501,7 +2518,7 @@ async def api_profile_nutrient_assistant_compute(
                 run_id = await db.create_llm_assistant_run(
                     conn, tg_user_id,
                     prompt_version=ASSISTANT_PROMPT_VERSION,
-                    model_name=s.OPENAI_MODEL,
+                    model_name=assistant_model,
                     input_snapshot=stronger_payload,
                     response_json={"raw_text": retry_raw, "parsed": retry_parsed or {}, "reason": retry_reason or "LLM_INCOMPLETE_LABS_COVERAGE", "missing_labs": retry_missing or missing_labs},
                     status="incomplete_labs_review",
@@ -2515,7 +2532,7 @@ async def api_profile_nutrient_assistant_compute(
         run_id = await db.create_llm_assistant_run(
             conn, tg_user_id,
             prompt_version=ASSISTANT_PROMPT_VERSION,
-            model_name=s.OPENAI_MODEL,
+            model_name=assistant_model,
             input_snapshot=llm_payload,
             response_json=parsed,
             status="ok_timeout_fallback" if used_timeout_fallback else "ok",

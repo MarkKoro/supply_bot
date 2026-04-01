@@ -19,6 +19,8 @@ from telegram_webapp_auth import verify_init_data
 import db
 import engine
 from settings import get_settings
+from openai import APIConnectionError, APITimeoutError
+
 from openai_client import OpenAIConfig, _sync_call, nutrient_assistant_single_call
 from achievements import THEMES, TAB_SKINS, BADGES
 
@@ -508,6 +510,23 @@ async def _compute_assistant_with_retry(cfg: OpenAIConfig, llm_payload: dict, re
         if valid:
             return last_raw, parsed, ""
     return last_raw, None, reason
+
+
+def _timeout_failsafe_payload(llm_payload: dict) -> dict:
+    payload = dict(llm_payload or {})
+    compact = dict(payload.get("assistant_context") or {})
+    compact["timeout_failsafe"] = True
+    compact["payload_compaction"] = "labs<=24,stack<=12,trim_text"
+    payload["assistant_context"] = compact
+    payload["labs"] = _compact_labs_for_llm(list(payload.get("labs") or []), max_items=24, max_per_analyte=1)
+    payload["active_stack"] = list(payload.get("active_stack") or [])[:12]
+
+    profile = dict(payload.get("user_profile") or {})
+    for key in ("symptoms_other_free_text", "primary_goal"):
+        if str(profile.get(key) or "") and len(str(profile.get(key) or "")) > 300:
+            profile[key] = str(profile.get(key) or "")[:300]
+    payload["user_profile"] = profile
+    return payload
 
 
 def _fallback_profile_value(assistant_profile: dict, profile: dict, key: str, default: str = "unknown") -> str:
@@ -2250,7 +2269,7 @@ async def api_profile_nutrient_assistant_compute(
         if await db.has_llm_assistant_cancel_today(conn, tg_user_id):
             return JSONResponse({"ok": False, "code": "DAILY_LIMIT_ONE_REQUEST"}, status_code=429)
         stage = "load_history"
-        history = await db.list_llm_assistant_runs(conn, tg_user_id, limit=10)
+        history = await db.list_llm_assistant_runs_meta(conn, tg_user_id, limit=10)
         active_history = [h for h in history if str(h.get("status") or "") in {"ok", "applied", "cancelled"}]
         if not is_admin_unlimited and len(active_history) >= 3:
             if (replace_run_id or 0) <= 0:
@@ -2292,7 +2311,9 @@ async def api_profile_nutrient_assistant_compute(
                 }, sex_key=sex_key)
                 for x in latest
             ]
-        labs_for_llm = _compact_labs_for_llm(labs, max_items=80)
+        # Keep payload compact and stable:
+        # only latest value per analyte (with date) is enough for compute.
+        labs_for_llm = _compact_labs_for_llm(labs, max_items=40, max_per_analyte=1)
         labs_count = len(labs_for_llm)
 
         birth_year = int(profile.get("birth_year") or 0) if str(profile.get("birth_year") or "").isdigit() else None
@@ -2377,7 +2398,12 @@ async def api_profile_nutrient_assistant_compute(
         llm_payload = _prune_for_llm(llm_payload_raw) or {}
         cfg = OpenAIConfig(api_key=s.OPENAI_API_KEY, model=s.OPENAI_MODEL)
         stage = "call_llm"
-        raw_response, parsed, invalid_reason = await _compute_assistant_with_retry(cfg, llm_payload, retries=0)
+        try:
+            raw_response, parsed, invalid_reason = await _compute_assistant_with_retry(cfg, llm_payload, retries=0)
+        except (APITimeoutError, APIConnectionError, TimeoutError):
+            stage = "call_llm_failsafe"
+            compact_payload = _timeout_failsafe_payload(llm_payload)
+            raw_response, parsed, invalid_reason = await _compute_assistant_with_retry(cfg, compact_payload, retries=0)
         if not parsed:
             stage = "save_invalid_run"
             run_id = await db.create_llm_assistant_run(
@@ -2398,7 +2424,12 @@ async def api_profile_nutrient_assistant_compute(
             stronger_context["strict_labs_review_required_codes"] = sorted({str(x.get("analyte_code") or "") for x in labs_for_llm if str(x.get("analyte_code") or "")})
             stronger_context["strict_labs_review_note"] = "Нельзя пропускать ни один analyte_code из входа в массиве labs_review."
             stronger_payload["assistant_context"] = stronger_context
-            retry_raw = await nutrient_assistant_single_call(cfg, payload=stronger_payload)
+            try:
+                retry_raw = await nutrient_assistant_single_call(cfg, payload=stronger_payload)
+            except (APITimeoutError, APIConnectionError, TimeoutError):
+                stage = "call_llm_strict_retry_failsafe"
+                stronger_payload = _timeout_failsafe_payload(stronger_payload)
+                retry_raw = await nutrient_assistant_single_call(cfg, payload=stronger_payload)
             retry_parsed = _extract_json_object(retry_raw)
             valid_retry, retry_reason = _validate_assistant_response(retry_parsed or {})
             retry_complete = False
@@ -2715,15 +2746,16 @@ async def api_profile_nutrient_plan_remove(
         code = str(nutrient_code or "").strip().lower()
         if not code:
             return JSONResponse({"ok": False, "code": "INVALID_NUTRIENT_CODE"}, status_code=400)
-        removed = await db.deactivate_active_nutrient_plans(conn, tg_user_id, code)
-        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-        user_id = await db.get_or_create_user(conn, tg_user_id)
-        await conn.execute(
-            "UPDATE nutrient_followup_reminders SET status='obsolete', updated_at_utc=? WHERE user_id=? AND nutrient_code=? AND status IN ('scheduled','sent','snoozed')",
-            (now, user_id, code),
+        result = await db.remove_nutrient_code_from_user_stack(conn, tg_user_id, code)
+        return JSONResponse(
+            {
+                "ok": True,
+                "removed": int(result.get("removed_plans") or 0),
+                "removed_stack_items": int(result.get("removed_stack_items") or 0),
+                "supplement_ids": list(result.get("supplement_ids") or []),
+                "nutrient_code": code,
+            }
         )
-        await conn.commit()
-        return JSONResponse({"ok": True, "removed": int(removed), "nutrient_code": code})
     finally:
         await conn.close()
 

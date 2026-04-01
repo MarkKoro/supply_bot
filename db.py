@@ -9142,19 +9142,6 @@ async def ensure_nutrient_assistant_draft(conn: aiosqlite.Connection, tg_user_id
     if existing:
         return existing
     profile = await get_user_health_profile(conn, tg_user_id)
-    history = await list_llm_assistant_runs(conn, tg_user_id, limit=1)
-    if history:
-        latest = history[0]
-        input_snapshot = latest.get("input_snapshot_json") if isinstance(latest, dict) else {}
-        if isinstance(input_snapshot, dict):
-            return await upsert_nutrient_assistant_draft(
-                conn,
-                tg_user_id,
-                assistant_profile=dict((input_snapshot.get("user_profile") or {})),
-                labs=list(input_snapshot.get("labs") or []),
-                compute_scope={},
-                source_run_id=int(latest.get("id") or 0) or None,
-            )
     return await upsert_nutrient_assistant_draft(conn, tg_user_id, assistant_profile=profile or {}, labs=[], compute_scope={}, source_run_id=None)
 
 

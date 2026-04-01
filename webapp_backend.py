@@ -538,6 +538,67 @@ def _to_iso_date(raw: str | None) -> str:
     return ""
 
 
+def _compact_labs_for_llm(
+    labs: list[dict],
+    *,
+    max_items: int = 80,
+    max_per_analyte: int = 2,
+) -> list[dict]:
+    # Preserve signal while keeping payload compact:
+    # - include up to N latest values per analyte (for trend context),
+    # - cap total size to avoid LLM/proxy timeouts.
+    grouped: dict[str, list[dict]] = {}
+    uncoded: list[dict] = []
+    for lab in list(labs or []):
+        item = dict(lab or {})
+        code = str(item.get("analyte_code") or "").strip()
+        if not code:
+            uncoded.append(item)
+            continue
+        grouped.setdefault(code, []).append(item)
+
+    selected: list[dict] = []
+    for code, items in grouped.items():
+        _ = code
+        items.sort(key=lambda x: str(x.get("measured_at") or ""), reverse=True)
+        selected.extend(items[: max(1, int(max_per_analyte))])
+
+    selected.extend(uncoded)
+    selected.sort(
+        key=lambda x: (
+            str(x.get("measured_at") or ""),
+            str(x.get("analyte_code") or ""),
+            str(x.get("analyte_name_ru") or ""),
+        ),
+        reverse=True,
+    )
+    return selected[: max(1, int(max_items))]
+
+
+def _prune_for_llm(value):
+    if isinstance(value, dict):
+        out: dict = {}
+        for k, v in value.items():
+            pv = _prune_for_llm(v)
+            if pv is None:
+                continue
+            out[k] = pv
+        return out or None
+    if isinstance(value, list):
+        out_list = [x for x in (_prune_for_llm(v) for v in value) if x is not None]
+        return out_list or None
+    if value is None:
+        return None
+    if isinstance(value, str):
+        txt = value.strip()
+        if not txt:
+            return None
+        if txt.lower() in {"unknown", "na", "n/a"}:
+            return None
+        return txt
+    return value
+
+
 def _normalize_assistant_lab_item(item: dict, sex_key: str = "any") -> dict:
     analyte_code = _canonical_analyte_code(str(item.get("analyte_code") or item.get("code") or ""))
     registry_item = ASSISTANT_ANALYTE_REGISTRY.get(analyte_code) or {}
@@ -2231,7 +2292,8 @@ async def api_profile_nutrient_assistant_compute(
                 }, sex_key=sex_key)
                 for x in latest
             ]
-        labs_count = len(labs)
+        labs_for_llm = _compact_labs_for_llm(labs, max_items=80)
+        labs_count = len(labs_for_llm)
 
         birth_year = int(profile.get("birth_year") or 0) if str(profile.get("birth_year") or "").isdigit() else None
         current_year = int(db.get_user_local_date(None).split("-")[0])
@@ -2289,9 +2351,7 @@ async def api_profile_nutrient_assistant_compute(
             if int(item.get("is_active") or 0) != 1:
                 continue
             started_days = _days_since_iso(str(item.get("created_at") or ""))
-            dose = str(item.get("dose_text") or "")
-            if started_days is not None:
-                dose = f"{dose} (принимает {started_days} дн.)".strip()
+            dose = str(item.get("dose_text") or "").strip()
             active_stack_payload.append(
                 {
                     "supplement_name": str(item.get("name_ru") or item.get("name_en") or item.get("name") or ""),
@@ -2299,14 +2359,13 @@ async def api_profile_nutrient_assistant_compute(
                     "dose_text": dose,
                     "frequency_text": "daily",
                     "started_days_ago": started_days,
-                    "note_text": str(item.get("note_text") or ""),
                 }
             )
 
-        llm_payload = {
+        llm_payload_raw = {
             "user_profile": user_profile_payload,
             "active_stack": active_stack_payload,
-            "labs": labs,
+            "labs": labs_for_llm,
             "assistant_context": {
                 "request_source": "webapp",
                 "language": "ru",
@@ -2315,9 +2374,10 @@ async def api_profile_nutrient_assistant_compute(
                 **dict(body.assistant_context or {}),
             },
         }
+        llm_payload = _prune_for_llm(llm_payload_raw) or {}
         cfg = OpenAIConfig(api_key=s.OPENAI_API_KEY, model=s.OPENAI_MODEL)
         stage = "call_llm"
-        raw_response, parsed, invalid_reason = await _compute_assistant_with_retry(cfg, llm_payload, retries=2)
+        raw_response, parsed, invalid_reason = await _compute_assistant_with_retry(cfg, llm_payload, retries=0)
         if not parsed:
             stage = "save_invalid_run"
             run_id = await db.create_llm_assistant_run(
@@ -2330,12 +2390,12 @@ async def api_profile_nutrient_assistant_compute(
             )
             await conn.commit()
             return JSONResponse({"ok": False, "code": "LLM_INVALID_CONTRACT", "reason": invalid_reason, "run_id": run_id}, status_code=422)
-        complete_labs, missing_labs = _labs_review_coverage(parsed, labs)
+        complete_labs, missing_labs = _labs_review_coverage(parsed, labs_for_llm)
         if not complete_labs:
             stage = "call_llm_strict_retry"
             stronger_payload = dict(llm_payload)
             stronger_context = dict(stronger_payload.get("assistant_context") or {})
-            stronger_context["strict_labs_review_required_codes"] = sorted({str(x.get("analyte_code") or "") for x in labs if str(x.get("analyte_code") or "")})
+            stronger_context["strict_labs_review_required_codes"] = sorted({str(x.get("analyte_code") or "") for x in labs_for_llm if str(x.get("analyte_code") or "")})
             stronger_context["strict_labs_review_note"] = "Нельзя пропускать ни один analyte_code из входа в массиве labs_review."
             stronger_payload["assistant_context"] = stronger_context
             retry_raw = await nutrient_assistant_single_call(cfg, payload=stronger_payload)
@@ -2344,7 +2404,7 @@ async def api_profile_nutrient_assistant_compute(
             retry_complete = False
             retry_missing: list[str] = []
             if valid_retry and retry_parsed:
-                retry_complete, retry_missing = _labs_review_coverage(retry_parsed, labs)
+                retry_complete, retry_missing = _labs_review_coverage(retry_parsed, labs_for_llm)
             if valid_retry and retry_complete and retry_parsed:
                 raw_response = retry_raw
                 parsed = retry_parsed
@@ -2361,7 +2421,7 @@ async def api_profile_nutrient_assistant_compute(
                 await conn.commit()
                 return JSONResponse({"ok": False, "code": "LLM_INCOMPLETE_LABS_COVERAGE", "missing_labs": retry_missing or missing_labs, "run_id": run_id}, status_code=422)
         stage = "enrich_execution_fields"
-        parsed = enrich_nutrient_plan_items_for_execution(parsed, context={"labs": labs, "assistant_profile": assistant_profile})
+        parsed = enrich_nutrient_plan_items_for_execution(parsed, context={"labs": labs_for_llm, "assistant_profile": assistant_profile})
 
         stage = "create_run"
         run_id = await db.create_llm_assistant_run(
@@ -2440,6 +2500,8 @@ async def api_profile_nutrient_assistant_compute(
             )
         now_utc = datetime.now(timezone.utc).replace(microsecond=0)
         stage = "materialize_plan_runs"
+        latest_lab_rows = await db.list_latest_lab_results(conn, tg_user_id, limit=1)
+        latest_lab_at_utc = max([str(x.get("created_at_utc") or "") for x in latest_lab_rows] or [""])
         for action in prepared_actions:
             code = str(action.get("nutrient_code") or "")
             supp = await db.find_supplement_by_slug_or_name(conn, code or None, str(action.get("nutrient_name_ru") or "") or None)
@@ -2466,7 +2528,7 @@ async def api_profile_nutrient_assistant_compute(
             }
             preview_snapshot = {
                 "profile_snapshot": profile,
-                "latest_lab_at_utc": max([str(x.get("created_at_utc") or "") for x in (await db.list_latest_lab_results(conn, tg_user_id, limit=1))] or [""]),
+                "latest_lab_at_utc": latest_lab_at_utc,
                 "stack_updated_at_utc": now_utc.isoformat(),
             }
             stage = "create_plan_run"
@@ -2492,6 +2554,7 @@ async def api_profile_nutrient_assistant_compute(
         return JSONResponse({"ok": True, "run_id": run_id, "result": parsed, "prepared_actions": prepared_actions})
     except Exception as exc:
         await conn.rollback()
+        exc_type = type(exc).__name__
         log.exception(
             "nutrient assistant compute failed debug_id=%s stage=%s tg_user_id=%s replace_run_id=%s labs_count=%s prepared_actions_count=%s exc_type=%s exc_msg=%s",
             debug_id,
@@ -2500,13 +2563,20 @@ async def api_profile_nutrient_assistant_compute(
             replace_run_id,
             labs_count,
             prepared_actions_count,
-            type(exc).__name__,
+            exc_type,
             str(exc),
         )
         payload = {"ok": False, "code": "ASSISTANT_COMPUTE_ERROR", "stage": stage, "debug_id": debug_id}
+        status_code = 500
         if str(stage).startswith("call_llm"):
-            payload["message_ru"] = "Не удалось получить ответ ассистента. Попробуйте ещё раз через минуту."
-        return JSONResponse(payload, status_code=500)
+            if exc_type in {"APITimeoutError", "APIConnectionError", "TimeoutError"}:
+                status_code = 504
+                payload["code"] = "ASSISTANT_UPSTREAM_TIMEOUT"
+                payload["message_ru"] = "Сервис расчёта не успел ответить вовремя."
+                payload["action_ru"] = "Подождите 30–60 секунд и повторите расчёт. Если ошибка повторится, временно оставьте только самые свежие анализы и попробуйте снова."
+            else:
+                payload["message_ru"] = "Не удалось получить ответ ассистента. Попробуйте ещё раз через минуту."
+        return JSONResponse(payload, status_code=status_code)
     finally:
         await conn.close()
 

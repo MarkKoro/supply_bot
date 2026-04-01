@@ -1554,10 +1554,13 @@
     const errPayload = detail || data;
     if (!res.ok || data.ok === false || (detail && detail.ok === false)) {
       const err = new Error(errPayload?.message || errPayload?.error || errPayload?.code || data?.message || data?.error || data?.code || `HTTP_${res.status}`);
+      err.httpStatus = res.status;
       if (errPayload && typeof errPayload === 'object') {
         if (errPayload.code) err.code = String(errPayload.code);
         if (errPayload.message) err.serverMessage = String(errPayload.message);
         if (errPayload.stage) err.stage = String(errPayload.stage);
+        if (errPayload.message_ru) err.messageRu = String(errPayload.message_ru);
+        if (errPayload.action_ru) err.actionRu = String(errPayload.action_ru);
       }
       throw err;
     }
@@ -4634,6 +4637,8 @@ function adminField(label, field, value, kind='input') {
           showToast('Лимит: после отмены доступен только 1 запрос в день');
         } else if ((e.code || e.message) === 'ASSISTANT_COMPUTE_ERROR' && String(e.stage || '') === 'call_llm') {
           showToast('Не удалось запустить расчёт. Исправляем формат ответа модели.');
+        } else if ((e.code || e.message) === 'ASSISTANT_UPSTREAM_TIMEOUT' || Number(e.httpStatus || 0) === 504 || String(e.message || '') === 'HTTP_504') {
+          showToast((e.messageRu || 'Расчёт занял слишком много времени. ') + (e.actionRu || 'Подождите 30–60 секунд и запустите расчёт ещё раз.'));
         } else {
           showToast(e.message || 'Не удалось выполнить расчёт');
         }

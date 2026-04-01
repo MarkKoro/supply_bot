@@ -4663,7 +4663,11 @@ function adminField(label, field, value, kind='input') {
       try {
         await api(`./api/profile/nutrient-assistant/my/${code}/remove`, { method:'POST', body:{} });
         showToast('Нутриент удалён из текущего плана');
-        await loadMyNutrientPlans(true);
+        await Promise.all([
+          loadMyNutrientPlans(true),
+          loadMySupplements(true),
+          loadToday({ force: true, silent: true }),
+        ]);
       } catch (e) {
         showToast(e.message || 'Не удалось удалить нутриент');
       }

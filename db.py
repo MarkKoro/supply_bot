@@ -9184,6 +9184,17 @@ async def list_llm_assistant_runs(conn: aiosqlite.Connection, tg_user_id: int, l
     return out
 
 
+async def list_llm_assistant_runs_meta(conn: aiosqlite.Connection, tg_user_id: int, limit: int = 20) -> list[dict]:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    rows = await fetchall(
+        conn,
+        """SELECT id, created_at, status, is_active, applied_at
+           FROM llm_assistant_runs WHERE user_id=? ORDER BY id DESC LIMIT ?""",
+        (user_id, max(1, int(limit))),
+    )
+    return [dict(row) for row in rows]
+
+
 async def delete_llm_assistant_run(conn: aiosqlite.Connection, tg_user_id: int, run_id: int) -> bool:
     user_id = await get_or_create_user(conn, int(tg_user_id))
     await conn.execute("DELETE FROM llm_assistant_plan_actions WHERE user_id=? AND run_id=?", (user_id, int(run_id)))
@@ -9441,6 +9452,73 @@ async def deactivate_active_nutrient_plans(conn: aiosqlite.Connection, tg_user_i
         (utc_now_iso(), user_id, str(nutrient_code or "").lower()),
     )
     return int(cur.rowcount or 0)
+
+
+async def remove_nutrient_code_from_user_stack(conn: aiosqlite.Connection, tg_user_id: int, nutrient_code: str) -> dict:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    code = str(nutrient_code or "").strip().lower()
+    if not code:
+        return {"removed_plans": 0, "removed_stack_items": 0, "supplement_ids": []}
+
+    now = utc_now_iso()
+    plan_rows = await fetchall(
+        conn,
+        """SELECT supplement_id
+           FROM nutrient_plan_runs
+           WHERE user_id=? AND nutrient_code=? AND is_active=1 AND supplement_id IS NOT NULL""",
+        (user_id, code),
+    )
+    action_rows = await fetchall(
+        conn,
+        """SELECT supplement_id
+           FROM llm_assistant_plan_actions
+           WHERE user_id=? AND nutrient_code=? AND status='applied' AND supplement_id IS NOT NULL""",
+        (user_id, code),
+    )
+    supplement_ids = sorted(
+        {
+            int(r["supplement_id"] or 0)
+            for r in [*plan_rows, *action_rows]
+            if int(r["supplement_id"] or 0) > 0
+        }
+    )
+
+    removed_plans = await deactivate_active_nutrient_plans(conn, int(tg_user_id), code)
+    await conn.execute(
+        "UPDATE llm_assistant_plan_actions SET status='superseded', updated_at=? WHERE user_id=? AND nutrient_code=? AND status='applied'",
+        (now, user_id, code),
+    )
+    await conn.execute(
+        "UPDATE nutrient_followup_reminders SET status='obsolete', updated_at_utc=? WHERE user_id=? AND nutrient_code=? AND status IN ('scheduled','sent','snoozed')",
+        (now, user_id, code),
+    )
+
+    removed_stack_items = 0
+    if supplement_ids:
+        placeholders = ",".join("?" for _ in supplement_ids)
+        stack_cur = await conn.execute(
+            f"UPDATE user_supplements SET is_active=0, enabled=0 WHERE user_id=? AND supplement_id IN ({placeholders})",
+            (user_id, *supplement_ids),
+        )
+        removed_stack_items = int(stack_cur.rowcount or 0)
+        await conn.execute(
+            f"DELETE FROM reminders WHERE user_id=? AND supplement_id IN ({placeholders})",
+            (int(tg_user_id), *supplement_ids),
+        )
+        await conn.execute(
+            f"DELETE FROM user_schedules WHERE user_id=? AND supplement_id IN ({placeholders})",
+            (user_id, *supplement_ids),
+        )
+        await conn.execute(
+            f"DELETE FROM day_plan_items WHERE user_id=? AND supplement_id IN ({placeholders}) AND source='ai'",
+            (user_id, *supplement_ids),
+        )
+    await conn.commit()
+    return {
+        "removed_plans": int(removed_plans),
+        "removed_stack_items": int(removed_stack_items),
+        "supplement_ids": supplement_ids,
+    }
 
 
 async def create_nutrient_plan_run(

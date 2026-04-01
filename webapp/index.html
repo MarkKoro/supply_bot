@@ -4169,6 +4169,67 @@ function adminField(label, field, value, kind='input') {
   function assistantOutcomeLabel(action){
     return ({start:'Старт',continue:'Продолжить',stop:'Остановить',do_not_start:'Не начинать',discuss_with_physician:'Обсудить с врачом',retest_only:'Только пересдать'})[String(action||'')] || action || '—';
   }
+  function assistantStatusRu(status){
+    return ({
+      active: 'Активно',
+      history: 'История',
+      prepared: 'Подготовлено',
+      applied: 'Применено',
+      stopped: 'Остановлено',
+      expired: 'Завершено',
+      draft: 'Черновик'
+    })[String(status || '').trim().toLowerCase()] || '—';
+  }
+  function assistantInterpretationRu(value){
+    return ({
+      low: 'Ниже нормы',
+      normal: 'В норме',
+      high: 'Выше нормы',
+      unclear: 'Недостаточно данных'
+    })[String(value || '').trim().toLowerCase()] || 'Недостаточно данных';
+  }
+  function assistantReferenceSourceRu(value){
+    return ({
+      registry: 'реестр',
+      user: 'пользователь',
+      unknown: 'не указан'
+    })[String(value || '').trim().toLowerCase()] || 'не указан';
+  }
+  function assistantProfileValueRu(value){
+    const key = String(value || '').trim().toLowerCase();
+    const map = {
+      m: 'мужской',
+      f: 'женский',
+      unknown: 'не указано',
+      na: 'не указано',
+      omnivore: 'смешанное',
+      pescatarian: 'пескетарианство',
+      vegetarian: 'вегетарианство',
+      vegan: 'веганство',
+      low: 'низкий',
+      medium: 'средний',
+      high: 'высокий'
+    };
+    return map[key] || (value ? String(value) : 'не указано');
+  }
+  function assistantNutrientNameRu(nameRu, nutrientCode){
+    const ru = String(nameRu || '').trim();
+    if (ru) return ru;
+    const code = String(nutrientCode || '').trim().toLowerCase();
+    const map = {
+      vitamin_d: 'Витамин D',
+      vitamin_b12: 'Витамин B12',
+      vitamin_b9: 'Витамин B9',
+      vitamin_b6: 'Витамин B6',
+      vitamin_c: 'Витамин C',
+      iron: 'Железо',
+      magnesium: 'Магний',
+      zinc: 'Цинк',
+      omega_3: 'Омега-3'
+    };
+    if (map[code]) return map[code];
+    return code ? `Нутриент (${code})` : 'Нутриент';
+  }
   function assistantAnalyteOptions(selectedCode){
     const head = `<option value="">Выберите показатель</option>`;
     return head + getAssistantAnalytePresets().map((item)=>`<option value="${esc(item.code)}" ${String(selectedCode||'')===String(item.code)?'selected':''}>${esc(item.name)}</option>`).join('');
@@ -4231,11 +4292,11 @@ function adminField(label, field, value, kind='input') {
   function profileSummaryFromAssistantInput(userProfile = {}) {
     const p = userProfile || {};
     const parts = [];
-    parts.push(`Пол: ${esc(String(p.sex_at_birth || 'unknown'))}`);
+    parts.push(`Пол: ${esc(assistantProfileValueRu(p.sex_at_birth))}`);
     parts.push(`Возраст: ${Number(p.age || 0) > 0 ? `${Number(p.age)} лет` : '—'}`);
     parts.push(`Рост/вес: ${esc(p.height_cm || '—')} см / ${esc(p.weight_kg || '—')} кг`);
-    parts.push(`Питание: ${esc(String(p.diet_type || 'unknown'))}`);
-    parts.push(`Солнце: ${esc(String(p.sun_exposure_level || 'unknown'))}`);
+    parts.push(`Питание: ${esc(assistantProfileValueRu(p.diet_type))}`);
+    parts.push(`Солнце: ${esc(assistantProfileValueRu(p.sun_exposure_level))}`);
     const factors = [];
     if (Array.isArray(p.thyroid_conditions) && p.thyroid_conditions.length) factors.push('щитовидка');
     if (Array.isArray(p.gi_problems) && p.gi_problems.length) factors.push('ЖКТ');
@@ -4248,14 +4309,14 @@ function adminField(label, field, value, kind='input') {
 
   function renderAssistantBasisLabs(labs = []) {
     if (!Array.isArray(labs) || !labs.length) return '<div class="muted">Нет анализов в базе расчёта</div>';
-    return labs.map((l)=>`<div class="item-row" style="display:block"><div><strong>${esc(l.canonical_analyte_name_ru || l.analyte_name_ru || l.analyte_code || 'Показатель')}</strong></div><div class="muted">${esc(l.value || '—')} ${esc(l.unit || '')} · реф: ${esc(l.ref_low ?? '—')}–${esc(l.ref_high ?? '—')}</div><div class="muted">Статус до LLM: ${esc(l.interpreted_status_pre_llm || 'unclear')} · источник: ${esc(l.reference_source || 'unknown')}</div></div>`).join('');
+    return labs.map((l)=>`<div class="item-row" style="display:block"><div><strong>${esc(l.canonical_analyte_name_ru || l.analyte_name_ru || l.analyte_code || 'Показатель')}</strong></div><div class="muted">${esc(l.value || '—')} ${esc(l.unit || '')} · реф: ${esc(l.ref_low ?? '—')}–${esc(l.ref_high ?? '—')}</div><div class="muted">Статус до LLM: ${esc(assistantInterpretationRu(l.interpreted_status_pre_llm))} · источник: ${esc(assistantReferenceSourceRu(l.reference_source))}</div></div>`).join('');
   }
 
   function renderMyNutrientsModal() {
     const a = state.nutrientAssistant;
     if (!a.myNutrientsOpen) return '';
     const plans = Array.isArray(a.myPlans) ? a.myPlans : [];
-    return `<div class="modal-overlay" data-assistant-close-my-nutrients><section class="card modal-card" onclick="event.stopPropagation()"><div class="row"><strong>Мои нутриенты</strong><button class="btn secondary" data-assistant-close-my-nutrients>Закрыть</button></div><div class="muted" style="margin-top:8px">Активные протоколы и текущие рекомендации по нутриентам.</div><div style="margin-top:10px">${a.myPlansLoading ? '<div class="muted">Загружаем…</div>' : (plans.length ? plans.map((plan)=>`<div class="item-row" style="display:block"><div class="row"><strong>${esc(plan.nutrient_name_ru || plan.nutrient_code || 'Нутриент')}</strong><span class="chip">${esc(plan.lifecycle_status || plan.recommend_action || 'active')}</span></div><div class="muted">Действие: ${esc(plan.recommend_action || '—')} · До: ${esc(plan.course_ends_at_utc ? formatUtcShort(plan.course_ends_at_utc) : '—')}</div><div class="muted">Обновлено: ${esc(formatUtcShort(plan.updated_at_utc || plan.created_at_utc || ''))}</div><div class="row" style="margin-top:8px"><button class="btn secondary" data-assistant-remove-my-nutrient="${esc(plan.nutrient_code || '')}">Отменить нутриент</button></div></div>`).join('') : '<div class="muted">Активных нутриентов пока нет</div>')}</div></section></div>`;
+    return `<div class="modal-overlay" data-assistant-close-my-nutrients><section class="card modal-card" onclick="event.stopPropagation()"><div class="row"><strong>Мои нутриенты</strong><button class="btn secondary" data-assistant-close-my-nutrients>Закрыть</button></div><div class="muted" style="margin-top:8px">Активные протоколы и текущие рекомендации по нутриентам.</div><div style="margin-top:10px">${a.myPlansLoading ? '<div class="muted">Загружаем…</div>' : (plans.length ? plans.map((plan)=>`<div class="item-row" style="display:block"><div class="row"><strong>${esc(assistantNutrientNameRu(plan.nutrient_name_ru, plan.nutrient_code))}</strong><span class="chip">${esc(assistantStatusRu(plan.lifecycle_status) !== '—' ? assistantStatusRu(plan.lifecycle_status) : assistantOutcomeLabel(plan.recommend_action))}</span></div><div class="muted">Действие: ${esc(assistantOutcomeLabel(plan.recommend_action))} · До: ${esc(plan.course_ends_at_utc ? formatUtcShort(plan.course_ends_at_utc) : '—')}</div><div class="muted">Обновлено: ${esc(formatUtcShort(plan.updated_at_utc || plan.created_at_utc || ''))}</div><div class="row" style="margin-top:8px"><button class="btn secondary" data-assistant-remove-my-nutrient="${esc(plan.nutrient_code || '')}">Отменить нутриент</button></div></div>`).join('') : '<div class="muted">Активных нутриентов пока нет</div>')}</div></section></div>`;
   }
 
   function renderAssistantModule(profile, labs) {
@@ -4338,22 +4399,22 @@ function adminField(label, field, value, kind='input') {
       </section>
       ${resultData ? `<section class="card fade">
         <div class="row"><strong>Расчёт #${esc(selectedRun?.id || a.currentRunId || '—')}</strong><span class="chip">${esc(formatUtcShort(selectedRun?.created_at || ''))}</span></div>
-        <div class="row" style="margin-top:8px"><strong>Результат assistant</strong></div>
+        <div class="row" style="margin-top:8px"><strong>Результат помощника</strong></div>
         <div class="muted" style="margin-top:8px">${esc(resultData.summary_ru || '')}</div>
         <div class="row" style="margin-top:8px"><span class="chip">Уверенность: ${esc(confidenceRu(resultData.confidence))}</span><span class="chip">Нутриентов: ${nutrients.length}</span><span class="chip">Анализов: ${(resultData.labs_used||[]).length}</span></div>
         <div class="field-grid two" style="margin-top:10px">
           <div><strong>Флаги безопасности</strong>${(resultData.safety_flags||[]).length ? (resultData.safety_flags||[]).map((x)=>`<div class="muted">• ${esc(x)}</div>`).join('') : '<div class="muted">Нет</div>'}</div>
           <div><strong>Флаги для врача</strong>${(resultData.physician_flags||[]).length ? (resultData.physician_flags||[]).map((x)=>`<div class="muted">• ${esc(x)}</div>`).join('') : '<div class="muted">Нет</div>'}</div>
         </div>
-        <div style="margin-top:10px">${nutrients.map((n)=>`<div class="item-row" style="display:block"><div class="row"><strong>${esc(n.nutrient_name_ru || n.nutrient_code || 'Нутриент')}</strong><span class="chip ${assistantOutcomeClass(n.recommend_action)}">${esc(assistantOutcomeLabel(n.recommend_action))}</span></div><div class="muted">${esc(n.reason_ru || '')}</div><div class="muted">Доза: ${esc(n.dose_text_ru || '—')} · Частота: ${esc(n.frequency_text_ru || '—')} · Длительность: ${esc(n.duration_text_ru || '—')}</div><div class="muted">Тайминг: ${esc(n.timing_text_ru || '—')} · С едой: ${boolMark(n.with_food)}</div><div class="muted">Стоп/пауза: ${esc(n.stop_or_pause_rule_ru || '—')}</div></div>`).join('')}</div>
-        <div style="margin-top:10px"><strong>Разбор всех анализов</strong>${labsReview.length ? labsReview.map((l)=>`<div class="item-row" style="display:block"><div class="row"><strong>${esc(l.analyte_name_ru || l.analyte_code || 'Показатель')}</strong><span class="chip">${esc(l.interpretation_status || 'unclear')}</span></div><div class="muted">${esc(l.value || '—')} ${esc(l.unit || '')} · реф: ${esc(l.ref_low || '—')}–${esc(l.ref_high || '—')}</div><div class="muted">${esc(l.short_reason_ru || '')}</div></div>`).join('') : '<div class="muted">Нет данных</div>'}</div>
+        <div style="margin-top:10px">${nutrients.map((n)=>`<div class="item-row" style="display:block"><div class="row"><strong>${esc(assistantNutrientNameRu(n.nutrient_name_ru, n.nutrient_code))}</strong><span class="chip ${assistantOutcomeClass(n.recommend_action)}">${esc(assistantOutcomeLabel(n.recommend_action))}</span></div><div class="muted">${esc(n.reason_ru || '')}</div><div class="muted">Доза: ${esc(n.dose_text_ru || '—')} · Частота: ${esc(n.frequency_text_ru || '—')} · Длительность: ${esc(n.duration_text_ru || '—')}</div><div class="muted">Тайминг: ${esc(n.timing_text_ru || '—')} · С едой: ${boolMark(n.with_food)}</div><div class="muted">Стоп/пауза: ${esc(n.stop_or_pause_rule_ru || '—')}</div></div>`).join('')}</div>
+        <div style="margin-top:10px"><strong>Разбор всех анализов</strong>${labsReview.length ? labsReview.map((l)=>`<div class="item-row" style="display:block"><div class="row"><strong>${esc(l.analyte_name_ru || l.analyte_code || 'Показатель')}</strong><span class="chip">${esc(assistantInterpretationRu(l.interpretation_status))}</span></div><div class="muted">${esc(l.value || '—')} ${esc(l.unit || '')} · реф: ${esc(l.ref_low || '—')}–${esc(l.ref_high || '—')}</div><div class="muted">${esc(l.short_reason_ru || '')}</div></div>`).join('') : '<div class="muted">Нет данных</div>'}</div>
         <div style="margin-top:10px"><strong>База расчёта</strong><div style="margin-top:6px">${profileSummaryFromAssistantInput(basisInput.user_profile || {})}</div><div style="margin-top:8px"><strong>Анализы в базе (${basisLabs.length})</strong>${renderAssistantBasisLabs(basisLabs)}</div></div>
-        <div style="margin-top:10px"><strong>Prepared actions / статус</strong>${detailActions.length ? detailActions.map((x)=>`<div class="item-row" style="display:block"><div class="row"><strong>${esc(x.nutrient_name_ru || x.nutrient_code || 'Нутриент')}</strong><span class="chip">${esc(x.status || 'prepared')}</span></div><div class="muted">Действие: ${esc(x.recommend_action || '—')} · Доза: ${esc(x.dose_text || '—')}</div></div>`).join('') : '<div class="muted">Нет подготовленных действий</div>'}</div>
+        <div style="margin-top:10px"><strong>Подготовленные действия / статус</strong>${detailActions.length ? detailActions.map((x)=>`<div class="item-row" style="display:block"><div class="row"><strong>${esc(assistantNutrientNameRu(x.nutrient_name_ru, x.nutrient_code))}</strong><span class="chip">${esc(assistantStatusRu(x.status))}</span></div><div class="muted">Действие: ${esc(assistantOutcomeLabel(x.recommend_action))} · Доза: ${esc(x.dose_text || '—')}</div></div>`).join('') : '<div class="muted">Нет подготовленных действий</div>'}</div>
         <div style="margin-top:10px"><strong>Следующие шаги</strong>${(resultData.next_steps_ru||[]).map((x)=>`<div class="muted">• ${esc(x)}</div>`).join('')}</div>
       </section>` : ''}
       ${history.length ? `<section class="card fade"><div class="row"><strong>История протоколов</strong></div>
-      <div style="margin-top:8px">${history.length ? history.map((h)=>{ const input=(h.input_snapshot_json||{}); const rr=(h.response_json||{}); const labsCount=Array.isArray(input.labs)?input.labs.length:0; const actionable=Array.isArray(rr.nutrient_plan)?rr.nutrient_plan.filter((x)=>['start','continue','stop','do_not_start','retest_only','discuss_with_physician'].includes(String(x?.recommend_action||''))).length:0; const status = h.is_active ? 'active' : (h.status || 'history'); return `<div class="item-row" style="display:block"><div class="row"><strong>${esc(formatUtcShort(h.created_at || ''))} · #${h.id}</strong><span class="chip">${esc(status)}</span></div><div class="muted">Анализов: ${labsCount} · actionable: ${actionable}</div><div class="row" style="margin-top:6px; gap:6px; flex-wrap:wrap"><button class="btn secondary" data-assistant-history="${h.id}">Открыть расчёт</button><button class="btn secondary" data-assistant-use-run-as-draft="${h.id}">Использовать как основу</button></div></div>`; }).join('') : '<div class="muted">Пока пусто</div>'}</div></section>` : ''}
-      ${a.pendingOverwriteRuns?.length ? `<div class="modal-overlay"><section class="card modal-card" onclick="event.stopPropagation()"><div class="row"><strong>История заполнена (максимум 3)</strong></div><div class="muted" style="margin-top:8px">Выберите, какую версию удалить перед новым расчётом:</div><div style="margin-top:8px">${a.pendingOverwriteRuns.map((r)=>`<button class="item-row" data-assistant-overwrite="${r.id}"><span>#${r.id} · ${esc(formatUtcShort(r.created_at||''))}${r.is_active?' · Активная':''}</span><span class="muted">${esc((r.response_json||{}).confidence||r.status||'')}</span></button>`).join('')}</div><div class="row" style="margin-top:10px"><button class="btn secondary" data-assistant-overwrite-cancel>Отмена</button></div></section></div>`:''}
+      <div style="margin-top:8px">${history.length ? history.map((h)=>{ const input=(h.input_snapshot_json||{}); const rr=(h.response_json||{}); const labsCount=Array.isArray(input.labs)?input.labs.length:0; const actionable=Array.isArray(rr.nutrient_plan)?rr.nutrient_plan.filter((x)=>['start','continue','stop','do_not_start','retest_only','discuss_with_physician'].includes(String(x?.recommend_action||''))).length:0; const status = h.is_active ? 'active' : (h.status || 'history'); return `<div class="item-row" style="display:block"><div class="row"><strong>${esc(formatUtcShort(h.created_at || ''))} · #${h.id}</strong><span class="chip">${esc(assistantStatusRu(status))}</span></div><div class="muted">Анализов: ${labsCount} · рекомендаций к действию: ${actionable}</div><div class="row" style="margin-top:6px; gap:6px; flex-wrap:wrap"><button class="btn secondary" data-assistant-history="${h.id}">Открыть расчёт</button><button class="btn secondary" data-assistant-use-run-as-draft="${h.id}">Использовать как основу</button></div></div>`; }).join('') : '<div class="muted">Пока пусто</div>'}</div></section>` : ''}
+      ${a.pendingOverwriteRuns?.length ? `<div class="modal-overlay"><section class="card modal-card" onclick="event.stopPropagation()"><div class="row"><strong>История заполнена (максимум 3)</strong></div><div class="muted" style="margin-top:8px">Выберите, какую версию удалить перед новым расчётом:</div><div style="margin-top:8px">${a.pendingOverwriteRuns.map((r)=>{ const c = String((r.response_json||{}).confidence || '').trim(); const right = c ? `Уверенность: ${confidenceRu(c)}` : assistantStatusRu(r.status); return `<button class="item-row" data-assistant-overwrite="${r.id}"><span>#${r.id} · ${esc(formatUtcShort(r.created_at||''))}${r.is_active?' · Активная':''}</span><span class="muted">${esc(right)}</span></button>`; }).join('')}</div><div class="row" style="margin-top:10px"><button class="btn secondary" data-assistant-overwrite-cancel>Отмена</button></div></section></div>`:''}
       ${a.blocked ? `<div class="modal-overlay"><section class="card modal-card"><div class="row"><strong>Считаем рекомендации…</strong></div><div class="muted" style="margin-top:8px">Пожалуйста, подождите. Пока отчёт формируется, действия временно заблокированы.</div></section></div>` : ''}
     `;
   }

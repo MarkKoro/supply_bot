@@ -427,9 +427,12 @@ async def nutrient_assistant_single_call(
     if not cfg:
         raise RuntimeError("OPENAI_DISABLED")
     payload_json = json.dumps(payload, ensure_ascii=False)
-    # Keep total request time below typical reverse-proxy limits (~60s)
-    # to avoid upstream HTTP 504 while still retrying transient timeouts.
-    timeouts = (18, 26)
+    labs_count = len(list(payload.get("labs") or []))
+    # Keep answer compact for large lab payloads so model has less to generate
+    # and can respond more predictably under network jitter.
+    max_output_tokens = 1800 if labs_count <= 20 else (1400 if labs_count <= 40 else 1100)
+    # Broader timeout ladder for better resiliency on transient network slowness.
+    timeouts = (20, 34, 50)
     last_exc: Exception | None = None
     for attempt, timeout_s in enumerate(timeouts, start=1):
         try:
@@ -437,7 +440,7 @@ async def nutrient_assistant_single_call(
                 _sync_call_nutrient_assistant,
                 cfg,
                 payload_json=payload_json,
-                max_output_tokens=2400,
+                max_output_tokens=max_output_tokens,
                 timeout_s=timeout_s,
                 max_retries=0,
             )

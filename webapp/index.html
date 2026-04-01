@@ -5126,11 +5126,16 @@ function adminField(label, field, value, kind='input') {
     }
   }
 
-  async function loadMySupplements(force) {
+  async function loadMySupplements(forceOrOptions = false) {
+    const opts = typeof forceOrOptions === 'object' && forceOrOptions !== null
+      ? forceOrOptions
+      : { force: !!forceOrOptions };
+    const force = !!opts.force;
+    const silent = !!opts.silent;
     const ms = state.mySupplements;
     if (ms.loading && !force) return;
     ms.loading = true;
-    renderActiveTab();
+    if (!silent) renderActiveTab();
     try {
       const res = await api("./api/my_supplements");
       ms.active = Array.isArray(res.active) ? res.active : [];
@@ -5139,7 +5144,7 @@ function adminField(label, field, value, kind='input') {
       showToast("Не удалось загрузить список БАДов");
     } finally {
       ms.loading = false;
-      renderActiveTab();
+      if (!silent) renderActiveTab();
     }
   }
 
@@ -6059,6 +6064,34 @@ function adminField(label, field, value, kind='input') {
     recalcTodaySnapshot();
   }
 
+  function removeSupplementFromMySupplementsState(supplementId) {
+    const sid = Number(supplementId || 0);
+    if (!sid) return;
+    state.mySupplements.active = (state.mySupplements.active || []).filter((item) => Number(item?.supplement_id || 0) !== sid);
+    state.mySupplements.frozen = (state.mySupplements.frozen || []).filter((item) => Number(item?.supplement_id || 0) !== sid);
+    delete state.mySupplements.busy[sid];
+  }
+
+  function removeSupplementEverywhereInToday(supplementId) {
+    const sid = Number(supplementId || 0);
+    if (!sid || !state.today?.slots) return;
+    for (const slot of state.today.slots) {
+      slot.items = (slot.items || []).filter((item) => Number(item?.supplement_id || 0) !== sid);
+      const nextComplexes = [];
+      for (const complex of (slot.complexes || [])) {
+        const nextItems = (complex.items || []).filter((item) => Number(item?.supplement_id || 0) !== sid);
+        if (!nextItems.length) continue;
+        complex.items = nextItems;
+        complex.total_count = nextItems.length;
+        complex.taken_count = nextItems.filter((item) => item.status === 'taken').length;
+        complex.status = complex.taken_count > 0 ? 'taken' : 'none';
+        nextComplexes.push(complex);
+      }
+      slot.complexes = nextComplexes;
+    }
+    recalcTodaySnapshot();
+  }
+
   function bindTodayEvents() {
     appEl.querySelectorAll("[data-item]").forEach((row) => {
       row.addEventListener("click", (e) => {
@@ -6470,16 +6503,28 @@ function adminField(label, field, value, kind='input') {
       const sid = Number(state.suppHub.item?.supplement_id || 0);
       if (!sid) return;
       if (!confirm('Удалить добавку из моих БАДов? История приёмов сохранится.')) return;
+      const prevMySuppActive = [...(state.mySupplements.active || [])];
+      const prevMySuppFrozen = [...(state.mySupplements.frozen || [])];
+      const prevToday = state.today ? JSON.parse(JSON.stringify(state.today)) : null;
       state.suppHub.deleting = true;
+      removeSupplementFromMySupplementsState(sid);
+      removeSupplementEverywhereInToday(sid);
       renderActiveTab();
       try {
         await api('./api/my_supplements/remove', { method: 'POST', body: { supplement_id: sid } });
         state.suppHub.open = false;
-        await loadMySupplements(true);
-        await loadToday(true);
         renderActiveTab();
+        await Promise.all([
+          loadMySupplements({ force: true, silent: true }),
+          loadToday({ force: true, silent: true }),
+        ]);
         showToast('Добавка удалена из списка');
       } catch {
+        state.mySupplements.active = prevMySuppActive;
+        state.mySupplements.frozen = prevMySuppFrozen;
+        if (prevToday) state.today = prevToday;
+        recalcTodaySnapshot();
+        renderActiveTab();
         showToast('Не удалось удалить добавку');
       } finally {
         state.suppHub.deleting = false;

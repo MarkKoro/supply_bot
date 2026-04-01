@@ -395,8 +395,9 @@ def _sync_call_nutrient_assistant(
     payload_json: str,
     max_output_tokens: int | None = None,
     timeout_s: float | None = None,
+    max_retries: int | None = None,
 ) -> str:
-    client = _build_openai_client(cfg, timeout_s=timeout_s)
+    client = _build_openai_client(cfg, timeout_s=timeout_s, max_retries=max_retries)
     instructions = f"{NUTRIENT_ASSISTANT_SYSTEM_PROMPT}\nJSON-контракт:\n{NUTRIENT_ASSISTANT_JSON_CONTRACT}"
     params = {
         "model": cfg.model,
@@ -425,13 +426,34 @@ async def nutrient_assistant_single_call(
 ) -> str:
     if not cfg:
         raise RuntimeError("OPENAI_DISABLED")
-    return await asyncio.to_thread(
-        _sync_call_nutrient_assistant,
-        cfg,
-        payload_json=json.dumps(payload, ensure_ascii=False),
-        max_output_tokens=2400,
-        timeout_s=45,
-    )
+    payload_json = json.dumps(payload, ensure_ascii=False)
+    timeouts = (45, 75, 110)
+    last_exc: Exception | None = None
+    for attempt, timeout_s in enumerate(timeouts, start=1):
+        try:
+            return await asyncio.to_thread(
+                _sync_call_nutrient_assistant,
+                cfg,
+                payload_json=payload_json,
+                max_output_tokens=2400,
+                timeout_s=timeout_s,
+                max_retries=0,
+            )
+        except (APITimeoutError, APIConnectionError) as exc:
+            last_exc = exc
+            log.warning(
+                "nutrient_assistant transient OpenAI error on attempt %s/%s: %s",
+                attempt,
+                len(timeouts),
+                exc,
+            )
+            if attempt < len(timeouts):
+                await asyncio.sleep(0.8 * attempt)
+                continue
+            raise
+    if last_exc is not None:
+        raise last_exc
+    return ""
 
 async def daily_advice(
     cfg: Optional[OpenAIConfig],

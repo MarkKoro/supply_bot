@@ -4175,10 +4175,17 @@ function adminField(label, field, value, kind='input') {
       history: 'История',
       prepared: 'Подготовлено',
       applied: 'Применено',
+      cancelled: 'Отменено',
+      replaced: 'Заменено',
       stopped: 'Остановлено',
       expired: 'Завершено',
       draft: 'Черновик'
     })[String(status || '').trim().toLowerCase()] || '—';
+  }
+  function assistantRunPendingApproval(run){
+    if (!run || Number(run.is_active || 0) === 1) return false;
+    const status = String(run.status || '').trim().toLowerCase();
+    return status === 'ok' || status === 'prepared';
   }
   function assistantInterpretationRu(value){
     return ({
@@ -4344,6 +4351,7 @@ function adminField(label, field, value, kind='input') {
     const showDirectUseLatest = !showOverflowMenu && hasHistory;
     const selectedRun = a.detailRun || history.find((x)=>Number(x.id)===Number(a.currentRunId || 0)) || null;
     const resultData = selectedRun?.response_json || result || null;
+    const canApplySelectedRun = assistantRunPendingApproval(selectedRun);
     const nutrients = Array.isArray(resultData?.nutrient_plan) ? resultData.nutrient_plan : [];
     const labsReview = Array.isArray(resultData?.labs_review) ? resultData.labs_review : [];
     const basisInput = selectedRun?.input_snapshot_json || {};
@@ -4410,10 +4418,11 @@ function adminField(label, field, value, kind='input') {
         <div style="margin-top:10px"><strong>Разбор всех анализов</strong>${labsReview.length ? labsReview.map((l)=>`<div class="item-row" style="display:block"><div class="row"><strong>${esc(l.analyte_name_ru || l.analyte_code || 'Показатель')}</strong><span class="chip">${esc(assistantInterpretationRu(l.interpretation_status))}</span></div><div class="muted">${esc(l.value || '—')} ${esc(l.unit || '')} · реф: ${esc(l.ref_low || '—')}–${esc(l.ref_high || '—')}</div><div class="muted">${esc(l.short_reason_ru || '')}</div></div>`).join('') : '<div class="muted">Нет данных</div>'}</div>
         <div style="margin-top:10px"><strong>База расчёта</strong><div style="margin-top:6px">${profileSummaryFromAssistantInput(basisInput.user_profile || {})}</div><div style="margin-top:8px"><strong>Анализы в базе (${basisLabs.length})</strong>${renderAssistantBasisLabs(basisLabs)}</div></div>
         <div style="margin-top:10px"><strong>Подготовленные действия / статус</strong>${detailActions.length ? detailActions.map((x)=>`<div class="item-row" style="display:block"><div class="row"><strong>${esc(assistantNutrientNameRu(x.nutrient_name_ru, x.nutrient_code))}</strong><span class="chip">${esc(assistantStatusRu(x.status))}</span></div><div class="muted">Действие: ${esc(assistantOutcomeLabel(x.recommend_action))} · Доза: ${esc(x.dose_text || '—')}</div></div>`).join('') : '<div class="muted">Нет подготовленных действий</div>'}</div>
+        ${canApplySelectedRun ? `<div class="row" style="margin-top:10px; gap:6px; flex-wrap:wrap"><button class="btn" data-assistant-apply-run="${selectedRun.id}" ${a.applying ? 'disabled' : ''}>${a.applying ? 'Применяем…' : 'Принять'}</button><button class="btn secondary" data-assistant-cancel-run="${selectedRun.id}" ${a.cancelling ? 'disabled' : ''}>${a.cancelling ? 'Отменяем…' : 'Отклонить'}</button></div>` : ''}
         <div style="margin-top:10px"><strong>Следующие шаги</strong>${(resultData.next_steps_ru||[]).map((x)=>`<div class="muted">• ${esc(x)}</div>`).join('')}</div>
       </section>` : ''}
       ${history.length ? `<section class="card fade"><div class="row"><strong>История протоколов</strong></div>
-      <div style="margin-top:8px">${history.length ? history.map((h)=>{ const input=(h.input_snapshot_json||{}); const rr=(h.response_json||{}); const labsCount=Array.isArray(input.labs)?input.labs.length:0; const actionable=Array.isArray(rr.nutrient_plan)?rr.nutrient_plan.filter((x)=>['start','continue','stop','do_not_start','retest_only','discuss_with_physician'].includes(String(x?.recommend_action||''))).length:0; const status = h.is_active ? 'active' : (h.status || 'history'); return `<div class="item-row" style="display:block"><div class="row"><strong>${esc(formatUtcShort(h.created_at || ''))} · #${h.id}</strong><span class="chip">${esc(assistantStatusRu(status))}</span></div><div class="muted">Анализов: ${labsCount} · рекомендаций к действию: ${actionable}</div><div class="row" style="margin-top:6px; gap:6px; flex-wrap:wrap"><button class="btn secondary" data-assistant-history="${h.id}">Открыть расчёт</button><button class="btn secondary" data-assistant-use-run-as-draft="${h.id}">Использовать как основу</button></div></div>`; }).join('') : '<div class="muted">Пока пусто</div>'}</div></section>` : ''}
+      <div style="margin-top:8px">${history.length ? history.map((h)=>{ const input=(h.input_snapshot_json||{}); const rr=(h.response_json||{}); const labsCount=Array.isArray(input.labs)?input.labs.length:0; const actionable=Array.isArray(rr.nutrient_plan)?rr.nutrient_plan.filter((x)=>['start','continue','stop','do_not_start','retest_only','discuss_with_physician'].includes(String(x?.recommend_action||''))).length:0; const status = h.is_active ? 'active' : (h.status || 'history'); const pending = assistantRunPendingApproval(h); return `<div class="item-row" style="display:block"><div class="row"><strong>${esc(formatUtcShort(h.created_at || ''))} · #${h.id}</strong><span class="chip">${esc(assistantStatusRu(status))}</span></div><div class="muted">Анализов: ${labsCount} · рекомендаций к действию: ${actionable}</div><div class="row" style="margin-top:6px; gap:6px; flex-wrap:wrap"><button class="btn secondary" data-assistant-history="${h.id}">Открыть расчёт</button><button class="btn secondary" data-assistant-use-run-as-draft="${h.id}">Использовать как основу</button>${pending ? `<button class="btn" data-assistant-apply-run="${h.id}" ${a.applying ? 'disabled' : ''}>${a.applying ? 'Применяем…' : 'Принять'}</button>` : ''}</div></div>`; }).join('') : '<div class="muted">Пока пусто</div>'}</div></section>` : ''}
       ${a.pendingOverwriteRuns?.length ? `<div class="modal-overlay"><section class="card modal-card" onclick="event.stopPropagation()"><div class="row"><strong>История заполнена (максимум 3)</strong></div><div class="muted" style="margin-top:8px">Выберите, какую версию удалить перед новым расчётом:</div><div style="margin-top:8px">${a.pendingOverwriteRuns.map((r)=>{ const c = String((r.response_json||{}).confidence || '').trim(); const right = c ? `Уверенность: ${confidenceRu(c)}` : assistantStatusRu(r.status); return `<button class="item-row" data-assistant-overwrite="${r.id}"><span>#${r.id} · ${esc(formatUtcShort(r.created_at||''))}${r.is_active?' · Активная':''}</span><span class="muted">${esc(right)}</span></button>`; }).join('')}</div><div class="row" style="margin-top:10px"><button class="btn secondary" data-assistant-overwrite-cancel>Отмена</button></div></section></div>`:''}
       ${a.blocked ? `<div class="modal-overlay"><section class="card modal-card"><div class="row"><strong>Считаем рекомендации…</strong></div><div class="muted" style="margin-top:8px">Пожалуйста, подождите. Пока отчёт формируется, действия временно заблокированы.</div></section></div>` : ''}
     `;
@@ -4523,6 +4532,11 @@ function adminField(label, field, value, kind='input') {
     });
     document.querySelector('[data-assistant-add-lab]')?.addEventListener('click', ()=>{
       syncExpandedAssistantLabRow();
+      state.nutrientAssistant.result = null;
+      state.nutrientAssistant.currentRunId = null;
+      state.nutrientAssistant.basisRunId = null;
+      state.nutrientAssistant.detailRun = null;
+      state.nutrientAssistant.detailPreparedActions = [];
       state.nutrientAssistant.manualLabs.push(createEmptyAssistantLabItem());
       state.nutrientAssistant.expandedLabIdx = state.nutrientAssistant.manualLabs.length - 1;
       renderActiveTab();
@@ -4706,6 +4720,38 @@ function adminField(label, field, value, kind='input') {
       state.nutrientAssistant.pendingOverwriteRuns = [];
       renderActiveTab();
       document.querySelector('[data-assistant-compute]')?.click();
+    }));
+    document.querySelectorAll('[data-assistant-apply-run]').forEach((el)=>el.addEventListener('click', async ()=>{
+      const runId = Number(el.dataset.assistantApplyRun || 0);
+      if (!runId || state.nutrientAssistant.applying) return;
+      state.nutrientAssistant.applying = true;
+      renderActiveTab();
+      try {
+        await api('./api/profile/nutrient-assistant/apply', { method:'POST', body: { run_id: runId } });
+        showToast('Расчёт принят');
+        await Promise.all([loadNutrientPlans(true), loadMyNutrientPlans(true)]);
+        await loadAssistantRunDetail(runId).catch(()=>null);
+      } catch (e) {
+        showToast(e.message || 'Не удалось принять расчёт');
+      }
+      state.nutrientAssistant.applying = false;
+      renderActiveTab();
+    }));
+    document.querySelectorAll('[data-assistant-cancel-run]').forEach((el)=>el.addEventListener('click', async ()=>{
+      const runId = Number(el.dataset.assistantCancelRun || 0);
+      if (!runId || state.nutrientAssistant.cancelling) return;
+      state.nutrientAssistant.cancelling = true;
+      renderActiveTab();
+      try {
+        await api(`./api/profile/nutrient-assistant/runs/${runId}/cancel`, { method:'POST', body:{} });
+        showToast('Расчёт отклонён');
+        await loadNutrientPlans(true);
+        await loadAssistantRunDetail(runId).catch(()=>null);
+      } catch (e) {
+        showToast(e.message || 'Не удалось отклонить расчёт');
+      }
+      state.nutrientAssistant.cancelling = false;
+      renderActiveTab();
     }));
     document.querySelector('[data-assistant-overwrite-cancel]')?.addEventListener('click', ()=>{
       state.nutrientAssistant.pendingOverwriteRuns = [];

@@ -427,7 +427,9 @@ async def nutrient_assistant_single_call(
     if not cfg:
         raise RuntimeError("OPENAI_DISABLED")
     payload_json = json.dumps(payload, ensure_ascii=False)
-    timeouts = (45, 75, 110)
+    # Keep total request time below typical reverse-proxy limits (~60s)
+    # to avoid upstream HTTP 504 while still retrying transient timeouts.
+    timeouts = (18, 26)
     last_exc: Exception | None = None
     for attempt, timeout_s in enumerate(timeouts, start=1):
         try:

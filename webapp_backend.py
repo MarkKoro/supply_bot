@@ -529,6 +529,49 @@ def _timeout_failsafe_payload(llm_payload: dict) -> dict:
     return payload
 
 
+def _build_timeout_fallback_assistant_response(labs_for_llm: list[dict]) -> dict:
+    def _lab_row(item: dict) -> dict:
+        status = str(item.get("interpreted_status_pre_llm") or "unclear")
+        if status not in {"low", "normal", "high", "unclear"}:
+            status = "unclear"
+        reason = str(item.get("interpretation_hint_ru") or "").strip() or "Автоматический резервный разбор из-за таймаута AI."
+        if status in {"low", "high"}:
+            actionability = "actionable"
+        elif status == "normal":
+            actionability = "watch"
+        else:
+            actionability = "insufficient_data"
+        return {
+            "analyte_code": str(item.get("analyte_code") or ""),
+            "analyte_name_ru": str(item.get("analyte_name_ru") or ""),
+            "value": str(item.get("value") or ""),
+            "unit": str(item.get("unit") or ""),
+            "ref_low": item.get("ref_low"),
+            "ref_high": item.get("ref_high"),
+            "interpretation_status": status,
+            "mapped_nutrient_code": str(item.get("canonical_nutrient_code") or ""),
+            "actionability": actionability,
+            "short_reason_ru": reason[:300],
+        }
+
+    labs_review = [_lab_row(x) for x in list(labs_for_llm or [])]
+    return {
+        "summary_ru": "AI-ответ временно недоступен по таймауту. Показан резервный безопасный разбор лабораторных показателей без назначения нутриентов.",
+        "confidence": "low",
+        "safety_flags": ["timeout_fallback_mode"],
+        "physician_flags": ["Перепроверьте рекомендации с врачом перед началом/изменением приёма."],
+        "labs_used": sorted({str(x.get("analyte_code") or "") for x in labs_for_llm if str(x.get("analyte_code") or "")}),
+        "missing_data": [],
+        "nutrient_plan": [],
+        "labs_review": labs_review,
+        "next_steps_ru": [
+            "Попробуйте пересчитать план через 30–60 секунд.",
+            "Если таймаут повторяется, оставьте только самые свежие анализы и повторите расчёт.",
+        ],
+        "disclaimer_ru": "Резервный ответ сформирован автоматически при сетевом таймауте и не заменяет консультацию врача.",
+    }
+
+
 def _fallback_profile_value(assistant_profile: dict, profile: dict, key: str, default: str = "unknown") -> str:
     assistant_value = str((assistant_profile or {}).get(key) or "").strip()
     if assistant_value and assistant_value.lower() != "unknown":
@@ -2398,12 +2441,26 @@ async def api_profile_nutrient_assistant_compute(
         llm_payload = _prune_for_llm(llm_payload_raw) or {}
         cfg = OpenAIConfig(api_key=s.OPENAI_API_KEY, model=s.OPENAI_MODEL)
         stage = "call_llm"
+        used_timeout_fallback = False
         try:
             raw_response, parsed, invalid_reason = await _compute_assistant_with_retry(cfg, llm_payload, retries=0)
         except (APITimeoutError, APIConnectionError, TimeoutError):
             stage = "call_llm_failsafe"
             compact_payload = _timeout_failsafe_payload(llm_payload)
-            raw_response, parsed, invalid_reason = await _compute_assistant_with_retry(cfg, compact_payload, retries=0)
+            try:
+                raw_response, parsed, invalid_reason = await _compute_assistant_with_retry(cfg, compact_payload, retries=0)
+            except (APITimeoutError, APIConnectionError, TimeoutError):
+                stage = "call_llm_timeout_fallback_local"
+                parsed = _build_timeout_fallback_assistant_response(labs_for_llm)
+                raw_response = json.dumps(parsed, ensure_ascii=False)
+                invalid_reason = ""
+                used_timeout_fallback = True
+                log.warning(
+                    "nutrient assistant fallback response used debug_id=%s tg_user_id=%s labs_count=%s",
+                    debug_id,
+                    tg_user_id,
+                    labs_count,
+                )
         if not parsed:
             stage = "save_invalid_run"
             run_id = await db.create_llm_assistant_run(
@@ -2461,7 +2518,7 @@ async def api_profile_nutrient_assistant_compute(
             model_name=s.OPENAI_MODEL,
             input_snapshot=llm_payload,
             response_json=parsed,
-            status="ok",
+            status="ok_timeout_fallback" if used_timeout_fallback else "ok",
         )
         stage = "save_draft_after_compute"
         await db.upsert_nutrient_assistant_draft(
@@ -2582,7 +2639,13 @@ async def api_profile_nutrient_assistant_compute(
         await db.save_llm_assistant_plan_actions(conn, tg_user_id, run_id, prepared_actions)
         stage = "commit"
         await conn.commit()
-        return JSONResponse({"ok": True, "run_id": run_id, "result": parsed, "prepared_actions": prepared_actions})
+        return JSONResponse({
+            "ok": True,
+            "run_id": run_id,
+            "result": parsed,
+            "prepared_actions": prepared_actions,
+            "fallback_used": used_timeout_fallback,
+        })
     except Exception as exc:
         await conn.rollback()
         exc_type = type(exc).__name__

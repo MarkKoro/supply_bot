@@ -2773,6 +2773,18 @@ async def reminders_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
     finally:
         await conn.close()
 
+
+async def nutrient_lifecycle_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
+    s = context.application.bot_data["settings"]
+    conn = await db.connect(s.DB_PATH)
+    try:
+        result = await db.process_due_nutrient_lifecycle(conn, limit=500)
+        if int(result.get("changed") or 0) > 0:
+            log.info("nutrient_lifecycle_tick applied: %s", result)
+    finally:
+        await conn.close()
+
+
 async def daily_rollover_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     s = context.application.bot_data["settings"]
     expired_due: list[dict] = []
@@ -7471,6 +7483,7 @@ async def _bootstrap() -> Application:
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_error_handler(on_error)
     app.job_queue.run_repeating(reminders_tick, interval=60, first=5, name="reminders_tick")
+    app.job_queue.run_repeating(nutrient_lifecycle_tick, interval=300, first=20, name="nutrient_lifecycle_tick")
     app.job_queue.run_repeating(daily_rollover_job, interval=600, first=30, name="daily_rollover")
     return app
 

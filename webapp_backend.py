@@ -379,7 +379,13 @@ ASSISTANT_ANALYTE_REGISTRY: dict[str, dict] = {
     "calcium": {"name_ru": "Кальций", "nutrient_code": "calcium", "units": ["mmol/l", "mg/dl"], "default_unit": "mmol/L", "ref_ranges": {"any": {"mmol/l": (2.15, 2.55), "mg/dl": (8.6, 10.2)}}},
     "vitamin_e": {"name_ru": "Витамин E", "nutrient_code": "vitamin_e", "units": ["mg/l", "umol/l"], "default_unit": "mg/L", "ref_ranges": {"any": {"mg/l": (5.0, 20.0), "umol/l": (12.0, 46.0)}}},
     "vitamin_c": {"name_ru": "Витамин C", "nutrient_code": "vitamin_c", "units": ["mg/l", "umol/l"], "default_unit": "mg/L", "ref_ranges": {"any": {"mg/l": (4.0, 20.0), "umol/l": (23.0, 114.0)}}},
-    "vitamin_b2": {"name_ru": "Витамин B2 (рибофлавин)", "nutrient_code": "vitamin_b2", "units": ["nmol/l", "ug/l"], "default_unit": "nmol/L", "ref_ranges": {"any": {"nmol/l": (200.0, 500.0)}}},
+    "vitamin_b2": {"name_ru": "Витамин B2 (рибофлавин)", "nutrient_code": "vitamin_b2", "units": ["nmol/l", "ug/l"], "default_unit": "nmol/L", "ref_ranges": {"any": {"nmol/l": (200.0, 500.0), "ug/l": (52.0, 130.0)}}},
+    "phosphorus": {"name_ru": "Фосфор", "nutrient_code": "phosphorus", "units": ["mmol/l", "mg/dl"], "default_unit": "mmol/L", "ref_ranges": {"any": {"mmol/l": (0.81, 1.45), "mg/dl": (2.5, 4.5)}}},
+    "potassium": {"name_ru": "Калий", "nutrient_code": "potassium", "units": ["mmol/l", "meq/l"], "default_unit": "mmol/L", "ref_ranges": {"any": {"mmol/l": (3.5, 5.1), "meq/l": (3.5, 5.1)}}},
+    "sodium": {"name_ru": "Натрий", "nutrient_code": "sodium", "units": ["mmol/l", "meq/l"], "default_unit": "mmol/L", "ref_ranges": {"any": {"mmol/l": (135.0, 145.0), "meq/l": (135.0, 145.0)}}},
+    "copper": {"name_ru": "Медь", "nutrient_code": "copper", "units": ["ug/dl", "umol/l"], "default_unit": "µg/dL", "ref_ranges": {"any": {"ug/dl": (70.0, 140.0), "umol/l": (11.0, 22.0)}}},
+    "iodine": {"name_ru": "Йод", "nutrient_code": "iodine", "units": ["ug/l", "umol/l"], "default_unit": "µg/L", "ref_ranges": {"any": {"ug/l": (40.0, 92.0), "umol/l": (0.32, 0.72)}}},
+    "choline": {"name_ru": "Холин", "nutrient_code": "choline", "units": ["umol/l", "mg/l"], "default_unit": "µmol/L", "ref_ranges": {"any": {"umol/l": (7.0, 20.0), "mg/l": (0.73, 2.1)}}},
     "vitamin_b3": {"name_ru": "Витамин B3 (ниацин)", "nutrient_code": "vitamin_b3", "units": ["umol/l", "mg/l"], "default_unit": "µmol/L", "ref_ranges": {"any": {"umol/l": (10.0, 50.0)}}},
     "vitamin_b5": {"name_ru": "Витамин B5 (пантотеновая кислота)", "nutrient_code": "vitamin_b5", "units": ["umol/l", "mg/l"], "default_unit": "µmol/L", "ref_ranges": {"any": {"umol/l": (1.0, 8.0)}}},
     "vitamin_b6": {"name_ru": "Витамин B6", "nutrient_code": "vitamin_b6", "units": ["nmol/l", "ug/l"], "default_unit": "nmol/L", "ref_ranges": {"any": {"nmol/l": (20.0, 125.0)}}},
@@ -502,6 +508,16 @@ async def _compute_assistant_with_retry(cfg: OpenAIConfig, llm_payload: dict, re
         if valid:
             return last_raw, parsed, ""
     return last_raw, None, reason
+
+
+def _fallback_profile_value(assistant_profile: dict, profile: dict, key: str, default: str = "unknown") -> str:
+    assistant_value = str((assistant_profile or {}).get(key) or "").strip()
+    if assistant_value and assistant_value.lower() != "unknown":
+        return assistant_value
+    profile_value = str((profile or {}).get(key) or "").strip()
+    if profile_value and profile_value.lower() != "na":
+        return profile_value
+    return default
 
 
 def _parse_json_list_field(raw: str | None) -> list[str]:
@@ -2241,17 +2257,17 @@ async def api_profile_nutrient_assistant_compute(
             "lactation_status": {"yes": "yes", "no": "no", "na": "not_applicable"}.get(str(profile.get("lactation_status") or "").lower(), "unknown"),
             "menstrual_status": str(assistant_profile.get("menstrual_status") or "unknown"),
             "heavy_menstrual_bleeding": bool(assistant_profile.get("heavy_menstrual_bleeding")),
-            "diet_type": str(assistant_profile.get("diet_type") or "unknown"),
+            "diet_type": _fallback_profile_value(assistant_profile, profile, "diet_type"),
             "fish_intake_frequency": str(assistant_profile.get("fish_intake_frequency") or "unknown"),
             "meat_intake_frequency": str(assistant_profile.get("meat_intake_frequency") or "unknown"),
             "dairy_intake_frequency": str(assistant_profile.get("dairy_intake_frequency") or "unknown"),
             "egg_intake_frequency": str(assistant_profile.get("egg_intake_frequency") or "unknown"),
-            "sun_exposure_level": str(assistant_profile.get("sun_exposure_level") or "unknown"),
+            "sun_exposure_level": _fallback_profile_value(assistant_profile, profile, "sun_exposure_level"),
             "sunscreen_use": str(assistant_profile.get("sunscreen_use") or "unknown"),
             "training_sessions_per_week": assistant_profile.get("training_sessions_per_week") or profile.get("training_sessions_per_week"),
             "training_minutes_per_week": assistant_profile.get("training_minutes_per_week") or profile.get("training_minutes_per_week"),
-            "smoking_status": str(assistant_profile.get("smoking_status") or "unknown"),
-            "alcohol_status": str(assistant_profile.get("alcohol_status") or "unknown"),
+            "smoking_status": _fallback_profile_value(assistant_profile, profile, "smoking_status"),
+            "alcohol_status": _fallback_profile_value(assistant_profile, profile, "alcohol_status"),
             "sleep_quality": str(assistant_profile.get("sleep_quality") or "unknown"),
             "stress_level": str(assistant_profile.get("stress_level") or "unknown"),
             "medications": _parse_json_list_field(profile.get("meds_json")),
@@ -2361,9 +2377,9 @@ async def api_profile_nutrient_assistant_compute(
             conn,
             tg_user_id,
             assistant_profile=assistant_profile,
-            labs=labs,
+            labs=[],
             compute_scope={"mode": "current_draft"},
-            source_run_id=run_id,
+            source_run_id=None,
         )
         prepared_actions: list[dict] = []
         seen_action_keys: set[tuple[str, str]] = set()
@@ -2585,6 +2601,21 @@ async def api_profile_nutrient_plans_get(x_telegram_init_data: str = Header(defa
         await conn.close()
 
 
+@app.get("/api/profile/nutrient-assistant/my-plans")
+async def api_profile_nutrient_my_plans_get(x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    if not await _paid_premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "code": "PAID_PREMIUM_REQUIRED"}, status_code=403)
+    conn = await db.connect(s.DB_PATH)
+    try:
+        await db.process_due_nutrient_lifecycle(conn, limit=300)
+        runs = await db.list_user_nutrient_plans(conn, tg_user_id, limit=120)
+        active_runs = [x for x in runs if int(x.get("is_active") or 0) == 1]
+        return JSONResponse({"ok": True, "runs": active_runs})
+    finally:
+        await conn.close()
+
+
 @app.get("/api/profile/nutrient-assistant/plans/{plan_id}")
 async def api_profile_nutrient_plan_get(plan_id: int, x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
     tg_user_id = await _auth_user_id(x_telegram_init_data)
@@ -2597,6 +2628,32 @@ async def api_profile_nutrient_plan_get(plan_id: int, x_telegram_init_data: str 
             raise HTTPException(status_code=404, detail="Assistant run not found")
         actions = await db.list_llm_assistant_plan_actions(conn, tg_user_id, int(plan_id))
         return JSONResponse({"ok": True, "run": run, "prepared_actions": actions})
+    finally:
+        await conn.close()
+
+
+@app.post("/api/profile/nutrient-assistant/my/{nutrient_code}/remove")
+async def api_profile_nutrient_plan_remove(
+    nutrient_code: str,
+    x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
+):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    if not await _paid_premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "code": "PAID_PREMIUM_REQUIRED"}, status_code=403)
+    conn = await db.connect(s.DB_PATH)
+    try:
+        code = str(nutrient_code or "").strip().lower()
+        if not code:
+            return JSONResponse({"ok": False, "code": "INVALID_NUTRIENT_CODE"}, status_code=400)
+        removed = await db.deactivate_active_nutrient_plans(conn, tg_user_id, code)
+        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        user_id = await db.get_or_create_user(conn, tg_user_id)
+        await conn.execute(
+            "UPDATE nutrient_followup_reminders SET status='obsolete', updated_at_utc=? WHERE user_id=? AND nutrient_code=? AND status IN ('scheduled','sent','snoozed')",
+            (now, user_id, code),
+        )
+        await conn.commit()
+        return JSONResponse({"ok": True, "removed": int(removed), "nutrient_code": code})
     finally:
         await conn.close()
 

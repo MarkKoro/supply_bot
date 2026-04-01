@@ -964,7 +964,10 @@
       registryAnalytes: null,
       detailRun: null,
       detailPreparedActions: [],
-      detailLoading: false
+      detailLoading: false,
+      myNutrientsOpen: false,
+      myPlans: [],
+      myPlansLoading: false
     },
     profileUi: { editOpen: false, manualOpen: false, uploadOpen: false, reviewOpen: false, selectedReportId: null, uploading: false, savingManual: false, savingReview: false, activeModule: "organs" },
     guide: { active: null, step: 0, steps: [], rect: null, card: null, arrow: null },
@@ -3793,7 +3796,13 @@ function adminField(label, field, value, kind='input') {
     { code:'crp', name:'СРБ', units:['mg/L','мг/л','mg/dL','мг/дл'] },
     { code:'hba1c', name:'HbA1c', units:['%','mmol/mol','ммоль/моль'] },
     { code:'glucose_fasting', name:'Глюкоза натощак', units:['mmol/L','ммоль/л','mg/dL','мг/дл'] },
-    { code:'omega3_index', name:'Омега-3 индекс', units:['%'] }
+    { code:'omega3_index', name:'Омега-3 индекс', units:['%'] },
+    { code:'phosphorus', name:'Фосфор', units:['mmol/L','ммоль/л','mg/dL','мг/дл'] },
+    { code:'potassium', name:'Калий', units:['mmol/L','ммоль/л','mEq/L'] },
+    { code:'sodium', name:'Натрий', units:['mmol/L','ммоль/л','mEq/L'] },
+    { code:'copper', name:'Медь', units:['µg/dL','ug/dL','мкг/дл','µmol/L','umol/L','мкмоль/л'] },
+    { code:'iodine', name:'Йод', units:['µg/L','ug/L','мкг/л','µmol/L','umol/L','мкмоль/л'] },
+    { code:'choline', name:'Холин', units:['µmol/L','umol/L','мкмоль/л','mg/L','мг/л'] }
   ];
   function getAssistantAnalytePresets() {
     const remote = Array.isArray(state.nutrientAssistant.registryAnalytes) ? state.nutrientAssistant.registryAnalytes : [];
@@ -3920,6 +3929,15 @@ function adminField(label, field, value, kind='input') {
       state.nutrientAssistant.history = Array.isArray(res.runs) ? res.runs : [];
     } catch {}
     state.nutrientAssistant.loadingHistory = false;
+  }
+  async function loadMyNutrientPlans(force) {
+    if (state.nutrientAssistant.myPlansLoading && !force) return;
+    state.nutrientAssistant.myPlansLoading = true;
+    try {
+      const res = await api('./api/profile/nutrient-assistant/my-plans');
+      state.nutrientAssistant.myPlans = Array.isArray(res.runs) ? res.runs : [];
+    } catch {}
+    state.nutrientAssistant.myPlansLoading = false;
   }
   async function loadNutrientDraft(force) {
     if (state.nutrientAssistant.loadingDraft && !force) return;
@@ -4233,6 +4251,13 @@ function adminField(label, field, value, kind='input') {
     return labs.map((l)=>`<div class="item-row" style="display:block"><div><strong>${esc(l.canonical_analyte_name_ru || l.analyte_name_ru || l.analyte_code || 'Показатель')}</strong></div><div class="muted">${esc(l.value || '—')} ${esc(l.unit || '')} · реф: ${esc(l.ref_low ?? '—')}–${esc(l.ref_high ?? '—')}</div><div class="muted">Статус до LLM: ${esc(l.interpreted_status_pre_llm || 'unclear')} · источник: ${esc(l.reference_source || 'unknown')}</div></div>`).join('');
   }
 
+  function renderMyNutrientsModal() {
+    const a = state.nutrientAssistant;
+    if (!a.myNutrientsOpen) return '';
+    const plans = Array.isArray(a.myPlans) ? a.myPlans : [];
+    return `<div class="modal-overlay" data-assistant-close-my-nutrients><section class="card modal-card" onclick="event.stopPropagation()"><div class="row"><strong>Мои нутриенты</strong><button class="btn secondary" data-assistant-close-my-nutrients>Закрыть</button></div><div class="muted" style="margin-top:8px">Активные протоколы и текущие рекомендации по нутриентам.</div><div style="margin-top:10px">${a.myPlansLoading ? '<div class="muted">Загружаем…</div>' : (plans.length ? plans.map((plan)=>`<div class="item-row" style="display:block"><div class="row"><strong>${esc(plan.nutrient_name_ru || plan.nutrient_code || 'Нутриент')}</strong><span class="chip">${esc(plan.lifecycle_status || plan.recommend_action || 'active')}</span></div><div class="muted">Действие: ${esc(plan.recommend_action || '—')} · До: ${esc(plan.course_ends_at_utc ? formatUtcShort(plan.course_ends_at_utc) : '—')}</div><div class="muted">Обновлено: ${esc(formatUtcShort(plan.updated_at_utc || plan.created_at_utc || ''))}</div><div class="row" style="margin-top:8px"><button class="btn secondary" data-assistant-remove-my-nutrient="${esc(plan.nutrient_code || '')}">Отменить нутриент</button></div></div>`).join('') : '<div class="muted">Активных нутриентов пока нет</div>')}</div></section></div>`;
+  }
+
   function renderAssistantModule(profile, labs) {
     const a = state.nutrientAssistant;
     const form = a.form || {};
@@ -4264,7 +4289,7 @@ function adminField(label, field, value, kind='input') {
     const basisLabs = Array.isArray(basisInput?.labs) ? basisInput.labs : [];
     const detailActions = Array.isArray(a.detailPreparedActions) ? a.detailPreparedActions : [];
     return `
-      <section class="card fade"><div class="row" style="flex-wrap:wrap; align-items:flex-start;"><strong>🧪 Нутриентный помощник</strong><button class="btn secondary" data-open-edit>Редактировать профиль</button></div><div class="profile-summary-grid" style="margin-top:8px">${summary}</div></section>
+      <section class="card fade"><div class="row" style="flex-wrap:wrap; align-items:flex-start;"><strong>🧪 Нутриентный помощник</strong><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn secondary" data-assistant-open-my-nutrients>Мои нутриенты</button><button class="btn secondary" data-open-edit>Редактировать профиль</button></div></div><div class="profile-summary-grid" style="margin-top:8px">${summary}</div></section>
       <section class="card fade">
         <div class="row"><strong>Данные для расчёта</strong></div>
         <div class="field-grid two" style="margin-top:8px">
@@ -4313,7 +4338,7 @@ function adminField(label, field, value, kind='input') {
       </section>
       ${resultData ? `<section class="card fade">
         <div class="row"><strong>Расчёт #${esc(selectedRun?.id || a.currentRunId || '—')}</strong><span class="chip">${esc(formatUtcShort(selectedRun?.created_at || ''))}</span></div>
-        <div class="row" style="margin-top:8px"><strong>Результат assistant</strong><div style="display:flex;gap:8px"><button class="btn" data-assistant-apply>${a.applying?'Применяем…':'Принять'}</button><button class="btn secondary" data-assistant-cancel>${a.cancelling?'Отменяем…':'Отменить'}</button></div></div>
+        <div class="row" style="margin-top:8px"><strong>Результат assistant</strong></div>
         <div class="muted" style="margin-top:8px">${esc(resultData.summary_ru || '')}</div>
         <div class="row" style="margin-top:8px"><span class="chip">Уверенность: ${esc(confidenceRu(resultData.confidence))}</span><span class="chip">Нутриентов: ${nutrients.length}</span><span class="chip">Анализов: ${(resultData.labs_used||[]).length}</span></div>
         <div class="field-grid two" style="margin-top:10px">
@@ -4352,7 +4377,7 @@ function adminField(label, field, value, kind='input') {
     if (activeModule === 'assistant') moduleHtml = hasPaidPremium ? renderAssistantModule(p, labs) : renderAssistantLockedModule();
     if (!moduleHtml) moduleHtml = `<section class="card fade">${renderBodyMap()}</section>`;
 
-    return `${renderProfileModulesGrid()}${moduleHtml}${renderProfileEditorModal()}${renderLabsModal('manual')}${renderLabsModal('upload')}${renderReviewModal()}`;
+    return `${renderProfileModulesGrid()}${moduleHtml}${renderProfileEditorModal()}${renderLabsModal('manual')}${renderLabsModal('upload')}${renderReviewModal()}${renderMyNutrientsModal()}`;
   }
 
   function collectLabRows(containerId){ const rows=[]; document.querySelectorAll(`#${containerId} [data-lab-row]`).forEach((rowEl)=>{ const idx=rowEl.dataset.labRow; const analyte_code=document.querySelector(`[data-lab-field="analyte_code"][data-idx="${idx}"]`)?.value||''; const preset=ANALYTE_PRESETS.find((x)=>x.code===analyte_code); const value=document.querySelector(`[data-lab-field="value_num"][data-idx="${idx}"]`)?.value||''; rows.push({ analyte_code, analyte_name:preset?.title||analyte_code, value_text:String(value), value_num:Number(String(value).replace(',','.'))||null, unit:document.querySelector(`[data-lab-field="unit"][data-idx="${idx}"]`)?.value||'', ref_low:Number(document.querySelector(`[data-lab-field="ref_low"][data-idx="${idx}"]`)?.value||'')||null, ref_high:Number(document.querySelector(`[data-lab-field="ref_high"][data-idx="${idx}"]`)?.value||'')||null }); }); return rows.filter((x)=>x.analyte_code); }
@@ -4517,6 +4542,10 @@ function adminField(label, field, value, kind='input') {
         state.nutrientAssistant.pendingComputePayload = null;
         await loadNutrientPlans(true);
         if (res.run_id) await loadAssistantRunDetail(res.run_id).catch(()=>null);
+        state.nutrientAssistant.manualLabs = [];
+        state.nutrientAssistant.expandedLabIdx = 0;
+        state.nutrientAssistant.draftSourceRunId = null;
+        await saveNutrientDraft({ labs: [], source_run_id: null }).catch(()=>null);
         showToast('Расчёт готов');
       } catch (e) {
         if (e.message === 'ASSISTANT_HISTORY_FULL') {
@@ -4538,33 +4567,28 @@ function adminField(label, field, value, kind='input') {
       state.nutrientAssistant.blocked = false;
       renderActiveTab();
     });
-    document.querySelector('[data-assistant-apply]')?.addEventListener('click', async ()=>{
-      if (state.nutrientAssistant.applying || !state.nutrientAssistant.currentRunId) return;
-      state.nutrientAssistant.applying = true;
+    document.querySelector('[data-assistant-open-my-nutrients]')?.addEventListener('click', async ()=>{
+      state.nutrientAssistant.myNutrientsOpen = true;
       renderActiveTab();
-      try {
-        const res = await api('./api/profile/nutrient-assistant/apply', { method:'POST', body: { run_id: state.nutrientAssistant.currentRunId } });
-        showToast(`План применён: ${Array.isArray(res.applied) ? res.applied.length : 0}`);
-      } catch (e) {
-        showToast(e.message || 'Не удалось применить план');
-      }
-      state.nutrientAssistant.applying = false;
+      await loadMyNutrientPlans(true);
       renderActiveTab();
     });
-    document.querySelector('[data-assistant-cancel]')?.addEventListener('click', async ()=>{
-      if (state.nutrientAssistant.cancelling || !state.nutrientAssistant.currentRunId) return;
-      state.nutrientAssistant.cancelling = true;
+    document.querySelectorAll('[data-assistant-close-my-nutrients]').forEach((el)=>el.addEventListener('click', ()=>{
+      state.nutrientAssistant.myNutrientsOpen = false;
       renderActiveTab();
+    }));
+    document.querySelectorAll('[data-assistant-remove-my-nutrient]').forEach((el)=>el.addEventListener('click', async ()=>{
+      const code = String(el.dataset.assistantRemoveMyNutrient || '').trim();
+      if (!code) return;
       try {
-        await api(`./api/profile/nutrient-assistant/runs/${state.nutrientAssistant.currentRunId}/cancel`, { method:'POST', body:{} });
-        showToast('Запрос отменён. Новый расчёт будет доступен завтра');
-        await loadNutrientPlans(true);
+        await api(`./api/profile/nutrient-assistant/my/${code}/remove`, { method:'POST', body:{} });
+        showToast('Нутриент удалён из текущего плана');
+        await loadMyNutrientPlans(true);
       } catch (e) {
-        showToast(e.message || 'Не удалось отменить');
+        showToast(e.message || 'Не удалось удалить нутриент');
       }
-      state.nutrientAssistant.cancelling = false;
       renderActiveTab();
-    });
+    }));
     document.querySelectorAll('[data-assistant-history]').forEach((el)=>el.addEventListener('click', async ()=>{
       try {
         const id = Number(el.dataset.assistantHistory);

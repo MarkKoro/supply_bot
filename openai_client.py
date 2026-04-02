@@ -6,7 +6,7 @@ import os
 from dataclasses import dataclass
 from typing import Optional
 
-from openai import APIConnectionError, APITimeoutError
+from openai import APIConnectionError, APITimeoutError, BadRequestError
 
 log = logging.getLogger("supply-bot")
 
@@ -415,7 +415,19 @@ def _sync_call_nutrient_assistant(
     }
     if max_output_tokens is not None:
         params["max_output_tokens"] = max_output_tokens
-    resp = client.responses.create(**params)
+    try:
+        resp = client.responses.create(**params)
+    except BadRequestError as exc:
+        message = str(exc)
+        if "Unsupported parameter: 'temperature'" in message and "temperature" in params:
+            params.pop("temperature", None)
+            log.warning(
+                "nutrient assistant responses.create fallback: retrying without temperature for model=%s",
+                cfg.model,
+            )
+            resp = client.responses.create(**params)
+        else:
+            raise
     return (resp.output_text or "").strip()
 
 

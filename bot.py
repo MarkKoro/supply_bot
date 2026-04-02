@@ -2004,7 +2004,7 @@ async def _finalize_ai_checkin(
         update,
         context,
         "🤖 Думаю… (AI)",
-        back(),
+        None,
         route=AI_CHECKIN_ROUTE,
         target_chat_id=target_chat_id,
         target_message_id=target_message_id,
@@ -2054,13 +2054,22 @@ async def _finalize_ai_checkin(
         action_type = str(action.get("type") or "").strip()
         if action_type not in {"add", "remove", "adjust"}:
             continue
-        slug = str(action.get("slug") or "").strip()
+        raw_slug = str(action.get("slug") or "").strip()
+        raw_name = str(action.get("ru_name") or action.get("name_ru") or action.get("name_en") or "").strip()
+        if not raw_slug and not raw_name:
+            missing_count += 1
+            continue
+        row = await db.find_supplement_by_slug_or_name(conn, raw_slug or None, raw_name or None)
+        if not row:
+            missing_count += 1
+            continue
+        slug = str(row["slug"] or "").strip()
         if not slug:
             missing_count += 1
             continue
         is_valid_action = False
         if action_type == "add":
-            is_valid_action = slug in candidate_slugs and slug not in stack_slugs
+            is_valid_action = slug not in stack_slugs
         elif action_type in {"remove", "adjust"}:
             is_valid_action = slug in stack_slugs
         if not is_valid_action:
@@ -2068,10 +2077,6 @@ async def _finalize_ai_checkin(
             continue
         dedup_key = (action_type, slug)
         if dedup_key in seen_action_keys:
-            continue
-        row = await db.get_supplement_by_slug(conn, slug)
-        if not row:
-            missing_count += 1
             continue
         ru_name = (row["name_ru"] or row["name_en"] or row["name"] or "").strip()
         action_id = str(action.get("id") or f"a{idx}").strip()
@@ -6763,7 +6768,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     route=AI_CHECKIN_ROUTE,
                 )
             else:
-                await show(update, context, "Готовлю рекомендации…", back(), route=AI_CHECKIN_ROUTE)
+                await show(update, context, "Готовлю рекомендации…", None, route=AI_CHECKIN_ROUTE)
                 extracted: dict = {}
                 try:
                     cfg = OpenAIConfig(api_key=s.OPENAI_API_KEY, model=s.OPENAI_MODEL)
@@ -6861,7 +6866,7 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             update,
             context,
             "Распознаю голос…",
-            ai_checkin_voice_kb(),
+            None,
             route=AI_CHECKIN_VOICE_ROUTE,
             payload=payload_data or _ai_checkin_voice_payload(),
             target_message_id=ui_message_id,
@@ -6935,7 +6940,7 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 update,
                 context,
                 "Готовлю рекомендации…",
-                ai_checkin_voice_kb(),
+                None,
                 route=AI_CHECKIN_VOICE_ROUTE,
                 payload=payload_data or _ai_checkin_voice_payload(),
                 target_message_id=ui_message_id,

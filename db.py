@@ -5105,9 +5105,41 @@ async def find_supplement_by_slug_or_name(
     name: str | None,
 ):
     if slug:
-        row = await get_supplement_by_slug(conn, slug)
-        if row:
-            return row
+        slug_raw = str(slug).strip()
+        slug_variants: list[str] = []
+        if slug_raw:
+            base_lower = slug_raw.lower()
+            for variant in (
+                slug_raw,
+                base_lower,
+                base_lower.replace("-", "_"),
+                base_lower.replace(" ", "_"),
+                base_lower.replace(" ", "-"),
+                base_lower.replace("_", "-"),
+                re.sub(r"[^a-z0-9_]+", "_", base_lower),
+            ):
+                v = str(variant).strip().lower().strip("_")
+                if v and v not in slug_variants:
+                    slug_variants.append(v)
+            compact = normalize_text(base_lower)
+            if compact and compact not in slug_variants:
+                slug_variants.append(compact)
+        for candidate_slug in slug_variants:
+            row = await get_supplement_by_slug(conn, candidate_slug)
+            if row:
+                return row
+        slug_norm = normalize(slug_raw)
+        if slug_norm:
+            row = await fetchone(
+                conn,
+                """SELECT s.* FROM supplements s
+                   JOIN supplement_aliases a ON a.supplement_id=s.id
+                   WHERE a.alias_norm=?
+                   LIMIT 1""",
+                (slug_norm,),
+            )
+            if row:
+                return row
     if not name:
         return None
     name = str(name).strip()

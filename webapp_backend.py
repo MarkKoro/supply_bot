@@ -577,7 +577,60 @@ def _timeout_failsafe_payload(llm_payload: dict) -> dict:
     return payload
 
 
-def _build_timeout_fallback_assistant_response(labs_for_llm: list[dict]) -> dict:
+def _build_fallback_nutrient_plan_from_labs(
+    labs_for_llm: list[dict],
+    *,
+    allowed_nutrient_codes: set[str] | None = None,
+    max_items: int = 20,
+) -> list[dict]:
+    plan: list[dict] = []
+    seen_codes: set[str] = set()
+    for item in list(labs_for_llm or []):
+        nutrient_code = _normalize_nutrient_code(str(item.get("canonical_nutrient_code") or ""))
+        if not nutrient_code or nutrient_code in seen_codes:
+            continue
+        if allowed_nutrient_codes is not None and nutrient_code not in allowed_nutrient_codes:
+            continue
+        status = str(item.get("interpreted_status_pre_llm") or "unclear")
+        if status == "normal":
+            action = "continue"
+            reason = "Показатель в референсе; обычно уместно сохранить текущую поддержку и наблюдать динамику."
+        elif status in {"low", "high"}:
+            action = "start"
+            reason = "Есть отклонение от референса; добавлен приоритет на коррекцию и повторный контроль."
+        else:
+            action = "retest_only"
+            reason = "Недостаточно данных для точной коррекции, сначала повторите/уточните анализ."
+        plan.append(
+            {
+                "nutrient_code": nutrient_code,
+                "nutrient_name_ru": str(item.get("canonical_analyte_name_ru") or nutrient_code),
+                "status": "attention" if status in {"low", "high"} else "monitor",
+                "recommend_action": action,
+                "dose_text_ru": "По стандартной схеме из справочника, индивидуализировать с врачом.",
+                "frequency_text_ru": "1 раз в день",
+                "duration_text_ru": "8–12 недель",
+                "timing_text_ru": "Во время еды",
+                "with_food": True,
+                "reason_ru": reason,
+                "monitor_ru": "Отслеживать самочувствие и переносимость.",
+                "retest_after_text_ru": "Через 8–12 недель",
+                "stop_or_pause_rule_ru": "Остановить при выраженной непереносимости и обсудить с врачом.",
+                "cautions_ru": "Требуется персональная проверка взаимодействий и противопоказаний.",
+                "interactions_ru": "Проверяйте совместимость с текущими препаратами и добавками.",
+            }
+        )
+        seen_codes.add(nutrient_code)
+        if len(plan) >= max(1, int(max_items)):
+            break
+    return plan
+
+
+def _build_timeout_fallback_assistant_response(
+    labs_for_llm: list[dict],
+    *,
+    allowed_nutrient_codes: set[str] | None = None,
+) -> dict:
     def _lab_row(item: dict) -> dict:
         status = str(item.get("interpreted_status_pre_llm") or "unclear")
         if status not in {"low", "normal", "high", "unclear"}:
@@ -603,21 +656,52 @@ def _build_timeout_fallback_assistant_response(labs_for_llm: list[dict]) -> dict
         }
 
     labs_review = [_lab_row(x) for x in list(labs_for_llm or [])]
+    nutrient_plan = _build_fallback_nutrient_plan_from_labs(
+        labs_for_llm,
+        allowed_nutrient_codes=allowed_nutrient_codes,
+        max_items=20,
+    )
     return {
-        "summary_ru": "AI-ответ временно недоступен по таймауту. Показан резервный безопасный разбор лабораторных показателей без назначения нутриентов.",
+        "summary_ru": "AI-ответ временно недоступен по таймауту. Показан резервный безопасный разбор лабораторных показателей с базовым планом по ключевым нутриентам.",
         "confidence": "low",
         "safety_flags": ["timeout_fallback_mode"],
         "physician_flags": ["Перепроверьте рекомендации с врачом перед началом/изменением приёма."],
         "labs_used": sorted({str(x.get("analyte_code") or "") for x in labs_for_llm if str(x.get("analyte_code") or "")}),
         "missing_data": [],
-        "nutrient_plan": [],
+        "nutrient_plan": nutrient_plan,
         "labs_review": labs_review,
         "next_steps_ru": [
             "Попробуйте пересчитать план через 30–60 секунд.",
             "Если таймаут повторяется, оставьте только самые свежие анализы и повторите расчёт.",
         ],
         "disclaimer_ru": "Резервный ответ сформирован автоматически при сетевом таймауте и не заменяет консультацию врача.",
-    }
+}
+
+
+def _merge_missing_labs_review(response_json: dict, input_labs: list[dict]) -> dict:
+    data = dict(response_json or {})
+    review = [dict(x) for x in list(data.get("labs_review") or []) if isinstance(x, dict)]
+    reviewed_codes = {str(x.get("analyte_code") or "").strip().lower() for x in review if str(x.get("analyte_code") or "").strip()}
+    for item in list(input_labs or []):
+        code = str(item.get("analyte_code") or "").strip().lower()
+        if not code or code in reviewed_codes:
+            continue
+        review.append(
+            {
+                "analyte_code": str(item.get("analyte_code") or ""),
+                "analyte_name_ru": str(item.get("analyte_name_ru") or ""),
+                "value": str(item.get("value") or ""),
+                "unit": str(item.get("unit") or ""),
+                "ref_low": item.get("ref_low"),
+                "ref_high": item.get("ref_high"),
+                "interpretation_status": str(item.get("interpreted_status_pre_llm") or "unclear"),
+                "mapped_nutrient_code": str(item.get("canonical_nutrient_code") or ""),
+                "actionability": "insufficient_data",
+                "short_reason_ru": "Добавлено автоматически для полного покрытия входных анализов.",
+            }
+        )
+    data["labs_review"] = review
+    return data
 
 
 def _fallback_profile_value(assistant_profile: dict, profile: dict, key: str, default: str = "unknown") -> str:
@@ -2360,34 +2444,12 @@ async def api_profile_nutrient_assistant_compute(
         if (not is_admin_unlimited) and await db.has_llm_assistant_cancel_today(conn, tg_user_id):
             return JSONResponse({"ok": False, "code": "DAILY_LIMIT_ONE_REQUEST"}, status_code=429)
         stage = "load_history"
-        history = await db.list_llm_assistant_runs_meta(conn, tg_user_id, limit=10)
-        month_key = datetime.now(timezone.utc).strftime("%Y-%m")
-        monthly_runs_count = sum(1 for h in history if str(h.get("created_at") or "").startswith(month_key))
-        if not is_admin_unlimited and monthly_runs_count >= NUTRIENT_ASSISTANT_MONTHLY_LIMIT:
-            reset_at_utc = (datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0) + timedelta(days=32)).replace(day=1)
-            return JSONResponse(
-                {
-                    "ok": False,
-                    "code": "ASSISTANT_MONTHLY_LIMIT_REACHED",
-                    "limit": NUTRIENT_ASSISTANT_MONTHLY_LIMIT,
-                    "used": monthly_runs_count,
-                    "period": month_key,
-                    "reset_at_utc": reset_at_utc.isoformat(),
-                },
-                status_code=429,
-            )
+        history = await db.list_llm_assistant_runs_meta(conn, tg_user_id, limit=30)
         active_history = [h for h in history if str(h.get("status") or "") in {"ok", "applied", "cancelled"}]
         if not is_admin_unlimited and len(active_history) >= 3:
             if (replace_run_id or 0) <= 0:
-                return JSONResponse(
-                    {
-                        "ok": False,
-                        "code": "ASSISTANT_HISTORY_FULL",
-                        "max_history": 3,
-                        "runs": active_history[:3],
-                    },
-                    status_code=409,
-                )
+                # Autoreplace oldest run to keep UX "always computable" without manual conflict flow.
+                replace_run_id = int(active_history[-1].get("id") or 0) or None
             target = next((r for r in active_history if int(r.get("id") or 0) == replace_run_id), None)
             if not target:
                 return JSONResponse({"ok": False, "code": "INVALID_REPLACE_RUN"}, status_code=400)
@@ -2564,7 +2626,10 @@ async def api_profile_nutrient_assistant_compute(
                 )
             except (APITimeoutError, APIConnectionError, TimeoutError):
                 stage = "call_llm_timeout_fallback_local"
-                parsed = _build_timeout_fallback_assistant_response(labs_for_llm)
+                parsed = _build_timeout_fallback_assistant_response(
+                    labs_for_llm,
+                    allowed_nutrient_codes=allowed_nutrient_codes,
+                )
                 raw_response = json.dumps(parsed, ensure_ascii=False)
                 invalid_reason = ""
                 used_timeout_fallback = True
@@ -2575,17 +2640,13 @@ async def api_profile_nutrient_assistant_compute(
                     labs_count,
                 )
         if not parsed:
-            stage = "save_invalid_run"
-            run_id = await db.create_llm_assistant_run(
-                conn, tg_user_id,
-                prompt_version=ASSISTANT_PROMPT_VERSION,
-                model_name=assistant_model,
-                input_snapshot=llm_payload,
-                response_json={"raw_text": raw_response, "reason": invalid_reason},
-                status="invalid_contract" if invalid_reason != "invalid_json" else "invalid_json",
+            stage = "build_fallback_for_invalid_contract"
+            parsed = _build_timeout_fallback_assistant_response(
+                labs_for_llm,
+                allowed_nutrient_codes=allowed_nutrient_codes,
             )
-            await conn.commit()
-            return JSONResponse({"ok": False, "code": "LLM_INVALID_CONTRACT", "reason": invalid_reason, "run_id": run_id}, status_code=422)
+            raw_response = raw_response or json.dumps(parsed, ensure_ascii=False)
+            used_timeout_fallback = True
         complete_labs, missing_labs = _labs_review_coverage(parsed, labs_for_llm)
         if not complete_labs:
             stage = "call_llm_strict_retry"
@@ -2613,17 +2674,19 @@ async def api_profile_nutrient_assistant_compute(
                 raw_response = retry_raw
                 parsed = retry_parsed
             else:
-                stage = "save_incomplete_run"
-                run_id = await db.create_llm_assistant_run(
-                    conn, tg_user_id,
-                    prompt_version=ASSISTANT_PROMPT_VERSION,
-                    model_name=assistant_model,
-                    input_snapshot=stronger_payload,
-                    response_json={"raw_text": retry_raw, "parsed": retry_parsed or {}, "reason": retry_reason or "LLM_INCOMPLETE_LABS_COVERAGE", "missing_labs": retry_missing or missing_labs},
-                    status="incomplete_labs_review",
+                # Ensure UX is resilient: never fail compute because of partial labs_review.
+                base = retry_parsed if valid_retry and retry_parsed else parsed
+                parsed = _merge_missing_labs_review(base or {}, labs_for_llm)
+                valid_merged, _ = _validate_assistant_response(
+                    parsed,
+                    allowed_nutrient_codes=allowed_nutrient_codes,
                 )
-                await conn.commit()
-                return JSONResponse({"ok": False, "code": "LLM_INCOMPLETE_LABS_COVERAGE", "missing_labs": retry_missing or missing_labs, "run_id": run_id}, status_code=422)
+                if not valid_merged:
+                    parsed = _build_timeout_fallback_assistant_response(
+                        labs_for_llm,
+                        allowed_nutrient_codes=allowed_nutrient_codes,
+                    )
+                used_timeout_fallback = True
         stage = "enrich_execution_fields"
         parsed = enrich_nutrient_plan_items_for_execution(parsed, context={"labs": labs_for_llm, "assistant_profile": assistant_profile})
 
@@ -2998,7 +3061,9 @@ async def api_profile_nutrient_assistant_apply(
             action = str(item.get("recommend_action") or "")
             nutrient_code = str(item.get("nutrient_code") or "").strip().lower()
             nutrient_name = str(item.get("nutrient_name_ru") or "").strip()
-            supp = await db.find_supplement_by_slug_or_name(conn, nutrient_code or None, nutrient_name or None)
+            supp = await db.get_supplement_by_slug(conn, nutrient_code) if nutrient_code else None
+            if not supp:
+                supp = await db.find_supplement_by_slug_or_name(conn, nutrient_code or None, nutrient_name or None)
             if not supp:
                 skipped.append({"action_id": int(item["id"]), "reason": "supplement_not_found", "nutrient_code": nutrient_code, "nutrient_name_ru": nutrient_name})
                 continue

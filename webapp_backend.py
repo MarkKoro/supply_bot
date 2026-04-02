@@ -402,6 +402,36 @@ ASSISTANT_ANALYTE_REGISTRY: dict[str, dict] = {
     "omega3_index": {"name_ru": "Омега-3 индекс", "nutrient_code": "omega_3", "units": ["%"], "default_unit": "%", "ref_ranges": {"any": {"%": (8.0, 12.0)}}},
 }
 
+ASSISTANT_ALLOWED_NUTRIENT_CODES: list[str] = sorted(
+    {
+        str(meta.get("nutrient_code") or "").strip().lower()
+        for meta in ASSISTANT_ANALYTE_REGISTRY.values()
+        if str(meta.get("nutrient_code") or "").strip()
+    }
+)
+ASSISTANT_ALLOWED_NUTRIENT_CODE_SET: set[str] = set(ASSISTANT_ALLOWED_NUTRIENT_CODES)
+ASSISTANT_NUTRIENT_CODE_ALIASES: dict[str, str] = {
+    "omega3": "omega_3",
+    "omega-3": "omega_3",
+    "omega_3": "omega_3",
+    "vitamin d": "vitamin_d",
+    "vitamin-d": "vitamin_d",
+    "vitamin b12": "vitamin_b12",
+    "vitamin-b12": "vitamin_b12",
+    "vitamin b9": "folate",
+    "vitamin-b9": "folate",
+    "b9": "folate",
+}
+
+
+def _normalize_nutrient_code(raw_code: str) -> str:
+    code = str(raw_code or "").strip().lower()
+    if not code:
+        return ""
+    compact = re.sub(r"[^a-z0-9]+", "_", code).strip("_")
+    candidate = ASSISTANT_NUTRIENT_CODE_ALIASES.get(code) or ASSISTANT_NUTRIENT_CODE_ALIASES.get(compact) or compact
+    return candidate if candidate in ASSISTANT_ALLOWED_NUTRIENT_CODE_SET else ""
+
 
 _ANALYTE_ALIAS_MAP: dict[str, str] = {}
 for _code, _meta in ASSISTANT_ANALYTE_REGISTRY.items():
@@ -453,7 +483,7 @@ def _extract_json_object(raw: str) -> dict | None:
     return None
 
 
-def _validate_assistant_response(data: dict) -> tuple[bool, str]:
+def _validate_assistant_response(data: dict, *, allowed_nutrient_codes: set[str] | None = None) -> tuple[bool, str]:
     required = [
         "summary_ru", "confidence", "safety_flags", "physician_flags", "labs_used",
         "missing_data", "nutrient_plan", "labs_review", "next_steps_ru", "disclaimer_ru",
@@ -481,6 +511,11 @@ def _validate_assistant_response(data: dict) -> tuple[bool, str]:
             return False, f"invalid_interpretation_status:{idx}"
         if str(lab.get("actionability") or "") not in {"actionable", "watch", "retest", "insufficient_data"}:
             return False, f"invalid_actionability:{idx}"
+        mapped_code = _normalize_nutrient_code(str(lab.get("mapped_nutrient_code") or ""))
+        if str(lab.get("mapped_nutrient_code") or "").strip() and not mapped_code:
+            return False, f"invalid_mapped_nutrient_code:{idx}"
+        if allowed_nutrient_codes is not None and mapped_code and mapped_code not in allowed_nutrient_codes:
+            return False, f"mapped_nutrient_code_out_of_catalog:{idx}"
     for idx, item in enumerate(list(data.get("nutrient_plan") or [])):
         if not isinstance(item, dict):
             return False, f"invalid_nutrient_item:{idx}"
@@ -495,10 +530,22 @@ def _validate_assistant_response(data: dict) -> tuple[bool, str]:
         action = str(item.get("recommend_action") or "")
         if action not in {"start", "continue", "stop", "do_not_start", "discuss_with_physician", "retest_only"}:
             return False, f"invalid_action:{idx}"
+        code = _normalize_nutrient_code(str(item.get("nutrient_code") or ""))
+        if not code:
+            return False, f"invalid_nutrient_code:{idx}"
+        if allowed_nutrient_codes is not None and code not in allowed_nutrient_codes:
+            return False, f"nutrient_code_out_of_catalog:{idx}"
+        item["nutrient_code"] = code
     return True, ""
 
 
-async def _compute_assistant_with_retry(cfg: OpenAIConfig, llm_payload: dict, retries: int = 2) -> tuple[str, dict | None, str]:
+async def _compute_assistant_with_retry(
+    cfg: OpenAIConfig,
+    llm_payload: dict,
+    retries: int = 2,
+    *,
+    allowed_nutrient_codes: set[str] | None = None,
+) -> tuple[str, dict | None, str]:
     last_raw = ""
     reason = "invalid_json"
     for _ in range(max(0, int(retries)) + 1):
@@ -507,7 +554,7 @@ async def _compute_assistant_with_retry(cfg: OpenAIConfig, llm_payload: dict, re
         if not parsed:
             reason = "invalid_json"
             continue
-        valid, reason = _validate_assistant_response(parsed)
+        valid, reason = _validate_assistant_response(parsed, allowed_nutrient_codes=allowed_nutrient_codes)
         if valid:
             return last_raw, parsed, ""
     return last_raw, None, reason
@@ -2441,6 +2488,43 @@ async def api_profile_nutrient_assistant_compute(
                     "started_days_ago": started_days,
                 }
             )
+        assistant_nutrient_catalog: list[dict] = []
+        missing_catalog_slugs: list[str] = []
+        for code in ASSISTANT_ALLOWED_NUTRIENT_CODES:
+            row = await db.fetchone(
+                conn,
+                """SELECT id, slug, COALESCE(NULLIF(name_ru,''), NULLIF(name_en,''), name, slug) AS name_ru
+                   FROM supplements
+                   WHERE slug=?
+                   LIMIT 1""",
+                (code,),
+            )
+            if not row:
+                missing_catalog_slugs.append(code)
+                continue
+            assistant_nutrient_catalog.append(
+                {
+                    "supplement_id": int(row["id"]),
+                    "nutrient_code": str(row["slug"] or ""),
+                    "nutrient_name_ru": str(row["name_ru"] or row["slug"] or ""),
+                }
+            )
+        if missing_catalog_slugs:
+            stage = "assistant_catalog_mismatch"
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "code": "ASSISTANT_NUTRIENT_CATALOG_MISMATCH",
+                    "missing_supplement_slugs": sorted(missing_catalog_slugs),
+                },
+                status_code=503,
+            )
+        assistant_catalog_by_code = {
+            str(x.get("nutrient_code") or "").strip().lower(): x
+            for x in assistant_nutrient_catalog
+            if str(x.get("nutrient_code") or "").strip()
+        }
+        allowed_nutrient_codes = set(assistant_catalog_by_code.keys())
 
         llm_payload_raw = {
             "user_profile": user_profile_payload,
@@ -2451,6 +2535,8 @@ async def api_profile_nutrient_assistant_compute(
                 "language": "ru",
                 "goal": "build_nutrient_recommendations",
                 "prompt_version": ASSISTANT_PROMPT_VERSION,
+                "nutrient_catalog": assistant_nutrient_catalog,
+                "allowed_nutrient_codes_note": "nutrient_code в nutrient_plan должен быть строго одним из nutrient_catalog.nutrient_code.",
                 **dict(body.assistant_context or {}),
             },
         }
@@ -2460,12 +2546,22 @@ async def api_profile_nutrient_assistant_compute(
         stage = "call_llm"
         used_timeout_fallback = False
         try:
-            raw_response, parsed, invalid_reason = await _compute_assistant_with_retry(cfg, llm_payload, retries=0)
+            raw_response, parsed, invalid_reason = await _compute_assistant_with_retry(
+                cfg,
+                llm_payload,
+                retries=0,
+                allowed_nutrient_codes=allowed_nutrient_codes,
+            )
         except (APITimeoutError, APIConnectionError, TimeoutError):
             stage = "call_llm_failsafe"
             compact_payload = _timeout_failsafe_payload(llm_payload)
             try:
-                raw_response, parsed, invalid_reason = await _compute_assistant_with_retry(cfg, compact_payload, retries=0)
+                raw_response, parsed, invalid_reason = await _compute_assistant_with_retry(
+                    cfg,
+                    compact_payload,
+                    retries=0,
+                    allowed_nutrient_codes=allowed_nutrient_codes,
+                )
             except (APITimeoutError, APIConnectionError, TimeoutError):
                 stage = "call_llm_timeout_fallback_local"
                 parsed = _build_timeout_fallback_assistant_response(labs_for_llm)
@@ -2505,7 +2601,10 @@ async def api_profile_nutrient_assistant_compute(
                 stronger_payload = _timeout_failsafe_payload(stronger_payload)
                 retry_raw = await nutrient_assistant_single_call(cfg, payload=stronger_payload)
             retry_parsed = _extract_json_object(retry_raw)
-            valid_retry, retry_reason = _validate_assistant_response(retry_parsed or {})
+            valid_retry, retry_reason = _validate_assistant_response(
+                retry_parsed or {},
+                allowed_nutrient_codes=allowed_nutrient_codes,
+            )
             retry_complete = False
             retry_missing: list[str] = []
             if valid_retry and retry_parsed:
@@ -2547,17 +2646,29 @@ async def api_profile_nutrient_assistant_compute(
             source_run_id=None,
         )
         prepared_actions: list[dict] = []
+        unresolved_nutrients: list[dict] = []
         seen_action_keys: set[tuple[str, str]] = set()
         stage = "prepare_actions"
         for item in list(parsed.get("nutrient_plan") or []):
             action = str(item.get("recommend_action") or "")
             if action not in {"start", "continue", "stop"}:
                 continue
-            nutrient_code = str(item.get("nutrient_code") or "").strip().lower()
+            nutrient_code = _normalize_nutrient_code(str(item.get("nutrient_code") or ""))
+            if not nutrient_code:
+                continue
             key = (nutrient_code, action)
             if key in seen_action_keys:
                 continue
             seen_action_keys.add(key)
+            resolved_supp = assistant_catalog_by_code.get(nutrient_code)
+            if not resolved_supp:
+                unresolved_nutrients.append(
+                    {
+                        "nutrient_code": nutrient_code,
+                        "nutrient_name_ru": str(item.get("nutrient_name_ru") or ""),
+                        "recommend_action": action,
+                    }
+                )
             prepared_actions.append(
                 {
                     "nutrient_code": nutrient_code,
@@ -2661,6 +2772,8 @@ async def api_profile_nutrient_assistant_compute(
             "run_id": run_id,
             "result": parsed,
             "prepared_actions": prepared_actions,
+            "missing_supplement_slugs": sorted({str(x.get("nutrient_code") or "") for x in unresolved_nutrients if str(x.get("nutrient_code") or "")}),
+            "unresolved_nutrients": unresolved_nutrients,
             "fallback_used": used_timeout_fallback,
         })
     except Exception as exc:
@@ -2725,13 +2838,31 @@ async def api_profile_nutrient_registry_summary(x_telegram_init_data: str = Head
 @app.get("/api/profile/nutrient-assistant/coverage-report")
 async def api_profile_nutrient_coverage_report(x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
     await _auth_user_id(x_telegram_init_data)
-    mapped = [x for x in ASSISTANT_ANALYTE_REGISTRY.values() if str(x.get("nutrient_code") or "")]
+    conn = await db.connect(s.DB_PATH)
+    try:
+        mapped_codes = sorted(
+            {
+                str(x.get("nutrient_code") or "").strip().lower()
+                for x in ASSISTANT_ANALYTE_REGISTRY.values()
+                if str(x.get("nutrient_code") or "").strip()
+            }
+        )
+        db_rows = await db.fetchall(conn, "SELECT slug FROM supplements")
+        supplement_slugs = {
+            str(x.get("slug") or "").strip().lower()
+            for x in db_rows
+            if str(x.get("slug") or "").strip()
+        }
+        missing_supplement_slugs = sorted([code for code in mapped_codes if code not in supplement_slugs])
+    finally:
+        await conn.close()
     return JSONResponse(
         {
             "ok": True,
             "analytes_total": len(ASSISTANT_ANALYTE_REGISTRY),
-            "nutrient_mapped_total": len(mapped),
+            "nutrient_mapped_total": len(mapped_codes),
             "unmapped_codes": sorted([code for code, meta in ASSISTANT_ANALYTE_REGISTRY.items() if not str(meta.get("nutrient_code") or "")]),
+            "missing_supplement_slugs": missing_supplement_slugs,
         }
     )
 

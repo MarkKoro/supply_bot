@@ -204,7 +204,7 @@ def _validate_assistant_response(data: dict, *, allowed_nutrient_codes: set[str]
         if not isinstance(item, dict):
             return False, f"invalid_nutrient_item:{idx}"
         required_item = [
-            "nutrient_code", "nutrient_name_ru", "status", "recommend_action", "dose_text_ru",
+            "nutrient_code", "nutrient_name_ru", "status", "recommend_action", "pause_after_course_days", "cycle_mode", "dose_text_ru",
             "frequency_text_ru", "duration_text_ru", "timing_text_ru", "with_food", "reason_ru",
             "monitor_ru", "retest_after_text_ru", "stop_or_pause_rule_ru", "cautions_ru", "interactions_ru",
         ]
@@ -305,6 +305,8 @@ def _build_fallback_nutrient_plan_from_labs(
                 "nutrient_name_ru": str(item.get("canonical_analyte_name_ru") or nutrient_code),
                 "status": "attention" if status in {"low", "high"} else "monitor",
                 "recommend_action": action,
+                "pause_after_course_days": None,
+                "cycle_mode": "one_shot",
                 "dose_text_ru": "По стандартной схеме из справочника, индивидуализировать с врачом.",
                 "frequency_text_ru": "1 раз в день",
                 "duration_text_ru": "8–12 недель",
@@ -560,6 +562,77 @@ def _labs_review_coverage(response_json: dict, input_labs: list[dict]) -> tuple[
     return (len(missing) == 0), missing
 
 
+def _build_nutrient_lab_status_map(labs_for_llm: list[dict]) -> dict[str, str]:
+    priority = {"high": 4, "low": 3, "normal": 2, "unclear": 1}
+    result: dict[str, str] = {}
+    for item in list(labs_for_llm or []):
+        nutrient_code = _normalize_nutrient_code(str(item.get("canonical_nutrient_code") or item.get("mapped_nutrient_code") or ""))
+        if not nutrient_code:
+            continue
+        status = str(item.get("interpreted_status_pre_llm") or item.get("interpretation_status") or "unclear").strip().lower()
+        if status not in priority:
+            status = "unclear"
+        prev = str(result.get(nutrient_code) or "unclear")
+        if priority[status] > priority.get(prev, 0):
+            result[nutrient_code] = status
+    return result
+
+
+def _clamped_action_for_status(nutrient_status: str, in_active_stack: bool) -> tuple[str, str]:
+    if nutrient_status == "high":
+        return ("stop", "possible_excess") if in_active_stack else ("do_not_start", "possible_excess")
+    if nutrient_status == "normal":
+        return ("continue", "likely_ok") if in_active_stack else ("do_not_start", "likely_ok")
+    if nutrient_status == "low":
+        return "start", "likely_low_or_risk"
+    return "retest_only", "unclear"
+
+
+def _apply_lab_action_safety_clamp(parsed: dict, labs_for_llm: list[dict], active_stack_codes: set[str]) -> dict:
+    data = dict(parsed or {})
+    lab_status_map = _build_nutrient_lab_status_map(labs_for_llm)
+    items = list(data.get("nutrient_plan") or [])
+    clamped_items: list[dict] = []
+    for raw in items:
+        item = dict(raw or {})
+        nutrient_code = _normalize_nutrient_code(str(item.get("nutrient_code") or ""))
+        if not nutrient_code:
+            clamped_items.append(item)
+            continue
+        nutrient_status = lab_status_map.get(nutrient_code, "unclear")
+        in_active_stack = nutrient_code in set(active_stack_codes or set())
+        forced_action, forced_status = _clamped_action_for_status(nutrient_status, in_active_stack)
+        prev_action = str(item.get("recommend_action") or "")
+        clamped = prev_action != forced_action
+        item["recommend_action"] = forced_action
+        item["status"] = forced_status
+        item["safety_clamped"] = bool(clamped)
+        item["safety_clamp_reason"] = (
+            f"lab_status={nutrient_status};in_active_stack={1 if in_active_stack else 0};action:{prev_action}->{forced_action}"
+        )
+        item["lab_status_final"] = nutrient_status
+        if nutrient_status == "high":
+            item["reason_ru"] = (
+                "Показатель выше референса на фоне текущего приёма — рекомендована остановка."
+                if in_active_stack
+                else "Показатель выше референса — начинать нутриент сейчас не нужно."
+            )
+        elif nutrient_status == "normal":
+            item["reason_ru"] = (
+                "Показатель в референсе, текущий курс можно продолжать под наблюдением."
+                if in_active_stack
+                else "Показатель в референсе, старт нутриента не требуется."
+            )
+        elif nutrient_status == "low":
+            item["reason_ru"] = "Показатель ниже референса — есть основания для начала курса."
+        else:
+            item["reason_ru"] = "Недостаточно надёжных данных по анализам, сначала нужен контроль/пересдача."
+        clamped_items.append(item)
+    data["nutrient_plan"] = clamped_items
+    data["nutrient_lab_status_map"] = lab_status_map
+    return data
+
+
 def _extract_reminder_times(frequency_text: str) -> list[str]:
     text = str(frequency_text or "").lower()
     if ("2" in text and "д" in text) or "2x" in text or "дважды" in text:
@@ -661,8 +734,11 @@ def enrich_nutrient_plan_items_for_execution(parsed: dict, context: dict | None 
         timing_context = _derive_timing_context(timing_text)
         course_days = _derive_course_days(duration_text)
         retest_after_days = _derive_course_days(retest_text)
+        pause_after_course_days = _safe_int_or_none(item.get("pause_after_course_days"))
+        pause_days = pause_after_course_days if pause_after_course_days is not None else (max(0, retest_after_days - course_days) if retest_after_days and course_days and retest_after_days > course_days else 0)
         reevaluate_after_days = course_days if action in {"start", "continue"} else None
         auto_stop_at_end = bool(course_days) and action in {"start", "continue"}
+        auto_repeat_enabled = action in {"start", "continue"} and auto_stop_at_end and int(pause_days or 0) > 0
         followup_kind = _derive_followup_kind(action)
         followup_message = ""
         if action in {"start", "continue"} and course_days:
@@ -676,8 +752,9 @@ def enrich_nutrient_plan_items_for_execution(parsed: dict, context: dict | None 
                 "explicit_times": explicit_times,
                 "timing_context": timing_context,
                 "course_days": course_days,
-                "pause_days": None,
+                "pause_days": pause_days,
                 "auto_stop_at_end": auto_stop_at_end,
+                "cycle_mode": "auto_repeat_after_pause" if auto_repeat_enabled else "one_shot",
                 "reevaluate_after_days": reevaluate_after_days,
                 "retest_after_days": retest_after_days,
                 "followup_kind": followup_kind,
@@ -804,6 +881,8 @@ async def run_nutrient_assistant_compute_pipeline(
     for item in stack:
         if int(item.get("is_active") or 0) != 1:
             continue
+        if int(item.get("enabled") or 0) != 1 or int(item.get("user_frozen") or 0) == 1:
+            continue
         active_stack_payload.append(
             {
                 "supplement_name": str(item.get("name_ru") or item.get("name_en") or item.get("name") or ""),
@@ -902,6 +981,9 @@ async def run_nutrient_assistant_compute_pipeline(
             )
             used_timeout_fallback = True
         _mark("merge_missing_labs_review")
+    stage = "safety_clamp"
+    parsed = _apply_lab_action_safety_clamp(parsed, labs_for_llm, active_stack_codes)
+    _mark("safety_clamp")
     stage = "enrich_execution_fields"
     parsed = enrich_nutrient_plan_items_for_execution(parsed, context={"labs": labs_for_llm, "assistant_profile": profile_payload})
     _mark("enrich_execution_fields")
@@ -919,13 +1001,29 @@ async def run_nutrient_assistant_compute_pipeline(
     stage = "materialize_actions"
     prepared_actions: list[dict] = []
     unresolved_nutrients: list[dict] = []
+    suppressed_actions: list[dict] = []
     seen_action_keys: set[tuple[str, str]] = set()
+    lab_status_map = _build_nutrient_lab_status_map(labs_for_llm)
     for item in list(parsed.get("nutrient_plan") or []):
         action = str(item.get("recommend_action") or "")
         if action not in {"start", "continue", "stop"}:
             continue
         nutrient_code = _normalize_nutrient_code(str(item.get("nutrient_code") or ""))
         if not nutrient_code or (nutrient_code, action) in seen_action_keys:
+            continue
+        nutrient_status = str(lab_status_map.get(nutrient_code) or "unclear")
+        in_active_stack = nutrient_code in active_stack_codes
+        if nutrient_status == "high" and (action == "start" or (action == "continue" and not in_active_stack)):
+            log.warning("nutrient materialization suppressed: high_status action=%s nutrient_code=%s in_stack=%s", action, nutrient_code, in_active_stack)
+            suppressed = {"nutrient_code": nutrient_code, "recommend_action": action, "reason": "high_status_guard", "lab_status": nutrient_status}
+            suppressed_actions.append(suppressed)
+            unresolved_nutrients.append(suppressed)
+            continue
+        if nutrient_status == "normal" and not in_active_stack and action in {"start", "continue"}:
+            log.warning("nutrient materialization suppressed: normal_out_of_stack action=%s nutrient_code=%s", action, nutrient_code)
+            suppressed = {"nutrient_code": nutrient_code, "recommend_action": action, "reason": "normal_out_of_stack_guard", "lab_status": nutrient_status}
+            suppressed_actions.append(suppressed)
+            unresolved_nutrients.append(suppressed)
             continue
         seen_action_keys.add((nutrient_code, action))
         resolved_supp = assistant_catalog_by_code.get(nutrient_code)
@@ -1018,5 +1116,6 @@ async def run_nutrient_assistant_compute_pipeline(
         "prepared_actions": prepared_actions,
         "missing_supplement_slugs": sorted({str(x.get("nutrient_code") or "") for x in unresolved_nutrients if str(x.get("nutrient_code") or "")}),
         "unresolved_nutrients": unresolved_nutrients,
+        "suppressed_actions": suppressed_actions,
         "fallback_used": used_timeout_fallback,
     }

@@ -1143,6 +1143,10 @@ async def _ensure_profile_foundation_tables(conn: aiosqlite.Connection) -> None:
     await _ensure_column(conn, "nutrient_plan_runs", "review_due_at_utc", "TEXT")
     await _ensure_column(conn, "nutrient_plan_runs", "retest_due_at_utc", "TEXT")
     await _ensure_column(conn, "nutrient_plan_runs", "cancelled_at_utc", "TEXT")
+    await _ensure_column(conn, "nutrient_plan_runs", "frozen_by_user", "INTEGER NOT NULL DEFAULT 0")
+    await _ensure_column(conn, "nutrient_plan_runs", "frozen_at_utc", "TEXT")
+    await _ensure_column(conn, "nutrient_plan_runs", "frozen_from_status", "TEXT")
+    await _ensure_column(conn, "user_supplements", "user_frozen", "INTEGER NOT NULL DEFAULT 0")
     await _ensure_column(conn, "nutrient_plan_explanations", "is_active", "INTEGER NOT NULL DEFAULT 1")
     await _ensure_column(conn, "nutrient_followup_reminders", "source_type", "TEXT NOT NULL DEFAULT 'nutrient_assistant'")
     await _ensure_column(conn, "nutrient_plan_rebuild_jobs", "status", "TEXT NOT NULL DEFAULT 'queued'")
@@ -5516,7 +5520,8 @@ async def get_supplement_detail_for_user(
                   s.body_effects_json,
                   us.supplement_id AS in_stack_id,
                   us.enabled AS user_enabled,
-                  us.is_active AS user_is_active
+                  us.is_active AS user_is_active,
+                  COALESCE(us.user_frozen,0) AS user_frozen
            FROM supplements s
            LEFT JOIN user_supplements us ON us.user_id=? AND us.supplement_id=s.id
            WHERE s.slug=? AND s.is_active=1
@@ -5526,8 +5531,13 @@ async def get_supplement_detail_for_user(
     if not row:
         return None
     in_stack = row["in_stack_id"] is not None
-    is_active_for_intake = bool(in_stack and int(row["user_is_active"] or 0) == 1 and int(row["user_enabled"] or 0) == 1)
-    is_frozen = bool(in_stack and int(row["user_is_active"] or 0) == 1 and int(row["user_enabled"] or 0) == 0)
+    is_active_for_intake = bool(
+        in_stack
+        and int(row["user_is_active"] or 0) == 1
+        and int(row["user_enabled"] or 0) == 1
+        and int(row["user_frozen"] or 0) == 0
+    )
+    is_frozen = bool(in_stack and int(row["user_is_active"] or 0) == 1 and int(row["user_frozen"] or 0) == 1)
     return {
         "id": int(row["id"]),
         "slug": str(row["slug"] or ""),
@@ -5549,6 +5559,7 @@ async def get_supplement_detail_for_user(
         "in_stack": in_stack,
         "enabled": int(row["user_enabled"] or 0) if in_stack else 0,
         "is_active": int(row["user_is_active"] or 0) if in_stack else 0,
+        "user_frozen": int(row["user_frozen"] or 0) if in_stack else 0,
         "is_frozen": is_frozen,
         "status": "active" if is_active_for_intake else ("frozen" if is_frozen else "inactive"),
     }
@@ -5827,7 +5838,7 @@ async def get_user_supplements_with_enabled(conn: aiosqlite.Connection, tg_user_
     user_id = await get_or_create_user(conn, int(tg_user_id))
     rows = await fetchall(
         conn,
-        """SELECT us.supplement_id, us.enabled, us.is_active, us.created_at,
+        """SELECT us.supplement_id, us.enabled, us.is_active, us.user_frozen, us.created_at,
                   s.slug, s.name_ru, s.name_en, s.name,
                   COALESCE(NULLIF(uss.dose_text,''), us.dose_text, '') AS dose_text,
                   COALESCE(NULLIF(us.note_text,''), '') AS note_text
@@ -5843,8 +5854,9 @@ async def get_user_supplements_with_enabled(conn: aiosqlite.Connection, tg_user_
             "supplement_id": int(r["supplement_id"] or 0),
             "enabled": int(r["enabled"] or 0),
             "is_active": int(r["is_active"] or 0),
-            "is_frozen": int(r["enabled"] or 0) == 0,
-            "status": "active" if int(r["enabled"] or 0) == 1 else "frozen",
+            "user_frozen": int(r["user_frozen"] or 0),
+            "is_frozen": int(r["user_frozen"] or 0) == 1 or int(r["enabled"] or 0) == 0,
+            "status": "frozen" if int(r["user_frozen"] or 0) == 1 else ("active" if int(r["enabled"] or 0) == 1 else "paused"),
             "slug": str(r["slug"] or "").strip(),
             "name_ru": str(r["name_ru"] or "").strip(),
             "name_en": str(r["name_en"] or "").strip(),
@@ -5866,6 +5878,112 @@ async def set_user_supp_enabled(conn: aiosqlite.Connection, user_id: int, supp_i
     )
     await conn.commit()
     return (cur.rowcount or 0) > 0
+
+
+def _shift_iso_utc(raw: str | None, delta: timedelta) -> str:
+    dt = _parse_iso_utc_or_none(raw)
+    if not dt:
+        return str(raw or "")
+    return (dt + delta).replace(microsecond=0).isoformat()
+
+
+async def set_user_supplement_manual_freeze(
+    conn: aiosqlite.Connection,
+    *,
+    tg_user_id: int,
+    supplement_id: int,
+    freeze: bool,
+) -> dict:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    now_dt = datetime.now(timezone.utc).replace(microsecond=0)
+    now_iso = now_dt.isoformat()
+    cur = await conn.execute(
+        "UPDATE user_supplements SET enabled=?, user_frozen=? WHERE user_id=? AND supplement_id=? AND is_active=1",
+        (0 if freeze else 1, 1 if freeze else 0, user_id, int(supplement_id)),
+    )
+    if int(cur.rowcount or 0) <= 0:
+        await conn.commit()
+        return {"updated": False, "shifted_seconds": 0, "runs_updated": 0}
+
+    if freeze:
+        await conn.execute("DELETE FROM reminders WHERE user_id=? AND supplement_id=?", (int(tg_user_id), int(supplement_id)))
+        run_rows = await fetchall(
+            conn,
+            """SELECT id, lifecycle_status
+               FROM nutrient_plan_runs
+               WHERE user_id=? AND supplement_id=? AND is_active=1
+                 AND lifecycle_status IN ('active','paused')
+                 AND COALESCE(frozen_by_user,0)=0""",
+            (user_id, int(supplement_id)),
+        )
+        for run in run_rows:
+            await conn.execute(
+                """UPDATE nutrient_plan_runs
+                   SET frozen_by_user=1, frozen_at_utc=?, frozen_from_status=?, lifecycle_status='frozen_by_user', updated_at_utc=?
+                   WHERE id=?""",
+                (now_iso, str(run["lifecycle_status"] or ""), now_iso, int(run["id"])),
+            )
+        await conn.commit()
+        return {"updated": True, "shifted_seconds": 0, "runs_updated": len(run_rows)}
+
+    frozen_rows = await fetchall(
+        conn,
+        """SELECT id, frozen_at_utc, frozen_from_status, course_ends_at_utc, review_due_at_utc, retest_due_at_utc
+           FROM nutrient_plan_runs
+           WHERE user_id=? AND supplement_id=? AND is_active=1 AND COALESCE(frozen_by_user,0)=1""",
+        (user_id, int(supplement_id)),
+    )
+    shifted_seconds = 0
+    for row in frozen_rows:
+        frozen_at = _parse_iso_utc_or_none(str(row["frozen_at_utc"] or ""))
+        delta = (now_dt - frozen_at) if frozen_at else timedelta(0)
+        if delta.total_seconds() > shifted_seconds:
+            shifted_seconds = int(delta.total_seconds())
+        restored_status = str(row["frozen_from_status"] or "review_required") or "review_required"
+        await conn.execute(
+            """UPDATE nutrient_plan_runs
+               SET frozen_by_user=0,
+                   frozen_at_utc='',
+                   frozen_from_status='',
+                   lifecycle_status=?,
+                   course_ends_at_utc=?,
+                   review_due_at_utc=?,
+                   retest_due_at_utc=?,
+                   updated_at_utc=?
+               WHERE id=?""",
+            (
+                restored_status,
+                _shift_iso_utc(row["course_ends_at_utc"], delta),
+                _shift_iso_utc(row["review_due_at_utc"], delta),
+                _shift_iso_utc(row["retest_due_at_utc"], delta),
+                now_iso,
+                int(row["id"]),
+            ),
+        )
+        reminder_rows = await fetchall(
+            conn,
+            "SELECT id, scheduled_for_utc FROM nutrient_followup_reminders WHERE plan_run_id=? AND status IN ('scheduled','snoozed')",
+            (int(row["id"]),),
+        )
+        for r in reminder_rows:
+            await conn.execute(
+                "UPDATE nutrient_followup_reminders SET scheduled_for_utc=?, updated_at_utc=? WHERE id=?",
+                (_shift_iso_utc(str(r["scheduled_for_utc"] or ""), delta), now_iso, int(r["id"])),
+            )
+        if restored_status == "active":
+            reminder_profile = await get_effective_reminders_for_supplement(conn, int(tg_user_id), int(supplement_id))
+            for hhmm in list(reminder_profile.get("times") or []):
+                norm_hhmm = _normalize_hhmm(str(hhmm or "").strip())
+                if not norm_hhmm:
+                    continue
+                await conn.execute(
+                    """INSERT INTO reminders(user_id, supplement_id, time_local, enabled, created_at)
+                       VALUES(?,?,?,?,?)
+                       ON CONFLICT(user_id, supplement_id, time_local) DO UPDATE SET enabled=excluded.enabled""",
+                    (int(tg_user_id), int(supplement_id), norm_hhmm, 1, now_iso),
+                )
+    await conn.commit()
+    return {"updated": True, "shifted_seconds": shifted_seconds, "runs_updated": len(frozen_rows)}
 
 
 async def set_user_supp_fields(
@@ -5913,7 +6031,7 @@ async def list_user_stack_details(conn: aiosqlite.Connection, tg_user_id: int, l
             LEFT JOIN user_supp_settings uss ON uss.user_id=us.user_id AND uss.supplement_id=us.supplement_id
             LEFT JOIN user_schedules sch ON sch.user_id=us.user_id AND sch.supplement_id=us.supplement_id
             {status_join}
-            WHERE us.user_id=? AND us.is_active=1 AND us.enabled=1
+            WHERE us.user_id=? AND us.is_active=1 AND us.enabled=1 AND COALESCE(us.user_frozen,0)=0
             ORDER BY s.name""",
         tuple(params),
     )
@@ -5955,7 +6073,7 @@ async def list_enabled_schedules(conn: aiosqlite.Connection):
            JOIN users u ON u.id=sch.user_id
            JOIN user_supplements us ON us.user_id=sch.user_id AND us.supplement_id=sch.supplement_id
            WHERE sch.is_enabled=1 AND sch.time_hhmm IS NOT NULL AND sch.time_hhmm!=''
-             AND us.is_active=1 AND us.enabled=1
+             AND us.is_active=1 AND us.enabled=1 AND COALESCE(us.user_frozen,0)=0
              AND u.tz_name IS NOT NULL AND u.tz_name!=''""",
     )
 
@@ -5967,7 +6085,7 @@ async def list_enabled_reminders(conn: aiosqlite.Connection):
            JOIN users u ON u.id=uss.user_id
            JOIN user_supplements us ON us.user_id=uss.user_id AND us.supplement_id=uss.supplement_id
            WHERE uss.reminder_enabled=1 AND uss.reminder_time IS NOT NULL AND uss.reminder_time!=''
-             AND us.is_active=1 AND us.enabled=1
+             AND us.is_active=1 AND us.enabled=1 AND COALESCE(us.user_frozen,0)=0
              AND u.tz_name IS NOT NULL AND u.tz_name!=''""",
     )
 
@@ -6160,7 +6278,8 @@ async def list_due_reminders(conn: aiosqlite.Connection):
            WHERE r.enabled=1
              AND COALESCE(np.reminders_enabled, 1)=1
              AND us.is_active=1
-             AND us.enabled=1""",
+             AND us.enabled=1
+             AND COALESCE(us.user_frozen,0)=0""",
     )
     slot_rows = await fetchall(
         conn,
@@ -6179,7 +6298,8 @@ async def list_due_reminders(conn: aiosqlite.Connection):
             AND uss.is_enabled=1
            WHERE us.is_active=1
              AND COALESCE(np.reminders_enabled, 1)=1
-             AND us.enabled=1""",
+             AND us.enabled=1
+             AND COALESCE(us.user_frozen,0)=0""",
     )
 
     custom_mode_pairs: set[tuple[int, int]] = set()
@@ -10295,7 +10415,10 @@ async def list_due_nutrient_followup_reminders(conn: aiosqlite.Connection) -> li
         """SELECT nfr.*, u.tz_name
            FROM nutrient_followup_reminders nfr
            JOIN users u ON u.id=nfr.user_id
+           JOIN nutrient_plan_runs npr ON npr.id=nfr.plan_run_id
            WHERE nfr.status IN ('scheduled','snoozed')
+             AND COALESCE(npr.frozen_by_user,0)=0
+             AND COALESCE(npr.lifecycle_status,'')!='frozen_by_user'
            ORDER BY nfr.scheduled_for_utc ASC, nfr.id ASC""",
     )
     now_utc = datetime.now(timezone.utc)
@@ -10334,10 +10457,10 @@ async def process_due_nutrient_lifecycle(conn: aiosqlite.Connection, limit: int 
         conn,
         """SELECT id, user_id, nutrient_code, supplement_id, lifecycle_status, recommend_action,
                   course_ends_at_utc, pause_days, review_due_at_utc, retest_due_at_utc,
-                  plan_snapshot_json
+                  plan_snapshot_json, frozen_by_user
            FROM nutrient_plan_runs
            WHERE is_active=1
-             AND lifecycle_status IN ('active','review_required','retest_due','paused')
+             AND lifecycle_status IN ('active','review_required','retest_due','paused','frozen_by_user')
            ORDER BY id ASC
            LIMIT ?""",
         (int(limit),),
@@ -10345,6 +10468,8 @@ async def process_due_nutrient_lifecycle(conn: aiosqlite.Connection, limit: int 
     for row in rows:
         plan_id = int(row["id"])
         lifecycle_status = str(row["lifecycle_status"] or "")
+        if int(row["frozen_by_user"] or 0) == 1 or lifecycle_status == "frozen_by_user":
+            continue
         plan_snapshot = _decode_json_or_default(row["plan_snapshot_json"], {})
         auto_stop = bool(plan_snapshot.get("auto_stop_at_end"))
         course_end = _parse_iso_utc_or_none(row["course_ends_at_utc"])
@@ -10399,8 +10524,15 @@ async def process_due_nutrient_lifecycle(conn: aiosqlite.Connection, limit: int 
             supplement_id = int(row["supplement_id"] or 0)
             recommend_action = str(row["recommend_action"] or "")
             if supplement_id > 0 and recommend_action in {"start", "continue"}:
+                supp_row = await fetchone(
+                    conn,
+                    "SELECT COALESCE(user_frozen,0) AS user_frozen FROM user_supplements WHERE user_id=? AND supplement_id=? LIMIT 1",
+                    (int(row["user_id"]), supplement_id),
+                )
+                if supp_row and int(supp_row["user_frozen"] or 0) == 1:
+                    continue
                 await conn.execute(
-                    "UPDATE user_supplements SET is_active=1, enabled=1 WHERE user_id=? AND supplement_id=?",
+                    "UPDATE user_supplements SET is_active=1, enabled=1 WHERE user_id=? AND supplement_id=? AND COALESCE(user_frozen,0)=0",
                     (int(row["user_id"]), supplement_id),
                 )
                 reminder_profile = await get_effective_reminders_for_supplement(conn, int(row["user_id"]), supplement_id)

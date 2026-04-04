@@ -471,6 +471,37 @@ CREATE TABLE IF NOT EXISTS user_complex_schedules (
   created_at_utc TEXT NOT NULL,
   UNIQUE(user_id, complex_id, slot_id)
 );
+
+CREATE TABLE IF NOT EXISTS assistant_jobs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tg_user_id INTEGER NOT NULL,
+  status TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'nutrient_compute',
+  request_json TEXT NOT NULL,
+  result_run_id INTEGER NOT NULL DEFAULT 0,
+  result_json TEXT NOT NULL DEFAULT '',
+  error_code TEXT NOT NULL DEFAULT '',
+  error_message TEXT NOT NULL DEFAULT '',
+  debug_id TEXT NOT NULL DEFAULT '',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  locked_by TEXT NOT NULL DEFAULT '',
+  locked_at_utc TEXT NOT NULL DEFAULT '',
+  created_at_utc TEXT NOT NULL,
+  started_at_utc TEXT NOT NULL DEFAULT '',
+  finished_at_utc TEXT NOT NULL DEFAULT '',
+  updated_at_utc TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_assistant_jobs_status_created ON assistant_jobs(status, created_at_utc, id);
+CREATE INDEX IF NOT EXISTS idx_assistant_jobs_user_created ON assistant_jobs(tg_user_id, id DESC);
+
+CREATE TABLE IF NOT EXISTS assistant_job_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id INTEGER NOT NULL,
+  event_type TEXT NOT NULL,
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  created_at_utc TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_assistant_job_events_job_id ON assistant_job_events(job_id, id ASC);
 """
 
 async def connect(db_path: str) -> aiosqlite.Connection:
@@ -1040,6 +1071,36 @@ async def _ensure_profile_foundation_tables(conn: aiosqlite.Connection) -> None:
           updated_at TEXT NOT NULL
         )"""
     )
+    await conn.execute(
+        """CREATE TABLE IF NOT EXISTS assistant_jobs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          tg_user_id INTEGER NOT NULL,
+          status TEXT NOT NULL,
+          kind TEXT NOT NULL DEFAULT 'nutrient_compute',
+          request_json TEXT NOT NULL,
+          result_run_id INTEGER NOT NULL DEFAULT 0,
+          result_json TEXT NOT NULL DEFAULT '',
+          error_code TEXT NOT NULL DEFAULT '',
+          error_message TEXT NOT NULL DEFAULT '',
+          debug_id TEXT NOT NULL DEFAULT '',
+          attempts INTEGER NOT NULL DEFAULT 0,
+          locked_by TEXT NOT NULL DEFAULT '',
+          locked_at_utc TEXT NOT NULL DEFAULT '',
+          created_at_utc TEXT NOT NULL,
+          started_at_utc TEXT NOT NULL DEFAULT '',
+          finished_at_utc TEXT NOT NULL DEFAULT '',
+          updated_at_utc TEXT NOT NULL
+        )"""
+    )
+    await conn.execute(
+        """CREATE TABLE IF NOT EXISTS assistant_job_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          job_id INTEGER NOT NULL,
+          event_type TEXT NOT NULL,
+          payload_json TEXT NOT NULL DEFAULT '{}',
+          created_at_utc TEXT NOT NULL
+        )"""
+    )
     await conn.execute("CREATE INDEX IF NOT EXISTS idx_llm_assistant_plan_actions_run ON llm_assistant_plan_actions(run_id, id ASC)")
     await conn.execute("CREATE INDEX IF NOT EXISTS idx_nutrient_plan_runs_user_code_active ON nutrient_plan_runs(user_id, nutrient_code, is_active)")
     await conn.execute("CREATE INDEX IF NOT EXISTS idx_nutrient_followup_plan ON nutrient_followup_items(plan_run_id)")
@@ -1049,6 +1110,9 @@ async def _ensure_profile_foundation_tables(conn: aiosqlite.Connection) -> None:
     await conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_nutrient_followup_rem_dedupe ON nutrient_followup_reminders(user_id, plan_run_id, reminder_type, scheduled_for_utc)")
     await conn.execute("CREATE INDEX IF NOT EXISTS idx_nutrient_rebuild_jobs_status_priority ON nutrient_plan_rebuild_jobs(status, priority, created_at_utc)")
     await conn.execute("CREATE INDEX IF NOT EXISTS idx_nutrient_rebuild_jobs_user_code ON nutrient_plan_rebuild_jobs(user_id, nutrient_code)")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_assistant_jobs_status_created ON assistant_jobs(status, created_at_utc, id)")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_assistant_jobs_user_created ON assistant_jobs(tg_user_id, id DESC)")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_assistant_job_events_job_id ON assistant_job_events(job_id, id ASC)")
     await _ensure_column(conn, "lab_reports", "source_filename", "TEXT")
     await _ensure_column(conn, "lab_reports", "mime_type", "TEXT")
     await _ensure_column(conn, "lab_reports", "parse_status", "TEXT NOT NULL DEFAULT 'manual'")
@@ -9117,6 +9181,198 @@ async def create_llm_assistant_run(
         ),
     )
     return int(cur.lastrowid)
+
+
+async def _append_assistant_job_event(
+    conn: aiosqlite.Connection,
+    job_id: int,
+    event_type: str,
+    payload: dict | None = None,
+) -> None:
+    await conn.execute(
+        """INSERT INTO assistant_job_events(job_id, event_type, payload_json, created_at_utc)
+           VALUES(?,?,?,?)""",
+        (
+            int(job_id),
+            str(event_type or "").strip() or "event",
+            json.dumps(payload or {}, ensure_ascii=False),
+            utc_now_iso(),
+        ),
+    )
+
+
+async def create_assistant_job(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    request_json: str,
+    debug_id: str,
+    kind: str = "nutrient_compute",
+) -> int:
+    now = utc_now_iso()
+    cur = await conn.execute(
+        """INSERT INTO assistant_jobs(
+            tg_user_id, status, kind, request_json, debug_id, created_at_utc, updated_at_utc
+           ) VALUES(?,?,?,?,?,?,?)""",
+        (
+            int(tg_user_id),
+            "queued",
+            str(kind or "nutrient_compute").strip() or "nutrient_compute",
+            str(request_json or "{}"),
+            str(debug_id or "").strip(),
+            now,
+            now,
+        ),
+    )
+    job_id = int(cur.lastrowid or 0)
+    await _append_assistant_job_event(conn, job_id, "created", {"status": "queued"})
+    await conn.commit()
+    return job_id
+
+
+async def get_assistant_job(conn: aiosqlite.Connection, tg_user_id: int, job_id: int) -> dict | None:
+    row = await fetchone(
+        conn,
+        "SELECT * FROM assistant_jobs WHERE tg_user_id=? AND id=? LIMIT 1",
+        (int(tg_user_id), int(job_id)),
+    )
+    return dict(row) if row else None
+
+
+async def get_assistant_job_by_id(conn: aiosqlite.Connection, job_id: int) -> dict | None:
+    row = await fetchone(conn, "SELECT * FROM assistant_jobs WHERE id=? LIMIT 1", (int(job_id),))
+    return dict(row) if row else None
+
+
+async def list_recent_assistant_jobs(conn: aiosqlite.Connection, tg_user_id: int, limit: int = 20) -> list[dict]:
+    rows = await fetchall(
+        conn,
+        """SELECT * FROM assistant_jobs
+           WHERE tg_user_id=?
+           ORDER BY id DESC
+           LIMIT ?""",
+        (int(tg_user_id), max(1, int(limit))),
+    )
+    return [dict(row) for row in rows]
+
+
+async def claim_next_assistant_job(conn: aiosqlite.Connection, worker_name: str) -> dict | None:
+    now = utc_now_iso()
+    worker = str(worker_name or "").strip() or "assistant_worker"
+    await conn.execute("BEGIN IMMEDIATE")
+    try:
+        row = await fetchone(
+            conn,
+            """SELECT id FROM assistant_jobs
+               WHERE status='queued'
+               ORDER BY created_at_utc ASC, id ASC
+               LIMIT 1""",
+        )
+        if not row:
+            await conn.commit()
+            return None
+        job_id = int(row["id"])
+        await conn.execute(
+            """UPDATE assistant_jobs
+               SET status='processing',
+                   attempts=attempts+1,
+                   locked_by=?,
+                   locked_at_utc=?,
+                   started_at_utc=CASE WHEN started_at_utc='' THEN ? ELSE started_at_utc END,
+                   updated_at_utc=?
+               WHERE id=? AND status='queued'""",
+            (worker, now, now, now, job_id),
+        )
+        changed = await fetchone(conn, "SELECT changes() AS c")
+        if int(changed["c"] if changed else 0) <= 0:
+            await conn.commit()
+            return None
+        await _append_assistant_job_event(conn, job_id, "claimed", {"worker_name": worker, "status": "processing"})
+        claimed = await fetchone(conn, "SELECT * FROM assistant_jobs WHERE id=? LIMIT 1", (job_id,))
+        await conn.commit()
+        return dict(claimed) if claimed else None
+    except Exception:
+        await conn.rollback()
+        raise
+
+
+async def mark_assistant_job_processing(conn: aiosqlite.Connection, job_id: int, worker_name: str) -> None:
+    now = utc_now_iso()
+    worker = str(worker_name or "").strip() or "assistant_worker"
+    await conn.execute(
+        """UPDATE assistant_jobs
+           SET status='processing',
+               locked_by=?,
+               locked_at_utc=?,
+               started_at_utc=CASE WHEN started_at_utc='' THEN ? ELSE started_at_utc END,
+               updated_at_utc=?
+           WHERE id=?""",
+        (worker, now, now, now, int(job_id)),
+    )
+    await _append_assistant_job_event(conn, int(job_id), "processing", {"worker_name": worker, "status": "processing"})
+    await conn.commit()
+
+
+async def mark_assistant_job_done(conn: aiosqlite.Connection, job_id: int, result_run_id: int, result_json: str = "") -> None:
+    now = utc_now_iso()
+    await conn.execute(
+        """UPDATE assistant_jobs
+           SET status='done',
+               result_run_id=?,
+               result_json=?,
+               error_code='',
+               error_message='',
+               finished_at_utc=?,
+               updated_at_utc=?
+           WHERE id=?""",
+        (int(result_run_id), str(result_json or ""), now, now, int(job_id)),
+    )
+    await _append_assistant_job_event(conn, int(job_id), "done", {"status": "done", "result_run_id": int(result_run_id)})
+    await conn.commit()
+
+
+async def mark_assistant_job_failed(conn: aiosqlite.Connection, job_id: int, error_code: str, error_message: str) -> None:
+    now = utc_now_iso()
+    safe_code = str(error_code or "UNKNOWN_ERROR").strip() or "UNKNOWN_ERROR"
+    safe_message = str(error_message or "").strip()
+    await conn.execute(
+        """UPDATE assistant_jobs
+           SET status='failed',
+               error_code=?,
+               error_message=?,
+               finished_at_utc=?,
+               updated_at_utc=?
+           WHERE id=?""",
+        (safe_code[:80], safe_message[:1000], now, now, int(job_id)),
+    )
+    await _append_assistant_job_event(conn, int(job_id), "failed", {"status": "failed", "error_code": safe_code[:80]})
+    await conn.commit()
+
+
+async def cancel_assistant_job(conn: aiosqlite.Connection, tg_user_id: int, job_id: int) -> bool:
+    now = utc_now_iso()
+    cur = await conn.execute(
+        """UPDATE assistant_jobs
+           SET status='cancelled',
+               finished_at_utc=CASE WHEN finished_at_utc='' THEN ? ELSE finished_at_utc END,
+               updated_at_utc=?,
+               error_code=CASE WHEN error_code='' THEN 'CANCELLED_BY_USER' ELSE error_code END,
+               error_message=CASE WHEN error_message='' THEN 'Cancelled by user' ELSE error_message END
+           WHERE id=? AND tg_user_id=? AND status IN ('queued','processing')""",
+        (now, now, int(job_id), int(tg_user_id)),
+    )
+    ok = int(cur.rowcount or 0) > 0
+    if ok:
+        await _append_assistant_job_event(conn, int(job_id), "cancelled", {"status": "cancelled"})
+    await conn.commit()
+    return ok
+
+
+async def touch_assistant_job(conn: aiosqlite.Connection, job_id: int) -> None:
+    await conn.execute(
+        "UPDATE assistant_jobs SET updated_at_utc=? WHERE id=?",
+        (utc_now_iso(), int(job_id)),
+    )
+    await conn.commit()
 
 
 async def get_nutrient_assistant_draft(conn: aiosqlite.Connection, tg_user_id: int) -> dict | None:

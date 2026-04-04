@@ -109,6 +109,18 @@ def _canonical_analyte_code(raw_code: str) -> str:
     return _ANALYTE_ALIAS_MAP.get(normalized, normalized)
 
 
+def _safe_float(value: str | float | int | None) -> float | None:
+    if value is None:
+        return None
+    txt = str(value).strip().replace(",", ".")
+    if not txt:
+        return None
+    try:
+        return float(txt)
+    except ValueError:
+        return None
+
+
 def _pick_ref_range(registry_item: dict, sex_key: str, unit: str) -> tuple[float | None, float | None]:
     ref_ranges = dict(registry_item.get("ref_ranges") or {})
     unit_key = _norm_unit(unit)

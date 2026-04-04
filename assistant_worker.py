@@ -7,8 +7,8 @@ import socket
 import time
 
 import db
+from nutrient_assistant_pipeline import NutrientAssistantPipelineError, run_nutrient_assistant_compute_pipeline
 from settings import get_settings
-from webapp_backend import NutrientAssistantPipelineError, run_nutrient_assistant_compute_pipeline
 
 log = logging.getLogger("assistant_worker")
 
@@ -93,15 +93,20 @@ async def process_assistant_job(conn, job: dict, worker_name: str) -> None:
 async def run_worker() -> None:
     settings = get_settings()
     worker_name = f"assistant-worker:{socket.gethostname()}"
-    poll_interval_sec = 2.0
-    idle_log_every = 30
+    poll_interval_sec = 2.5
+    idle_log_every = 48
     idle_ticks = 0
+    stale_check_every = 24
 
     log.info("assistant worker starting worker_name=%s db_path=%s", worker_name, settings.DB_PATH)
 
     while True:
         conn = await db.connect(settings.DB_PATH)
         try:
+            if idle_ticks % stale_check_every == 0:
+                recovered = await db.recover_stale_assistant_jobs(conn, stale_after_seconds=600)
+                if recovered:
+                    log.warning("assistant worker stale recovered count=%s job_ids=%s", len(recovered), recovered[:10])
             job = await db.claim_next_assistant_job(conn, worker_name)
             if not job:
                 idle_ticks += 1

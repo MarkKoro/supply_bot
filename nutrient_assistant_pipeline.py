@@ -92,6 +92,11 @@ def _normalize_nutrient_code(raw_code: str) -> str:
     return candidate if candidate in ASSISTANT_ALLOWED_NUTRIENT_CODE_SET else ""
 
 
+def _normalize_analyte_code(value: str) -> str:
+    text = re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower())
+    return text.strip("_")
+
+
 _ANALYTE_ALIAS_MAP: dict[str, str] = {}
 for _code, _meta in ASSISTANT_ANALYTE_REGISTRY.items():
     _ANALYTE_ALIAS_MAP[_code] = _code

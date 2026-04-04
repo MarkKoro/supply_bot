@@ -965,6 +965,10 @@
       detailRun: null,
       detailPreparedActions: [],
       detailLoading: false,
+      currentJobId: null,
+      currentJobStatus: "",
+      jobPollTimer: null,
+      jobPollErrors: 0,
       myNutrientsOpen: false,
       myPlans: [],
       myPlansLoading: false,
@@ -3991,6 +3995,66 @@ function adminField(label, field, value, kind='input') {
       state.nutrientAssistant.detailLoading = false;
     }
   }
+  async function fetchAssistantJob(jobId) {
+    const id = Number(jobId || 0);
+    if (!id) return null;
+    const res = await api(`./api/profile/nutrient-assistant/jobs/${id}`);
+    return res.job || null;
+  }
+  function stopAssistantJobPolling() {
+    if (state.nutrientAssistant.jobPollTimer) {
+      clearTimeout(state.nutrientAssistant.jobPollTimer);
+      state.nutrientAssistant.jobPollTimer = null;
+    }
+  }
+  function scheduleAssistantJobPolling(jobId, delayMs = 2500) {
+    stopAssistantJobPolling();
+    state.nutrientAssistant.jobPollTimer = setTimeout(async ()=>{
+      const id = Number(jobId || state.nutrientAssistant.currentJobId || 0);
+      if (!id) return;
+      try {
+        const job = await fetchAssistantJob(id);
+        const prevStatus = String(state.nutrientAssistant.currentJobStatus || '');
+        const status = String(job?.status || '');
+        state.nutrientAssistant.currentJobId = id;
+        state.nutrientAssistant.currentJobStatus = status;
+        state.nutrientAssistant.jobPollErrors = 0;
+        if (status === 'queued' || status === 'processing') {
+          if (status !== prevStatus) showToast(status === 'queued' ? 'Расчёт в очереди' : 'Идёт расчёт');
+          scheduleAssistantJobPolling(id, 2500);
+        } else if (status === 'done' && Number(job?.result_run_id || 0) > 0) {
+          stopAssistantJobPolling();
+          state.nutrientAssistant.computing = false;
+          state.nutrientAssistant.blocked = false;
+          state.nutrientAssistant.currentJobId = null;
+          state.nutrientAssistant.currentJobStatus = 'done';
+          await loadNutrientPlans(true);
+          await loadAssistantRunDetail(Number(job.result_run_id)).catch(()=>null);
+          showToast('Расчёт готов');
+        } else if (status === 'failed') {
+          stopAssistantJobPolling();
+          state.nutrientAssistant.computing = false;
+          state.nutrientAssistant.blocked = false;
+          state.nutrientAssistant.currentJobStatus = 'failed';
+          state.nutrientAssistant.currentJobId = null;
+          showToast(String(job?.error_message || 'Расчёт завершился с ошибкой'));
+        } else {
+          scheduleAssistantJobPolling(id, 2500);
+        }
+      } catch {
+        state.nutrientAssistant.jobPollErrors = Number(state.nutrientAssistant.jobPollErrors || 0) + 1;
+        if (state.nutrientAssistant.jobPollErrors <= 5) {
+          scheduleAssistantJobPolling(id, 3000);
+        } else {
+          stopAssistantJobPolling();
+          state.nutrientAssistant.computing = false;
+          state.nutrientAssistant.blocked = false;
+          showToast('Проблема с сетью при проверке статуса расчёта');
+        }
+      }
+      renderActiveTab();
+    }, delayMs);
+  }
   async function saveNutrientDraft(partial = {}) {
     const hasProfile = Object.prototype.hasOwnProperty.call(partial, 'assistant_profile');
     const hasLabs = Object.prototype.hasOwnProperty.call(partial, 'labs');
@@ -4667,6 +4731,7 @@ function adminField(label, field, value, kind='input') {
       if (state.nutrientAssistant.computing) return;
       state.nutrientAssistant.computing = true;
       state.nutrientAssistant.blocked = true;
+      state.nutrientAssistant.currentJobStatus = 'queued';
       renderActiveTab();
       try {
         const assistant_profile = collectAssistantForm();
@@ -4676,20 +4741,19 @@ function adminField(label, field, value, kind='input') {
         state.nutrientAssistant.manualLabs = normalizeAssistantLabs(state.nutrientAssistant.manualLabs || []);
         await saveNutrientDraft({ assistant_profile, labs }).catch(()=>null);
         const res = await api('./api/profile/nutrient-assistant/compute', { method:'POST', body: { assistant_profile, labs, replace_run_id } });
-        state.nutrientAssistant.result = res.result || null;
-        state.nutrientAssistant.currentRunId = res.run_id || null;
+        const jobId = Number(res.job_id || 0) || null;
+        state.nutrientAssistant.currentJobId = jobId;
+        state.nutrientAssistant.currentJobStatus = String(res.status || 'queued');
+        state.nutrientAssistant.result = null;
+        state.nutrientAssistant.currentRunId = null;
         state.nutrientAssistant.detailRun = null;
-        state.nutrientAssistant.detailPreparedActions = Array.isArray(res.prepared_actions) ? res.prepared_actions : [];
+        state.nutrientAssistant.detailPreparedActions = [];
         state.nutrientAssistant.pendingOverwriteRuns = [];
         state.nutrientAssistant.pendingComputePayload = null;
-        await loadNutrientPlans(true);
-        if (res.run_id) await loadAssistantRunDetail(res.run_id).catch(()=>null);
-        state.nutrientAssistant.manualLabs = [];
-        state.nutrientAssistant.expandedLabIdx = 0;
-        state.nutrientAssistant.draftSourceRunId = null;
-        await saveNutrientDraft({ labs: [], source_run_id: null }).catch(()=>null);
-        showToast('Расчёт готов');
+        showToast('Расчёт поставлен в очередь');
+        if (jobId) scheduleAssistantJobPolling(jobId, 2000);
       } catch (e) {
+        stopAssistantJobPolling();
         if (e.message === 'ASSISTANT_HISTORY_FULL') {
           try {
             const conflictRes = await api('./api/profile/nutrient-assistant/plans');
@@ -4709,8 +4773,10 @@ function adminField(label, field, value, kind='input') {
           showToast(e.message || 'Не удалось выполнить расчёт');
         }
       }
-      state.nutrientAssistant.computing = false;
-      state.nutrientAssistant.blocked = false;
+      if (!state.nutrientAssistant.currentJobId) {
+        state.nutrientAssistant.computing = false;
+        state.nutrientAssistant.blocked = false;
+      }
       renderActiveTab();
     });
     document.querySelector('[data-assistant-open-my-nutrients]')?.addEventListener('click', async ()=>{

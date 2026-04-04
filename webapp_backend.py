@@ -465,6 +465,14 @@ def _safe_json_loads(raw: str) -> dict | None:
         return None
 
 
+def _decode_json_or_default(raw, default):
+    try:
+        data = json.loads(str(raw or ""))
+        return data if isinstance(data, type(default)) else default
+    except Exception:
+        return default
+
+
 def _extract_json_object(raw: str) -> dict | None:
     direct = _safe_json_loads(str(raw or "").strip())
     if direct is not None:
@@ -2468,6 +2476,7 @@ async def api_profile_nutrient_assistant_job_get(
             "kind": str(item.get("kind") or ""),
             "status": str(item.get("status") or ""),
             "result_run_id": int(item.get("result_run_id") or 0),
+            "result_json": _decode_json_or_default(item.get("result_json"), {}),
             "error_code": str(item.get("error_code") or ""),
             "error_message": str(item.get("error_message") or ""),
             "debug_id": str(item.get("debug_id") or ""),
@@ -2481,6 +2490,283 @@ async def api_profile_nutrient_assistant_job_get(
         await conn.close()
 
 
+class NutrientAssistantPipelineError(Exception):
+    def __init__(self, code: str, stage: str, message: str = "") -> None:
+        self.code = str(code or "ASSISTANT_PIPELINE_ERROR")
+        self.stage = str(stage or "unknown")
+        self.message = str(message or "")
+        super().__init__(self.message or self.code)
+
+
+async def run_nutrient_assistant_compute_pipeline(
+    conn,
+    *,
+    tg_user_id: int,
+    assistant_profile: dict | None,
+    labs: list[dict] | None,
+    assistant_context: dict | None,
+    debug_id: str,
+) -> dict:
+    if not s.OPENAI_API_KEY:
+        raise NutrientAssistantPipelineError("OPENAI_DISABLED", "validate_openai")
+    stage = "load_profile"
+    profile = await db.get_user_health_profile(conn, tg_user_id)
+    stack = await db.get_user_supplements_with_enabled(conn, tg_user_id)
+    sex_key = {"m": "male", "f": "female"}.get(str(profile.get("sex_at_birth") or "").lower(), "any")
+    stage = "normalize_labs"
+    if labs:
+        normalized_labs = [_normalize_assistant_lab_item(dict(x or {}), sex_key=sex_key) for x in list(labs)]
+    else:
+        latest = await db.list_latest_lab_results(conn, tg_user_id, limit=80)
+        normalized_labs = [
+            _normalize_assistant_lab_item({
+                "analyte_code": str(x.get("analyte_code") or ""),
+                "analyte_name_ru": str(x.get("analyte_name") or ""),
+                "value": x.get("value_num") if x.get("value_num") is not None else str(x.get("value_text") or ""),
+                "unit": str(x.get("unit") or ""),
+                "ref_low": x.get("ref_low"),
+                "ref_high": x.get("ref_high"),
+                "measured_at": _to_iso_date(str(x.get("measured_at") or "")),
+            }, sex_key=sex_key)
+            for x in latest
+        ]
+
+    labs_for_llm = _compact_labs_for_llm(normalized_labs, max_items=40, max_per_analyte=1)
+    labs_count = len(labs_for_llm)
+    current_year = int(db.get_user_local_date(None).split("-")[0])
+    birth_year = int(profile.get("birth_year") or 0) if str(profile.get("birth_year") or "").isdigit() else None
+    age = current_year - birth_year if birth_year and 1900 <= birth_year <= current_year else None
+    profile_payload = dict(assistant_profile or {})
+
+    user_profile_payload = {
+        "sex_at_birth": {"m": "male", "f": "female", "na": "unknown"}.get(str(profile.get("sex_at_birth") or "").lower(), "unknown"),
+        "age": age,
+        "height_cm": profile.get("height_cm"),
+        "weight_kg": profile.get("weight_kg"),
+        "country_code": str(profile.get("country_code") or ""),
+        "city": str(profile.get("city") or ""),
+        "pregnancy_status": {"yes": "yes", "no": "no", "na": "not_applicable"}.get(str(profile.get("pregnancy_status") or "").lower(), "unknown"),
+        "lactation_status": {"yes": "yes", "no": "no", "na": "not_applicable"}.get(str(profile.get("lactation_status") or "").lower(), "unknown"),
+        "menstrual_status": str(profile_payload.get("menstrual_status") or "unknown"),
+        "heavy_menstrual_bleeding": bool(profile_payload.get("heavy_menstrual_bleeding")),
+        "diet_type": _fallback_profile_value(profile_payload, profile, "diet_type"),
+        "fish_intake_frequency": str(profile_payload.get("fish_intake_frequency") or "unknown"),
+        "meat_intake_frequency": str(profile_payload.get("meat_intake_frequency") or "unknown"),
+        "dairy_intake_frequency": str(profile_payload.get("dairy_intake_frequency") or "unknown"),
+        "egg_intake_frequency": str(profile_payload.get("egg_intake_frequency") or "unknown"),
+        "sun_exposure_level": _fallback_profile_value(profile_payload, profile, "sun_exposure_level"),
+        "sunscreen_use": str(profile_payload.get("sunscreen_use") or "unknown"),
+        "training_sessions_per_week": profile_payload.get("training_sessions_per_week") or profile.get("training_sessions_per_week"),
+        "training_minutes_per_week": profile_payload.get("training_minutes_per_week") or profile.get("training_minutes_per_week"),
+        "smoking_status": _fallback_profile_value(profile_payload, profile, "smoking_status"),
+        "alcohol_status": _fallback_profile_value(profile_payload, profile, "alcohol_status"),
+        "sleep_quality": str(profile_payload.get("sleep_quality") or "unknown"),
+        "stress_level": str(profile_payload.get("stress_level") or "unknown"),
+        "medications": _parse_json_list_field(profile.get("meds_json")),
+        "health_conditions": _parse_json_list_field(profile.get("conditions_json")),
+        "gi_problems": list(profile_payload.get("gi_problems") or []),
+        "malabsorption_risk": bool(profile_payload.get("malabsorption_risk")),
+        "kidney_conditions": list(profile_payload.get("kidney_conditions") or []),
+        "liver_conditions": list(profile_payload.get("liver_conditions") or []),
+        "thyroid_conditions": list(profile_payload.get("thyroid_conditions") or []),
+        "bariatric_or_gi_surgery_history": bool(profile_payload.get("bariatric_or_gi_surgery_history")),
+        "allergies_or_restrictions": list(profile_payload.get("allergies_or_restrictions") or []),
+        "known_past_deficiencies": list(profile_payload.get("known_past_deficiencies") or []),
+        "primary_goal": str(profile_payload.get("primary_goal") or ""),
+        "symptoms": list(profile_payload.get("symptoms") or []),
+        "symptoms_other_free_text": str(profile_payload.get("symptoms_other_free_text") or ""),
+    }
+    active_stack_payload = []
+    for item in stack:
+        if int(item.get("is_active") or 0) != 1:
+            continue
+        active_stack_payload.append(
+            {
+                "supplement_name": str(item.get("name_ru") or item.get("name_en") or item.get("name") or ""),
+                "nutrient_code": str(item.get("slug") or ""),
+                "dose_text": str(item.get("dose_text") or "").strip(),
+                "frequency_text": "daily",
+                "started_days_ago": _days_since_iso(str(item.get("created_at") or "")),
+            }
+        )
+    stage = "assistant_catalog"
+    assistant_nutrient_catalog: list[dict] = []
+    missing_catalog_slugs: list[str] = []
+    for code in ASSISTANT_ALLOWED_NUTRIENT_CODES:
+        row = await db.fetchone(
+            conn,
+            """SELECT id, slug, COALESCE(NULLIF(name_ru,''), NULLIF(name_en,''), name, slug) AS name_ru
+               FROM supplements
+               WHERE slug=?
+               LIMIT 1""",
+            (code,),
+        )
+        if not row:
+            missing_catalog_slugs.append(code)
+            continue
+        assistant_nutrient_catalog.append(
+            {"supplement_id": int(row["id"]), "nutrient_code": str(row["slug"] or ""), "nutrient_name_ru": str(row["name_ru"] or row["slug"] or "")}
+        )
+    if missing_catalog_slugs:
+        raise NutrientAssistantPipelineError("ASSISTANT_NUTRIENT_CATALOG_MISMATCH", stage, ",".join(sorted(missing_catalog_slugs)))
+    assistant_catalog_by_code = {str(x.get("nutrient_code") or "").strip().lower(): x for x in assistant_nutrient_catalog}
+    allowed_nutrient_codes = set(assistant_catalog_by_code.keys())
+    llm_payload = _prune_for_llm(
+        {
+            "user_profile": user_profile_payload,
+            "active_stack": active_stack_payload,
+            "labs": labs_for_llm,
+            "assistant_context": {
+                "request_source": "webapp_worker",
+                "language": "ru",
+                "goal": "build_nutrient_recommendations",
+                "prompt_version": ASSISTANT_PROMPT_VERSION,
+                "nutrient_catalog": assistant_nutrient_catalog,
+                "allowed_nutrient_codes_note": "nutrient_code в nutrient_plan должен быть строго одним из nutrient_catalog.nutrient_code.",
+                **dict(assistant_context or {}),
+            },
+        }
+    ) or {}
+    assistant_model = (s.OPENAI_NUTRIENT_ASSISTANT_MODEL or "").strip() or s.OPENAI_MODEL
+    cfg = OpenAIConfig(api_key=s.OPENAI_API_KEY, model=assistant_model)
+    stage = "call_llm"
+    used_timeout_fallback = False
+    try:
+        raw_response, parsed, _ = await _compute_assistant_with_retry(cfg, llm_payload, retries=0, allowed_nutrient_codes=allowed_nutrient_codes)
+    except (APITimeoutError, APIConnectionError, TimeoutError):
+        stage = "call_llm_failsafe"
+        try:
+            raw_response, parsed, _ = await _compute_assistant_with_retry(
+                cfg,
+                _timeout_failsafe_payload(llm_payload),
+                retries=0,
+                allowed_nutrient_codes=allowed_nutrient_codes,
+            )
+        except (APITimeoutError, APIConnectionError, TimeoutError):
+            stage = "call_llm_timeout_fallback_local"
+            parsed = _build_timeout_fallback_assistant_response(labs_for_llm, allowed_nutrient_codes=allowed_nutrient_codes)
+            raw_response = json.dumps(parsed, ensure_ascii=False)
+            used_timeout_fallback = True
+            log.warning("nutrient assistant fallback response used debug_id=%s tg_user_id=%s labs_count=%s", debug_id, tg_user_id, labs_count)
+    if not parsed:
+        parsed = _build_timeout_fallback_assistant_response(labs_for_llm, allowed_nutrient_codes=allowed_nutrient_codes)
+        raw_response = raw_response if 'raw_response' in locals() else json.dumps(parsed, ensure_ascii=False)
+        used_timeout_fallback = True
+    complete_labs, _ = _labs_review_coverage(parsed, labs_for_llm)
+    if not complete_labs:
+        stage = "labs_review_merge_local"
+        parsed = _merge_missing_labs_review(parsed, labs_for_llm)
+        valid_merged, _ = _validate_assistant_response(parsed, allowed_nutrient_codes=allowed_nutrient_codes)
+        if not valid_merged:
+            parsed = _build_timeout_fallback_assistant_response(labs_for_llm, allowed_nutrient_codes=allowed_nutrient_codes)
+            used_timeout_fallback = True
+    stage = "enrich_execution_fields"
+    parsed = enrich_nutrient_plan_items_for_execution(parsed, context={"labs": labs_for_llm, "assistant_profile": profile_payload})
+    stage = "create_run"
+    run_id = await db.create_llm_assistant_run(
+        conn,
+        tg_user_id,
+        prompt_version=ASSISTANT_PROMPT_VERSION,
+        model_name=assistant_model,
+        input_snapshot=llm_payload,
+        response_json=parsed,
+        status="ok_timeout_fallback" if used_timeout_fallback else "ok",
+    )
+    stage = "materialize_actions"
+    prepared_actions: list[dict] = []
+    unresolved_nutrients: list[dict] = []
+    seen_action_keys: set[tuple[str, str]] = set()
+    for item in list(parsed.get("nutrient_plan") or []):
+        action = str(item.get("recommend_action") or "")
+        if action not in {"start", "continue", "stop"}:
+            continue
+        nutrient_code = _normalize_nutrient_code(str(item.get("nutrient_code") or ""))
+        if not nutrient_code or (nutrient_code, action) in seen_action_keys:
+            continue
+        seen_action_keys.add((nutrient_code, action))
+        resolved_supp = assistant_catalog_by_code.get(nutrient_code)
+        if not resolved_supp:
+            unresolved_nutrients.append({"nutrient_code": nutrient_code, "nutrient_name_ru": str(item.get("nutrient_name_ru") or ""), "recommend_action": action})
+        prepared_actions.append(
+            {
+                "nutrient_code": nutrient_code,
+                "nutrient_name_ru": str(item.get("nutrient_name_ru") or ""),
+                "recommend_action": action,
+                "supplement_name": str(item.get("nutrient_name_ru") or ""),
+                "dose_text": str(item.get("dose_text_ru") or ""),
+                "frequency_text": str(item.get("frequency_text_ru") or item.get("frequency_per_day") or ""),
+                "duration_text": str(item.get("duration_text_ru") or item.get("course_days") or ""),
+                "timing_text": str(item.get("timing_text_ru") or item.get("timing_context") or ""),
+                "stop_or_pause_rule_ru": str(item.get("stop_or_pause_rule_ru") or ""),
+                "with_food": bool(item.get("with_food")),
+                "reminders": list(item.get("explicit_times") or _extract_reminder_times(str(item.get("frequency_text_ru") or ""))),
+                "frequency_per_day": _safe_int_or_none(item.get("frequency_per_day")),
+                "explicit_times": list(item.get("explicit_times") or []),
+                "timing_context": str(item.get("timing_context") or ""),
+                "course_days": _safe_int_or_none(item.get("course_days")),
+                "pause_days": _safe_int_or_none(item.get("pause_days")),
+                "auto_stop_at_end": bool(item.get("auto_stop_at_end")),
+                "reevaluate_after_days": _safe_int_or_none(item.get("reevaluate_after_days")),
+                "retest_after_days": _safe_int_or_none(item.get("retest_after_days")),
+                "followup_kind": str(item.get("followup_kind") or "followup_review"),
+                "followup_message": str(item.get("followup_message") or ""),
+                "status": "prepared",
+            }
+        )
+    schema_ok, schema_missing = await db.check_nutrient_assistant_materialization_schema(conn)
+    if not schema_ok:
+        raise NutrientAssistantPipelineError("ASSISTANT_SCHEMA_MISMATCH", "schema_guard_materialization", ",".join(schema_missing))
+    now_utc = datetime.now(timezone.utc).replace(microsecond=0)
+    latest_lab_rows = await db.list_latest_lab_results(conn, tg_user_id, limit=1)
+    latest_lab_at_utc = max([str(x.get("created_at_utc") or "") for x in latest_lab_rows] or [""])
+    for action in prepared_actions:
+        code = str(action.get("nutrient_code") or "")
+        supp = await db.find_supplement_by_slug_or_name(conn, code or None, str(action.get("nutrient_name_ru") or "") or None)
+        supplement_id = int(supp["id"]) if supp else None
+        course_days = int(action.get("course_days") or 0) if str(action.get("course_days") or "").isdigit() else 0
+        reevaluate_after_days = int(action.get("reevaluate_after_days") or 0) if str(action.get("reevaluate_after_days") or "").isdigit() else 0
+        retest_after_days = int(action.get("retest_after_days") or 0) if str(action.get("retest_after_days") or "").isdigit() else 0
+        lifecycle_status = "active" if str(action.get("recommend_action") or "") in {"start", "continue"} else "review_required"
+        plan_snapshot = {
+            "plan_mode": "assistant_generated",
+            "plan_phase": "execution_ready",
+            "confidence_level": str(parsed.get("confidence") or "low"),
+            "lifecycle_status": lifecycle_status,
+            "recommend_action": str(action.get("recommend_action") or ""),
+            "supplement_id": supplement_id,
+            "course_started_at_utc": now_utc.isoformat() if lifecycle_status == "active" else "",
+            "course_ends_at_utc": (now_utc + timedelta(days=course_days)).isoformat() if course_days > 0 else "",
+            "pause_days": action.get("pause_days"),
+            "review_due_at_utc": (now_utc + timedelta(days=reevaluate_after_days)).isoformat() if reevaluate_after_days > 0 else "",
+            "retest_due_at_utc": (now_utc + timedelta(days=retest_after_days)).isoformat() if retest_after_days > 0 else "",
+            "auto_stop_at_end": bool(action.get("auto_stop_at_end")),
+            "followup_kind": str(action.get("followup_kind") or ""),
+            "followup_message": str(action.get("followup_message") or ""),
+        }
+        preview_snapshot = {"profile_snapshot": profile, "latest_lab_at_utc": latest_lab_at_utc, "stack_updated_at_utc": now_utc.isoformat()}
+        plan_run_id = await db.create_nutrient_plan_run(conn, tg_user_id, code, None, preview_snapshot, plan_snapshot)
+        action["nutrient_plan_run_id"] = plan_run_id
+        followups = []
+        if plan_snapshot["review_due_at_utc"]:
+            followups.append({"item_type": "followup_review", "title_ru": "Пересмотр плана", "due_date_utc": plan_snapshot["review_due_at_utc"], "details": {"message_ru": plan_snapshot["followup_message"]}})
+        if plan_snapshot["retest_due_at_utc"]:
+            followups.append({"item_type": "retest", "title_ru": "Повторный анализ", "due_date_utc": plan_snapshot["retest_due_at_utc"], "details": {"message_ru": "Пора повторно сдать анализы."}})
+        if followups:
+            await db.save_nutrient_followup_items(conn, tg_user_id, plan_run_id, code, followups)
+            candidates = [{"candidate_type": str(f["item_type"]), "trigger_date_utc": str(f["due_date_utc"]), "payload": dict(f.get("details") or {})} for f in followups]
+            await db.save_nutrient_reminder_candidates(conn, tg_user_id, plan_run_id, code, candidates)
+            await db.activate_nutrient_reminders_for_plan(conn, tg_user_id, plan_run_id)
+    await db.save_llm_assistant_plan_actions(conn, tg_user_id, run_id, prepared_actions)
+    return {
+        "run_id": run_id,
+        "result": parsed,
+        "prepared_actions": prepared_actions,
+        "missing_supplement_slugs": sorted({str(x.get("nutrient_code") or "") for x in unresolved_nutrients if str(x.get("nutrient_code") or "")}),
+        "unresolved_nutrients": unresolved_nutrients,
+        "fallback_used": used_timeout_fallback,
+    }
+
+
 @app.post("/api/profile/nutrient-assistant/compute")
 async def api_profile_nutrient_assistant_compute(
     body: NutrientAssistantComputeBody,
@@ -2488,8 +2774,6 @@ async def api_profile_nutrient_assistant_compute(
 ):
     debug_id = uuid.uuid4().hex[:12]
     stage = "init"
-    prepared_actions_count = 0
-    labs_count = len(list(body.labs or []))
     replace_run_id = int(body.replace_run_id or 0) if body.replace_run_id is not None else None
     tg_user_id = await _auth_user_id(x_telegram_init_data)
     stage = "validate_access"
@@ -2499,7 +2783,6 @@ async def api_profile_nutrient_assistant_compute(
         return JSONResponse({"ok": False, "code": "PAID_PREMIUM_REQUIRED"}, status_code=403)
     if not s.OPENAI_API_KEY:
         return JSONResponse({"ok": False, "code": "OPENAI_DISABLED"}, status_code=503)
-
     conn = await db.connect(s.DB_PATH)
     try:
         stage = "check_daily_limit"
@@ -2515,40 +2798,11 @@ async def api_profile_nutrient_assistant_compute(
             target = next((r for r in active_history if int(r.get("id") or 0) == replace_run_id), None)
             if not target:
                 return JSONResponse({"ok": False, "code": "INVALID_REPLACE_RUN"}, status_code=400)
-            stage = "replace_run"
-            ok = await db.replace_llm_assistant_run(conn, tg_user_id, replace_run_id)
-            if not ok:
-                return JSONResponse({"ok": False, "code": "INVALID_REPLACE_RUN"}, status_code=400)
 
-        stage = "load_profile"
+        stage = "load_profile_for_draft"
         profile = await db.get_user_health_profile(conn, tg_user_id)
-        stack = await db.get_user_supplements_with_enabled(conn, tg_user_id)
         sex_key = {"m": "male", "f": "female"}.get(str(profile.get("sex_at_birth") or "").lower(), "any")
-        stage = "normalize_labs"
-        if body.labs:
-            labs = [_normalize_assistant_lab_item(dict(x or {}), sex_key=sex_key) for x in list(body.labs)]
-        else:
-            latest = await db.list_latest_lab_results(conn, tg_user_id, limit=80)
-            labs = [
-                _normalize_assistant_lab_item({
-                    "analyte_code": str(x.get("analyte_code") or ""),
-                    "analyte_name_ru": str(x.get("analyte_name") or ""),
-                    "value": x.get("value_num") if x.get("value_num") is not None else str(x.get("value_text") or ""),
-                    "unit": str(x.get("unit") or ""),
-                    "ref_low": x.get("ref_low"),
-                    "ref_high": x.get("ref_high"),
-                    "measured_at": _to_iso_date(str(x.get("measured_at") or "")),
-                }, sex_key=sex_key)
-                for x in latest
-            ]
-        # Keep payload compact and stable:
-        # only latest value per analyte (with date) is enough for compute.
-        labs_for_llm = _compact_labs_for_llm(labs, max_items=40, max_per_analyte=1)
-        labs_count = len(labs_for_llm)
-
-        birth_year = int(profile.get("birth_year") or 0) if str(profile.get("birth_year") or "").isdigit() else None
-        current_year = int(db.get_user_local_date(None).split("-")[0])
-        age = current_year - birth_year if birth_year and 1900 <= birth_year <= current_year else None
+        labs = [_normalize_assistant_lab_item(dict(x or {}), sex_key=sex_key) for x in list(body.labs or [])]
         assistant_profile = dict(body.assistant_profile or {})
         stage = "save_draft_before_compute"
         await db.upsert_nutrient_assistant_draft(
@@ -2559,373 +2813,34 @@ async def api_profile_nutrient_assistant_compute(
             compute_scope={"mode": "current_draft"},
             source_run_id=None,
         )
-        user_profile_payload = {
-            "sex_at_birth": {"m": "male", "f": "female", "na": "unknown"}.get(str(profile.get("sex_at_birth") or "").lower(), "unknown"),
-            "age": age,
-            "height_cm": profile.get("height_cm"),
-            "weight_kg": profile.get("weight_kg"),
-            "country_code": str(profile.get("country_code") or ""),
-            "city": str(profile.get("city") or ""),
-            "pregnancy_status": {"yes": "yes", "no": "no", "na": "not_applicable"}.get(str(profile.get("pregnancy_status") or "").lower(), "unknown"),
-            "lactation_status": {"yes": "yes", "no": "no", "na": "not_applicable"}.get(str(profile.get("lactation_status") or "").lower(), "unknown"),
-            "menstrual_status": str(assistant_profile.get("menstrual_status") or "unknown"),
-            "heavy_menstrual_bleeding": bool(assistant_profile.get("heavy_menstrual_bleeding")),
-            "diet_type": _fallback_profile_value(assistant_profile, profile, "diet_type"),
-            "fish_intake_frequency": str(assistant_profile.get("fish_intake_frequency") or "unknown"),
-            "meat_intake_frequency": str(assistant_profile.get("meat_intake_frequency") or "unknown"),
-            "dairy_intake_frequency": str(assistant_profile.get("dairy_intake_frequency") or "unknown"),
-            "egg_intake_frequency": str(assistant_profile.get("egg_intake_frequency") or "unknown"),
-            "sun_exposure_level": _fallback_profile_value(assistant_profile, profile, "sun_exposure_level"),
-            "sunscreen_use": str(assistant_profile.get("sunscreen_use") or "unknown"),
-            "training_sessions_per_week": assistant_profile.get("training_sessions_per_week") or profile.get("training_sessions_per_week"),
-            "training_minutes_per_week": assistant_profile.get("training_minutes_per_week") or profile.get("training_minutes_per_week"),
-            "smoking_status": _fallback_profile_value(assistant_profile, profile, "smoking_status"),
-            "alcohol_status": _fallback_profile_value(assistant_profile, profile, "alcohol_status"),
-            "sleep_quality": str(assistant_profile.get("sleep_quality") or "unknown"),
-            "stress_level": str(assistant_profile.get("stress_level") or "unknown"),
-            "medications": _parse_json_list_field(profile.get("meds_json")),
-            "health_conditions": _parse_json_list_field(profile.get("conditions_json")),
-            "gi_problems": list(assistant_profile.get("gi_problems") or []),
-            "malabsorption_risk": bool(assistant_profile.get("malabsorption_risk")),
-            "kidney_conditions": list(assistant_profile.get("kidney_conditions") or []),
-            "liver_conditions": list(assistant_profile.get("liver_conditions") or []),
-            "thyroid_conditions": list(assistant_profile.get("thyroid_conditions") or []),
-            "bariatric_or_gi_surgery_history": bool(assistant_profile.get("bariatric_or_gi_surgery_history")),
-            "allergies_or_restrictions": list(assistant_profile.get("allergies_or_restrictions") or []),
-            "known_past_deficiencies": list(assistant_profile.get("known_past_deficiencies") or []),
-            "primary_goal": str(assistant_profile.get("primary_goal") or ""),
-            "symptoms": list(assistant_profile.get("symptoms") or []),
-            "symptoms_other_free_text": str(assistant_profile.get("symptoms_other_free_text") or ""),
-        }
-        active_stack_payload = []
-        for item in stack:
-            if int(item.get("is_active") or 0) != 1:
-                continue
-            started_days = _days_since_iso(str(item.get("created_at") or ""))
-            dose = str(item.get("dose_text") or "").strip()
-            active_stack_payload.append(
-                {
-                    "supplement_name": str(item.get("name_ru") or item.get("name_en") or item.get("name") or ""),
-                    "nutrient_code": str(item.get("slug") or ""),
-                    "dose_text": dose,
-                    "frequency_text": "daily",
-                    "started_days_ago": started_days,
-                }
-            )
-        assistant_nutrient_catalog: list[dict] = []
-        missing_catalog_slugs: list[str] = []
-        for code in ASSISTANT_ALLOWED_NUTRIENT_CODES:
-            row = await db.fetchone(
-                conn,
-                """SELECT id, slug, COALESCE(NULLIF(name_ru,''), NULLIF(name_en,''), name, slug) AS name_ru
-                   FROM supplements
-                   WHERE slug=?
-                   LIMIT 1""",
-                (code,),
-            )
-            if not row:
-                missing_catalog_slugs.append(code)
-                continue
-            assistant_nutrient_catalog.append(
-                {
-                    "supplement_id": int(row["id"]),
-                    "nutrient_code": str(row["slug"] or ""),
-                    "nutrient_name_ru": str(row["name_ru"] or row["slug"] or ""),
-                }
-            )
-        if missing_catalog_slugs:
-            stage = "assistant_catalog_mismatch"
-            return JSONResponse(
-                {
-                    "ok": False,
-                    "code": "ASSISTANT_NUTRIENT_CATALOG_MISMATCH",
-                    "missing_supplement_slugs": sorted(missing_catalog_slugs),
-                },
-                status_code=503,
-            )
-        assistant_catalog_by_code = {
-            str(x.get("nutrient_code") or "").strip().lower(): x
-            for x in assistant_nutrient_catalog
-            if str(x.get("nutrient_code") or "").strip()
-        }
-        allowed_nutrient_codes = set(assistant_catalog_by_code.keys())
-
-        llm_payload_raw = {
-            "user_profile": user_profile_payload,
-            "active_stack": active_stack_payload,
-            "labs": labs_for_llm,
-            "assistant_context": {
-                "request_source": "webapp",
-                "language": "ru",
-                "goal": "build_nutrient_recommendations",
-                "prompt_version": ASSISTANT_PROMPT_VERSION,
-                "nutrient_catalog": assistant_nutrient_catalog,
-                "allowed_nutrient_codes_note": "nutrient_code в nutrient_plan должен быть строго одним из nutrient_catalog.nutrient_code.",
-                **dict(body.assistant_context or {}),
+        stage = "enqueue_job"
+        request_json = json.dumps(
+            {
+                "assistant_profile": assistant_profile,
+                "labs": labs,
+                "assistant_context": dict(body.assistant_context or {}),
+                "replace_run_id": replace_run_id,
             },
-        }
-        llm_payload = _prune_for_llm(llm_payload_raw) or {}
-        assistant_model = (s.OPENAI_NUTRIENT_ASSISTANT_MODEL or "").strip() or s.OPENAI_MODEL
-        cfg = OpenAIConfig(api_key=s.OPENAI_API_KEY, model=assistant_model)
-        stage = "call_llm"
-        used_timeout_fallback = False
-        try:
-            raw_response, parsed, invalid_reason = await _compute_assistant_with_retry(
-                cfg,
-                llm_payload,
-                retries=0,
-                allowed_nutrient_codes=allowed_nutrient_codes,
-            )
-        except (APITimeoutError, APIConnectionError, TimeoutError):
-            stage = "call_llm_failsafe"
-            compact_payload = _timeout_failsafe_payload(llm_payload)
-            try:
-                raw_response, parsed, invalid_reason = await _compute_assistant_with_retry(
-                    cfg,
-                    compact_payload,
-                    retries=0,
-                    allowed_nutrient_codes=allowed_nutrient_codes,
-                )
-            except (APITimeoutError, APIConnectionError, TimeoutError):
-                stage = "call_llm_timeout_fallback_local"
-                parsed = _build_timeout_fallback_assistant_response(
-                    labs_for_llm,
-                    allowed_nutrient_codes=allowed_nutrient_codes,
-                )
-                raw_response = json.dumps(parsed, ensure_ascii=False)
-                invalid_reason = ""
-                used_timeout_fallback = True
-                log.warning(
-                    "nutrient assistant fallback response used debug_id=%s tg_user_id=%s labs_count=%s",
-                    debug_id,
-                    tg_user_id,
-                    labs_count,
-                )
-        if not parsed:
-            stage = "build_fallback_for_invalid_contract"
-            parsed = _build_timeout_fallback_assistant_response(
-                labs_for_llm,
-                allowed_nutrient_codes=allowed_nutrient_codes,
-            )
-            raw_response = raw_response or json.dumps(parsed, ensure_ascii=False)
-            used_timeout_fallback = True
-        complete_labs, missing_labs = _labs_review_coverage(parsed, labs_for_llm)
-        if not complete_labs:
-            stage = "call_llm_strict_retry"
-            stronger_payload = dict(llm_payload)
-            stronger_context = dict(stronger_payload.get("assistant_context") or {})
-            stronger_context["strict_labs_review_required_codes"] = sorted({str(x.get("analyte_code") or "") for x in labs_for_llm if str(x.get("analyte_code") or "")})
-            stronger_context["strict_labs_review_note"] = "Нельзя пропускать ни один analyte_code из входа в массиве labs_review."
-            stronger_payload["assistant_context"] = stronger_context
-            try:
-                retry_raw = await nutrient_assistant_single_call(cfg, payload=stronger_payload)
-            except (APITimeoutError, APIConnectionError, TimeoutError):
-                stage = "call_llm_strict_retry_failsafe"
-                stronger_payload = _timeout_failsafe_payload(stronger_payload)
-                retry_raw = await nutrient_assistant_single_call(cfg, payload=stronger_payload)
-            retry_parsed = _extract_json_object(retry_raw)
-            valid_retry, retry_reason = _validate_assistant_response(
-                retry_parsed or {},
-                allowed_nutrient_codes=allowed_nutrient_codes,
-            )
-            retry_complete = False
-            retry_missing: list[str] = []
-            if valid_retry and retry_parsed:
-                retry_complete, retry_missing = _labs_review_coverage(retry_parsed, labs_for_llm)
-            if valid_retry and retry_complete and retry_parsed:
-                raw_response = retry_raw
-                parsed = retry_parsed
-            else:
-                # Ensure UX is resilient: never fail compute because of partial labs_review.
-                base = retry_parsed if valid_retry and retry_parsed else parsed
-                parsed = _merge_missing_labs_review(base or {}, labs_for_llm)
-                valid_merged, _ = _validate_assistant_response(
-                    parsed,
-                    allowed_nutrient_codes=allowed_nutrient_codes,
-                )
-                if not valid_merged:
-                    parsed = _build_timeout_fallback_assistant_response(
-                        labs_for_llm,
-                        allowed_nutrient_codes=allowed_nutrient_codes,
-                    )
-                used_timeout_fallback = True
-        stage = "enrich_execution_fields"
-        parsed = enrich_nutrient_plan_items_for_execution(parsed, context={"labs": labs_for_llm, "assistant_profile": assistant_profile})
-
-        stage = "create_run"
-        run_id = await db.create_llm_assistant_run(
-            conn, tg_user_id,
-            prompt_version=ASSISTANT_PROMPT_VERSION,
-            model_name=assistant_model,
-            input_snapshot=llm_payload,
-            response_json=parsed,
-            status="ok_timeout_fallback" if used_timeout_fallback else "ok",
+            ensure_ascii=False,
         )
-        stage = "save_draft_after_compute"
-        await db.upsert_nutrient_assistant_draft(
-            conn,
-            tg_user_id,
-            assistant_profile=assistant_profile,
-            labs=[],
-            compute_scope={"mode": "current_draft"},
-            source_run_id=None,
-        )
-        prepared_actions: list[dict] = []
-        unresolved_nutrients: list[dict] = []
-        seen_action_keys: set[tuple[str, str]] = set()
-        stage = "prepare_actions"
-        for item in list(parsed.get("nutrient_plan") or []):
-            action = str(item.get("recommend_action") or "")
-            if action not in {"start", "continue", "stop"}:
-                continue
-            nutrient_code = _normalize_nutrient_code(str(item.get("nutrient_code") or ""))
-            if not nutrient_code:
-                continue
-            key = (nutrient_code, action)
-            if key in seen_action_keys:
-                continue
-            seen_action_keys.add(key)
-            resolved_supp = assistant_catalog_by_code.get(nutrient_code)
-            if not resolved_supp:
-                unresolved_nutrients.append(
-                    {
-                        "nutrient_code": nutrient_code,
-                        "nutrient_name_ru": str(item.get("nutrient_name_ru") or ""),
-                        "recommend_action": action,
-                    }
-                )
-            prepared_actions.append(
-                {
-                    "nutrient_code": nutrient_code,
-                    "nutrient_name_ru": str(item.get("nutrient_name_ru") or ""),
-                    "recommend_action": action,
-                    "supplement_name": str(item.get("nutrient_name_ru") or ""),
-                    "dose_text": str(item.get("dose_text_ru") or ""),
-                    "frequency_text": str(item.get("frequency_text_ru") or item.get("frequency_per_day") or ""),
-                    "duration_text": str(item.get("duration_text_ru") or item.get("course_days") or ""),
-                    "timing_text": str(item.get("timing_text_ru") or item.get("timing_context") or ""),
-                    "stop_or_pause_rule_ru": str(item.get("stop_or_pause_rule_ru") or ""),
-                    "with_food": bool(item.get("with_food")),
-                    "reminders": list(item.get("explicit_times") or _extract_reminder_times(str(item.get("frequency_text_ru") or ""))),
-                    "frequency_per_day": _safe_int_or_none(item.get("frequency_per_day")),
-                    "explicit_times": list(item.get("explicit_times") or []),
-                    "timing_context": str(item.get("timing_context") or ""),
-                    "course_days": _safe_int_or_none(item.get("course_days")),
-                    "pause_days": _safe_int_or_none(item.get("pause_days")),
-                    "auto_stop_at_end": bool(item.get("auto_stop_at_end")),
-                    "reevaluate_after_days": _safe_int_or_none(item.get("reevaluate_after_days")),
-                    "retest_after_days": _safe_int_or_none(item.get("retest_after_days")),
-                    "followup_kind": str(item.get("followup_kind") or "followup_review"),
-                    "followup_message": str(item.get("followup_message") or ""),
-                    "status": "prepared",
-                }
-            )
-        prepared_actions_count = len(prepared_actions)
-        stage = "schema_guard_materialization"
-        schema_ok, schema_missing = await db.check_nutrient_assistant_materialization_schema(conn)
-        if not schema_ok:
-            await conn.rollback()
-            log.error(
-                "nutrient assistant schema mismatch debug_id=%s tg_user_id=%s stage=%s replace_run_id=%s labs_count=%s prepared_actions_count=%s missing=%s",
-                debug_id,
-                tg_user_id,
-                stage,
-                replace_run_id,
-                labs_count,
-                prepared_actions_count,
-                ",".join(schema_missing),
-            )
-            return JSONResponse(
-                {"ok": False, "code": "ASSISTANT_SCHEMA_MISMATCH", "stage": stage, "debug_id": debug_id},
-                status_code=503,
-            )
-        now_utc = datetime.now(timezone.utc).replace(microsecond=0)
-        stage = "materialize_plan_runs"
-        latest_lab_rows = await db.list_latest_lab_results(conn, tg_user_id, limit=1)
-        latest_lab_at_utc = max([str(x.get("created_at_utc") or "") for x in latest_lab_rows] or [""])
-        for action in prepared_actions:
-            code = str(action.get("nutrient_code") or "")
-            supp = await db.find_supplement_by_slug_or_name(conn, code or None, str(action.get("nutrient_name_ru") or "") or None)
-            supplement_id = int(supp["id"]) if supp else None
-            course_days = int(action.get("course_days") or 0) if str(action.get("course_days") or "").isdigit() else 0
-            reevaluate_after_days = int(action.get("reevaluate_after_days") or 0) if str(action.get("reevaluate_after_days") or "").isdigit() else 0
-            retest_after_days = int(action.get("retest_after_days") or 0) if str(action.get("retest_after_days") or "").isdigit() else 0
-            lifecycle_status = "active" if str(action.get("recommend_action") or "") in {"start", "continue"} else "review_required"
-            plan_snapshot = {
-                "plan_mode": "assistant_generated",
-                "plan_phase": "execution_ready",
-                "confidence_level": str(parsed.get("confidence") or "low"),
-                "lifecycle_status": lifecycle_status,
-                "recommend_action": str(action.get("recommend_action") or ""),
-                "supplement_id": supplement_id,
-                "course_started_at_utc": now_utc.isoformat() if lifecycle_status == "active" else "",
-                "course_ends_at_utc": (now_utc + timedelta(days=course_days)).isoformat() if course_days > 0 else "",
-                "pause_days": action.get("pause_days"),
-                "review_due_at_utc": (now_utc + timedelta(days=reevaluate_after_days)).isoformat() if reevaluate_after_days > 0 else "",
-                "retest_due_at_utc": (now_utc + timedelta(days=retest_after_days)).isoformat() if retest_after_days > 0 else "",
-                "auto_stop_at_end": bool(action.get("auto_stop_at_end")),
-                "followup_kind": str(action.get("followup_kind") or ""),
-                "followup_message": str(action.get("followup_message") or ""),
-            }
-            preview_snapshot = {
-                "profile_snapshot": profile,
-                "latest_lab_at_utc": latest_lab_at_utc,
-                "stack_updated_at_utc": now_utc.isoformat(),
-            }
-            stage = "create_plan_run"
-            plan_run_id = await db.create_nutrient_plan_run(conn, tg_user_id, code, None, preview_snapshot, plan_snapshot)
-            action["nutrient_plan_run_id"] = plan_run_id
-            followups = []
-            if plan_snapshot["review_due_at_utc"]:
-                followups.append({"item_type": "followup_review", "title_ru": "Пересмотр плана", "due_date_utc": plan_snapshot["review_due_at_utc"], "details": {"message_ru": plan_snapshot["followup_message"]}})
-            if plan_snapshot["retest_due_at_utc"]:
-                followups.append({"item_type": "retest", "title_ru": "Повторный анализ", "due_date_utc": plan_snapshot["retest_due_at_utc"], "details": {"message_ru": "Пора повторно сдать анализы."}})
-            if followups:
-                stage = "save_followups"
-                await db.save_nutrient_followup_items(conn, tg_user_id, plan_run_id, code, followups)
-                candidates = [{"candidate_type": str(f["item_type"]), "trigger_date_utc": str(f["due_date_utc"]), "payload": dict(f.get("details") or {})} for f in followups]
-                stage = "save_reminder_candidates"
-                await db.save_nutrient_reminder_candidates(conn, tg_user_id, plan_run_id, code, candidates)
-                stage = "activate_reminders"
-                await db.activate_nutrient_reminders_for_plan(conn, tg_user_id, plan_run_id)
-        stage = "save_actions"
-        await db.save_llm_assistant_plan_actions(conn, tg_user_id, run_id, prepared_actions)
-        stage = "commit"
-        await conn.commit()
-        return JSONResponse({
-            "ok": True,
-            "run_id": run_id,
-            "result": parsed,
-            "prepared_actions": prepared_actions,
-            "missing_supplement_slugs": sorted({str(x.get("nutrient_code") or "") for x in unresolved_nutrients if str(x.get("nutrient_code") or "")}),
-            "unresolved_nutrients": unresolved_nutrients,
-            "fallback_used": used_timeout_fallback,
-        })
+        job_id = await db.create_assistant_job(conn, tg_user_id, request_json=request_json, debug_id=debug_id, kind="nutrient_compute")
+        return JSONResponse({"ok": True, "mode": "queued", "job_id": job_id, "status": "queued"})
+    except NutrientAssistantPipelineError as exc:
+        await conn.rollback()
+        return JSONResponse({"ok": False, "code": exc.code, "stage": exc.stage, "debug_id": debug_id, "message": exc.message}, status_code=503)
     except Exception as exc:
         await conn.rollback()
         exc_type = type(exc).__name__
         log.exception(
-            "nutrient assistant compute failed debug_id=%s stage=%s tg_user_id=%s replace_run_id=%s labs_count=%s prepared_actions_count=%s exc_type=%s exc_msg=%s",
+            "nutrient assistant enqueue failed debug_id=%s stage=%s tg_user_id=%s replace_run_id=%s exc_type=%s exc_msg=%s",
             debug_id,
             stage,
             tg_user_id,
             replace_run_id,
-            labs_count,
-            prepared_actions_count,
             exc_type,
             str(exc),
         )
-        payload = {"ok": False, "code": "ASSISTANT_COMPUTE_ERROR", "stage": stage, "debug_id": debug_id}
-        status_code = 500
-        if str(stage).startswith("call_llm"):
-            if exc_type in {"APITimeoutError", "APIConnectionError", "TimeoutError"}:
-                status_code = 504
-                payload["code"] = "ASSISTANT_UPSTREAM_TIMEOUT"
-                payload["message_ru"] = "Сервис расчёта не успел ответить вовремя."
-                payload["action_ru"] = "Подождите 30–60 секунд и повторите расчёт. Если ошибка повторится, временно оставьте только самые свежие анализы и попробуйте снова."
-            else:
-                payload["message_ru"] = "Не удалось получить ответ ассистента. Попробуйте ещё раз через минуту."
-        return JSONResponse(payload, status_code=status_code)
+        return JSONResponse({"ok": False, "code": "ASSISTANT_COMPUTE_ERROR", "stage": stage, "debug_id": debug_id}, status_code=500)
     finally:
         await conn.close()
 

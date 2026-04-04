@@ -446,9 +446,9 @@ async def nutrient_assistant_single_call(
     labs_count = len(list(payload.get("labs") or []))
     # Keep answer compact for large lab payloads so model has less to generate
     # and can respond more predictably under network jitter.
-    max_output_tokens = 3200 if labs_count <= 20 else (2600 if labs_count <= 40 else 2000)
-    # Broader timeout ladder for better resiliency on transient network slowness.
-    timeouts = (25, 45, 70)
+    max_output_tokens = 2200 if labs_count <= 20 else (1800 if labs_count <= 40 else 1400)
+    # Production-friendly compact ladder: one main call + one compact retry.
+    timeouts = (23, 17)
     last_exc: Exception | None = None
     for attempt, timeout_s in enumerate(timeouts, start=1):
         try:

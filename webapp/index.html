@@ -4256,12 +4256,19 @@ function adminField(label, field, value, kind='input') {
       draft: 'Черновик'
     })[String(status || '').trim().toLowerCase()] || '—';
   }
-  function assistantRunPendingApproval(run){
+  function assistantRunPendingApproval(run, preparedActions){
     if (!run || Number(run.is_active || 0) === 1) return false;
     const status = String(run.status || '').trim().toLowerCase();
+    const statusAllowed = ['ok', 'prepared', 'ok_timeout_fallback'].includes(status);
+    if (!statusAllowed) return false;
+    const prepared = Array.isArray(preparedActions)
+      ? preparedActions
+      : (Array.isArray(run?.prepared_actions) ? run.prepared_actions : []);
+    const preparedHasActionable = prepared.some((item)=>['start','continue','stop'].includes(String(item?.recommend_action || '').trim().toLowerCase()));
+    if (preparedHasActionable) return true;
     const plan = Array.isArray(run?.response_json?.nutrient_plan) ? run.response_json.nutrient_plan : [];
     const hasActionable = plan.some((item)=>['start','continue','stop'].includes(String(item?.recommend_action || '').trim().toLowerCase()));
-    return (status === 'ok' || status === 'prepared') && hasActionable;
+    return hasActionable;
   }
   function assistantInterpretationRu(value){
     return ({
@@ -4449,14 +4456,14 @@ function adminField(label, field, value, kind='input') {
     if (hasAnyDraftLabs) overflowActions.push('save_draft', 'delete_draft');
     const showOverflowMenu = overflowActions.length >= 2;
     const showDirectUseLatest = !showOverflowMenu && hasHistory;
+    const detailActions = Array.isArray(a.detailPreparedActions) ? a.detailPreparedActions : [];
     const selectedRun = a.detailRun || history.find((x)=>Number(x.id)===Number(a.currentRunId || 0)) || null;
     const resultData = selectedRun?.response_json || result || null;
-    const canApplySelectedRun = assistantRunPendingApproval(selectedRun);
+    const canApplySelectedRun = assistantRunPendingApproval(selectedRun, detailActions);
     const nutrients = Array.isArray(resultData?.nutrient_plan) ? resultData.nutrient_plan : [];
     const labsReview = Array.isArray(resultData?.labs_review) ? resultData.labs_review : [];
     const basisInput = selectedRun?.input_snapshot_json || {};
     const basisLabs = Array.isArray(basisInput?.labs) ? basisInput.labs : [];
-    const detailActions = Array.isArray(a.detailPreparedActions) ? a.detailPreparedActions : [];
     const usageLimit = Number(a.usageLimit || 5);
     const usedThisMonth = assistantUsageInCurrentMonth(history);
     const isAssistantAdminUnlimited = ['owner', 'admin'].includes(String(state.me?.role || '').toLowerCase());

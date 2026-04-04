@@ -6110,7 +6110,9 @@ async def list_due_reminders(conn: aiosqlite.Connection):
            LEFT JOIN user_schedules sch
              ON sch.user_id=us.user_id AND sch.supplement_id=us.supplement_id AND sch.is_enabled=1
            LEFT JOIN user_schedule_slots uss
-             ON uss.user_id=us.user_id AND uss.slot_id=sch.slot_id AND uss.is_enabled=1
+             ON uss.user_id=us.user_id
+            AND uss.slot_id=COALESCE(NULLIF(sch.slot_id,''), 'morning')
+            AND uss.is_enabled=1
            WHERE us.is_active=1
              AND COALESCE(np.reminders_enabled, 1)=1
              AND us.enabled=1""",
@@ -6177,7 +6179,7 @@ async def list_due_reminders(conn: aiosqlite.Connection):
 
         schedule_time = _normalize_hhmm(str(row["schedule_time_hhmm"] or "").strip())
         slot_time = _normalize_hhmm(str(row["slot_time_local"] or "").strip())
-        effective_time = schedule_time or slot_time
+        effective_time = schedule_time or slot_time or "08:00"
         if not effective_time:
             continue
 

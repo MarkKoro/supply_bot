@@ -264,11 +264,13 @@ def _timeout_failsafe_payload(llm_payload: dict) -> dict:
 def _build_fallback_nutrient_plan_from_labs(
     labs_for_llm: list[dict],
     *,
+    active_stack_codes: set[str] | None = None,
     allowed_nutrient_codes: set[str] | None = None,
     max_items: int = 20,
 ) -> list[dict]:
     plan: list[dict] = []
     seen_codes: set[str] = set()
+    active_codes = {str(x or "").strip().lower() for x in (active_stack_codes or set()) if str(x or "").strip()}
     for item in list(labs_for_llm or []):
         nutrient_code = _normalize_nutrient_code(str(item.get("canonical_nutrient_code") or ""))
         if not nutrient_code or nutrient_code in seen_codes:
@@ -276,12 +278,24 @@ def _build_fallback_nutrient_plan_from_labs(
         if allowed_nutrient_codes is not None and nutrient_code not in allowed_nutrient_codes:
             continue
         status = str(item.get("interpreted_status_pre_llm") or "unclear")
-        if status == "normal":
-            action = "continue"
-            reason = "Показатель в референсе; обычно уместно сохранить текущую поддержку и наблюдать динамику."
-        elif status in {"low", "high"}:
+        in_active_stack = nutrient_code in active_codes
+        if status == "low":
             action = "start"
-            reason = "Есть отклонение от референса; добавлен приоритет на коррекцию и повторный контроль."
+            reason = "Показатель ниже референса; есть основания для коррекции."
+        elif status == "high":
+            action = "stop" if in_active_stack else "do_not_start"
+            reason = (
+                "Показатель выше референса на фоне текущего приёма; стоит остановить и пересмотреть."
+                if in_active_stack
+                else "Показатель выше референса, начинать добавку не нужно."
+            )
+        elif status == "normal":
+            action = "continue" if in_active_stack else "do_not_start"
+            reason = (
+                "Показатель в референсе; сохранить текущую поддержку можно только если она уже идёт и есть контекст."
+                if in_active_stack
+                else "Показатель в референсе, начинать добавку не требуется."
+            )
         else:
             action = "retest_only"
             reason = "Недостаточно данных для точной коррекции, сначала повторите/уточните анализ."
@@ -313,6 +327,7 @@ def _build_fallback_nutrient_plan_from_labs(
 def _build_timeout_fallback_assistant_response(
     labs_for_llm: list[dict],
     *,
+    active_stack_codes: set[str] | None = None,
     allowed_nutrient_codes: set[str] | None = None,
 ) -> dict:
     def _lab_row(item: dict) -> dict:
@@ -342,6 +357,7 @@ def _build_timeout_fallback_assistant_response(
     labs_review = [_lab_row(x) for x in list(labs_for_llm or [])]
     nutrient_plan = _build_fallback_nutrient_plan_from_labs(
         labs_for_llm,
+        active_stack_codes=active_stack_codes,
         allowed_nutrient_codes=allowed_nutrient_codes,
         max_items=20,
     )
@@ -797,6 +813,11 @@ async def run_nutrient_assistant_compute_pipeline(
                 "started_days_ago": _days_since_iso(str(item.get("created_at") or "")),
             }
         )
+    active_stack_codes = {
+        _normalize_nutrient_code(str(item.get("nutrient_code") or ""))
+        for item in active_stack_payload
+        if _normalize_nutrient_code(str(item.get("nutrient_code") or ""))
+    }
     stage = "assistant_catalog"
     assistant_nutrient_catalog: list[dict] = []
     missing_catalog_slugs: list[str] = []
@@ -859,7 +880,11 @@ async def run_nutrient_assistant_compute_pipeline(
         _mark("call_llm_attempt_2")
     if not parsed:
         stage = "local_fallback"
-        parsed = _build_timeout_fallback_assistant_response(labs_for_llm, allowed_nutrient_codes=allowed_nutrient_codes)
+        parsed = _build_timeout_fallback_assistant_response(
+            labs_for_llm,
+            active_stack_codes=active_stack_codes,
+            allowed_nutrient_codes=allowed_nutrient_codes,
+        )
         raw_response = raw_response if 'raw_response' in locals() else json.dumps(parsed, ensure_ascii=False)
         used_timeout_fallback = True
         _mark("local_fallback")
@@ -870,7 +895,11 @@ async def run_nutrient_assistant_compute_pipeline(
         parsed = _merge_missing_labs_review(parsed, labs_for_llm)
         valid_merged, _ = _validate_assistant_response(parsed, allowed_nutrient_codes=allowed_nutrient_codes)
         if not valid_merged:
-            parsed = _build_timeout_fallback_assistant_response(labs_for_llm, allowed_nutrient_codes=allowed_nutrient_codes)
+            parsed = _build_timeout_fallback_assistant_response(
+                labs_for_llm,
+                active_stack_codes=active_stack_codes,
+                allowed_nutrient_codes=allowed_nutrient_codes,
+            )
             used_timeout_fallback = True
         _mark("merge_missing_labs_review")
     stage = "enrich_execution_fields"

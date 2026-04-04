@@ -2419,6 +2419,68 @@ async def api_profile_nutrient_assistant_draft_post(
         await conn.close()
 
 
+@app.get("/api/profile/nutrient-assistant/jobs")
+async def api_profile_nutrient_assistant_jobs_list(
+    x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
+):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    if not await _paid_premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "code": "PAID_PREMIUM_REQUIRED"}, status_code=403)
+    conn = await db.connect(s.DB_PATH)
+    try:
+        rows = await db.list_recent_assistant_jobs(conn, tg_user_id, limit=20)
+        jobs = [
+            {
+                "id": int(item.get("id") or 0),
+                "kind": str(item.get("kind") or ""),
+                "status": str(item.get("status") or ""),
+                "result_run_id": int(item.get("result_run_id") or 0),
+                "error_code": str(item.get("error_code") or ""),
+                "error_message": str(item.get("error_message") or ""),
+                "debug_id": str(item.get("debug_id") or ""),
+                "created_at_utc": str(item.get("created_at_utc") or ""),
+                "started_at_utc": str(item.get("started_at_utc") or ""),
+                "finished_at_utc": str(item.get("finished_at_utc") or ""),
+                "updated_at_utc": str(item.get("updated_at_utc") or ""),
+            }
+            for item in rows
+        ]
+        return JSONResponse({"ok": True, "jobs": jobs})
+    finally:
+        await conn.close()
+
+
+@app.get("/api/profile/nutrient-assistant/jobs/{job_id}")
+async def api_profile_nutrient_assistant_job_get(
+    job_id: int,
+    x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
+):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    if not await _paid_premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "code": "PAID_PREMIUM_REQUIRED"}, status_code=403)
+    conn = await db.connect(s.DB_PATH)
+    try:
+        item = await db.get_assistant_job(conn, tg_user_id, int(job_id))
+        if not item:
+            return JSONResponse({"ok": False, "code": "JOB_NOT_FOUND"}, status_code=404)
+        job = {
+            "id": int(item.get("id") or 0),
+            "kind": str(item.get("kind") or ""),
+            "status": str(item.get("status") or ""),
+            "result_run_id": int(item.get("result_run_id") or 0),
+            "error_code": str(item.get("error_code") or ""),
+            "error_message": str(item.get("error_message") or ""),
+            "debug_id": str(item.get("debug_id") or ""),
+            "created_at_utc": str(item.get("created_at_utc") or ""),
+            "started_at_utc": str(item.get("started_at_utc") or ""),
+            "finished_at_utc": str(item.get("finished_at_utc") or ""),
+            "updated_at_utc": str(item.get("updated_at_utc") or ""),
+        }
+        return JSONResponse({"ok": True, "job": job})
+    finally:
+        await conn.close()
+
+
 @app.post("/api/profile/nutrient-assistant/compute")
 async def api_profile_nutrient_assistant_compute(
     body: NutrientAssistantComputeBody,

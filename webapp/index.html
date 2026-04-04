@@ -4007,7 +4007,7 @@ function adminField(label, field, value, kind='input') {
       state.nutrientAssistant.jobPollTimer = null;
     }
   }
-  function scheduleAssistantJobPolling(jobId, delayMs = 2500) {
+  function scheduleAssistantJobPolling(jobId, delayMs = 3800) {
     stopAssistantJobPolling();
     state.nutrientAssistant.jobPollTimer = setTimeout(async ()=>{
       const id = Number(jobId || state.nutrientAssistant.currentJobId || 0);
@@ -4021,7 +4021,7 @@ function adminField(label, field, value, kind='input') {
         state.nutrientAssistant.jobPollErrors = 0;
         if (status === 'queued' || status === 'processing') {
           if (status !== prevStatus) showToast(status === 'queued' ? 'Расчёт в очереди' : 'Идёт расчёт');
-          scheduleAssistantJobPolling(id, 2500);
+          scheduleAssistantJobPolling(id, 3800);
         } else if (status === 'done' && Number(job?.result_run_id || 0) > 0) {
           stopAssistantJobPolling();
           state.nutrientAssistant.computing = false;
@@ -4039,12 +4039,12 @@ function adminField(label, field, value, kind='input') {
           state.nutrientAssistant.currentJobId = null;
           showToast(String(job?.error_message || 'Расчёт завершился с ошибкой'));
         } else {
-          scheduleAssistantJobPolling(id, 2500);
+          scheduleAssistantJobPolling(id, 3800);
         }
       } catch {
         state.nutrientAssistant.jobPollErrors = Number(state.nutrientAssistant.jobPollErrors || 0) + 1;
         if (state.nutrientAssistant.jobPollErrors <= 5) {
-          scheduleAssistantJobPolling(id, 3000);
+          scheduleAssistantJobPolling(id, 4200);
         } else {
           stopAssistantJobPolling();
           state.nutrientAssistant.computing = false;
@@ -4259,7 +4259,9 @@ function adminField(label, field, value, kind='input') {
   function assistantRunPendingApproval(run){
     if (!run || Number(run.is_active || 0) === 1) return false;
     const status = String(run.status || '').trim().toLowerCase();
-    return status === 'ok' || status === 'prepared';
+    const plan = Array.isArray(run?.response_json?.nutrient_plan) ? run.response_json.nutrient_plan : [];
+    const hasActionable = plan.some((item)=>['start','continue','stop'].includes(String(item?.recommend_action || '').trim().toLowerCase()));
+    return (status === 'ok' || status === 'prepared') && hasActionable;
   }
   function assistantInterpretationRu(value){
     return ({
@@ -4751,7 +4753,7 @@ function adminField(label, field, value, kind='input') {
         state.nutrientAssistant.pendingOverwriteRuns = [];
         state.nutrientAssistant.pendingComputePayload = null;
         showToast('Расчёт поставлен в очередь');
-        if (jobId) scheduleAssistantJobPolling(jobId, 2000);
+        if (jobId) scheduleAssistantJobPolling(jobId, 3800);
       } catch (e) {
         stopAssistantJobPolling();
         if (e.message === 'ASSISTANT_HISTORY_FULL') {

@@ -9229,6 +9229,63 @@ async def create_assistant_job(
     return job_id
 
 
+async def find_active_assistant_job(conn: aiosqlite.Connection, tg_user_id: int, kind: str = "nutrient_compute") -> dict | None:
+    row = await fetchone(
+        conn,
+        """SELECT * FROM assistant_jobs
+           WHERE tg_user_id=? AND kind=? AND status IN ('queued','processing')
+           ORDER BY id ASC
+           LIMIT 1""",
+        (int(tg_user_id), str(kind or "nutrient_compute")),
+    )
+    return dict(row) if row else None
+
+
+async def recover_stale_assistant_jobs(
+    conn: aiosqlite.Connection,
+    *,
+    stale_after_seconds: int = 600,
+    kind: str = "nutrient_compute",
+) -> list[int]:
+    now = utc_now_iso()
+    threshold = max(60, int(stale_after_seconds))
+    rows = await fetchall(
+        conn,
+        """SELECT id
+           FROM assistant_jobs
+           WHERE kind=?
+             AND status='processing'
+             AND (
+               CASE
+                 WHEN COALESCE(updated_at_utc,'')='' THEN 1
+                 ELSE (strftime('%s','now') - strftime('%s', replace(replace(updated_at_utc,'T',' '),'Z',''))) >= ?
+               END
+             )
+           ORDER BY id ASC""",
+        (str(kind or "nutrient_compute"), threshold),
+    )
+    recovered_ids: list[int] = []
+    for row in rows:
+        job_id = int(row["id"])
+        await conn.execute(
+            """UPDATE assistant_jobs
+               SET status='queued',
+                   locked_by='',
+                   locked_at_utc='',
+                   updated_at_utc=?
+               WHERE id=? AND status='processing'""",
+            (now, job_id),
+        )
+        changed = await fetchone(conn, "SELECT changes() AS c")
+        if int(changed["c"] if changed else 0) <= 0:
+            continue
+        recovered_ids.append(job_id)
+        await _append_assistant_job_event(conn, job_id, "stale_recovered", {"status": "queued", "reason": "STALE_PROCESSING_RECOVERED"})
+    if recovered_ids:
+        await conn.commit()
+    return recovered_ids
+
+
 async def get_assistant_job(conn: aiosqlite.Connection, tg_user_id: int, job_id: int) -> dict | None:
     row = await fetchone(
         conn,

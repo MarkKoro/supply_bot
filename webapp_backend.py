@@ -22,6 +22,8 @@ from settings import get_settings
 from openai import APIConnectionError, APITimeoutError
 
 from openai_client import OpenAIConfig, _sync_call, nutrient_assistant_single_call
+from nutrient_assistant_pipeline import NutrientAssistantPipelineError as PipelineError
+import nutrient_assistant_pipeline as nutrient_pipeline
 from achievements import THEMES, TAB_SKINS, BADGES
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -2802,7 +2804,7 @@ async def api_profile_nutrient_assistant_compute(
         stage = "load_profile_for_draft"
         profile = await db.get_user_health_profile(conn, tg_user_id)
         sex_key = {"m": "male", "f": "female"}.get(str(profile.get("sex_at_birth") or "").lower(), "any")
-        labs = [_normalize_assistant_lab_item(dict(x or {}), sex_key=sex_key) for x in list(body.labs or [])]
+        labs = [nutrient_pipeline._normalize_assistant_lab_item(dict(x or {}), sex_key=sex_key) for x in list(body.labs or [])]
         assistant_profile = dict(body.assistant_profile or {})
         stage = "save_draft_before_compute"
         await db.upsert_nutrient_assistant_draft(
@@ -2823,9 +2825,16 @@ async def api_profile_nutrient_assistant_compute(
             },
             ensure_ascii=False,
         )
+        existing = await db.find_active_assistant_job(conn, tg_user_id, kind="nutrient_compute")
+        if existing:
+            existing_id = int(existing.get("id") or 0)
+            existing_status = str(existing.get("status") or "queued")
+            log.info("nutrient assistant deduplicated enqueue tg_user_id=%s job_id=%s status=%s", tg_user_id, existing_id, existing_status)
+            return JSONResponse({"ok": True, "mode": "queued", "job_id": existing_id, "status": existing_status, "deduplicated": True})
         job_id = await db.create_assistant_job(conn, tg_user_id, request_json=request_json, debug_id=debug_id, kind="nutrient_compute")
-        return JSONResponse({"ok": True, "mode": "queued", "job_id": job_id, "status": "queued"})
-    except NutrientAssistantPipelineError as exc:
+        log.info("nutrient assistant queued tg_user_id=%s job_id=%s debug_id=%s", tg_user_id, job_id, debug_id)
+        return JSONResponse({"ok": True, "mode": "queued", "job_id": job_id, "status": "queued", "deduplicated": False})
+    except PipelineError as exc:
         await conn.rollback()
         return JSONResponse({"ok": False, "code": exc.code, "stage": exc.stage, "debug_id": debug_id, "message": exc.message}, status_code=503)
     except Exception as exc:

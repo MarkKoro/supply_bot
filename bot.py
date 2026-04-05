@@ -2320,7 +2320,7 @@ async def _show_premium_hub(
     plans = _premium_plans_payload(s)
     text = (
         "⭐ <b>Premium</b>\n\n"
-        "С Premium открывается полный WebApp: удобный Today, карта органов, Нутриентный помощник, AI check-in и гибкая настройка напоминаний.\n\n"
+        "С Premium открывается полный WebApp: удобный Today, карта органов, AI check-in и гибкая настройка напоминаний.\n\n"
         "Выберите срок — кнопка сразу откроет оплату в WebApp."
     )
     await show(update, context, text, premium_plans_kb(plans, s.WEBAPP_URL, back_cb=back_cb), route=route)
@@ -2332,8 +2332,6 @@ async def _show_starter_trial_offer(update: Update, context: ContextTypes.DEFAUL
         "Ты уже получил стартовый подбор.",
         "",
         "Теперь можно 3 дня бесплатно пользоваться WebApp: отмечать приём, смотреть карту, настраивать стек и проверить, как это ощущается в жизни.",
-        "",
-        "<i>(Нутриентный помощник остаётся закрыт на бесплатном 3-дневном доступе.)</i>",
     ]
     kb = InlineKeyboardMarkup(
         [
@@ -2540,14 +2538,12 @@ async def on_success_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await msg.reply_text(
             "Оплата прошла успешно! Premium активирован сразу, "
             "а оставшиеся дни Starter добавлены к сроку.\n"
-            f"Подписка активна до: {until_iso}\n"
-            "🧪 Внутренний помощник уже открыт."
+            f"Подписка активна до: {until_iso}"
         )
     else:
         await msg.reply_text(
             "Оплата прошла успешно!\n"
-            f"Premium активен до: {until_iso}\n"
-            "🧪 Внутренний помощник уже открыт."
+            f"Premium активен до: {until_iso}"
         )
     context.user_data["home_entry_reason"] = "premium_activated"
     await home(update, context)
@@ -2585,7 +2581,7 @@ def _home_text(
             "Теперь тебе доступно:",
             "• полный WebApp с расширенным трекингом и планом на день;",
             "• AI check-in и персональные подсказки;",
-            "• Нутриентный помощник и расширенные Premium-функции.",
+            "• расширенные Premium-функции и автоматизация.",
         ]
     next_step_block = f"Следующий шаг: {next_step}" if show_next_step_hint else "Открой нужный раздел в меню ниже."
     return (
@@ -2618,7 +2614,7 @@ def _subscription_expired_text() -> str:
         "Что временно недоступно без подписки:\n"
         "• ежедневный AI-опрос;\n"
         "• комплексы;\n"
-        "• автоматические напоминания из расширенного помощника и Premium-функций.\n\n"
+        "• расширенные автоматические напоминания и Premium-функции.\n\n"
         "Продлите подписку, чтобы снова включить полный режим."
     )
 
@@ -3106,7 +3102,7 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     update,
                     context,
                     f"Премиум доступ активирован до <b>{until_iso}</b>\n\n"
-                    "<i>Нутриентный помощник доступен только на платном Premium.</i>",
+                    "<i>Открой WebApp и начни пользоваться полным режимом.</i>",
                     InlineKeyboardMarkup(rows),
                     route="starter:active",
                 )
@@ -3133,8 +3129,7 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "• AI check-in и подсказки по самочувствию\n"
                 "• удобный трекинг приёма и напоминаний\n"
                 "• достижения и персонализация интерфейса\n\n"
-                "База добавок и стартовый подбор по-прежнему доступны бесплатно.\n\n"
-                "<i>(На бесплатном 3-дневном доступе Нутриентный помощник остаётся закрыт.)</i>",
+                "База добавок и стартовый подбор по-прежнему доступны бесплатно.",
                 InlineKeyboardMarkup(
                     [
                         [InlineKeyboardButton("🎁 Активировать 3 дня", callback_data="starter:activate")],
@@ -3203,7 +3198,6 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 context,
                 "⭐ <b>Что входит в Premium</b>\n\n"
                 "• полный доступ к WebApp\n"
-                "• Нутриентный помощник\n"
                 "• карта органов с деталями по системам\n"
                 "• AI check-in и подсказки по самочувствию\n"
                 "• удобный трекинг приёма и напоминаний\n"
@@ -3377,7 +3371,7 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await show(
                 update,
                 context,
-                "Нутриентный помощник убран из бота и доступен только внутри Premium WebApp.",
+                "Открой WebApp для расширенного режима и дополнительных функций.",
                 InlineKeyboardMarkup([
                     [InlineKeyboardButton("⭐ Купить Premium", callback_data="menu:premium")],
                     [InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")],

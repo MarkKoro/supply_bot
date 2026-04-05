@@ -35,14 +35,17 @@ def _json_sanitize(payload: Any, *, _seen: set[int] | None = None) -> Any:
     if payload_id in _seen:
         return "<circular_ref>"
     _seen.add(payload_id)
-    if isinstance(payload, dict):
-        return {str(k): _json_sanitize(v, _seen=_seen) for k, v in payload.items()}
-    if isinstance(payload, (list, tuple, set, frozenset)):
-        return [_json_sanitize(item, _seen=_seen) for item in payload]
-    converted = _json_default(payload)
-    if converted is payload:
-        return str(payload)
-    return _json_sanitize(converted, _seen=_seen)
+    try:
+        if isinstance(payload, dict):
+            return {str(k): _json_sanitize(v, _seen=_seen) for k, v in payload.items()}
+        if isinstance(payload, (list, tuple, set, frozenset)):
+            return [_json_sanitize(item, _seen=_seen) for item in payload]
+        converted = _json_default(payload)
+        if converted is payload:
+            return str(payload)
+        return _json_sanitize(converted, _seen=_seen)
+    finally:
+        _seen.discard(payload_id)
 
 
 def _json_dumps_safe(payload: Any) -> str:
@@ -9636,9 +9639,9 @@ async def upsert_nutrient_assistant_draft(
           updated_at_utc=excluded.updated_at_utc""",
         (
             user_id,
-            json.dumps(assistant_profile or {}, ensure_ascii=False),
-            json.dumps(labs or [], ensure_ascii=False),
-            json.dumps(compute_scope or {}, ensure_ascii=False),
+            _json_dumps_safe(assistant_profile or {}),
+            _json_dumps_safe(labs or []),
+            _json_dumps_safe(compute_scope or {}),
             int(source_run_id) if source_run_id else None,
             now,
             now,

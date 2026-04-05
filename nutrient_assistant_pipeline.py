@@ -167,6 +167,13 @@ def _extract_json_object(raw: str) -> dict | None:
     return None
 
 
+def _truncate_for_log(text: str, *, max_len: int = 700) -> str:
+    raw = str(text or "").strip()
+    if len(raw) <= max_len:
+        return raw
+    return f"{raw[:max_len]}…(truncated {len(raw) - max_len} chars)"
+
+
 def _validate_assistant_response(data: dict, *, allowed_nutrient_codes: set[str] | None = None) -> tuple[bool, str]:
     required = [
         "summary_ru", "confidence", "safety_flags", "physician_flags", "labs_used",
@@ -364,7 +371,7 @@ def _build_timeout_fallback_assistant_response(
         max_items=20,
     )
     return {
-        "summary_ru": "AI-ответ временно недоступен по таймауту. Показан резервный безопасный разбор лабораторных показателей с базовым планом по ключевым нутриентам.",
+        "summary_ru": "AI-ответ временно недоступен (таймаут или невалидный формат). Показан резервный безопасный разбор лабораторных показателей с базовым планом по ключевым нутриентам.",
         "confidence": "low",
         "safety_flags": ["timeout_fallback_mode"],
         "physician_flags": ["Перепроверьте рекомендации с врачом перед началом/изменением приёма."],
@@ -376,7 +383,7 @@ def _build_timeout_fallback_assistant_response(
             "Попробуйте пересчитать план через 30–60 секунд.",
             "Если таймаут повторяется, оставьте только самые свежие анализы и повторите расчёт.",
         ],
-        "disclaimer_ru": "Резервный ответ сформирован автоматически при сетевом таймауте и не заменяет консультацию врача.",
+        "disclaimer_ru": "Резервный ответ сформирован автоматически при проблеме AI-ответа и не заменяет консультацию врача.",
 }
 
 
@@ -940,25 +947,88 @@ async def run_nutrient_assistant_compute_pipeline(
     cfg = OpenAIConfig(api_key=s.OPENAI_API_KEY, model=assistant_model)
     stage = "call_llm_attempt_1"
     used_timeout_fallback = False
+    fallback_reason = ""
+    response_reason_1 = ""
+    response_reason_2 = ""
     try:
-        raw_response, parsed, _ = await _compute_assistant_with_retry(cfg, llm_payload, retries=0, allowed_nutrient_codes=allowed_nutrient_codes)
+        raw_response, parsed, response_reason_1 = await _compute_assistant_with_retry(
+            cfg,
+            llm_payload,
+            retries=0,
+            allowed_nutrient_codes=allowed_nutrient_codes,
+        )
         _mark("call_llm_attempt_1")
-    except (APITimeoutError, APIConnectionError, TimeoutError):
+    except (APITimeoutError, APIConnectionError, TimeoutError) as exc:
+        response_reason_1 = type(exc).__name__
+        fallback_reason = response_reason_1
+        log.error(
+            "nutrient assistant attempt_1 transport_error debug_id=%s tg_user_id=%s error=%s",
+            debug_id,
+            tg_user_id,
+            exc,
+            exc_info=True,
+        )
         _mark("call_llm_attempt_1")
         stage = "call_llm_attempt_2"
         try:
-            raw_response, parsed, _ = await _compute_assistant_with_retry(
+            raw_response, parsed, response_reason_2 = await _compute_assistant_with_retry(
                 cfg,
                 _timeout_failsafe_payload(llm_payload),
                 retries=0,
                 allowed_nutrient_codes=allowed_nutrient_codes,
             )
-        except (APITimeoutError, APIConnectionError, TimeoutError):
+        except (APITimeoutError, APIConnectionError, TimeoutError) as exc2:
+            response_reason_2 = type(exc2).__name__
+            fallback_reason = f"{response_reason_1}->{response_reason_2}"
+            log.error(
+                "nutrient assistant attempt_2 transport_error debug_id=%s tg_user_id=%s error=%s",
+                debug_id,
+                tg_user_id,
+                exc2,
+                exc_info=True,
+            )
             parsed = None
             raw_response = ""
         _mark("call_llm_attempt_2")
+    if not parsed and stage != "call_llm_attempt_2":
+        stage = "call_llm_attempt_2"
+        response_reason_2 = "not_run"
+        log.warning(
+            "nutrient assistant attempt_1 invalid_response debug_id=%s tg_user_id=%s reason=%s raw_preview=%s",
+            debug_id,
+            tg_user_id,
+            response_reason_1 or "unknown",
+            _truncate_for_log(raw_response),
+        )
+        try:
+            raw_response, parsed, response_reason_2 = await _compute_assistant_with_retry(
+                cfg,
+                _timeout_failsafe_payload(llm_payload),
+                retries=0,
+                allowed_nutrient_codes=allowed_nutrient_codes,
+            )
+        except (APITimeoutError, APIConnectionError, TimeoutError) as exc3:
+            response_reason_2 = type(exc3).__name__
+            parsed = None
+            raw_response = ""
+            log.error(
+                "nutrient assistant attempt_2 transport_error_after_invalid_response debug_id=%s tg_user_id=%s error=%s",
+                debug_id,
+                tg_user_id,
+                exc3,
+                exc_info=True,
+            )
+        _mark("call_llm_attempt_2")
     if not parsed:
         stage = "local_fallback"
+        fallback_reason = fallback_reason or f"{response_reason_1 or 'unknown'}->{response_reason_2 or 'unknown'}"
+        log.error(
+            "nutrient assistant local_fallback debug_id=%s tg_user_id=%s reason=%s raw_preview=%s",
+            debug_id,
+            tg_user_id,
+            fallback_reason,
+            _truncate_for_log(raw_response),
+        )
         parsed = _build_timeout_fallback_assistant_response(
             labs_for_llm,
             active_stack_codes=active_stack_codes,
@@ -967,7 +1037,13 @@ async def run_nutrient_assistant_compute_pipeline(
         raw_response = raw_response if 'raw_response' in locals() else json.dumps(parsed, ensure_ascii=False)
         used_timeout_fallback = True
         _mark("local_fallback")
-        log.warning("nutrient assistant fallback used debug_id=%s tg_user_id=%s stage=%s", debug_id, tg_user_id, stage)
+        log.warning(
+            "nutrient assistant fallback used debug_id=%s tg_user_id=%s stage=%s reason=%s",
+            debug_id,
+            tg_user_id,
+            stage,
+            fallback_reason or "unknown",
+        )
     complete_labs, _ = _labs_review_coverage(parsed, labs_for_llm)
     if not complete_labs:
         stage = "merge_missing_labs_review"

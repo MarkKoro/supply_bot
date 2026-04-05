@@ -80,44 +80,21 @@ NUTRIENT_ASSISTANT_JSON_CONTRACT = """{
   "confidence": "low|medium|high",
   "safety_flags": ["string"],
   "physician_flags": ["string"],
-  "labs_used": [
-    {
-      "analyte_code": "string",
-      "value": "string",
-      "unit": "string",
-      "date": "string"
-    }
-  ],
   "missing_data": ["string"],
   "nutrient_plan": [
     {
       "nutrient_code": "string",
-      "nutrient_name_ru": "string",
       "status": "likely_low_or_risk|likely_ok|unclear|possible_excess",
       "recommend_action": "start|continue|stop|do_not_start|discuss_with_physician|retest_only",
       "pause_after_course_days": "integer|null",
       "cycle_mode": "one_shot|auto_repeat_after_pause",
-      "dose_text_ru": "string",
-      "frequency_text_ru": "string",
-      "duration_text_ru": "string",
-      "timing_text_ru": "string",
-      "with_food": true,
       "reason_ru": "string",
-      "monitor_ru": "string",
-      "retest_after_text_ru": "string",
-      "stop_or_pause_rule_ru": "string",
-      "cautions_ru": ["string"],
-      "interactions_ru": ["string"]
+      "monitor_ru": "string"
     }
   ],
   "labs_review": [
     {
       "analyte_code": "string",
-      "analyte_name_ru": "string",
-      "value": "string",
-      "unit": "string",
-      "ref_low": "string|number|null",
-      "ref_high": "string|number|null",
       "interpretation_status": "low|normal|high|unclear",
       "mapped_nutrient_code": "string",
       "actionability": "actionable|watch|retest|insufficient_data",
@@ -139,20 +116,6 @@ NUTRIENT_ASSISTANT_JSON_SCHEMA = {
             "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
             "safety_flags": {"type": "array", "items": {"type": "string"}},
             "physician_flags": {"type": "array", "items": {"type": "string"}},
-            "labs_used": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "properties": {
-                        "analyte_code": {"type": "string"},
-                        "value": {"type": "string"},
-                        "unit": {"type": "string"},
-                        "date": {"type": "string"},
-                    },
-                    "required": ["analyte_code", "value", "unit", "date"],
-                },
-            },
             "missing_data": {"type": "array", "items": {"type": "string"}},
             "nutrient_plan": {
                 "type": "array",
@@ -161,27 +124,15 @@ NUTRIENT_ASSISTANT_JSON_SCHEMA = {
                     "additionalProperties": False,
                     "properties": {
                         "nutrient_code": {"type": "string"},
-                        "nutrient_name_ru": {"type": "string"},
                         "status": {"type": "string", "enum": ["likely_low_or_risk", "likely_ok", "unclear", "possible_excess"]},
                         "recommend_action": {"type": "string", "enum": ["start", "continue", "stop", "do_not_start", "discuss_with_physician", "retest_only"]},
                         "pause_after_course_days": {"type": ["integer", "null"]},
                         "cycle_mode": {"type": "string", "enum": ["one_shot", "auto_repeat_after_pause"]},
-                        "dose_text_ru": {"type": "string"},
-                        "frequency_text_ru": {"type": "string"},
-                        "duration_text_ru": {"type": "string"},
-                        "timing_text_ru": {"type": "string"},
-                        "with_food": {"type": "boolean"},
                         "reason_ru": {"type": "string"},
                         "monitor_ru": {"type": "string"},
-                        "retest_after_text_ru": {"type": "string"},
-                        "stop_or_pause_rule_ru": {"type": "string"},
-                        "cautions_ru": {"type": "array", "items": {"type": "string"}},
-                        "interactions_ru": {"type": "array", "items": {"type": "string"}},
                     },
                     "required": [
-                        "nutrient_code", "nutrient_name_ru", "status", "recommend_action", "pause_after_course_days", "cycle_mode", "dose_text_ru",
-                        "frequency_text_ru", "duration_text_ru", "timing_text_ru", "with_food", "reason_ru",
-                        "monitor_ru", "retest_after_text_ru", "stop_or_pause_rule_ru", "cautions_ru", "interactions_ru",
+                        "nutrient_code", "status", "recommend_action", "pause_after_course_days", "cycle_mode", "reason_ru", "monitor_ru",
                     ],
                 },
             },
@@ -192,26 +143,20 @@ NUTRIENT_ASSISTANT_JSON_SCHEMA = {
                     "additionalProperties": False,
                     "properties": {
                         "analyte_code": {"type": "string"},
-                        "analyte_name_ru": {"type": "string"},
-                        "value": {"type": "string"},
-                        "unit": {"type": "string"},
-                        "ref_low": {"type": ["string", "number", "null"]},
-                        "ref_high": {"type": ["string", "number", "null"]},
                         "interpretation_status": {"type": "string", "enum": ["low", "normal", "high", "unclear"]},
                         "mapped_nutrient_code": {"type": "string"},
                         "actionability": {"type": "string", "enum": ["actionable", "watch", "retest", "insufficient_data"]},
                         "short_reason_ru": {"type": "string"},
                     },
                     "required": [
-                        "analyte_code", "analyte_name_ru", "value", "unit", "ref_low", "ref_high",
-                        "interpretation_status", "mapped_nutrient_code", "actionability", "short_reason_ru",
+                        "analyte_code", "interpretation_status", "mapped_nutrient_code", "actionability", "short_reason_ru",
                     ],
                 },
             },
             "next_steps_ru": {"type": "array", "items": {"type": "string"}},
             "disclaimer_ru": {"type": "string"},
         },
-        "required": ["summary_ru", "confidence", "safety_flags", "physician_flags", "labs_used", "missing_data", "nutrient_plan", "labs_review", "next_steps_ru", "disclaimer_ru"],
+        "required": ["summary_ru", "confidence", "safety_flags", "physician_flags", "missing_data", "nutrient_plan", "labs_review", "next_steps_ru", "disclaimer_ru"],
     },
 }
 
@@ -251,6 +196,66 @@ def _validate_strict_schema_consistency(schema: dict, path: str = "schema") -> N
 
 
 _validate_strict_schema_consistency(NUTRIENT_ASSISTANT_JSON_SCHEMA["schema"], path="NUTRIENT_ASSISTANT_JSON_SCHEMA.schema")
+
+
+@dataclass
+class NutrientAssistantLLMResponse:
+    raw_text: str
+    parsed: dict | None
+    response_status: str
+    meta: dict
+
+
+def _safe_model_dump(value):
+    if value is None:
+        return None
+    try:
+        if hasattr(value, "model_dump"):
+            return value.model_dump()
+    except Exception:
+        pass
+    if isinstance(value, (dict, list, str, int, float, bool)):
+        return value
+    return str(value)
+
+
+def _extract_nutrient_response_payload(resp) -> NutrientAssistantLLMResponse:
+    output_text = str(getattr(resp, "output_text", "") or "").strip()
+    parsed: dict | None = None
+    parsed_attr = _safe_model_dump(getattr(resp, "output_parsed", None))
+    if isinstance(parsed_attr, dict):
+        parsed = parsed_attr
+    status = str(getattr(resp, "status", "") or "").strip().lower() or "unknown"
+    refusal = False
+    outputs = list(getattr(resp, "output", []) or [])
+    output_dump = _safe_model_dump(outputs)
+    for out in outputs:
+        out_type = str(getattr(out, "type", "") or "")
+        if out_type == "refusal":
+            refusal = True
+        contents = list(getattr(out, "content", []) or [])
+        for content in contents:
+            ctype = str(getattr(content, "type", "") or "")
+            if ctype == "refusal":
+                refusal = True
+            if not output_text:
+                text_candidate = str(getattr(content, "text", "") or getattr(content, "output_text", "") or "").strip()
+                if text_candidate:
+                    output_text = text_candidate
+            if parsed is None:
+                parsed_candidate = _safe_model_dump(getattr(content, "parsed", None))
+                if isinstance(parsed_candidate, dict):
+                    parsed = parsed_candidate
+            if parsed is None:
+                json_candidate = _safe_model_dump(getattr(content, "json", None))
+                if isinstance(json_candidate, dict):
+                    parsed = json_candidate
+    return NutrientAssistantLLMResponse(
+        raw_text=output_text,
+        parsed=parsed,
+        response_status=status,
+        meta={"refusal": refusal, "output": output_dump},
+    )
 
 SUGGEST_STACK_JSON_SCHEMA = {
     "name": "supplement_stack_suggestion",
@@ -400,7 +405,7 @@ def _sync_call_nutrient_assistant(
     max_output_tokens: int | None = None,
     timeout_s: float | None = None,
     max_retries: int | None = None,
-) -> str:
+) -> NutrientAssistantLLMResponse:
     client = _build_openai_client(cfg, timeout_s=timeout_s, max_retries=max_retries)
     instructions = f"{NUTRIENT_ASSISTANT_SYSTEM_PROMPT}\nJSON-контракт:\n{NUTRIENT_ASSISTANT_JSON_CONTRACT}"
     params = {
@@ -436,7 +441,7 @@ def _sync_call_nutrient_assistant(
             resp = client.responses.create(**params)
         else:
             raise
-    return (resp.output_text or "").strip()
+    return _extract_nutrient_response_payload(resp)
 
 
 async def nutrient_assistant_single_call(
@@ -444,6 +449,15 @@ async def nutrient_assistant_single_call(
     *,
     payload: dict,
 ) -> str:
+    response = await nutrient_assistant_single_call_verbose(cfg, payload=payload)
+    return response.raw_text
+
+
+async def nutrient_assistant_single_call_verbose(
+    cfg: Optional[OpenAIConfig],
+    *,
+    payload: dict,
+) -> NutrientAssistantLLMResponse:
     if not cfg:
         raise RuntimeError("OPENAI_DISABLED")
     payload_json = json.dumps(payload, ensure_ascii=False)
@@ -478,7 +492,7 @@ async def nutrient_assistant_single_call(
             raise
     if last_exc is not None:
         raise last_exc
-    return ""
+    return NutrientAssistantLLMResponse(raw_text="", parsed=None, response_status="unknown", meta={})
 
 async def daily_advice(
     cfg: Optional[OpenAIConfig],

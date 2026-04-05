@@ -7,7 +7,7 @@ import time
 
 import db
 from openai import APIConnectionError, APITimeoutError
-from openai_client import OpenAIConfig, nutrient_assistant_single_call
+from openai_client import OpenAIConfig, nutrient_assistant_single_call_verbose
 from settings import get_settings
 
 s = get_settings()
@@ -176,7 +176,7 @@ def _truncate_for_log(text: str, *, max_len: int = 700) -> str:
 
 def _validate_assistant_response(data: dict, *, allowed_nutrient_codes: set[str] | None = None) -> tuple[bool, str]:
     required = [
-        "summary_ru", "confidence", "safety_flags", "physician_flags", "labs_used",
+        "summary_ru", "confidence", "safety_flags", "physician_flags",
         "missing_data", "nutrient_plan", "labs_review", "next_steps_ru", "disclaimer_ru",
     ]
     for key in required:
@@ -192,8 +192,7 @@ def _validate_assistant_response(data: dict, *, allowed_nutrient_codes: set[str]
         if not isinstance(lab, dict):
             return False, f"invalid_labs_review_item:{idx}"
         required_lab = [
-            "analyte_code", "analyte_name_ru", "value", "unit", "ref_low", "ref_high",
-            "interpretation_status", "mapped_nutrient_code", "actionability", "short_reason_ru",
+            "analyte_code", "interpretation_status", "mapped_nutrient_code", "actionability", "short_reason_ru",
         ]
         for field in required_lab:
             if field not in lab:
@@ -211,9 +210,7 @@ def _validate_assistant_response(data: dict, *, allowed_nutrient_codes: set[str]
         if not isinstance(item, dict):
             return False, f"invalid_nutrient_item:{idx}"
         required_item = [
-            "nutrient_code", "nutrient_name_ru", "status", "recommend_action", "pause_after_course_days", "cycle_mode", "dose_text_ru",
-            "frequency_text_ru", "duration_text_ru", "timing_text_ru", "with_food", "reason_ru",
-            "monitor_ru", "retest_after_text_ru", "stop_or_pause_rule_ru", "cautions_ru", "interactions_ru",
+            "nutrient_code", "status", "recommend_action", "pause_after_course_days", "cycle_mode", "reason_ru", "monitor_ru",
         ]
         for field in required_item:
             if field not in item:
@@ -236,19 +233,30 @@ async def _compute_assistant_with_retry(
     retries: int = 2,
     *,
     allowed_nutrient_codes: set[str] | None = None,
-) -> tuple[str, dict | None, str]:
+) -> tuple[str, dict | None, str, str, dict]:
     last_raw = ""
     reason = "invalid_json"
+    response_status = "unknown"
+    response_meta: dict = {}
     for _ in range(max(0, int(retries)) + 1):
-        last_raw = await nutrient_assistant_single_call(cfg, payload=llm_payload)
-        parsed = _extract_json_object(last_raw)
+        response = await nutrient_assistant_single_call_verbose(cfg, payload=llm_payload)
+        last_raw = str(response.raw_text or "")
+        response_status = str(response.response_status or "unknown")
+        response_meta = dict(response.meta or {})
+        if response_meta.get("refusal"):
+            reason = "refusal"
+            continue
+        if response_status and response_status not in {"completed", "unknown"}:
+            reason = "response_incomplete"
+            continue
+        parsed = dict(response.parsed) if isinstance(response.parsed, dict) else _extract_json_object(last_raw)
         if not parsed:
-            reason = "invalid_json"
+            reason = "empty_output_text" if not str(last_raw).strip() else "invalid_json"
             continue
         valid, reason = _validate_assistant_response(parsed, allowed_nutrient_codes=allowed_nutrient_codes)
         if valid:
-            return last_raw, parsed, ""
-    return last_raw, None, reason
+            return last_raw, parsed, "", response_status, response_meta
+    return last_raw, None, reason, response_status, response_meta
 
 
 def _timeout_failsafe_payload(llm_payload: dict) -> dict:
@@ -640,6 +648,44 @@ def _apply_lab_action_safety_clamp(parsed: dict, labs_for_llm: list[dict], activ
     return data
 
 
+def _hydrate_minimal_assistant_response(parsed: dict, *, assistant_catalog_by_code: dict[str, dict], labs_for_llm: list[dict]) -> dict:
+    data = dict(parsed or {})
+    labs_by_code = {str(x.get("analyte_code") or "").strip().lower(): dict(x) for x in list(labs_for_llm or []) if str(x.get("analyte_code") or "").strip()}
+    hydrated_review: list[dict] = []
+    for raw in list(data.get("labs_review") or []):
+        item = dict(raw or {})
+        code = str(item.get("analyte_code") or "").strip().lower()
+        source = labs_by_code.get(code, {})
+        item["analyte_name_ru"] = str(item.get("analyte_name_ru") or source.get("analyte_name_ru") or source.get("canonical_analyte_name_ru") or code)
+        item["value"] = str(item.get("value") or source.get("value") or "")
+        item["unit"] = str(item.get("unit") or source.get("unit") or "")
+        item["ref_low"] = item.get("ref_low", source.get("ref_low"))
+        item["ref_high"] = item.get("ref_high", source.get("ref_high"))
+        hydrated_review.append(item)
+    data["labs_review"] = hydrated_review
+    hydrated_plan: list[dict] = []
+    for raw in list(data.get("nutrient_plan") or []):
+        item = dict(raw or {})
+        nutrient_code = _normalize_nutrient_code(str(item.get("nutrient_code") or ""))
+        catalog_item = dict(assistant_catalog_by_code.get(nutrient_code) or {})
+        item["nutrient_name_ru"] = str(item.get("nutrient_name_ru") or catalog_item.get("nutrient_name_ru") or nutrient_code)
+        item["dose_text_ru"] = str(item.get("dose_text_ru") or "По стандартной схеме из справочника, индивидуализировать с врачом.")
+        item["frequency_text_ru"] = str(item.get("frequency_text_ru") or "1 раз в день")
+        item["duration_text_ru"] = str(item.get("duration_text_ru") or "8–12 недель")
+        item["timing_text_ru"] = str(item.get("timing_text_ru") or "Во время еды")
+        item["with_food"] = bool(item["with_food"]) if "with_food" in item else True
+        item["retest_after_text_ru"] = str(item.get("retest_after_text_ru") or "Через 8–12 недель")
+        item["stop_or_pause_rule_ru"] = str(item.get("stop_or_pause_rule_ru") or "Остановить при выраженной непереносимости и обсудить с врачом.")
+        cautions = item.get("cautions_ru")
+        interactions = item.get("interactions_ru")
+        item["cautions_ru"] = list(cautions) if isinstance(cautions, list) else ["Требуется персональная проверка противопоказаний."]
+        item["interactions_ru"] = list(interactions) if isinstance(interactions, list) else ["Проверяйте совместимость с текущими препаратами и добавками."]
+        hydrated_plan.append(item)
+    data["nutrient_plan"] = hydrated_plan
+    data.setdefault("labs_used", sorted([str(x.get("analyte_code") or "") for x in list(labs_for_llm or []) if str(x.get("analyte_code") or "")]))
+    return data
+
+
 def _extract_reminder_times(frequency_text: str) -> list[str]:
     text = str(frequency_text or "").lower()
     if ("2" in text and "д" in text) or "2x" in text or "дважды" in text:
@@ -950,8 +996,14 @@ async def run_nutrient_assistant_compute_pipeline(
     fallback_reason = ""
     response_reason_1 = ""
     response_reason_2 = ""
+    response_status_1 = "unknown"
+    response_status_2 = "unknown"
+    response_meta_1: dict = {}
+    response_meta_2: dict = {}
+    raw_response = ""
+    parsed: dict | None = None
     try:
-        raw_response, parsed, response_reason_1 = await _compute_assistant_with_retry(
+        raw_response, parsed, response_reason_1, response_status_1, response_meta_1 = await _compute_assistant_with_retry(
             cfg,
             llm_payload,
             retries=0,
@@ -971,7 +1023,7 @@ async def run_nutrient_assistant_compute_pipeline(
         _mark("call_llm_attempt_1")
         stage = "call_llm_attempt_2"
         try:
-            raw_response, parsed, response_reason_2 = await _compute_assistant_with_retry(
+            raw_response, parsed, response_reason_2, response_status_2, response_meta_2 = await _compute_assistant_with_retry(
                 cfg,
                 _timeout_failsafe_payload(llm_payload),
                 retries=0,
@@ -994,14 +1046,17 @@ async def run_nutrient_assistant_compute_pipeline(
         stage = "call_llm_attempt_2"
         response_reason_2 = "not_run"
         log.warning(
-            "nutrient assistant attempt_1 invalid_response debug_id=%s tg_user_id=%s reason=%s raw_preview=%s",
+            "nutrient assistant attempt_1 invalid_response debug_id=%s tg_user_id=%s reason=%s response_status=%s labs_count=%s payload_size=%s raw_preview=%s",
             debug_id,
             tg_user_id,
             response_reason_1 or "unknown",
+            response_status_1,
+            labs_count,
+            len(json.dumps(llm_payload, ensure_ascii=False)),
             _truncate_for_log(raw_response),
         )
         try:
-            raw_response, parsed, response_reason_2 = await _compute_assistant_with_retry(
+            raw_response, parsed, response_reason_2, response_status_2, response_meta_2 = await _compute_assistant_with_retry(
                 cfg,
                 _timeout_failsafe_payload(llm_payload),
                 retries=0,
@@ -1023,10 +1078,14 @@ async def run_nutrient_assistant_compute_pipeline(
         stage = "local_fallback"
         fallback_reason = fallback_reason or f"{response_reason_1 or 'unknown'}->{response_reason_2 or 'unknown'}"
         log.error(
-            "nutrient assistant local_fallback debug_id=%s tg_user_id=%s reason=%s raw_preview=%s",
+            "nutrient assistant local_fallback debug_id=%s tg_user_id=%s reason=%s response_statuses=%s->%s labs_count=%s payload_size=%s raw_preview=%s",
             debug_id,
             tg_user_id,
             fallback_reason,
+            response_status_1,
+            response_status_2,
+            labs_count,
+            len(json.dumps(llm_payload, ensure_ascii=False)),
             _truncate_for_log(raw_response),
         )
         parsed = _build_timeout_fallback_assistant_response(
@@ -1044,6 +1103,11 @@ async def run_nutrient_assistant_compute_pipeline(
             stage,
             fallback_reason or "unknown",
         )
+    parsed = _hydrate_minimal_assistant_response(
+        parsed,
+        assistant_catalog_by_code=assistant_catalog_by_code,
+        labs_for_llm=labs_for_llm,
+    )
     complete_labs, _ = _labs_review_coverage(parsed, labs_for_llm)
     if not complete_labs:
         stage = "merge_missing_labs_review"
@@ -1062,6 +1126,18 @@ async def run_nutrient_assistant_compute_pipeline(
     _mark("safety_clamp")
     stage = "enrich_execution_fields"
     parsed = enrich_nutrient_plan_items_for_execution(parsed, context={"labs": labs_for_llm, "assistant_profile": profile_payload})
+    parsed["assistant_debug"] = {
+        "invalid_reason_attempt_1": response_reason_1 or "",
+        "invalid_reason_attempt_2": response_reason_2 or "",
+        "fallback_reason": fallback_reason or "",
+        "raw_preview": _truncate_for_log(raw_response),
+        "model_name": assistant_model,
+        "labs_count": labs_count,
+        "response_status_attempt_1": response_status_1,
+        "response_status_attempt_2": response_status_2,
+        "response_meta_attempt_1": response_meta_1,
+        "response_meta_attempt_2": response_meta_2,
+    }
     _mark("enrich_execution_fields")
     stage = "create_run"
     run_id = await db.create_llm_assistant_run(
@@ -1194,4 +1270,9 @@ async def run_nutrient_assistant_compute_pipeline(
         "unresolved_nutrients": unresolved_nutrients,
         "suppressed_actions": suppressed_actions,
         "fallback_used": used_timeout_fallback,
+        "fallback_reason": fallback_reason,
+        "invalid_reason": response_reason_2 or response_reason_1,
+        "raw_preview": _truncate_for_log(raw_response),
+        "model_name": assistant_model,
+        "labs_count": labs_count,
     }

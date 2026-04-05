@@ -52,7 +52,18 @@ async def process_assistant_job(conn, job: dict, worker_name: str) -> None:
             conn,
             job_id,
             result_run_id=result_run_id,
-            result_json=json.dumps({"run_id": result_run_id, "fallback_used": bool(result.get("fallback_used"))}, ensure_ascii=False),
+            result_json=json.dumps(
+                {
+                    "run_id": result_run_id,
+                    "fallback_used": bool(result.get("fallback_used")),
+                    "fallback_reason": str(result.get("fallback_reason") or ""),
+                    "invalid_reason": str(result.get("invalid_reason") or ""),
+                    "raw_preview": str(result.get("raw_preview") or ""),
+                    "model_name": str(result.get("model_name") or ""),
+                    "labs_count": int(result.get("labs_count") or 0),
+                },
+                ensure_ascii=False,
+            ),
         )
         elapsed_ms = int((time.monotonic() - started_ts) * 1000)
         log.info(

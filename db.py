@@ -10,6 +10,26 @@ import aiosqlite
 
 
 
+def _json_default(value: Any) -> Any:
+    for method_name in ("model_dump", "to_dict", "dict"):
+        method = getattr(value, method_name, None)
+        if callable(method):
+            try:
+                return method()
+            except Exception:
+                pass
+    if isinstance(value, (set, frozenset)):
+        return sorted(value)
+    raw = getattr(value, "__dict__", None)
+    if isinstance(raw, dict):
+        return raw
+    return str(value)
+
+
+def _json_dumps_safe(payload: Any) -> str:
+    return json.dumps(payload if payload is not None else {}, ensure_ascii=False, default=_json_default)
+
+
 def _safe_nutrient_protocol_defs() -> list[dict]:
     try:
         from nutrient_rules import NUTRIENT_PROTOCOL_DEFS as defs  # type: ignore
@@ -9300,8 +9320,8 @@ async def create_llm_assistant_run(
             now,
             str(prompt_version or ""),
             str(model_name or ""),
-            json.dumps(input_snapshot or {}, ensure_ascii=False),
-            json.dumps(response_json or {}, ensure_ascii=False),
+            _json_dumps_safe(input_snapshot),
+            _json_dumps_safe(response_json),
             str(status or "ok"),
         ),
     )
@@ -9320,7 +9340,7 @@ async def _append_assistant_job_event(
         (
             int(job_id),
             str(event_type or "").strip() or "event",
-            json.dumps(payload or {}, ensure_ascii=False),
+            _json_dumps_safe(payload),
             utc_now_iso(),
         ),
     )

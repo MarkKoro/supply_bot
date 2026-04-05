@@ -139,6 +139,35 @@ STRESS_OPTIONS = [
 _settings_cache = None
 
 
+def _parse_iso_dt(raw: str | None) -> datetime | None:
+    txt = str(raw or "").strip()
+    if not txt:
+        return None
+    try:
+        return datetime.fromisoformat(txt.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def _format_start_date_and_duration(raw: str | None) -> tuple[str, str]:
+    dt = _parse_iso_dt(raw)
+    if not dt:
+        return ("—", "—")
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    start_date = dt.date()
+    days = max((datetime.now(timezone.utc).date() - start_date).days, 0) + 1
+    if days < 7:
+        approx = f"примерно {days} дн."
+    elif days < 30:
+        approx = f"примерно {max(1, round(days / 7))} нед."
+    elif days < 365:
+        approx = f"примерно {max(1, round(days / 30))} мес."
+    else:
+        approx = f"примерно {max(1, round(days / 365))} г."
+    return (start_date.strftime("%d.%m.%Y"), approx)
+
+
 def _is_admin(tg_user_id: int) -> bool:
     global _settings_cache
     if _settings_cache is None:
@@ -2289,7 +2318,13 @@ async def _show_complex_detail(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     c_items = await db.list_complex_items(conn, tg_uid, int(complex_id))
     schedules = [x for x in await db.list_complex_schedules(conn, tg_uid) if int(x.get("complex_id") or 0) == int(complex_id)]
-    lines = [f"🧩 <b>{target.get('name') or 'Комплекс'}</b>", f"Позиций: {len(c_items)}"]
+    created_at, duration = _format_start_date_and_duration(target.get("created_at_utc"))
+    lines = [
+        f"🧩 <b>{target.get('name') or 'Комплекс'}</b>",
+        f"Позиций: {len(c_items)}",
+        f"Дата начала: {created_at}",
+        f"Уже принимается: {duration}",
+    ]
     if schedules:
         sched_txt = ", ".join([f"{str(x.get('slot_id') or '')}:{str(x.get('time_local') or '--:--')}" for x in schedules])
         lines.append(f"Расписание: {sched_txt}")
@@ -8797,6 +8832,8 @@ async def show_my_supp_hub(
         if name_en and name_en != name_ru:
             name_line = f"{name_line} ({name_en})"
         dose_text = (row["dose_text"] or "").strip() or "—"
+        start_date, duration = _format_start_date_and_duration(row["created_at"])
+        taken_count = int(row["taken_count"] or 0)
         status_text = "не отмечено"
         if today_status == "taken":
             status_text = "выпил"
@@ -8807,6 +8844,9 @@ async def show_my_supp_hub(
             "⚙️ <b>Управление добавкой</b>\n\n"
             f"{name_line}\n\n"
             f"Доза: {dose_text}\n"
+            f"Дата начала: {start_date}\n"
+            f"Уже принимается: {duration}\n"
+            f"Всего принял: {taken_count} раз\n"
             f"Статус на сегодня: {status_text}\n"
             "Напоминание: автоматически по времени приёма\n"
         )

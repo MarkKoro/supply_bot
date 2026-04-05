@@ -5464,12 +5464,16 @@ function adminField(label, field, value, kind='input') {
             const busy = !!hub.actionBusy[cid];
             const slotLabel = (hub.slots || []).find((slot) => String(slot.slot_id || "") === String(schedule?.slot_id || ""));
             const labelTime = schedule ? `${slotLabel?.title_ru || schedule.slot_id || 'слот'}${schedule.time_local ? ` · ${schedule.time_local}` : ''}` : 'не назначено';
+            const startedAt = formatStartDateRu(c.created_at_utc);
+            const intakeDuration = approxIntakeDurationRu(c.created_at_utc);
             return `<div class="item-row" style="display:block">
               <button type="button" class="btn secondary complex-row-toggle" data-complex-expand="${cid}">
                 <div class="row"><strong>${expanded ? '▾' : '▸'} ${esc(c.name || 'Комплекс')}</strong><span class="muted">${Number(c.items_count || 0)} шт</span></div>
               </button>
               ${expanded ? `<div style="margin-top:8px; display:grid; gap:8px;">
                 <div class="muted">⏰ Время: ${esc(labelTime)}</div>
+                <div class="muted">Дата начала: ${esc(startedAt)}</div>
+                <div class="muted">Уже принимается: ${esc(intakeDuration)}</div>
                 <div class="row" style="justify-content:flex-start; gap:8px; flex-wrap:wrap;">
                   <button class="btn secondary" type="button" data-complex-rename="${cid}" ${busy ? 'disabled' : ''}>Переименовать</button>
                   <button class="btn secondary" type="button" data-complex-schedule="${cid}" ${busy ? 'disabled' : ''}>Выбрать слот</button>
@@ -5527,6 +5531,36 @@ function adminField(label, field, value, kind='input') {
     return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
   }
 
+  function parseIsoDate(value) {
+    const raw = String(value || '').trim();
+    if (!raw) return null;
+    const dt = new Date(raw);
+    if (Number.isNaN(dt.getTime())) return null;
+    return dt;
+  }
+
+  function formatStartDateRu(value) {
+    const dt = parseIsoDate(value);
+    if (!dt) return '—';
+    const y = dt.getUTCFullYear();
+    const m = String(dt.getUTCMonth() + 1).padStart(2, '0');
+    const d = String(dt.getUTCDate()).padStart(2, '0');
+    return `${d}.${m}.${y}`;
+  }
+
+  function approxIntakeDurationRu(value) {
+    const dt = parseIsoDate(value);
+    if (!dt) return '—';
+    const startUtc = Date.UTC(dt.getUTCFullYear(), dt.getUTCMonth(), dt.getUTCDate());
+    const now = new Date();
+    const nowUtc = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+    const days = Math.max(0, Math.floor((nowUtc - startUtc) / 86400000)) + 1;
+    if (days < 7) return `примерно ${days} дн.`;
+    if (days < 30) return `примерно ${Math.max(1, Math.round(days / 7))} нед.`;
+    if (days < 365) return `примерно ${Math.max(1, Math.round(days / 30))} мес.`;
+    return `примерно ${Math.max(1, Math.round(days / 365))} г.`;
+  }
+
   function renderSuppHubSheet() {
     const hub = state.suppHub;
     if (!hub.open) return '';
@@ -5541,6 +5575,9 @@ function adminField(label, field, value, kind='input') {
         <div class="row"><strong>🧪 Меню добавки</strong><button class="btn secondary" data-supp-hub-close>✕</button></div>
         ${hub.loading ? '<div class="muted" style="margin-top:8px">Загрузка...</div>' : `
           <div class="muted" style="margin-top:8px">${esc(item.name_ru || item.name_en || item.name || 'Добавка')}</div>
+          <div class="muted" style="margin-top:6px">Дата начала: ${esc(formatStartDateRu(item.created_at))}</div>
+          <div class="muted" style="margin-top:4px">Уже принимается: ${esc(approxIntakeDurationRu(item.created_at))}</div>
+          <div class="muted" style="margin-top:4px">Принято: ${Number(item.taken_count || 0)} раз</div>
           <div style="margin-top:10px">
             <label class="hub-label">Доза</label>
             <input id="hubDose" class="input" value="${esc(hub.doseText || '')}" placeholder="например, 1 капсула" />

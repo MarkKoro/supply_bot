@@ -5738,6 +5738,13 @@ async def get_user_supplement(conn: aiosqlite.Connection, tg_user_id: int, suppl
         """SELECT us.id, us.user_id, us.supplement_id, us.is_active, us.enabled,
                   COALESCE(NULLIF(uss.dose_text, ''), us.dose_text) AS dose_text,
                   us.note_text, us.notes, us.created_at,
+                  (
+                    SELECT COUNT(*)
+                    FROM supplement_day_state sds
+                    WHERE sds.user_id=us.user_id
+                      AND sds.supplement_id=us.supplement_id
+                      AND sds.status='taken'
+                  ) AS taken_count,
                   s.slug, s.name, s.name_ru, s.name_en,
                   s.summary_ru, s.summary_verified, s.summary_theoretical,
                   s.molecular_mechanisms, s.mechanisms
@@ -5888,10 +5895,17 @@ async def get_user_supplements_with_enabled(conn: aiosqlite.Connection, tg_user_
         """SELECT us.supplement_id, us.enabled, us.is_active, us.user_frozen, us.created_at,
                   s.slug, s.name_ru, s.name_en, s.name,
                   COALESCE(NULLIF(uss.dose_text,''), us.dose_text, '') AS dose_text,
-                  COALESCE(NULLIF(us.note_text,''), '') AS note_text
+                  COALESCE(NULLIF(us.note_text,''), '') AS note_text,
+                  COALESCE(sds.taken_count, 0) AS taken_count
            FROM user_supplements us
            JOIN supplements s ON s.id=us.supplement_id
            LEFT JOIN user_supp_settings uss ON uss.user_id=us.user_id AND uss.supplement_id=us.supplement_id
+           LEFT JOIN (
+               SELECT user_id, supplement_id, COUNT(*) AS taken_count
+               FROM supplement_day_state
+               WHERE status='taken'
+               GROUP BY user_id, supplement_id
+           ) sds ON sds.user_id=us.user_id AND sds.supplement_id=us.supplement_id
            WHERE us.user_id=? AND us.is_active=1
            ORDER BY COALESCE(NULLIF(s.name_ru,''), NULLIF(s.name_en,''), s.name), us.supplement_id""",
         (user_id,),
@@ -5911,6 +5925,7 @@ async def get_user_supplements_with_enabled(conn: aiosqlite.Connection, tg_user_
             "dose_text": str(r["dose_text"] or "").strip(),
             "note_text": str(r["note_text"] or "").strip(),
             "created_at": str(r["created_at"] or "").strip(),
+            "taken_count": int(r["taken_count"] or 0),
         }
         for r in rows
     ]
@@ -7621,15 +7636,23 @@ async def list_complexes(conn: aiosqlite.Connection, tg_user_id: int) -> list[di
     user_id = await get_or_create_user(conn, int(tg_user_id))
     rows = await fetchall(
         conn,
-        """SELECT c.id, c.name, COUNT(ci.supplement_id) AS items_count
+        """SELECT c.id, c.name, c.created_at_utc, COUNT(ci.supplement_id) AS items_count
            FROM user_complexes c
            LEFT JOIN user_complex_items ci ON ci.complex_id=c.id
            WHERE c.user_id=?
-           GROUP BY c.id, c.name
+           GROUP BY c.id, c.name, c.created_at_utc
            ORDER BY c.name""",
         (user_id,),
     )
-    return [{"id": int(r["id"]), "name": str(r["name"] or ""), "items_count": int(r["items_count"] or 0)} for r in rows]
+    return [
+        {
+            "id": int(r["id"]),
+            "name": str(r["name"] or ""),
+            "items_count": int(r["items_count"] or 0),
+            "created_at_utc": str(r["created_at_utc"] or "").strip(),
+        }
+        for r in rows
+    ]
 
 
 async def add_item_to_complex(conn: aiosqlite.Connection, tg_user_id: int, complex_id: int, supplement_id: int, dose_override: str = "") -> None:

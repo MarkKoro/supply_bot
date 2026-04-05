@@ -1078,7 +1078,8 @@
     { id: "settings", title: "Настройки", icon: "⚙️" }
   ];
   const GUIDE_KEYS = { main: 'main_tabs', survey: 'survey_tab', profile: 'profile_tab' };
-  const GUIDE_VERSION = { main_tabs: 5, survey_tab: 5, profile_tab: 5 };
+  const GUIDE_VERSION = { main_tabs: 5, survey_tab: 5, profile_tab: 6 };
+  const SHOW_NUTRIENT_ASSISTANT_UI = false;
   const GUIDE_TEXT = {
     main_tabs: [
       { selector: '.tab[data-tab="today"]', title: 'Сегодня', text: 'Здесь вы отмечаете приём БАДов на сегодня и видите текущий дневной план.' },
@@ -1094,7 +1095,6 @@
     ],
     profile_tab: [
       { selector: '[data-profile-module="organs"]', title: 'Карта органов', text: 'Здесь можно быстро увидеть, какие системы организма вы поддерживаете добавками.' },
-      { selector: '[data-profile-module="assistant"]', title: 'Внутренний помощник', text: 'Этот модуль всегда виден в веб-апе. На Starter он недоступен для нажатия и открывается после покупки Premium.' },
       { selector: '[data-profile-module="cosmetics"]', title: 'Косметика', text: 'В этом разделе вы меняете внешний вид интерфейса: темы, иконки вкладок и бейдж.' }
     ]
   };
@@ -1632,7 +1632,7 @@
     const carriedStarterDays = Number(info.carried_starter_days || 0);
     const carryoverNote = fromStarter
       ? `Оставшиеся дни Starter добавлены к сроку Premium${carriedStarterDays > 0 ? ` (≈ ${Math.ceil(carriedStarterDays)} дн.)` : ''}.`
-      : 'Доступ к Premium и внутреннему помощнику открыт сразу после оплаты.';
+      : 'Доступ к Premium открыт сразу после оплаты.';
     return `
       <div class="payment-success-overlay" data-payment-success-overlay>
         <section class="payment-success-card">
@@ -1640,7 +1640,6 @@
           <div class="muted">Вы активировали тариф <strong>${esc(planName)}</strong>.</div>
           <div class="muted" style="margin-top:6px">Подписка активна до: <strong>${esc(untilLabel)}</strong>.</div>
           <div class="muted" style="margin-top:6px">${esc(carryoverNote)}</div>
-          <div class="muted" style="margin-top:6px">🧪 Внутренний помощник уже доступен в разделе «Профиль».</div>
           <div style="margin-top:12px" class="row">
             <button class="btn" data-payment-success-close>Отлично</button>
           </div>
@@ -1921,7 +1920,7 @@
         <div class="card fade">
           <h2 style="margin:0 0 4px">${title}</h2>
           <div class="muted">${subtitle}</div>
-          <div class="muted" style="margin-top:8px">Что даёт Premium: Today • Каталог • Карта органов • Нутриентный помощник • AI check-in.</div>
+          <div class="muted" style="margin-top:8px">Что даёт Premium: Today • Каталог • Карта органов • AI check-in • расширенный трекинг и напоминания.</div>
         </div>
 
         <div class="plans">${plansHtml || '<div class="card">Планы пока недоступны.</div>'}</div>
@@ -4194,10 +4193,17 @@ function adminField(label, field, value, kind='input') {
     const unseen = getUnseenAchievementsCount();
     const modules = [
       { id: 'organs', title: '🫀 Карта органов', hint: 'Как добавки влияют на системы', locked: false },
-      { id: 'assistant', title: '🧪 Помощник', hint: hasPaidPremium ? 'Персональные рекомендации (обновляется)' : 'Показываем модуль сразу, открыть расчёт можно после Premium', locked: false },
       { id: 'achievements', title: '🏆 Достижения', hint: 'Ваш прогресс и открытия', locked: false, unseen },
       { id: 'cosmetics', title: '🎨 Косметика', hint: 'Тема, вкладки и бейдж', locked: false }
     ];
+    if (SHOW_NUTRIENT_ASSISTANT_UI) {
+      modules.splice(1, 0, {
+        id: 'assistant',
+        title: '🧪 Помощник',
+        hint: hasPaidPremium ? 'Персональные рекомендации (обновляется)' : 'Показываем модуль сразу, открыть расчёт можно после Premium',
+        locked: false
+      });
+    }
     const firstModuleId = modules[0]?.id || 'organs';
     const active = String(state.profileUi.activeModule || firstModuleId);
     return `<section class="card fade"><div class="profile-module-grid">${modules.map((m)=>`<button class="btn profile-module-btn ${active===m.id?'active':''}" data-profile-module="${m.id}" ${m.locked ? 'disabled' : ''}><div><strong>${m.title}${m.unseen ? `<span class="new-pill" style="margin-left:6px; margin-top:4px;">NEW ${m.unseen}</span>` : ''}</strong></div><div class="muted">${m.hint}</div></button>`).join('')}</div></section>`;
@@ -4626,12 +4632,16 @@ function adminField(label, field, value, kind='input') {
 
     const hasPaidPremium = Boolean(state.me?.premium);
     const fallbackModule = 'organs';
-    const activeModule = String(state.profileUi.activeModule || fallbackModule);
+    const requestedModule = String(state.profileUi.activeModule || fallbackModule);
+    const activeModule = (!SHOW_NUTRIENT_ASSISTANT_UI && requestedModule === 'assistant') ? fallbackModule : requestedModule;
+    if (activeModule !== requestedModule) state.profileUi.activeModule = activeModule;
     let moduleHtml = '';
     if (activeModule === 'organs') moduleHtml = `<section class="card fade">${renderBodyMap()}</section>`;
     if (activeModule === 'achievements') moduleHtml = renderProfileAchievementsModule();
     if (activeModule === 'cosmetics') moduleHtml = renderProfileCosmeticsModule();
-    if (activeModule === 'assistant') moduleHtml = hasPaidPremium ? renderAssistantModule(p, labs) : renderAssistantLockedModule();
+    if (activeModule === 'assistant' && SHOW_NUTRIENT_ASSISTANT_UI) {
+      moduleHtml = hasPaidPremium ? renderAssistantModule(p, labs) : renderAssistantLockedModule();
+    }
     if (!moduleHtml) moduleHtml = `<section class="card fade">${renderBodyMap()}</section>`;
 
     return `${renderProfileModulesGrid()}${moduleHtml}${renderProfileEditorModal()}${renderLabsModal('manual')}${renderLabsModal('upload')}${renderReviewModal()}${renderMyNutrientsModal()}`;
@@ -4689,7 +4699,7 @@ function adminField(label, field, value, kind='input') {
 
   function bindProfileEvents() {
     document.querySelectorAll('[data-profile-module]').forEach((el)=>el.addEventListener('click', async ()=>{
-      const next = String(el.dataset.profileModule || 'assistant');
+      const next = String(el.dataset.profileModule || 'organs');
       state.profileUi.activeModule = next;
       if (next === 'achievements' && getUnseenAchievementsCount() > 0) {
         await markAchievementsSeen();
@@ -4698,7 +4708,7 @@ function adminField(label, field, value, kind='input') {
       if (next === 'organs') {
         await loadBodyMap(true);
         bindBodyMapEvents();
-      } else if (next === 'assistant') {
+      } else if (next === 'assistant' && SHOW_NUTRIENT_ASSISTANT_UI) {
         await Promise.all([loadNutrientPlans(true), loadNutrientDraft(true), loadAssistantRegistry(true)]);
         renderActiveTab();
       }

@@ -25,6 +25,11 @@ def _safe_get_all_nutrient_rules() -> dict[str, dict]:
     except Exception:
         return {}
 
+
+def get_all_nutrient_rules() -> dict[str, dict]:
+    """Compatibility wrapper: always returns a dict and never raises."""
+    return _safe_get_all_nutrient_rules()
+
 def utc_now_iso() -> str:
     return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
 
@@ -10617,7 +10622,7 @@ async def count_nutrient_reminders_sent_today(conn: aiosqlite.Connection, tg_use
 def _impact_nutrients_for_slug(slug: str) -> list[str]:
     low = str(slug or "").lower()
     out = []
-    for code, profile in get_all_nutrient_rules().items():
+    for code, profile in _safe_get_all_nutrient_rules().items():
         tokens = [str(x).lower() for x in (profile.get("stack_match_slugs") or [])]
         if any(tok and tok in low for tok in tokens):
             out.append(code)

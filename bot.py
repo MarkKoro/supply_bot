@@ -502,19 +502,20 @@ async def _show_stats_screen(update: Update, context: ContextTypes.DEFAULT_TYPE,
     stack_ids = await db.get_user_stack_supplement_ids(conn, tg_uid)
     streaks = await db.get_streaks(conn, tg_uid, date_local, stack_ids, max_back=90)
 
+    marks_total = int((summary.get("today") or {}).get("taken") or 0) + int((summary.get("last7") or {}).get("taken") or 0) + int((summary.get("last30") or {}).get("taken") or 0)
     miss_lines = []
     for idx, row in enumerate(misses[:5], start=1):
         name = str(row.get("name_ru") or row.get("slug") or f"ID {row.get('supplement_id')}")
         miss_lines.append(f"{idx}) {name} — {int(row.get('missed') or 0)}")
     if not miss_lines:
-        miss_lines = ["нет пропусков 🎯"]
+        miss_lines = ["пока нет пропусков"] if marks_total > 0 else ["пока нет данных"]
 
     streak_lines = []
     for idx, row in enumerate(streaks[:5], start=1):
         name = str(row.get("name_ru") or row.get("slug") or f"ID {row.get('supplement_id')}")
         streak_lines.append(f"{idx}) {name} — {int(row.get('streak_days') or 0)} дн")
     if not streak_lines:
-        streak_lines = ["пока нет активных стриков"]
+        streak_lines = ["пока нет активных стриков"] if marks_total > 0 else ["сначала отметьте первые приёмы"]
 
     text = "\n".join([
         "📈 <b>Статистика</b>",

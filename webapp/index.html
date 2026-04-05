@@ -3859,9 +3859,28 @@ function adminField(label, field, value, kind='input') {
     { code:'iodine', name:'Йод', units:['µg/L','ug/L','мкг/л','µmol/L','umol/L','мкмоль/л'] },
     { code:'choline', name:'Холин', units:['µmol/L','umol/L','мкмоль/л','mg/L','мг/л'] }
   ];
+  function assistantAnalyteSortKey(item = {}) {
+    const name = String(item.name || item.name_ru || item.label || '').trim();
+    const bMatch = name.match(/^Витамин\s+B\s*(\d+)/i);
+    return {
+      name,
+      isBVitamin: !!bMatch,
+      bNum: bMatch ? Number(bMatch[1] || 0) : 0,
+    };
+  }
+  function sortAssistantAnalytePresets(items = []) {
+    const list = Array.isArray(items) ? items.slice() : [];
+    return list.sort((a, b)=>{
+      const ak = assistantAnalyteSortKey(a);
+      const bk = assistantAnalyteSortKey(b);
+      const byName = ak.name.localeCompare(bk.name, 'ru', { sensitivity: 'base', numeric: true });
+      if (ak.isBVitamin && bk.isBVitamin && ak.bNum !== bk.bNum) return ak.bNum - bk.bNum;
+      return byName;
+    });
+  }
   function getAssistantAnalytePresets() {
     const remote = Array.isArray(state.nutrientAssistant.registryAnalytes) ? state.nutrientAssistant.registryAnalytes : [];
-    return remote.length ? remote : DEFAULT_ASSISTANT_ANALYTE_PRESETS;
+    return sortAssistantAnalytePresets(remote.length ? remote : DEFAULT_ASSISTANT_ANALYTE_PRESETS);
   }
   function createEmptyAssistantLabItem() {
     return { analyte_code: "", analyte_name_ru: "", value: "", unit: "", ref_low: "", ref_high: "", measured_at: "", referenceOpen: false };

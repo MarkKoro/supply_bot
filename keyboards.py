@@ -850,7 +850,7 @@ def complex_add_mine_kb(
     cid = int(complex_id)
     btns: list[list[InlineKeyboardButton]] = []
     for item in rows:
-        sid = int(item.get("id") or 0)
+        sid = int(item.get("supplement_id") or item.get("id") or 0)
         title = str(item.get("name") or item.get("name_ru") or item.get("name_en") or f"ID {sid}")
         btns.append([InlineKeyboardButton(f"• {title}", callback_data=f"cx:add_pick:{cid}:{sid}")])
     nav: list[InlineKeyboardButton] = []

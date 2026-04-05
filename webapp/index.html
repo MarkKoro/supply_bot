@@ -151,7 +151,10 @@
       padding: 10px 14px;
       font-size: 14px;
       font-weight: 600;
-      white-space: nowrap;
+      white-space: normal;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+      line-height: 1.2;
     }
 
     .btn:active, .pressed {
@@ -192,6 +195,9 @@
     }
 
     .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
+    .mode-banner { gap: 10px; align-items: flex-start; flex-wrap: wrap; }
+    .mode-banner .btn { flex: 0 0 auto; }
+    .mode-banner .muted { overflow-wrap: anywhere; word-break: break-word; }
     .row > * { min-width: 0; }
     .muted { color: var(--muted); }
 
@@ -446,7 +452,7 @@
       width: 100%;
       border: 1px solid rgba(255,255,255,0.28);
       border-radius: 12px;
-      background: rgba(255,255,255,0.11);
+      background: rgba(15, 24, 54, 0.7);
       color: var(--text);
       padding: 10px 12px;
       transition: transform .08s ease, box-shadow .12s ease, border-color .12s ease;
@@ -454,6 +460,7 @@
     }
     .select option { background: #ffffff; color: #1c2236; }
     .textarea { min-height: 88px; resize: vertical; }
+    .input::placeholder, .textarea::placeholder, .search-input::placeholder { color: rgba(224, 232, 246, 0.72); }
 
     .btn, .chip, .card, .tab, .input, .select, .textarea, .search-input {
       transition: transform .08s ease, box-shadow .12s ease, border-color .12s ease;
@@ -660,8 +667,8 @@
     .organ-tile.state-balanced .organ-icon { border-color: rgba(255,191,92,0.8); color: rgba(255,221,158,0.98); }
     .organ-icon svg { width: 26px; height: 26px; display:block; color: inherit; fill: currentColor; stroke: currentColor; }
     .organ-text { min-width:0; flex:1; }
-    .organ-text .title { font-weight:700; }
-    .organ-text .muted { font-size:12px; }
+    .organ-text .title { font-weight:700; font-size: 18px; line-height: 1.15; overflow-wrap:anywhere; word-break:break-word; }
+    .organ-text .muted { font-size:12px; line-height:1.2; overflow-wrap:anywhere; word-break:break-word; }
     .organ-emoji { font-size: 19px; line-height:1; filter: drop-shadow(0 0 8px rgba(255,255,255,0.25)); }
     .badge { border-radius:999px; padding:2px 8px; font-size:12px; font-weight:700; }
     .badge.plus { background: rgba(73,216,141,0.2); color:#b7ffd5; }
@@ -746,6 +753,7 @@
     .history-list { display:grid; gap:8px; margin-top:8px; }
     .history-item { border:1px solid rgba(255,255,255,0.14); border-radius:12px; padding:10px; background:rgba(255,255,255,0.05); }
     .hub-time-mode { margin-top:8px; display:flex; gap:8px; flex-wrap:wrap; }
+    .hub-label { color: rgba(236, 244, 255, 0.96); font-weight: 700; text-shadow: 0 1px 2px rgba(0,0,0,0.35); }
     .hub-slot-list { margin-top:8px; display:grid; gap:8px; }
     .hub-slot-item { width:100%; text-align:left; border-radius:12px; border:1px solid rgba(255,109,129,.45); background: rgba(255,89,119,.12); padding:10px; color:#ffd9df; }
     .hub-slot-item.active { box-shadow: 0 0 0 1px rgba(255,164,178,.75) inset, 0 0 16px rgba(255,100,130,.25); background: rgba(255,89,119,.22); }
@@ -2602,7 +2610,7 @@
     const itemsHtml = c.items.map((item) => `
       <button type="button" class="card item-row" data-catalog-open="${item.slug}" style="display:block; width:100%; margin-top:0;">
         <div class="row catalog-item-head"><strong class="supp-name">${esc(item.name_ru || item.name_en)}</strong><span>${item.has_purchase ? '🛒' : ''}</span></div>
-        <div class="muted" style="margin-top:6px">${esc(evidenceUserLabel(item.evidence_grade))} • ${esc(confidenceUserLabel(item.confidence))} ${item.in_stack ? '• ✅ в стеке' : ''}</div>
+        <div class="muted" style="margin-top:6px">${esc(evidenceUserLabel(item.evidence_grade))} • ${esc(confidenceUserLabel(item.confidence))} ${item.in_stack ? '• ✅ добавлено' : ''}</div>
       </button>`).join('');
 
     const listHtml = c.loading && !c.items.length
@@ -2612,8 +2620,8 @@
     const pickForComplexId = Number(c.pickForComplexId || 0);
     const pickComplex = (state.complexes || []).find((x) => Number(x.id || 0) === pickForComplexId);
     return `
-      ${pickForComplexId ? `<div class="card fade"><div class="row" style="gap:8px; align-items:flex-start;"><div><strong>Режим: добавить БАД в комплекс</strong><div class="muted" style="margin-top:4px">Комплекс: ${esc(pickComplex?.name || `#${pickForComplexId}`)}. Нажмите на БАД в списке — он добавится сразу.</div></div><button class="btn secondary" type="button" data-catalog-cancel-complex-pick>Отмена</button></div></div>` : ''}
-      ${c.pickForBodymapSystem ? `<div class="card fade"><div class="row" style="gap:8px; align-items:flex-start;"><div><strong>Режим: добавить для органа</strong><div class="muted" style="margin-top:4px">Фильтр по системе: ${esc(SYSTEM_LABELS[c.pickForBodymapSystem] || c.pickForBodymapSystem)}. Нажмите на БАД — он сразу добавится в стек, а карта обновится.</div></div><button class="btn secondary" type="button" data-catalog-cancel-bodymap-pick>Отмена</button></div></div>` : ''}
+      ${pickForComplexId ? `<div class="card fade"><div class="row mode-banner"><div><strong>Режим: добавить БАД в комплекс</strong><div class="muted" style="margin-top:4px">Комплекс: ${esc(pickComplex?.name || `#${pickForComplexId}`)}. Нажмите на БАД в списке — он добавится сразу.</div></div><button class="btn secondary" type="button" data-catalog-cancel-complex-pick>Отмена</button></div></div>` : ''}
+      ${c.pickForBodymapSystem ? `<div class="card fade"><div class="row mode-banner"><div><strong>Режим: добавить для органа</strong><div class="muted" style="margin-top:4px">Фильтр по системе: ${esc(SYSTEM_LABELS[c.pickForBodymapSystem] || c.pickForBodymapSystem)}. Нажмите на БАД — он сразу добавится в стек, а карта обновится.</div></div><button class="btn secondary" type="button" data-catalog-cancel-bodymap-pick>Отмена</button></div></div>` : ''}
       <div class="card fade catalog-toolbar">
         <div class="catalog-row">
           <input id="catalogSearch" class="search-input" placeholder="Поиск RU/EN..." value="${esc(c.q)}" ${c.focusSearchOnOpen ? "autofocus" : ""}/>
@@ -2720,7 +2728,9 @@
             ${available.length ? `<div class="section-tabs">${sectionButtons}</div>` : ''}
             <div id="catalogSectionContent">${openedSection ? `<div class="section-content">${detailParagraphs(openedSection.text)}</div>` : ''}</div>
             <div class="action-grid">
-              <button type="button" class="btn" data-stack-toggle data-id="${item.id}" data-in="${item.in_stack ? '1':'0'}">${item.in_stack ? 'Убрать из стека' : 'Добавить в мой стек'}</button>
+              ${item.in_stack
+                ? '<button type="button" class="btn green" disabled>✅ Добавлено в стек</button><button type="button" class="btn secondary" data-stack-remove data-id="'+item.id+'">Убрать из стека</button>'
+                : '<button type="button" class="btn" data-stack-add data-id="'+item.id+'">Добавить в мой стек</button>'}
               <button type="button" class="btn secondary" data-add-complex data-id="${item.id}">Добавить в комплекс</button>
               ${item.purchase_url ? '<button type="button" class="btn secondary" data-open-shop>Перейти в магазин</button>' : ''}
             </div>
@@ -2835,6 +2845,21 @@
     catalogObserver.observe(sentinel);
   }
 
+  function applyCatalogInStackState(supplementId, inStack) {
+    const sid = Number(supplementId || 0);
+    const next = !!inStack;
+    if (!sid) return;
+    for (const item of (state.catalog.items || [])) {
+      if (Number(item.id || 0) === sid) item.in_stack = next;
+    }
+    const detail = state.catalog.detail || null;
+    if (detail && Number(detail.id || 0) === sid) detail.in_stack = next;
+    const slug = String(detail?.slug || '');
+    if (slug && state.catalog.detailCache?.[slug]) {
+      state.catalog.detailCache[slug].in_stack = next;
+    }
+  }
+
   function bindDetailModalEvents() {
     const closeAddToComplexModal = () => {
       state.catalog.addToComplexModal = { open: false, supplementId: 0, creating: false };
@@ -2920,14 +2945,32 @@
         showToast('Не удалось создать комплекс');
       }
     }));
-    appEl.querySelector('[data-stack-toggle]')?.addEventListener('click', async (e)=>{
-      const b=e.currentTarget; const id=Number(b.dataset.id); const inStack=b.dataset.in==='1';
-      const action=inStack?'remove':'add'; haptic();
-      const detail=state.catalog.detail; const prev=detail.in_stack; detail.in_stack=!inStack;
-      const listItem=state.catalog.items.find(i=>i.id===id); if(listItem) listItem.in_stack=detail.in_stack; renderActiveTab();
-      try { const r=await api('./api/my_supplements/toggle',{method:'POST',body:{supplement_id:id,action}}); detail.in_stack=!!r.in_stack; if(listItem) listItem.in_stack=detail.in_stack; await Promise.all([loadToday(true), loadBodyMap(true)]); showToast(detail.in_stack?'Добавлено в стек':'Убрано из стека'); renderActiveTab(); }
-      catch { detail.in_stack=prev; if(listItem) listItem.in_stack=prev; renderActiveTab(); showToast('Не удалось обновить стек'); }
-    });
+    const bindStackAction = (selector, action) => {
+      appEl.querySelector(selector)?.addEventListener('click', async (e) => {
+        const b = e.currentTarget;
+        const id = Number(b.dataset.id || 0);
+        if (!id) return;
+        haptic();
+        const detail = state.catalog.detail || {};
+        const prev = !!detail.in_stack;
+        const optimistic = action === 'add';
+        applyCatalogInStackState(id, optimistic);
+        renderActiveTab();
+        try {
+          const r = await api('./api/my_supplements/toggle', { method: 'POST', body: { supplement_id: id, action } });
+          applyCatalogInStackState(id, !!r.in_stack);
+          await Promise.all([loadToday(true), loadBodyMap(true)]);
+          showToast((!!r.in_stack) ? 'Добавлено в стек' : 'Убрано из стека');
+          renderActiveTab();
+        } catch {
+          applyCatalogInStackState(id, prev);
+          renderActiveTab();
+          showToast('Не удалось обновить стек');
+        }
+      });
+    };
+    bindStackAction('[data-stack-add]', 'add');
+    bindStackAction('[data-stack-remove]', 'remove');
   }
 
   function bindCatalogEvents() {
@@ -5315,13 +5358,19 @@ function adminField(label, field, value, kind='input') {
     if (!st) return '';
     const today = st.today || {};
     const d7 = st.last7 || {};
-    const tLine = (today.expected > 0 && today.adherence !== null && today.adherence !== undefined)
-      ? `${today.taken}/${today.expected} (${today.adherence}%)`
-      : 'нет плана';
-    const d7Line = (d7.expected > 0 && d7.adherence !== null && d7.adherence !== undefined)
-      ? `${d7.taken}/${d7.expected} (${d7.adherence}%)`
-      : 'нет плана';
-    return `<div class="muted" style="margin-top:8px">Сегодня: ${tLine}</div><div class="muted">7 дней: ${d7Line}</div>`;
+    const d30 = st.last30 || {};
+    const marksTotal = Number(today.taken || 0) + Number(d7.taken || 0) + Number(d30.taken || 0);
+    const line = (label, block) => {
+      const expected = Number(block?.expected || 0);
+      const taken = Number(block?.taken || 0);
+      const adherence = block?.adherence;
+      if (expected <= 0 || adherence === null || adherence === undefined) return `<div class="muted">${label}: нет плана</div>`;
+      return `<div class="muted">${label}: ${taken}/${expected} (${adherence}%)</div>`;
+    };
+    const extra = marksTotal > 0
+      ? `<div class="muted">Отмечено приёмов: ${marksTotal}</div>`
+      : `<div class="muted">Пока нет отмеченных приёмов.</div>`;
+    return `<div class="muted" style="margin-top:8px">${line('Сегодня', today).replace('<div class="muted">','').replace('</div>','')}</div>${line('7 дней', d7)}${line('30 дней', d30)}${extra}`;
   }
 
   function renderMySupplementsSheet() {
@@ -5463,11 +5512,11 @@ function adminField(label, field, value, kind='input') {
         ${hub.loading ? '<div class="muted" style="margin-top:8px">Загрузка...</div>' : `
           <div class="muted" style="margin-top:8px">${esc(item.name_ru || item.name_en || item.name || 'Добавка')}</div>
           <div style="margin-top:10px">
-            <label class="muted">Доза</label>
+            <label class="hub-label">Доза</label>
             <input id="hubDose" class="input" value="${esc(hub.doseText || '')}" placeholder="например, 1 капсула" />
           </div>
           <div style="margin-top:8px">
-            <label class="muted">Заметка</label>
+            <label class="hub-label">Заметка</label>
             <textarea id="hubNote" class="textarea" placeholder="заметки по приёму">${esc(hub.noteText || '')}</textarea>
           </div>
           <div style="margin-top:10px" class="row">
@@ -5758,8 +5807,11 @@ function adminField(label, field, value, kind='input') {
     const summaryStats = state.stats || {};
     const topMiss = Array.isArray(summaryStats.top_misses_7) ? summaryStats.top_misses_7 : [];
     const topStreaks = Array.isArray(summaryStats.top_streaks) ? summaryStats.top_streaks : [];
-    const topMissText = topMiss.length ? `${topMiss[0].name_ru || topMiss[0].slug || '—'} (${Number(topMiss[0].missed || 0)})` : 'Пока нет';
-    const topStreakText = topStreaks.length ? `${topStreaks[0].name_ru || topStreaks[0].slug || '—'} (${Number(topStreaks[0].streak || 0)} дн)` : 'Пока нет';
+    const hasAnyTakenMarks = Number(summaryStats?.today?.taken || 0) + Number(summaryStats?.last7?.taken || 0) + Number(summaryStats?.last30?.taken || 0) > 0;
+    const topMissText = topMiss.length ? `${topMiss[0].name_ru || topMiss[0].slug || '—'} (${Number(topMiss[0].missed || 0)})` : '';
+    const topStreakText = topStreaks.length ? `${topStreaks[0].name_ru || topStreaks[0].slug || '—'} (${Number(topStreaks[0].streak || 0)} дн)` : '';
+    const topMissList = topMiss.slice(0,3).map((x, i) => `<div class="muted">${i+1}) ${esc(x.name_ru || x.slug || '—')} — ${Number(x.missed || 0)}</div>`).join('');
+    const topStreakList = topStreaks.slice(0,3).map((x, i) => `<div class="muted">${i+1}) ${esc(x.name_ru || x.slug || '—')} — ${Number(x.streak || 0)} дн</div>`).join('');
     return `
       <h2 class="settings-heading">Настройки</h2>
       <section class="card fade">
@@ -5833,8 +5885,8 @@ function adminField(label, field, value, kind='input') {
             <details ${sectionsOpen.stats ? 'open' : ''} data-settings-section="stats">
               <summary><span>📈 Статистика</span><span class="ios-arrow">▾</span></summary>
               <div class="ios-content">
-                <div class="muted" style="margin-top:8px">Самый частый пропуск (7д): ${esc(topMissText)}</div>
-                <div class="muted">Лучший стрик: ${esc(topStreakText)}</div>
+                ${hasAnyTakenMarks ? `<div class="muted" style="margin-top:8px">Лучший стрик: ${esc(topStreakText || '—')}</div>${topStreakList ? `<div style="margin-top:4px">${topStreakList}</div>` : ''}` : ''}
+                ${topMiss.length ? `<div class="muted" style="margin-top:8px">Частые пропуски (7д): ${esc(topMissText || '—')}</div><div style="margin-top:4px">${topMissList}</div>` : ''}
                 ${renderStatsBlock() || '<div class="muted" style="margin-top:8px">Пока нет данных для отображения.</div>'}
               </div>
             </details>

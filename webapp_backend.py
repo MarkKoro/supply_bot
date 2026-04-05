@@ -1901,36 +1901,6 @@ async def api_profile_nutrient_assistant_job_get(
         await conn.close()
 
 
-class NutrientAssistantPipelineError(Exception):
-    def __init__(self, code: str, stage: str, message: str = "") -> None:
-        self.code = str(code or "ASSISTANT_PIPELINE_ERROR")
-        self.stage = str(stage or "unknown")
-        self.message = str(message or "")
-        super().__init__(self.message or self.code)
-
-
-async def run_nutrient_assistant_compute_pipeline(
-    conn,
-    *,
-    tg_user_id: int,
-    assistant_profile: dict | None,
-    labs: list[dict] | None,
-    assistant_context: dict | None,
-    debug_id: str,
-) -> dict:
-    try:
-        return await nutrient_pipeline.run_nutrient_assistant_compute_pipeline(
-            conn,
-            tg_user_id=int(tg_user_id),
-            assistant_profile=dict(assistant_profile or {}),
-            labs=list(labs or []),
-            assistant_context=dict(assistant_context or {}),
-            debug_id=str(debug_id or ''),
-        )
-    except nutrient_pipeline.NutrientAssistantPipelineError as exc:
-        raise NutrientAssistantPipelineError(exc.code, exc.stage, exc.message) from exc
-
-
 @app.post("/api/profile/nutrient-assistant/compute")
 async def api_profile_nutrient_assistant_compute(
     body: NutrientAssistantComputeBody,

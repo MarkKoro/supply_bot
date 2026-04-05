@@ -218,6 +218,15 @@ def _validate_assistant_response(data: dict, *, allowed_nutrient_codes: set[str]
         action = str(item.get("recommend_action") or "")
         if action not in {"start", "continue", "stop", "do_not_start", "discuss_with_physician", "retest_only"}:
             return False, f"invalid_action:{idx}"
+        status = str(item.get("status") or "")
+        if status not in {"likely_low_or_risk", "likely_ok", "unclear", "possible_excess"}:
+            return False, f"invalid_status:{idx}"
+        cycle_mode = str(item.get("cycle_mode") or "")
+        if cycle_mode not in {"one_shot", "auto_repeat_after_pause"}:
+            return False, f"invalid_cycle_mode:{idx}"
+        pause_after_course_days = item.get("pause_after_course_days")
+        if pause_after_course_days is not None and not isinstance(pause_after_course_days, int):
+            return False, f"invalid_pause_after_course_days:{idx}"
         code = _normalize_nutrient_code(str(item.get("nutrient_code") or ""))
         if not code:
             return False, f"invalid_nutrient_code:{idx}"
@@ -230,33 +239,30 @@ def _validate_assistant_response(data: dict, *, allowed_nutrient_codes: set[str]
 async def _compute_assistant_with_retry(
     cfg: OpenAIConfig,
     llm_payload: dict,
-    retries: int = 2,
     *,
     allowed_nutrient_codes: set[str] | None = None,
-) -> tuple[str, dict | None, str, str, dict]:
-    last_raw = ""
-    reason = "invalid_json"
-    response_status = "unknown"
-    response_meta: dict = {}
-    for _ in range(max(0, int(retries)) + 1):
-        response = await nutrient_assistant_single_call_verbose(cfg, payload=llm_payload)
-        last_raw = str(response.raw_text or "")
-        response_status = str(response.response_status or "unknown")
-        response_meta = dict(response.meta or {})
-        if response_meta.get("refusal"):
-            reason = "refusal"
-            continue
-        if response_status and response_status not in {"completed", "unknown"}:
-            reason = "response_incomplete"
-            continue
-        parsed = dict(response.parsed) if isinstance(response.parsed, dict) else _extract_json_object(last_raw)
-        if not parsed:
-            reason = "empty_output_text" if not str(last_raw).strip() else "invalid_json"
-            continue
-        valid, reason = _validate_assistant_response(parsed, allowed_nutrient_codes=allowed_nutrient_codes)
-        if valid:
-            return last_raw, parsed, "", response_status, response_meta
-    return last_raw, None, reason, response_status, response_meta
+    input_labs: list[dict] | None = None,
+) -> tuple[dict | None, str, str, dict, str]:
+    response = await nutrient_assistant_single_call_verbose(cfg, payload=llm_payload)
+    raw_text = str(response.raw_text or "")
+    response_status = str(response.response_status or "unknown")
+    response_meta = dict(response.meta or {})
+    if response_meta.get("refusal"):
+        return None, "invalid_response", response_status, response_meta, raw_text
+    if response_status and response_status not in {"completed", "unknown"}:
+        return None, "response_incomplete", response_status, response_meta, raw_text
+    parsed = dict(response.parsed) if isinstance(response.parsed, dict) else _extract_json_object(raw_text)
+    if not parsed:
+        if not str(raw_text).strip():
+            return None, "empty_output", response_status, response_meta, raw_text
+        return None, "invalid_json", response_status, response_meta, raw_text
+    valid, reason = _validate_assistant_response(parsed, allowed_nutrient_codes=allowed_nutrient_codes)
+    if not valid:
+        return None, f"invalid_contract:{reason}", response_status, response_meta, raw_text
+    complete_labs, missing_codes = _labs_review_coverage(parsed, list(input_labs or []))
+    if not complete_labs:
+        return None, f"incomplete_labs_review:{','.join(missing_codes[:8])}", response_status, response_meta, raw_text
+    return parsed, "", response_status, response_meta, raw_text
 
 
 def _timeout_failsafe_payload(llm_payload: dict) -> dict:
@@ -994,6 +1000,7 @@ async def run_nutrient_assistant_compute_pipeline(
     stage = "call_llm_attempt_1"
     used_timeout_fallback = False
     fallback_reason = ""
+    invalid_reason = ""
     response_reason_1 = ""
     response_reason_2 = ""
     response_status_1 = "unknown"
@@ -1003,48 +1010,26 @@ async def run_nutrient_assistant_compute_pipeline(
     raw_response = ""
     parsed: dict | None = None
     try:
-        raw_response, parsed, response_reason_1, response_status_1, response_meta_1 = await _compute_assistant_with_retry(
+        parsed, response_reason_1, response_status_1, response_meta_1, raw_response = await _compute_assistant_with_retry(
             cfg,
             llm_payload,
-            retries=0,
             allowed_nutrient_codes=allowed_nutrient_codes,
+            input_labs=labs_for_llm,
         )
-        _mark("call_llm_attempt_1")
     except (APITimeoutError, APIConnectionError, TimeoutError) as exc:
-        response_reason_1 = type(exc).__name__
-        fallback_reason = response_reason_1
+        response_reason_1 = "transport_timeout"
+        response_status_1 = "transport_error"
+        raw_response = ""
         log.error(
-            "nutrient assistant attempt_1 transport_error debug_id=%s tg_user_id=%s error=%s",
+            "nutrient assistant attempt_1 transport_timeout debug_id=%s tg_user_id=%s error=%s",
             debug_id,
             tg_user_id,
             exc,
             exc_info=True,
         )
-        _mark("call_llm_attempt_1")
-        stage = "call_llm_attempt_2"
-        try:
-            raw_response, parsed, response_reason_2, response_status_2, response_meta_2 = await _compute_assistant_with_retry(
-                cfg,
-                _timeout_failsafe_payload(llm_payload),
-                retries=0,
-                allowed_nutrient_codes=allowed_nutrient_codes,
-            )
-        except (APITimeoutError, APIConnectionError, TimeoutError) as exc2:
-            response_reason_2 = type(exc2).__name__
-            fallback_reason = f"{response_reason_1}->{response_reason_2}"
-            log.error(
-                "nutrient assistant attempt_2 transport_error debug_id=%s tg_user_id=%s error=%s",
-                debug_id,
-                tg_user_id,
-                exc2,
-                exc_info=True,
-            )
-            parsed = None
-            raw_response = ""
-        _mark("call_llm_attempt_2")
-    if not parsed and stage != "call_llm_attempt_2":
-        stage = "call_llm_attempt_2"
-        response_reason_2 = "not_run"
+    _mark("call_llm_attempt_1")
+    if response_reason_1:
+        invalid_reason = response_reason_1
         log.warning(
             "nutrient assistant attempt_1 invalid_response debug_id=%s tg_user_id=%s reason=%s response_status=%s labs_count=%s payload_size=%s raw_preview=%s",
             debug_id,
@@ -1055,28 +1040,33 @@ async def run_nutrient_assistant_compute_pipeline(
             len(json.dumps(llm_payload, ensure_ascii=False)),
             _truncate_for_log(raw_response),
         )
+        stage = "call_llm_attempt_2"
+        timeout_payload = _timeout_failsafe_payload(llm_payload)
         try:
-            raw_response, parsed, response_reason_2, response_status_2, response_meta_2 = await _compute_assistant_with_retry(
+            parsed, response_reason_2, response_status_2, response_meta_2, raw_response = await _compute_assistant_with_retry(
                 cfg,
-                _timeout_failsafe_payload(llm_payload),
-                retries=0,
+                timeout_payload,
                 allowed_nutrient_codes=allowed_nutrient_codes,
+                input_labs=labs_for_llm,
             )
-        except (APITimeoutError, APIConnectionError, TimeoutError) as exc3:
-            response_reason_2 = type(exc3).__name__
-            parsed = None
+        except (APITimeoutError, APIConnectionError, TimeoutError) as exc2:
+            response_reason_2 = "transport_timeout"
+            response_status_2 = "transport_error"
             raw_response = ""
             log.error(
-                "nutrient assistant attempt_2 transport_error_after_invalid_response debug_id=%s tg_user_id=%s error=%s",
+                "nutrient assistant attempt_2 transport_timeout debug_id=%s tg_user_id=%s error=%s",
                 debug_id,
                 tg_user_id,
-                exc3,
+                exc2,
                 exc_info=True,
             )
         _mark("call_llm_attempt_2")
     if not parsed:
+        invalid_reason = response_reason_2 or response_reason_1 or "unknown_invalid_response"
+        fallback_reason = f"{response_reason_1 or 'unknown'}->{response_reason_2 or 'not_run'}"
+        response_reason_2 = response_reason_2 or "not_run"
+    if not parsed:
         stage = "local_fallback"
-        fallback_reason = fallback_reason or f"{response_reason_1 or 'unknown'}->{response_reason_2 or 'unknown'}"
         log.error(
             "nutrient assistant local_fallback debug_id=%s tg_user_id=%s reason=%s response_statuses=%s->%s labs_count=%s payload_size=%s raw_preview=%s",
             debug_id,
@@ -1127,8 +1117,9 @@ async def run_nutrient_assistant_compute_pipeline(
     stage = "enrich_execution_fields"
     parsed = enrich_nutrient_plan_items_for_execution(parsed, context={"labs": labs_for_llm, "assistant_profile": profile_payload})
     parsed["assistant_debug"] = {
-        "invalid_reason_attempt_1": response_reason_1 or "",
-        "invalid_reason_attempt_2": response_reason_2 or "",
+        "invalid_reason": invalid_reason or "",
+        "response_reason_1": response_reason_1 or "",
+        "response_reason_2": response_reason_2 or "",
         "fallback_reason": fallback_reason or "",
         "raw_preview": _truncate_for_log(raw_response),
         "model_name": assistant_model,
@@ -1271,7 +1262,9 @@ async def run_nutrient_assistant_compute_pipeline(
         "suppressed_actions": suppressed_actions,
         "fallback_used": used_timeout_fallback,
         "fallback_reason": fallback_reason,
-        "invalid_reason": response_reason_2 or response_reason_1,
+        "invalid_reason": invalid_reason or response_reason_2 or response_reason_1,
+        "response_reason_1": response_reason_1,
+        "response_reason_2": response_reason_2,
         "raw_preview": _truncate_for_log(raw_response),
         "model_name": assistant_model,
         "labs_count": labs_count,

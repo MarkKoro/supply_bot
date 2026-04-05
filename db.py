@@ -26,8 +26,27 @@ def _json_default(value: Any) -> Any:
     return str(value)
 
 
+def _json_sanitize(payload: Any, *, _seen: set[int] | None = None) -> Any:
+    if payload is None or isinstance(payload, (str, int, float, bool)):
+        return payload
+    if _seen is None:
+        _seen = set()
+    payload_id = id(payload)
+    if payload_id in _seen:
+        return "<circular_ref>"
+    _seen.add(payload_id)
+    if isinstance(payload, dict):
+        return {str(k): _json_sanitize(v, _seen=_seen) for k, v in payload.items()}
+    if isinstance(payload, (list, tuple, set, frozenset)):
+        return [_json_sanitize(item, _seen=_seen) for item in payload]
+    converted = _json_default(payload)
+    if converted is payload:
+        return str(payload)
+    return _json_sanitize(converted, _seen=_seen)
+
+
 def _json_dumps_safe(payload: Any) -> str:
-    return json.dumps(payload if payload is not None else {}, ensure_ascii=False, default=_json_default)
+    return json.dumps(_json_sanitize(payload if payload is not None else {}), ensure_ascii=False)
 
 
 def _safe_nutrient_protocol_defs() -> list[dict]:

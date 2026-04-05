@@ -4,7 +4,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 from openai import APIConnectionError, APITimeoutError, BadRequestError
 
@@ -206,16 +206,30 @@ class NutrientAssistantLLMResponse:
     meta: dict
 
 
-def _safe_model_dump(value):
-    if value is None:
-        return None
-    try:
-        if hasattr(value, "model_dump"):
-            return value.model_dump()
-    except Exception:
-        pass
-    if isinstance(value, (dict, list, str, int, float, bool)):
+def _safe_model_dump(value: Any, _seen: set[int] | None = None):
+    if value is None or isinstance(value, (str, int, float, bool)):
         return value
+    if _seen is None:
+        _seen = set()
+    value_id = id(value)
+    if value_id in _seen:
+        return "<circular_ref>"
+    _seen.add(value_id)
+    if isinstance(value, dict):
+        return {str(k): _safe_model_dump(v, _seen) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_safe_model_dump(item, _seen) for item in value]
+    for method_name in ("model_dump", "to_dict", "dict"):
+        method = getattr(value, method_name, None)
+        if callable(method):
+            try:
+                dumped = method()
+                return _safe_model_dump(dumped, _seen)
+            except Exception:
+                pass
+    raw = getattr(value, "__dict__", None)
+    if isinstance(raw, dict):
+        return {str(k): _safe_model_dump(v, _seen) for k, v in raw.items()}
     return str(value)
 
 

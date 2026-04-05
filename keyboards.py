@@ -849,9 +849,16 @@ def complex_add_mine_kb(
 ) -> InlineKeyboardMarkup:
     cid = int(complex_id)
     btns: list[list[InlineKeyboardButton]] = []
+    def _row_val(row, key, default=None):
+        if isinstance(row, dict):
+            return row.get(key, default)
+        try:
+            return row[key]
+        except Exception:
+            return default
     for item in rows:
-        sid = int(item.get("supplement_id") or item.get("id") or 0)
-        title = str(item.get("name") or item.get("name_ru") or item.get("name_en") or f"ID {sid}")
+        sid = int(_row_val(item, "supplement_id") or _row_val(item, "id") or 0)
+        title = str(_row_val(item, "name") or _row_val(item, "name_ru") or _row_val(item, "name_en") or f"ID {sid}")
         btns.append([InlineKeyboardButton(f"• {title}", callback_data=f"cx:add_pick:{cid}:{sid}")])
     nav: list[InlineKeyboardButton] = []
     if has_prev:

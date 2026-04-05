@@ -1723,14 +1723,19 @@
   function renderGuideOverlay() {
     const g = state.guide;
     if (!g.active || !g.steps?.length) return "";
-    while (g.step < g.steps.length && !findGuideTarget(g.steps[g.step])) g.step += 1;
-    if (g.step >= g.steps.length) {
+    const step = g.steps[g.step];
+    if (!step) {
       state.guide = { active: null, step: 0, steps: [], rect: null, card: null, arrow: null };
       return "";
     }
+    const target = findGuideTarget(step);
+    if (!target) {
+      // Пользователь мог быстро переключить экран: держим прогресс, но временно не рисуем оверлей,
+      // чтобы шаг не "съедался" из-за отсутствия DOM-элемента.
+      return "";
+    }
     updateGuideLayout();
-    const step = g.steps[g.step];
-    if (!step || !g.rect || !g.card || !g.arrow) return "";
+    if (!g.rect || !g.card || !g.arrow) return "";
     const total = g.steps.length;
     const isLast = g.step >= total - 1;
     const topH = Math.max(0, g.rect.top);

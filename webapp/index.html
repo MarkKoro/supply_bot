@@ -6228,7 +6228,14 @@ function adminField(label, field, value, kind='input') {
         const movedTo = String(result?.moved_to_slot_id || '').trim();
         showToast(movedTo ? `Слот удалён, перенос в ${movedTo}` : 'Слот удалён');
         renderActiveTab();
-      } catch {
+      } catch (err) {
+        if (String(err?.code || '') === 'slot_not_found') {
+          state.settingsUi.slotEdit = { open: false, slotId: "", time: "" };
+          await loadScheduleData(true);
+          showToast('Слот уже удалён');
+          renderActiveTab();
+          return;
+        }
         showToast('Не удалось удалить слот');
       } finally {
         delete state.settingsUi.slotBusy[slotId];

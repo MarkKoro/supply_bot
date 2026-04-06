@@ -3510,9 +3510,14 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             try:
                 result = await db.delete_custom_slot(conn, user_id, slot_id)
                 moved_to = str(result.get("moved_to_slot_id") or "ближайший")
-                await answer(update, context, f"Слот удалён. Перенесли в: {moved_to}")
-            except ValueError:
-                await answer(update, context, "Не удалось удалить слот")
+                if update.callback_query:
+                    await update.callback_query.answer(f"Слот удалён. Перенесли в: {moved_to}")
+            except ValueError as exc:
+                message = "Не удалось удалить слот"
+                if str(exc) == "slot_not_found":
+                    message = "Слот уже удалён"
+                if update.callback_query:
+                    await update.callback_query.answer(message, show_alert=False)
             await _show_schedule_home(update, context, conn, tg_uid)
             return
 

@@ -3862,7 +3862,7 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await show(
                 update,
                 context,
-                f"Удалить стек «{row.get('title_ru') or 'Без названия'}»?\nЭто действие удалит и его состав.",
+                f"Удалить стек «{row['title_ru'] or 'Без названия'}»?\nЭто действие удалит и его состав.",
                 admin_stack_delete_confirm_kb(stack_id),
                 route=f"admin:stack:delete_confirm:{stack_id}",
             )
@@ -3910,25 +3910,25 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
 
         if data.startswith("admin:stack:item:open:"):
-            _, _, _, _, _, stack_id, item_id = data.split(":")
+            _, _, _, _, stack_id, item_id = data.split(":")
             await _show_admin_stack_item(update, context, conn, int(stack_id), int(item_id))
             return
 
         if data.startswith("admin:stack:item:del:"):
-            _, _, _, _, _, stack_id, item_id = data.split(":")
+            _, _, _, _, stack_id, item_id = data.split(":")
             await db.admin_delete_curated_stack_item(conn, int(item_id))
             await q.answer("Удалено.", show_alert=False)
             await _show_admin_stack_items(update, context, conn, int(stack_id))
             return
 
         if data.startswith("admin:stack:item:move:"):
-            _, _, _, _, _, stack_id, item_id, direction = data.split(":")
+            _, _, _, _, stack_id, item_id, direction = data.split(":")
             await db.admin_move_curated_stack_item(conn, int(stack_id), int(item_id), direction)
             await _show_admin_stack_items(update, context, conn, int(stack_id))
             return
 
         if data.startswith("admin:stack:item:edit:"):
-            _, _, _, _, _, stack_id, item_id = data.split(":")
+            _, _, _, _, stack_id, item_id = data.split(":")
             await show(
                 update,
                 context,

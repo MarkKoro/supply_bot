@@ -4570,7 +4570,8 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 )
                 existing_ids.add(supplement_id)
                 changed_slugs.add(str(supplement["slug"] or "").strip())
-            summary = await db.add_stack_items_to_user(conn, user_id, to_add)
+            internal_user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
+            summary = await db.add_stack_items_to_user(conn, internal_user_id, to_add)
             if changed_slugs:
                 await db.enqueue_stack_change_rebuilds(conn, tg_uid, sorted(slug for slug in changed_slugs if slug))
             lines = [f"✅ Добавлено новых: {summary['added']}"]

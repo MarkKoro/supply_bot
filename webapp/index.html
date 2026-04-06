@@ -5632,6 +5632,11 @@ function adminField(label, field, value, kind='input') {
     return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
   }
 
+  function isDefaultScheduleSlot(slotId) {
+    const normalized = String(slotId || '').trim();
+    return normalized === 'morning' || normalized === 'noon' || normalized === 'evening';
+  }
+
   function parseIsoDate(value) {
     const raw = String(value || '').trim();
     if (!raw) return null;
@@ -5852,6 +5857,22 @@ function adminField(label, field, value, kind='input') {
     return { slotId: String(created?.slot_id || ''), time };
   }
 
+  async function deleteScheduleSlot(slotId) {
+    const normalizedSlotId = String(slotId || '').trim();
+    if (!normalizedSlotId) throw new Error('invalid_slot_id');
+    const removed = await api('./api/schedule/delete_slot', { method: 'POST', body: { slot_id: normalizedSlotId } });
+    const scheduleRes = await api('./api/schedule');
+    const nextSlots = Array.isArray(scheduleRes.slots) ? scheduleRes.slots : [];
+    state.settingsSchedule.slots = nextSlots;
+    state.complexHub.slots = nextSlots;
+    if (state.suppHub.open || state.suppHub.slots?.length) {
+      state.suppHub.slots = nextSlots;
+      state.suppHub.schedules = Array.isArray(scheduleRes.schedules) ? scheduleRes.schedules : (state.suppHub.schedules || []);
+      state.suppHub.scheduleCacheAt = Date.now();
+    }
+    return removed || {};
+  }
+
   function renderSettings() {
     const me = state.me || {};
     const accessLabel = me.premium ? "Premium" : (me.starter_trial_active ? "Starter" : "Нет активного доступа");
@@ -5972,6 +5993,7 @@ function adminField(label, field, value, kind='input') {
     const enabledSlots = scheduleSlots.filter((s) => !!s.is_enabled);
     const sectionsOpen = state.settingsUi?.sectionsOpen || {};
     const slotEdit = state.settingsUi?.slotEdit || { open: false, slotId: "", time: "" };
+    const slotEditIsCustom = slotEdit.open && !isDefaultScheduleSlot(slotEdit.slotId);
     const summaryStats = state.stats || {};
     const topMiss = Array.isArray(summaryStats.top_misses_7) ? summaryStats.top_misses_7 : [];
     const topStreaks = Array.isArray(summaryStats.top_streaks) ? summaryStats.top_streaks : [];
@@ -6068,9 +6090,12 @@ function adminField(label, field, value, kind='input') {
             <label class="muted">Новое время (HH:MM)
               <input class="input" id="settingsSlotTimeInput" type="time" value="${esc(slotEdit.time || '')}" />
             </label>
-            <div class="row" style="justify-content:flex-end;gap:8px">
+            <div class="row" style="justify-content:space-between;gap:8px">
+              ${slotEditIsCustom ? '<button class="btn secondary" type="button" id="settingsSlotDeleteBtn">Удалить слот</button>' : '<span></span>'}
+              <div class="row" style="gap:8px">
               <button class="btn secondary" type="button" data-slot-edit-close>Отмена</button>
               <button class="btn" type="button" id="settingsSlotTimeSave">Сохранить</button>
+              </div>
             </div>
           </div>
         </section>
@@ -6183,6 +6208,28 @@ function adminField(label, field, value, kind='input') {
         renderActiveTab();
       } catch {
         showToast('Не удалось сохранить время слота');
+      } finally {
+        delete state.settingsUi.slotBusy[slotId];
+      }
+    });
+    document.getElementById('settingsSlotDeleteBtn')?.addEventListener('click', async () => {
+      const slotId = String(state.settingsUi?.slotEdit?.slotId || '');
+      if (!slotId || isDefaultScheduleSlot(slotId)) {
+        showToast('Базовый слот удалить нельзя');
+        return;
+      }
+      if (state.settingsUi.slotBusy[slotId]) return;
+      const confirmed = confirm('Удалить этот слот? Добавки автоматически перенесутся в ближайший слот по времени.');
+      if (!confirmed) return;
+      state.settingsUi.slotBusy[slotId] = true;
+      try {
+        const result = await deleteScheduleSlot(slotId);
+        state.settingsUi.slotEdit = { open: false, slotId: "", time: "" };
+        const movedTo = String(result?.moved_to_slot_id || '').trim();
+        showToast(movedTo ? `Слот удалён, перенос в ${movedTo}` : 'Слот удалён');
+        renderActiveTab();
+      } catch {
+        showToast('Не удалось удалить слот');
       } finally {
         delete state.settingsUi.slotBusy[slotId];
       }

@@ -690,12 +690,14 @@ async def _show_reminders_home(update: Update, context: ContextTypes.DEFAULT_TYP
 async def _show_schedule_home(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, tg_uid: int) -> None:
     user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
     slots = await db.get_user_slots(conn, user_id)
+    default_slot_ids = {str(item.get("slot_id") or "") for item in db.default_user_slots()}
+    has_custom_slots = any(str(slot.get("slot_id") or "") not in default_slot_ids for slot in slots)
     lines = ["⏰ <b>Расписание</b>"]
     for slot in slots:
         if not slot.get("is_enabled", True):
             continue
         lines.append(f"• [{slot.get('time_local','--:--')}] {slot.get('title_ru','Слот')}")
-    await show(update, context, "\n".join(lines), schedule_menu_kb(), route="settings:schedule")
+    await show(update, context, "\n".join(lines), schedule_menu_kb(has_custom_slots=has_custom_slots), route="settings:schedule")
 
 
 async def _show_notifications_settings(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, tg_uid: int) -> None:
@@ -3485,6 +3487,33 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if data == "schedule:add_custom":
             context.user_data[WAITING_KEY] = "schedule:add_custom"
             await show(update, context, "Введи время в формате HH:MM", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="settings:notifications")]]), route="schedule:add_custom")
+            return
+        if data == "schedule:delete_pick":
+            user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
+            slots = await db.get_user_slots(conn, user_id)
+            default_slot_ids = {str(item.get("slot_id") or "") for item in db.default_user_slots()}
+            custom_slots = [slot for slot in slots if str(slot.get("slot_id") or "") not in default_slot_ids]
+            if not custom_slots:
+                await show(update, context, "Кастомных слотов пока нет.", schedule_menu_kb(has_custom_slots=False), route="settings:schedule")
+                return
+            await show(
+                update,
+                context,
+                "Выбери кастомный слот для удаления. БАДы из него автоматически перенесём в ближайший слот по времени.",
+                schedule_slots_pick_kb(custom_slots, prefix="schedule:delete_slot"),
+                route="schedule:delete_pick",
+            )
+            return
+        if data.startswith("schedule:delete_slot:"):
+            slot_id = data.split(":", 2)[2]
+            user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
+            try:
+                result = await db.delete_custom_slot(conn, user_id, slot_id)
+                moved_to = str(result.get("moved_to_slot_id") or "ближайший")
+                await answer(update, context, f"Слот удалён. Перенесли в: {moved_to}")
+            except ValueError:
+                await answer(update, context, "Не удалось удалить слот")
+            await _show_schedule_home(update, context, conn, tg_uid)
             return
 
         if data == "menu:add":

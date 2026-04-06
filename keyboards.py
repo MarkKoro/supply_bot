@@ -928,13 +928,20 @@ def complex_schedule_kb(complex_id: int, slots: list[dict]) -> InlineKeyboardMar
     return InlineKeyboardMarkup(rows)
 
 
-def schedule_menu_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
+def schedule_menu_kb(*, has_custom_slots: bool = False) -> InlineKeyboardMarkup:
+    rows = [
         [InlineKeyboardButton("Изменить время слота", callback_data="schedule:slot_pick")],
         [InlineKeyboardButton("➕ Добавить время", callback_data="schedule:add_custom")],
-        [InlineKeyboardButton("Назначить время добавкам", callback_data="menu:my")],
-        [InlineKeyboardButton("⬅️ Назад", callback_data="settings:notifications")],
-    ])
+    ]
+    if has_custom_slots:
+        rows.append([InlineKeyboardButton("🗑 Удалить слот", callback_data="schedule:delete_pick")])
+    rows.extend(
+        [
+            [InlineKeyboardButton("Назначить время добавкам", callback_data="menu:my")],
+            [InlineKeyboardButton("⬅️ Назад", callback_data="settings:notifications")],
+        ]
+    )
+    return InlineKeyboardMarkup(rows)
 
 
 def schedule_slots_pick_kb(slots: list[dict], prefix: str = "schedule:slot_time_set") -> InlineKeyboardMarkup:

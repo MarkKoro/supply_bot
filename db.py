@@ -8727,6 +8727,98 @@ async def add_custom_slot(conn: aiosqlite.Connection, user_id: int, time_local: 
     return slot_id
 
 
+async def delete_custom_slot(conn: aiosqlite.Connection, user_id: int, slot_id: str) -> dict[str, object]:
+    target_slot_id = str(slot_id or "").strip()
+    if not target_slot_id:
+        raise ValueError("slot_id_required")
+
+    default_slot_ids = {str(item.get("slot_id") or "") for item in default_user_slots()}
+    if target_slot_id in default_slot_ids:
+        raise ValueError("default_slot_cannot_be_deleted")
+
+    slots = await get_user_slots(conn, int(user_id))
+    slot_to_delete = next((s for s in slots if str(s.get("slot_id") or "") == target_slot_id), None)
+    if not slot_to_delete:
+        raise ValueError("slot_not_found")
+
+    target_time = _normalize_hhmm(str(slot_to_delete.get("time_local") or "").strip())
+    if not target_time:
+        raise ValueError("invalid_slot_time")
+
+    def _minutes(hhmm: str) -> int:
+        hh, mm = hhmm.split(":", 1)
+        return int(hh) * 60 + int(mm)
+
+    delete_minutes = _minutes(target_time)
+    candidate_slots = []
+    for slot in slots:
+        sid = str(slot.get("slot_id") or "").strip()
+        if not sid or sid == target_slot_id:
+            continue
+        time_local = _normalize_hhmm(str(slot.get("time_local") or "").strip())
+        if not time_local:
+            continue
+        candidate_slots.append((sid, time_local))
+    if not candidate_slots:
+        raise ValueError("no_target_slot")
+    candidate_slots.sort(key=lambda item: (abs(_minutes(item[1]) - delete_minutes), _minutes(item[1]), item[0]))
+    nearest_slot_id = str(candidate_slots[0][0])
+
+    user_row = await fetchone(conn, "SELECT tg_user_id FROM users WHERE id=? LIMIT 1", (int(user_id),))
+    tg_user_id = int(user_row["tg_user_id"]) if user_row and user_row["tg_user_id"] is not None else 0
+
+    complex_rows = await fetchall(
+        conn,
+        """SELECT DISTINCT complex_id
+           FROM user_complex_schedules
+           WHERE user_id=? AND slot_id=?""",
+        (int(user_id), target_slot_id),
+    )
+    moved_complex_ids = [int(row["complex_id"] or 0) for row in complex_rows if int(row["complex_id"] or 0) > 0]
+    for complex_id in moved_complex_ids:
+        if tg_user_id > 0:
+            await set_complex_schedule(conn, tg_user_id, complex_id, nearest_slot_id, None)
+        else:
+            await conn.execute(
+                """UPDATE user_complex_schedules
+                   SET slot_id=?, time_local=''
+                   WHERE user_id=? AND complex_id=? AND slot_id=?""",
+                (nearest_slot_id, int(user_id), int(complex_id), target_slot_id),
+            )
+
+    supplement_rows = await fetchall(
+        conn,
+        """SELECT DISTINCT supplement_id
+           FROM user_schedules
+           WHERE user_id=? AND slot_id=?""",
+        (int(user_id), target_slot_id),
+    )
+    moved_supplement_ids = [int(row["supplement_id"] or 0) for row in supplement_rows if int(row["supplement_id"] or 0) > 0]
+    for supplement_id in moved_supplement_ids:
+        if tg_user_id > 0:
+            await set_schedule_slot(conn, int(user_id), int(supplement_id), nearest_slot_id)
+        else:
+            await conn.execute(
+                """UPDATE user_schedules
+                   SET slot_id=?, time_hhmm=NULL, is_enabled=1
+                   WHERE user_id=? AND supplement_id=?""",
+                (nearest_slot_id, int(user_id), int(supplement_id)),
+            )
+
+    await conn.execute(
+        "DELETE FROM user_schedule_slots WHERE user_id=? AND slot_id=?",
+        (int(user_id), target_slot_id),
+    )
+    await conn.commit()
+
+    return {
+        "deleted_slot_id": target_slot_id,
+        "moved_to_slot_id": nearest_slot_id,
+        "moved_supplements_count": len(moved_supplement_ids),
+        "moved_complexes_count": len(moved_complex_ids),
+    }
+
+
 async def _clear_custom_reminders_for_schedule_switch(
     conn: aiosqlite.Connection,
     tg_user_id: int,

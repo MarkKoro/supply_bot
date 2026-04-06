@@ -75,6 +75,10 @@ class AddSlotBody(BaseModel):
     title_ru: str | None = None
 
 
+class DeleteSlotBody(BaseModel):
+    slot_id: str
+
+
 class ScheduleSetBody(BaseModel):
     supplement_id: int
     slot_id: str
@@ -2794,6 +2798,22 @@ async def api_schedule_add_slot(body: AddSlotBody, x_telegram_init_data: str = H
     finally:
         await conn.close()
     return JSONResponse({"ok": True, "slot_id": slot_id})
+
+
+@app.post("/api/schedule/delete_slot")
+async def api_schedule_delete_slot(body: DeleteSlotBody, x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    if not await _premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
+    conn = await db.connect(s.DB_PATH)
+    try:
+        user_id = await db.get_or_create_user(conn, tg_user_id, tz_name="")
+        result = await db.delete_custom_slot(conn, user_id, body.slot_id)
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "code": str(exc)}, status_code=400)
+    finally:
+        await conn.close()
+    return JSONResponse({"ok": True, **result})
 
 
 @app.post("/api/schedule/set")

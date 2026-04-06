@@ -3195,6 +3195,21 @@ def _normalize_hhmm(value: str) -> str | None:
     return None
 
 
+def _extract_first_hhmm(value: str) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    direct = _normalize_hhmm(text)
+    if direct:
+        return direct
+    for match in re.finditer(r"([0-2]?\d)[:.]([0-5]?\d)", text):
+        candidate = f"{match.group(1)}:{match.group(2)}"
+        normalized = _normalize_hhmm(candidate)
+        if normalized:
+            return normalized
+    return None
+
+
 def _is_reminder_due_now(local_now: datetime, target_hhmm: str, grace_seconds: int = 120) -> bool:
     normalized = _normalize_hhmm(target_hhmm)
     if not normalized:
@@ -5338,6 +5353,20 @@ async def add_stack_items_to_user(conn: aiosqlite.Connection, user_id: int, item
             await conn.execute(
                 "UPDATE user_supplements SET note_text=? WHERE user_id=? AND supplement_id=?",
                 (combined, user_id, supplement_id),
+            )
+        timing_hhmm = _extract_first_hhmm(timing_text)
+        if timing_hhmm and not existing:
+            await conn.execute(
+                """INSERT INTO user_schedules(user_id, supplement_id, time_hhmm, slot_id, is_enabled)
+                   VALUES(?, ?, ?, 'morning', 1)
+                   ON CONFLICT(user_id, supplement_id) DO UPDATE SET
+                     time_hhmm=excluded.time_hhmm,
+                     is_enabled=1""",
+                (user_id, supplement_id, timing_hhmm),
+            )
+            await conn.execute(
+                "UPDATE user_schedules SET slot_id='morning' WHERE user_id=? AND supplement_id=? AND (slot_id IS NULL OR slot_id='')",
+                (user_id, supplement_id),
             )
 
     await conn.commit()

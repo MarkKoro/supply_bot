@@ -6663,6 +6663,7 @@ async def set_user_schedule_time(
         "UPDATE user_schedules SET slot_id='morning' WHERE user_id=? AND supplement_id=? AND (slot_id IS NULL OR slot_id='')",
         (user_id, supplement_id),
     )
+    await _clear_custom_reminders_for_schedule_switch(conn, int(tg_user_id), int(supplement_id))
     await conn.commit()
 
 async def get_today_intake_status(
@@ -8726,7 +8727,27 @@ async def add_custom_slot(conn: aiosqlite.Connection, user_id: int, time_local: 
     return slot_id
 
 
+async def _clear_custom_reminders_for_schedule_switch(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    supplement_id: int,
+) -> None:
+    await conn.execute(
+        "DELETE FROM reminders WHERE user_id=? AND supplement_id=?",
+        (int(tg_user_id), int(supplement_id)),
+    )
+    reminder_left = await fetchone(
+        conn,
+        "SELECT 1 AS x FROM reminders WHERE user_id=? AND supplement_id=? LIMIT 1",
+        (int(tg_user_id), int(supplement_id)),
+    )
+    if reminder_left:
+        raise RuntimeError("failed_to_clear_custom_reminders")
+
+
 async def set_schedule_slot(conn: aiosqlite.Connection, user_id: int, supplement_id: int, slot_id: str) -> None:
+    user_row = await fetchone(conn, "SELECT tg_user_id FROM users WHERE id=? LIMIT 1", (int(user_id),))
+    tg_user_id = int(user_row["tg_user_id"]) if user_row and user_row["tg_user_id"] is not None else 0
     await conn.execute(
         """INSERT INTO user_schedules(user_id, supplement_id, time_hhmm, slot_id, is_enabled)
            VALUES(?, ?, NULL, ?, 1)
@@ -8735,6 +8756,8 @@ async def set_schedule_slot(conn: aiosqlite.Connection, user_id: int, supplement
              is_enabled=1""",
         (user_id, supplement_id, slot_id),
     )
+    if tg_user_id > 0:
+        await _clear_custom_reminders_for_schedule_switch(conn, tg_user_id, int(supplement_id))
     await conn.commit()
 
 
@@ -8744,6 +8767,8 @@ async def set_schedule_time_override(
     supplement_id: int,
     time_hhmm: str | None,
 ) -> None:
+    user_row = await fetchone(conn, "SELECT tg_user_id FROM users WHERE id=? LIMIT 1", (int(user_id),))
+    tg_user_id = int(user_row["tg_user_id"]) if user_row and user_row["tg_user_id"] is not None else 0
     normalized = None
     if time_hhmm is not None:
         normalized = _normalize_hhmm(time_hhmm)
@@ -8761,6 +8786,8 @@ async def set_schedule_time_override(
         "UPDATE user_schedules SET slot_id='morning' WHERE user_id=? AND supplement_id=? AND (slot_id IS NULL OR slot_id='')",
         (user_id, supplement_id),
     )
+    if tg_user_id > 0:
+        await _clear_custom_reminders_for_schedule_switch(conn, tg_user_id, int(supplement_id))
     await conn.commit()
 
 

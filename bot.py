@@ -735,16 +735,32 @@ async def _show_supplement_time_screen(
     slot = next((s for s in slots if str(s.get("slot_id") or "") == str(current.get("slot_id") or "")), None)
     slot_title = str(slot.get("title_ru") or "Утро") if slot else "Утро"
     slot_time = str(slot.get("time_local") or "--:--") if slot else "--:--"
+    reminder_profile = await db.get_effective_reminders_for_supplement(conn, tg_uid, supplement_id)
+    reminder_mode = str(reminder_profile.get("mode") or "slot").strip()
+    reminder_times = [str(t).strip() for t in list(reminder_profile.get("times") or []) if str(t).strip()]
     override = str(current.get("time_hhmm") or "").strip()
-    effective_time = override or slot_time
     title = (supplement["name_ru"] or supplement["name"] or "").strip()
+    if reminder_mode == "custom" and reminder_times:
+        active_time = ", ".join(reminder_times)
+        time_block = (
+            f"Режим: своё время\n"
+            f"Текущее время: {active_time}\n"
+            "Напоминание ставится по этому времени.\n\n"
+            "Можно назначить новое своё время или вернуться к слоту."
+        )
+    else:
+        effective_time = override or slot_time
+        time_block = (
+            f"Режим: слот\n"
+            f"Слот: {slot_title} · {slot_time}\n"
+            f"Текущее время: {effective_time}\n"
+            "Напоминание ставится автоматически по времени слота.\n\n"
+            "Можно выбрать другой слот или назначить своё время."
+        )
     text = (
         f"⏰ <b>Время приёма</b>\n\n"
         f"💊 {title}\n"
-        f"Слот: {slot_title} · {slot_time}\n"
-        f"Текущее время: {effective_time}\n"
-        "Напоминание ставится автоматически на это время.\n\n"
-        "Можно назначить своё время или выбрать один из слотов."
+        f"{time_block}"
     )
     await show(update, context, text, supplement_time_kb(supplement_id, slots), route=f"supplement:set_time:{supplement_id}")
 

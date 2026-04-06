@@ -404,6 +404,14 @@
     .catalog-list { display:grid; gap:10px; }
     .catalog-status { text-align:center; font-size:12px; color: var(--muted); padding: 6px 0; }
     .catalog-skeleton { height: 72px; border-radius: 14px; border: 1px solid rgba(255,255,255,0.12); background: linear-gradient(110deg, rgba(255,255,255,0.05) 8%, rgba(255,255,255,0.12) 18%, rgba(255,255,255,0.05) 33%); background-size: 180% 100%; animation: shimmer 1.4s linear infinite; }
+    .ready-stack-list { display:grid; gap:10px; margin-top:10px; }
+    .ready-stack-item { border:1px solid rgba(255,255,255,.16); border-radius:14px; padding:12px; background: rgba(255,255,255,0.04); display:grid; gap:8px; }
+    .ready-stack-item-head { display:flex; align-items:flex-start; justify-content:space-between; gap:8px; }
+    .ready-stack-meta { font-size:12px; color: var(--muted); }
+    .ready-stack-items { display:grid; gap:6px; margin-top:4px; }
+    .ready-stack-subitem { border:1px solid rgba(255,255,255,.12); border-radius:10px; padding:8px; background: rgba(255,255,255,.03); text-align:left; color:inherit; }
+    .ready-stack-subitem-title { font-weight:700; font-size:13px; }
+    .ready-stack-subitem-meta { margin-top:4px; font-size:12px; color: var(--muted); }
     .supp-name {
       display: -webkit-box;
       -webkit-line-clamp: 2;
@@ -910,6 +918,9 @@
       loadingMore: false,
       hasMore: true,
       error: false,
+      stacksLoading: false,
+      stacksOpen: false,
+      readyStacks: [],
       filters: { evidence: [], targets: [], burdens: [], sort: "alpha" },
       detail: null, detailLoading: false, filtersOpen: false,
       detailSection: null,
@@ -2621,6 +2632,38 @@
     const listHtml = c.loading && !c.items.length
       ? skeletons
       : (itemsHtml || (!c.error ? '<div class="card">Ничего не найдено.</div>' : ''));
+    const readyStacks = Array.isArray(c.readyStacks) ? c.readyStacks : [];
+    const readyStacksHtml = c.stacksLoading
+      ? '<div class="catalog-skeleton" style="height:120px"></div>'
+      : (readyStacks.length
+        ? `<div class="ready-stack-list">${readyStacks.map((stack) => {
+          const items = Array.isArray(stack.items) ? stack.items : [];
+          const tags = Array.isArray(stack.tags) ? stack.tags.filter(Boolean).slice(0, 4) : [];
+          return `<div class="ready-stack-item">
+            <div class="ready-stack-item-head">
+              <div>
+                <div style="font-weight:700">${esc(stack.title_ru || 'Готовый стек')}</div>
+                <div class="ready-stack-meta">${esc(stack.author_ru || 'Без автора')} • позиций: ${Number(stack.items_total || items.length || 0)}</div>
+              </div>
+              <button class="btn" type="button" data-ready-stack-add="${esc(stack.slug || '')}" ${stack.has_any_new ? '' : 'disabled'}>${stack.has_any_new ? 'Добавить весь стек' : 'Уже добавлено'}</button>
+            </div>
+            ${stack.description_ru ? `<div class="muted">${esc(stack.description_ru)}</div>` : ''}
+            ${tags.length ? `<div>${tags.map((tag) => `<span class="chip">${esc(tag)}</span>`).join(' ')}</div>` : ''}
+            <div class="ready-stack-meta">Новых: ${Number(stack.addable_count || 0)} • Уже есть: ${Number(stack.already_in_stack_count || 0)} • Не найдено: ${Number(stack.missing_count || 0)}</div>
+            <div class="ready-stack-items">
+              ${items.map((item) => {
+                const canOpen = !!String(item.resolved_slug || '').trim();
+                const note = item.not_found ? '⚠️ Не найдено в каталоге' : (item.already_in_stack ? '✅ Уже в ваших БАДах' : '🆕 Добавится');
+                return `<button type="button" class="ready-stack-subitem" ${canOpen ? `data-ready-item-open="${esc(item.resolved_slug)}"` : 'disabled'} title="${canOpen ? 'Открыть карточку' : 'Нет карточки в каталоге'}">
+                  <div class="ready-stack-subitem-title">${esc(item.supplement_name || item.supplement_slug || 'Без названия')}</div>
+                  <div class="ready-stack-subitem-meta">${esc(item.dose_ru || 'Доза не указана')} • ${esc(item.timing_ru || 'Время не указано')}</div>
+                  <div class="ready-stack-subitem-meta">${esc(note)}${item.notes_ru ? ` • ${esc(item.notes_ru)}` : ''}</div>
+                </button>`;
+              }).join('')}
+            </div>
+          </div>`;
+        }).join('')}</div>`
+        : '<div class="card"><div class="muted">Пока нет готовых стеков.</div></div>');
 
     const pickForComplexId = Number(c.pickForComplexId || 0);
     const pickComplex = (state.complexes || []).find((x) => Number(x.id || 0) === pickForComplexId);
@@ -2635,6 +2678,9 @@
         <div class="catalog-quick-grid">
           ${CATALOG_QUICK_CATEGORIES.map((cat)=>`<button class="catalog-quick-card ${filters.targets.includes(cat.token) ? 'active' : ''}" data-quick-target="${cat.token}"><span class="catalog-quick-icon" data-organ-icon="${cat.token}"></span><span>${esc(cat.label)}</span></button>`).join('')}
         </div>
+        <div class="catalog-row">
+          <button class="btn secondary" id="catalogReadyStacksToggle">${c.stacksOpen ? 'Скрыть готовые стеки' : 'Готовые стеки'}</button>
+        </div>
         <div class="catalog-meta">
           <select id="catalogSortInline" class="select" style="max-width:220px;">
             <option value="alpha" ${filters.sort==='alpha'?'selected':''}>${sortLabels.alpha}</option>
@@ -2648,6 +2694,7 @@
           ${activeFilterChips.length ? activeFilterChips.map((f)=>`<button class="chip" data-filter-remove="${f.key}:${f.value}">${esc(f.label)} ✕</button>`).join('') : '<span class="muted">Фильтры не выбраны</span>'}
         </div>
       </div>
+      ${c.stacksOpen ? `<div class="card fade"><div class="row"><strong>Готовые стеки</strong><button class="btn secondary" type="button" id="catalogReadyStacksRefresh">Обновить</button></div>${readyStacksHtml}</div>` : ''}
       ${c.error ? '<div class="card"><div style="font-weight:700">Не удалось загрузить каталог</div><div style="margin-top:10px"><button class="btn" id="catalogRetry">Повторить</button></div></div>' : ''}
       <div class="catalog-list">${listHtml}</div>
       <div id="catalogSentinel" style="height:1px"></div>
@@ -2837,6 +2884,21 @@
     await loadCatalog(true);
   }
 
+  async function loadReadyStacks(force = false) {
+    if (state.catalog.stacksLoading) return;
+    if (!force && Array.isArray(state.catalog.readyStacks) && state.catalog.readyStacks.length) return;
+    state.catalog.stacksLoading = true;
+    try {
+      const out = await api('./api/curated_stacks');
+      state.catalog.readyStacks = Array.isArray(out.items) ? out.items : [];
+    } catch {
+      state.catalog.readyStacks = [];
+      showToast('Не удалось загрузить готовые стеки');
+    } finally {
+      state.catalog.stacksLoading = false;
+    }
+  }
+
   function setupCatalogInfiniteScroll() {
     catalogObserver?.disconnect?.();
     catalogObserver = null;
@@ -3011,6 +3073,40 @@
       state.catalog.hasMore = true;
       await loadCatalog(true);
     });
+
+    document.getElementById('catalogReadyStacksToggle')?.addEventListener('click', async () => {
+      haptic();
+      state.catalog.stacksOpen = !state.catalog.stacksOpen;
+      if (state.catalog.stacksOpen) await loadReadyStacks();
+      renderActiveTab();
+    });
+
+    document.getElementById('catalogReadyStacksRefresh')?.addEventListener('click', async () => {
+      haptic();
+      await loadReadyStacks(true);
+      renderActiveTab();
+    });
+
+    appEl.querySelectorAll('[data-ready-stack-add]').forEach((el) => el.addEventListener('click', async () => {
+      haptic();
+      const slug = String(el.dataset.readyStackAdd || '').trim();
+      if (!slug) return;
+      try {
+        const out = await api(`./api/curated_stacks/${encodeURIComponent(slug)}/add`, { method: 'POST' });
+        await Promise.all([loadReadyStacks(true), loadCatalog(true), loadToday(true), loadBodyMap(true)]);
+        showToast(`Добавлено: ${Number(out.added || 0)} • уже было: ${Number(out.duplicates_count || 0)}`);
+        renderActiveTab();
+      } catch {
+        showToast('Не удалось добавить готовый стек');
+      }
+    }));
+
+    appEl.querySelectorAll('[data-ready-item-open]').forEach((el) => el.addEventListener('click', async () => {
+      haptic();
+      const slug = String(el.dataset.readyItemOpen || '').trim();
+      if (!slug) return;
+      await openSupplementDetail(slug);
+    }));
 
     appEl.querySelectorAll('[data-quick-target]').forEach((el)=>el.addEventListener('click', async ()=>{
       const token = el.dataset.quickTarget;

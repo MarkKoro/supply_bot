@@ -63,6 +63,7 @@ from keyboards import (
     admin_stacks_kb,
     admin_stacks_list_kb,
     admin_stack_editor_kb,
+    admin_stack_delete_confirm_kb,
     admin_stack_items_kb,
     admin_stack_item_editor_kb,
     admin_stack_search_kb,
@@ -3852,6 +3853,32 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await _show_admin_stack_editor(update, context, conn, stack_id)
             return
 
+        if data.startswith("admin:stack:delete_confirm:"):
+            stack_id = int(data.split(":")[-1])
+            row = await db.admin_get_curated_stack_by_id(conn, stack_id)
+            if not row:
+                await show(update, context, "Стек не найден.", back(), route="admin:stacks")
+                return
+            await show(
+                update,
+                context,
+                f"Удалить стек «{row.get('title_ru') or 'Без названия'}»?\nЭто действие удалит и его состав.",
+                admin_stack_delete_confirm_kb(stack_id),
+                route=f"admin:stack:delete_confirm:{stack_id}",
+            )
+            return
+
+        if data.startswith("admin:stack:delete:"):
+            stack_id = int(data.split(":")[-1])
+            row = await db.admin_get_curated_stack_by_id(conn, stack_id)
+            if not row:
+                await show(update, context, "Стек не найден.", back(), route="admin:stacks")
+                return
+            await db.admin_delete_curated_stack(conn, stack_id)
+            await q.answer("Стек удалён.", show_alert=False)
+            await _show_admin_stacks(update, context, conn, 0)
+            return
+
         if data.startswith("admin:stack:edit:"):
             parts = data.split(":")
             if len(parts) < 5:
@@ -3946,7 +3973,11 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
 
         if data.startswith("admin:stack:item:pick:"):
-            _, _, _, _, _, stack_id, slug = data.split(":")
+            parts = data.split(":", 5)
+            if len(parts) != 6:
+                await show(update, context, "Некорректная команда выбора добавки.", back(), route="admin:stacks")
+                return
+            _, _, _, _, stack_id, slug = parts
             supplement = await db.get_supplement_by_slug(conn, slug)
             if not supplement:
                 await show(update, context, "Добавка не найдена.", back(), route=f"admin:stack:items:{stack_id}")
@@ -4507,7 +4538,10 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 return
             items = await db.list_curated_stack_items(conn, int(stack["id"]))
             not_found: list[str] = []
+            already_added: list[str] = []
             to_add: list[dict] = []
+            changed_slugs: set[str] = set()
+            existing_ids = await db.get_user_stack_supplement_ids(conn, tg_uid)
             for item in items:
                 supplement = await db.find_supplement_by_slug_or_name(
                     conn,
@@ -4522,16 +4556,25 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     )
                     not_found.append(name)
                     continue
+                supplement_id = int(supplement["id"])
+                if supplement_id in existing_ids:
+                    already_added.append(str(supplement["name_ru"] or supplement["name_en"] or supplement["slug"] or "Без названия"))
+                    continue
                 to_add.append(
                     {
-                        "supplement_id": int(supplement["id"]),
+                        "supplement_id": supplement_id,
                         "dose_ru": item["dose_ru"],
                         "timing_ru": item["timing_ru"],
                         "notes_ru": item["notes_ru"],
                     }
                 )
+                existing_ids.add(supplement_id)
+                changed_slugs.add(str(supplement["slug"] or "").strip())
             summary = await db.add_stack_items_to_user(conn, user_id, to_add)
-            lines = [f"✅ Добавлено: {summary['total']}"]
+            if changed_slugs:
+                await db.enqueue_stack_change_rebuilds(conn, tg_uid, sorted(slug for slug in changed_slugs if slug))
+            lines = [f"✅ Добавлено новых: {summary['added']}"]
+            lines.append(f"ℹ️ Уже были в ваших БАДах: {len(already_added)}")
             if not_found:
                 lines.append(f"⚠️ Не найдено в каталоге: {len(not_found)}")
                 lines.extend([f"• {name}" for name in not_found[:10]])
@@ -4539,6 +4582,12 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     lines.append("…и ещё")
             else:
                 lines.append("⚠️ Не найдено в каталоге: 0")
+            if already_added:
+                lines.append("")
+                lines.append("Уже были добавлены:")
+                lines.extend([f"• {name}" for name in already_added[:10]])
+                if len(already_added) > 10:
+                    lines.append("…и ещё")
             lines.append("")
             lines.append("<i>Это не медсовет.</i>")
             back_kb = InlineKeyboardMarkup(
@@ -8673,6 +8722,7 @@ async def _show_curated_stack(
     target_chat_id: int | None = None,
     target_message_id: int | None = None,
 ) -> None:
+    tg_uid = update.effective_user.id if update.effective_user else 0
     stack = await db.get_curated_stack(conn, slug)
     if not stack:
         await show(
@@ -8687,6 +8737,8 @@ async def _show_curated_stack(
         return
 
     items = await db.list_curated_stack_items(conn, int(stack["id"]))
+    existing_ids = await db.get_user_stack_supplement_ids(conn, tg_uid) if tg_uid else set()
+    item_buttons: list[dict] = []
     lines = [f"🧠 <b>{stack['title_ru']}</b>"]
     author = str(stack["author_ru"] or "").strip()
     description = str(stack["description_ru"] or "").strip()
@@ -8705,6 +8757,17 @@ async def _show_curated_stack(
                 or str(item["supplement_slug"] or "").strip()
                 or "Без названия"
             )
+            supplement = await db.find_supplement_by_slug_or_name(conn, item["supplement_slug"], item["supplement_name"])
+            in_stack_mark = ""
+            if supplement and int(supplement["id"]) in existing_ids:
+                in_stack_mark = " ✅ уже в ваших БАДах"
+            if supplement:
+                item_buttons.append(
+                    {
+                        "supplement_id": int(supplement["id"]),
+                        "label": f"🔎 {name[:34]}",
+                    }
+                )
             parts = [name]
             dose = str(item["dose_ru"] or "").strip()
             timing = str(item["timing_ru"] or "").strip()
@@ -8712,9 +8775,11 @@ async def _show_curated_stack(
                 parts.append(dose)
             if timing:
                 parts.append(timing)
-            lines.append("• " + " — ".join(parts))
+            lines.append("• " + " — ".join(parts) + in_stack_mark)
         if len(items) > max_items:
             lines.append(f"…и ещё {len(items) - max_items} поз.")
+        lines.append("")
+        lines.append("Нажми на кнопку «🔎 …», чтобы открыть карточку БАДа.")
 
     lines.append("")
     lines.append("<i>Это не медсовет.</i>")
@@ -8723,7 +8788,7 @@ async def _show_curated_stack(
         update,
         context,
         "\n".join(lines),
-        curated_stack_card(slug, source_url=stack["source_url"], back_page=back_page),
+        curated_stack_card(slug, source_url=stack["source_url"], back_page=back_page, item_buttons=item_buttons),
         route=f"curated:open:{slug}",
         target_chat_id=target_chat_id,
         target_message_id=target_message_id,

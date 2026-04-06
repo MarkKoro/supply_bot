@@ -2380,6 +2380,134 @@ async def api_catalog(
     return JSONResponse({"ok": True, **payload})
 
 
+@app.get("/api/curated_stacks")
+async def api_curated_stacks(x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    if not await _premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "error": "PREMIUM_REQUIRED", "code": "PREMIUM_REQUIRED"}, status_code=402)
+
+    conn = await db.connect(s.DB_PATH)
+    try:
+        user_id = await db.get_or_create_user(conn, tg_user_id, tz_name="")
+        stack_rows = await db.list_curated_stacks(conn, limit=100, offset=0)
+        user_stack_ids = await db.get_user_stack_supplement_ids(conn, tg_user_id)
+        items_out: list[dict] = []
+        for row in stack_rows:
+            stack_id = int(row["id"])
+            item_rows = await db.list_curated_stack_items(conn, stack_id)
+            resolved_items: list[dict] = []
+            for item in item_rows:
+                supplement = await db.find_supplement_by_slug_or_name(
+                    conn,
+                    item["supplement_slug"],
+                    item["supplement_name"],
+                )
+                supplement_id = int(supplement["id"]) if supplement else 0
+                resolved_slug = str(supplement["slug"] or "").strip() if supplement else ""
+                resolved_items.append(
+                    {
+                        "id": int(item["id"]),
+                        "supplement_id": supplement_id,
+                        "supplement_slug": str(item["supplement_slug"] or "").strip(),
+                        "resolved_slug": resolved_slug,
+                        "supplement_name": str(item["supplement_name"] or "").strip(),
+                        "dose_ru": str(item["dose_ru"] or "").strip(),
+                        "timing_ru": str(item["timing_ru"] or "").strip(),
+                        "notes_ru": str(item["notes_ru"] or "").strip(),
+                        "already_in_stack": bool(supplement_id and supplement_id in user_stack_ids),
+                        "not_found": supplement is None,
+                    }
+                )
+
+            duplicate_count = sum(1 for item in resolved_items if item["already_in_stack"])
+            missing_count = sum(1 for item in resolved_items if item["not_found"])
+            items_out.append(
+                {
+                    "id": stack_id,
+                    "slug": str(row["slug"] or "").strip(),
+                    "title_ru": str(row["title_ru"] or "").strip(),
+                    "author_ru": str(row["author_ru"] or "").strip(),
+                    "description_ru": str(row["description_ru"] or "").strip(),
+                    "source_url": str(row["source_url"] or "").strip(),
+                    "tags": json.loads(row["tags_json"] or "[]") if row["tags_json"] else [],
+                    "items": resolved_items,
+                    "items_total": len(resolved_items),
+                    "already_in_stack_count": duplicate_count,
+                    "missing_count": missing_count,
+                    "addable_count": max(0, len(resolved_items) - duplicate_count - missing_count),
+                    "has_any_new": any((not item["already_in_stack"]) and (not item["not_found"]) for item in resolved_items),
+                }
+            )
+    finally:
+        await conn.close()
+    return JSONResponse({"ok": True, "items": items_out, "user_id": int(user_id)})
+
+
+@app.post("/api/curated_stacks/{slug}/add")
+async def api_curated_stack_add(slug: str, x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    if not await _premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "error": "PREMIUM_REQUIRED", "code": "PREMIUM_REQUIRED"}, status_code=402)
+
+    conn = await db.connect(s.DB_PATH)
+    try:
+        user_id = await db.get_or_create_user(conn, tg_user_id, tz_name="")
+        stack = await db.get_curated_stack(conn, slug)
+        if not stack:
+            return JSONResponse({"ok": False, "error": "NOT_FOUND"}, status_code=404)
+        item_rows = await db.list_curated_stack_items(conn, int(stack["id"]))
+        user_stack_ids = await db.get_user_stack_supplement_ids(conn, tg_user_id)
+        not_found: list[str] = []
+        duplicates: list[str] = []
+        to_add: list[dict] = []
+        changed_slugs: set[str] = set()
+        for item in item_rows:
+            supplement = await db.find_supplement_by_slug_or_name(
+                conn,
+                item["supplement_slug"],
+                item["supplement_name"],
+            )
+            name = (
+                str(item["supplement_name"] or "").strip()
+                or str(item["supplement_slug"] or "").strip()
+                or "Без названия"
+            )
+            if not supplement:
+                not_found.append(name)
+                continue
+            supplement_id = int(supplement["id"])
+            if supplement_id in user_stack_ids:
+                duplicates.append(str(supplement["name_ru"] or supplement["name_en"] or supplement["slug"] or name))
+                continue
+            to_add.append(
+                {
+                    "supplement_id": supplement_id,
+                    "dose_ru": item["dose_ru"],
+                    "timing_ru": item["timing_ru"],
+                    "notes_ru": item["notes_ru"],
+                }
+            )
+            changed_slugs.add(str(supplement["slug"] or "").strip())
+            user_stack_ids.add(supplement_id)
+        summary = await db.add_stack_items_to_user(conn, user_id, to_add)
+        if changed_slugs:
+            await db.enqueue_stack_change_rebuilds(conn, tg_user_id, [x for x in sorted(changed_slugs) if x])
+    finally:
+        await conn.close()
+    return JSONResponse(
+        {
+            "ok": True,
+            "added": int(summary.get("added") or 0),
+            "updated": int(summary.get("updated") or 0),
+            "total_processed": int(summary.get("total") or 0),
+            "duplicates_count": len(duplicates),
+            "not_found_count": len(not_found),
+            "duplicates": duplicates[:20],
+            "not_found": not_found[:20],
+        }
+    )
+
+
 @app.get("/api/supplement/{slug}")
 async def api_supplement_detail(slug: str, x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
     tg_user_id = await _auth_user_id(x_telegram_init_data)

@@ -435,7 +435,17 @@ def admin_stack_editor_kb(stack_id: int, is_active: int) -> InlineKeyboardMarkup
                 InlineKeyboardButton("🏷 Теги", callback_data=f"admin:stack:edit:{stack_id}:tags"),
             ],
             [InlineKeyboardButton("📦 Состав", callback_data=f"admin:stack:items:{stack_id}")],
+            [InlineKeyboardButton("🗑 Удалить стек", callback_data=f"admin:stack:delete_confirm:{stack_id}")],
             [InlineKeyboardButton("⬅️ Назад", callback_data="admin:stacks")],
+        ]
+    )
+
+
+def admin_stack_delete_confirm_kb(stack_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🗑 Да, удалить", callback_data=f"admin:stack:delete:{stack_id}")],
+            [InlineKeyboardButton("✖️ Отмена", callback_data=f"admin:stack:open:{stack_id}")],
         ]
     )
 
@@ -576,8 +586,19 @@ def admin_supp_toggle_confirm_kb(supplement_id: int, to_active: int) -> InlineKe
 def admin_supp_audit_back_kb(supplement_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"admin:supp_open:{supplement_id}")]])
 
-def curated_stack_card(slug: str, *, source_url: str | None, back_page: int) -> InlineKeyboardMarkup:
+def curated_stack_card(
+    slug: str,
+    *,
+    source_url: str | None,
+    back_page: int,
+    item_buttons: list[dict] | None = None,
+) -> InlineKeyboardMarkup:
     btns = []
+    for item in list(item_buttons or [])[:12]:
+        label = str(item.get("label") or "Добавка")
+        supp_id = int(item.get("supplement_id") or 0)
+        if supp_id > 0:
+            btns.append([InlineKeyboardButton(label, callback_data=f"supp:open:{supp_id}")])
     if source_url:
         btns.append([InlineKeyboardButton("🔗 Источник", url=source_url)])
     btns.append([InlineKeyboardButton("➕ Добавить себе", callback_data=f"curated:add:{slug}")])

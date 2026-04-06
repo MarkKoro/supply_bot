@@ -5143,6 +5143,11 @@ async def admin_set_curated_stack_active(conn: aiosqlite.Connection, stack_id: i
     await conn.commit()
 
 
+async def admin_delete_curated_stack(conn: aiosqlite.Connection, stack_id: int):
+    await conn.execute("DELETE FROM curated_stacks WHERE id=?", (int(stack_id),))
+    await conn.commit()
+
+
 async def admin_add_curated_stack_item(
     conn: aiosqlite.Connection,
     stack_id: int,

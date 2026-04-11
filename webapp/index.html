@@ -911,7 +911,7 @@
     unlockToast: { open: false, applying: false, items: [], sparkleTick: 0 },
     mySupplements: { open: false, tab: "active", loading: false, busy: {}, active: [], frozen: [] },
     complexHub: { open: false, loading: false, schedulesLoading: false, slotsLoading: false, itemsLoading: {}, actionBusy: {}, expanded: {}, itemsById: {}, schedules: [], slots: [], returnToToday: false, schedulePicker: { open: false, complexId: 0 } },
-    suppHub: { open: false, loading: false, saving: false, item: null, slots: [], slotId: "morning", time: "", timeMode: "slot", customTime: "", doseText: "", noteText: "", remindersMode: "slot", reminderTimes: [], reminderInput: "", historyOpen: false, historyLoading: false, history: null, historyMonthOffset: 0, deleting: false, scheduleCacheAt: 0, schedules: [] },
+    suppHub: { open: false, loading: false, saving: false, item: null, slots: [], slotId: "morning", time: "", timeMode: "slot", customTime: "", doseText: "", noteText: "", remindersMode: "slot", reminderTimes: [], reminderInput: "", historyOpen: false, historyLoading: false, history: null, historyMonthOffset: 0, deleting: false, scheduleCacheAt: 0, schedules: [], splitDraft: null },
     toastTimer: null,
     catalog: {
       q: "", page: 0, items: [], total: 0, loading: false,
@@ -5681,6 +5681,10 @@ function adminField(label, field, value, kind='input') {
         <div class="row"><strong>🧪 Меню добавки</strong><button class="btn secondary" data-supp-hub-close>✕</button></div>
         ${hub.loading ? '<div class="muted" style="margin-top:8px">Загрузка...</div>' : `
           <div class="muted" style="margin-top:8px">${esc(item.name_ru || item.name_en || item.name || 'Добавка')}</div>
+          ${hub.splitDraft ? `<div class="card" style="margin-top:10px; padding:10px; border-color:rgba(109,255,174,.35); background:rgba(43,164,95,.16);">
+            <div><strong>✅ Создан второй приём (копия)</strong></div>
+            <div class="muted" style="margin-top:4px">Сейчас настройте время напоминания именно для этого нового приёма.</div>
+          </div>` : ''}
           <div class="muted" style="margin-top:6px">Дата начала: ${esc(formatStartDateRu(item.created_at))}</div>
           <div class="muted" style="margin-top:4px">Уже принимается: ${esc(approxIntakeDurationRu(item.created_at))}</div>
           <div class="muted" style="margin-top:4px">Принято: ${Number(item.taken_count || 0)} раз</div>
@@ -5734,8 +5738,13 @@ function adminField(label, field, value, kind='input') {
             ${hub.historyLoading ? '<div class="muted">Загружаем историю…</div>' : renderSuppHistory(hub.history)}
           </div>` : ''}
           <div style="margin-top:10px" class="row">
-            <button class="btn secondary" type="button" data-my-supp-split>Разделить приём</button>
-            <button class="btn secondary" type="button" data-my-supp-delete ${hub.deleting ? 'disabled' : ''}>${hub.deleting ? 'Удаляем…' : 'Удалить из моих БАДов'}</button>
+            ${hub.splitDraft ? `
+              <button class="btn" type="button" data-split-apply>Оставить второй приём</button>
+              <button class="btn secondary" type="button" data-split-cancel>Отменить второй приём</button>
+            ` : `
+              <button class="btn secondary" type="button" data-my-supp-split>Разделить приём</button>
+              <button class="btn secondary" type="button" data-my-supp-delete ${hub.deleting ? 'disabled' : ''}>${hub.deleting ? 'Удаляем…' : 'Удалить из моих БАДов'}</button>
+            `}
           </div>
         `}
       </div>
@@ -6365,6 +6374,7 @@ function adminField(label, field, value, kind='input') {
     state.suppHub.historyLoading = false;
     state.suppHub.historyMonthOffset = 0;
     state.suppHub.deleting = false;
+    state.suppHub.splitDraft = null;
     renderActiveTab();
     try {
       const cacheAgeMs = Date.now() - Number(state.suppHub.scheduleCacheAt || 0);
@@ -6951,15 +6961,46 @@ function adminField(label, field, value, kind='input') {
       const sid = Number(state.suppHub.item?.supplement_id || 0);
       if (!sid) return;
       try {
-        await api('./api/my_supplements/split', { method: 'POST', body: { supplement_id: sid } });
+        const res = await api('./api/my_supplements/split', { method: 'POST', body: { supplement_id: sid } });
+        const newId = Number(res?.created?.supplement_id || 0);
+        if (!newId) throw new Error('split id missing');
+        state.suppHub.splitDraft = { originId: sid, newId };
         await Promise.all([
           loadMySupplements({ force: true, silent: true }),
           loadToday({ force: true, silent: true }),
         ]);
-        showToast('Добавлен новый приём');
+        await openSupplementHub(newId);
+        state.suppHub.splitDraft = { originId: sid, newId };
+        state.suppHub.timeMode = 'custom';
+        state.suppHub.customTime = normalizeHHMM(state.suppHub.customTime || state.suppHub.time || '');
+        state.suppHub.time = state.suppHub.customTime;
+        renderActiveTab();
+        showToast('Создан второй приём — выберите время');
       } catch {
         showToast('Не удалось разделить приём');
       }
+    });
+
+    appEl.querySelector('[data-split-cancel]')?.addEventListener('click', async () => {
+      const draft = state.suppHub.splitDraft;
+      if (!draft?.newId || !draft?.originId) return;
+      try {
+        await api('./api/my_supplements/remove', { method: 'POST', body: { supplement_id: Number(draft.newId) } });
+        await Promise.all([
+          loadMySupplements({ force: true, silent: true }),
+          loadToday({ force: true, silent: true }),
+        ]);
+        await openSupplementHub(Number(draft.originId));
+        showToast('Второй приём отменён');
+      } catch {
+        showToast('Не удалось отменить второй приём');
+      }
+    });
+
+    appEl.querySelector('[data-split-apply]')?.addEventListener('click', async () => {
+      state.suppHub.splitDraft = null;
+      renderActiveTab();
+      showToast('Второй приём сохранён');
     });
 
     appEl.querySelector('[data-my-supp-delete]')?.addEventListener('click', async () => {

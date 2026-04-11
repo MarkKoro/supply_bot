@@ -4,6 +4,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 import json
+import time
 import re
 from typing import Any
 import aiosqlite
@@ -437,6 +438,17 @@ CREATE TABLE IF NOT EXISTS supplement_day_state (
 CREATE INDEX IF NOT EXISTS idx_sds_user_day ON supplement_day_state(user_id, day);
 CREATE INDEX IF NOT EXISTS idx_sds_user_sup_day ON supplement_day_state(user_id, supplement_id, day);
 
+CREATE TABLE IF NOT EXISTS user_supplement_split_groups (
+  user_id INTEGER NOT NULL,
+  base_supplement_id INTEGER NOT NULL,
+  supplement_id INTEGER NOT NULL,
+  intake_order INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY(user_id, supplement_id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_split_group_order
+  ON user_supplement_split_groups(user_id, base_supplement_id, intake_order);
+
 CREATE TABLE IF NOT EXISTS curated_stacks (
   id INTEGER PRIMARY KEY,
   slug TEXT UNIQUE NOT NULL,
@@ -699,6 +711,7 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     await _ensure_user_intake_log(conn)
     await _ensure_user_supp_settings(conn)
     await _ensure_user_notification_prefs(conn)
+    await _ensure_user_supplement_split_groups(conn)
     await _ensure_supplement_day_state(conn)
     await _ensure_reminders(conn)
     await _ensure_ui_state(conn)
@@ -1601,6 +1614,24 @@ async def _ensure_user_notification_prefs(conn: aiosqlite.Connection) -> None:
            SELECT id, 1 FROM users"""
     )
     await conn.commit()
+
+
+async def _ensure_user_supplement_split_groups(conn: aiosqlite.Connection) -> None:
+    await conn.execute(
+        """CREATE TABLE IF NOT EXISTS user_supplement_split_groups (
+          user_id INTEGER NOT NULL,
+          base_supplement_id INTEGER NOT NULL,
+          supplement_id INTEGER NOT NULL,
+          intake_order INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          PRIMARY KEY(user_id, supplement_id)
+        )"""
+    )
+    await conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_split_group_order ON user_supplement_split_groups(user_id, base_supplement_id, intake_order)"
+    )
+    await conn.commit()
+
 
 async def _ensure_supplement_day_state(conn: aiosqlite.Connection) -> None:
     table = await fetchone(
@@ -5677,8 +5708,130 @@ async def add_user_supplement(conn: aiosqlite.Connection, tg_user_id: int, suppl
 async def add_user_supp(conn: aiosqlite.Connection, user_id: int, supplement_id: int) -> None:
     await add_user_supplement(conn, user_id, supplement_id)
 
+
+def _strip_intake_suffix(name: str) -> str:
+    return re.sub(r"\s*\(прием\s*\d+\)\s*$", "", str(name or "").strip(), flags=re.IGNORECASE).strip()
+
+
+async def _refresh_split_titles(conn: aiosqlite.Connection, user_id: int, base_supplement_id: int) -> None:
+    rows = await fetchall(
+        conn,
+        """SELECT sg.supplement_id, sg.intake_order,
+                  COALESCE(NULLIF(s.name_ru,''), NULLIF(s.name_en,''), s.name, '') AS label
+           FROM user_supplement_split_groups sg
+           JOIN supplements s ON s.id=sg.supplement_id
+           JOIN user_supplements us ON us.user_id=sg.user_id AND us.supplement_id=sg.supplement_id
+           WHERE sg.user_id=? AND sg.base_supplement_id=? AND us.is_active=1 AND us.enabled=1
+           ORDER BY sg.intake_order ASC""",
+        (int(user_id), int(base_supplement_id)),
+    )
+    if not rows:
+        return
+    base_name = _strip_intake_suffix(str(rows[0]["label"] or ""))
+    if len(rows) == 1:
+        sid = int(rows[0]["supplement_id"] or 0)
+        await conn.execute(
+            "UPDATE supplements SET name_ru=?, name=? WHERE id=?",
+            (base_name, base_name, sid),
+        )
+        return
+    for row in rows:
+        sid = int(row["supplement_id"] or 0)
+        idx = int(row["intake_order"] or 1)
+        title = f"{base_name} (прием {idx})"
+        await conn.execute(
+            "UPDATE supplements SET name_ru=?, name=? WHERE id=?",
+            (title, title, sid),
+        )
+
+
+async def split_user_supplement_intake(conn: aiosqlite.Connection, tg_user_id: int, supplement_id: int) -> dict:
+    user_id = await get_or_create_user(conn, tg_user_id)
+    base_row = await fetchone(
+        conn,
+        """SELECT s.* FROM user_supplements us
+           JOIN supplements s ON s.id=us.supplement_id
+           WHERE us.user_id=? AND us.supplement_id=? AND us.is_active=1 AND us.enabled=1
+           LIMIT 1""",
+        (user_id, int(supplement_id)),
+    )
+    if not base_row:
+        raise ValueError("supplement_not_found")
+    base_supplement_id = int(supplement_id)
+    grp_exists = await fetchone(
+        conn,
+        "SELECT 1 AS x FROM user_supplement_split_groups WHERE user_id=? AND supplement_id=? LIMIT 1",
+        (user_id, base_supplement_id),
+    )
+    if not grp_exists:
+        await conn.execute(
+            """INSERT OR IGNORE INTO user_supplement_split_groups(user_id, base_supplement_id, supplement_id, intake_order, created_at)
+               VALUES(?,?,?,?,?)""",
+            (user_id, base_supplement_id, base_supplement_id, 1, utc_now_iso()),
+        )
+    max_order_row = await fetchone(
+        conn,
+        "SELECT COALESCE(MAX(intake_order), 1) AS max_order FROM user_supplement_split_groups WHERE user_id=? AND base_supplement_id=?",
+        (user_id, base_supplement_id),
+    )
+    next_order = int(max_order_row["max_order"] or 1) + 1
+    clone_slug = f"{str(base_row['slug'] or 'supp')}_u{user_id}_i{next_order}_{int(time.time())}"
+    now = utc_now_iso()
+    cur = await conn.execute(
+        """INSERT INTO supplements(
+             slug, name, name_ru, name_en, aliases, aliases_json, alias_norm, search_blob,
+             human_trials_count_est, participants_total_est, avg_effect_percent_est, confidence,
+             tags, goals, rules_tags, summary_ru, summary_verified, summary_theoretical, molecular_mechanisms,
+             evidence_json, dose_ru, timing_ru, safety_ru, purchase_url, tags_json, mechanisms,
+             supplement_type, functional_groups, functional_groups_json, evidence_grade,
+             body_effects_json, body_targets, body_targets_json, body_burdens, body_burdens_json,
+             safety_notes, interaction_classes, interaction_classes_json, payload_json, is_active, updated_at_utc
+           )
+           SELECT ?, name, name_ru, name_en, aliases, aliases_json, alias_norm, search_blob,
+                  human_trials_count_est, participants_total_est, avg_effect_percent_est, confidence,
+                  tags, goals, rules_tags, summary_ru, summary_verified, summary_theoretical, molecular_mechanisms,
+                  evidence_json, dose_ru, timing_ru, safety_ru, purchase_url, tags_json, mechanisms,
+                  supplement_type, functional_groups, functional_groups_json, evidence_grade,
+                  body_effects_json, body_targets, body_targets_json, body_burdens, body_burdens_json,
+                  safety_notes, interaction_classes, interaction_classes_json, payload_json, 0, ?
+           FROM supplements WHERE id=?""",
+        (clone_slug, now, base_supplement_id),
+    )
+    clone_id = int(cur.lastrowid or 0)
+    if clone_id <= 0:
+        raise ValueError("split_create_failed")
+    await add_user_supplement(conn, tg_user_id, clone_id)
+    schedule_row = await fetchone(
+        conn,
+        "SELECT slot_id, time_hhmm FROM user_schedules WHERE user_id=? AND supplement_id=?",
+        (user_id, base_supplement_id),
+    )
+    if schedule_row:
+        await conn.execute(
+            """INSERT INTO user_schedules(user_id, supplement_id, time_hhmm, slot_id, is_enabled)
+               VALUES(?,?,?,?,1)
+               ON CONFLICT(user_id, supplement_id) DO UPDATE SET
+                 time_hhmm=excluded.time_hhmm,
+                 slot_id=excluded.slot_id,
+                 is_enabled=1""",
+            (user_id, clone_id, schedule_row["time_hhmm"], str(schedule_row["slot_id"] or "morning")),
+        )
+    await conn.execute(
+        """INSERT OR REPLACE INTO user_supplement_split_groups(user_id, base_supplement_id, supplement_id, intake_order, created_at)
+           VALUES(?,?,?,?,?)""",
+        (user_id, base_supplement_id, clone_id, next_order, utc_now_iso()),
+    )
+    await _refresh_split_titles(conn, user_id, base_supplement_id)
+    await conn.commit()
+    return {"supplement_id": clone_id, "intake_order": next_order, "base_supplement_id": base_supplement_id}
+
 async def remove_user_supplement(conn: aiosqlite.Connection, tg_user_id: int, supplement_id: int) -> None:
     user_id = await get_or_create_user(conn, tg_user_id)
+    grp = await fetchone(
+        conn,
+        "SELECT base_supplement_id FROM user_supplement_split_groups WHERE user_id=? AND supplement_id=?",
+        (user_id, int(supplement_id)),
+    )
     await conn.execute(
         "UPDATE user_supplements SET is_active=0, enabled=0 WHERE user_id=? AND supplement_id=?",
         (user_id, supplement_id),
@@ -5687,6 +5840,23 @@ async def remove_user_supplement(conn: aiosqlite.Connection, tg_user_id: int, su
         "DELETE FROM reminders WHERE user_id=? AND supplement_id=?",
         (tg_user_id, supplement_id),
     )
+    if grp:
+        base_supplement_id = int(grp["base_supplement_id"] or 0)
+        await conn.execute(
+            "DELETE FROM user_supplement_split_groups WHERE user_id=? AND supplement_id=?",
+            (user_id, int(supplement_id)),
+        )
+        rest = await fetchall(
+            conn,
+            "SELECT supplement_id FROM user_supplement_split_groups WHERE user_id=? AND base_supplement_id=? ORDER BY intake_order ASC",
+            (user_id, base_supplement_id),
+        )
+        for idx, row in enumerate(rest, start=1):
+            await conn.execute(
+                "UPDATE user_supplement_split_groups SET intake_order=? WHERE user_id=? AND supplement_id=?",
+                (idx, user_id, int(row["supplement_id"] or 0)),
+            )
+        await _refresh_split_titles(conn, user_id, base_supplement_id)
     await conn.commit()
 
 async def remove_user_supp(conn: aiosqlite.Connection, user_id: int, supplement_id: int) -> None:
@@ -5720,6 +5890,7 @@ async def get_user_supplement_intake_history(
     tg_user_id: int,
     supplement_id: int,
     limit: int = 20,
+    month_offset: int = 0,
 ) -> dict:
     user_id = await get_or_create_user(conn, int(tg_user_id))
     rows = await fetchall(
@@ -5758,12 +5929,38 @@ async def get_user_supplement_intake_history(
             }
         )
 
+    today = date.today()
+    month_anchor = today.replace(day=1)
+    shift = int(month_offset)
+    year = month_anchor.year + (month_anchor.month - 1 + shift) // 12
+    month = (month_anchor.month - 1 + shift) % 12 + 1
+    start_month = date(year, month, 1)
+    end_month = date(year, month, calendar.monthrange(year, month)[1])
+    month_rows = await fetchall(
+        conn,
+        """SELECT day, status
+           FROM supplement_day_state
+           WHERE user_id=? AND supplement_id=? AND day>=? AND day<=?
+           ORDER BY day ASC""",
+        (user_id, int(supplement_id), start_month.isoformat(), end_month.isoformat()),
+    )
+    month_days = [{"day": str(r["day"] or ""), "status": str(r["status"] or "none")} for r in month_rows]
     summary = {
         "taken_days": len(taken_days),
         "last_taken_day": taken_days[0] if taken_days else "",
         "first_taken_day": taken_days[-1] if taken_days else "",
     }
-    return {"entries": entries, "summary": summary}
+    return {
+        "entries": entries,
+        "summary": summary,
+        "calendar": {
+            "month_offset": shift,
+            "month": f"{year:04d}-{month:02d}",
+            "start_day": start_month.isoformat(),
+            "end_day": end_month.isoformat(),
+            "days": month_days,
+        },
+    }
 
 async def get_user_supplement(conn: aiosqlite.Connection, tg_user_id: int, supplement_id: int):
     user_id = await get_or_create_user(conn, tg_user_id)

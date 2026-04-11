@@ -123,6 +123,10 @@ class MySuppDeleteBody(BaseModel):
     supplement_id: int
 
 
+class MySuppSplitBody(BaseModel):
+    supplement_id: int
+
+
 class ReminderSetBody(BaseModel):
     supplement_id: int
     mode: str
@@ -2721,6 +2725,7 @@ async def api_my_supplements_remove(
 @app.get("/api/my_supplements/history")
 async def api_my_supplements_history(
     supplement_id: int,
+    month_offset: int = 0,
     x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
 ):
     tg_user_id = await _auth_user_id(x_telegram_init_data)
@@ -2729,10 +2734,26 @@ async def api_my_supplements_history(
 
     conn = await db.connect(s.DB_PATH)
     try:
-        payload = await db.get_user_supplement_intake_history(conn, tg_user_id, int(supplement_id), limit=20)
+        payload = await db.get_user_supplement_intake_history(conn, tg_user_id, int(supplement_id), limit=40, month_offset=int(month_offset))
     finally:
         await conn.close()
     return JSONResponse({"ok": True, **payload})
+
+
+@app.post("/api/my_supplements/split")
+async def api_my_supplements_split(
+    body: MySuppSplitBody,
+    x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
+):
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    if not await _premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "error": "PREMIUM_REQUIRED", "code": "PREMIUM_REQUIRED"}, status_code=402)
+    conn = await db.connect(s.DB_PATH)
+    try:
+        created = await db.split_user_supplement_intake(conn, tg_user_id, int(body.supplement_id))
+    finally:
+        await conn.close()
+    return JSONResponse({"ok": True, "created": created})
 
 
 @app.get("/api/schedule")

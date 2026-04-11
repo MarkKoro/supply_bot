@@ -1,5 +1,6 @@
 from __future__ import annotations
 import asyncio
+import calendar
 import html
 import json
 import logging
@@ -43,6 +44,7 @@ from keyboards import (
     supplement_compat_list,
     supp_tabs_kb,
     my_supplement_hub,
+    my_supplement_history_kb,
     my_supplement_reminders,
     timezone_picker,
     settings_menu,
@@ -2817,7 +2819,7 @@ async def reminders_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
             supplement_id = int(item["supplement_id"])
             time_local = str(item["time_local"])
             day = str(item["day"])
-            today_status = await db.get_today_status(conn, tg_user_id, supplement_id)
+            today_status = await db.get_day_status(conn, tg_user_id, day, supplement_id)
             if today_status in {"taken", "skipped"}:
                 continue
             inserted = await db.insert_reminder_fire(conn, tg_user_id, supplement_id, day, time_local)
@@ -5031,6 +5033,27 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             supplement_id = int(data.split(":")[-1])
             await db.set_today_status(conn, tg_uid, supplement_id, "skipped")
             await show_my_supp_hub(update, context, tg_uid, supplement_id, conn=conn)
+            return
+
+        if data.startswith("mysupp:hist:"):
+            parts = data.split(":")
+            supplement_id = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+            month_offset = int(parts[3]) if len(parts) > 3 and re.fullmatch(r"-?\d+", parts[3] or "") else 0
+            if supplement_id <= 0:
+                await q.answer("Некорректный БАД", show_alert=False)
+                return
+            await _show_my_supp_history(update, context, conn, tg_uid, supplement_id, month_offset)
+            return
+
+        if data.startswith("mysupp:split:"):
+            supplement_id = int(data.split(":")[-1])
+            try:
+                result = await db.split_user_supplement_intake(conn, tg_uid, supplement_id)
+                new_id = int(result.get("supplement_id") or 0)
+                await q.answer("Добавлен дополнительный приём", show_alert=False)
+                await show_my_supp_hub(update, context, tg_uid, new_id or supplement_id, conn=conn)
+            except Exception:
+                await q.answer("Не удалось разделить приём", show_alert=False)
             return
 
         if data.startswith("mysupp:remove:"):
@@ -9028,6 +9051,56 @@ async def _show_my_supp_reminders(
         route=f"mysupp:rem:{supplement_id}",
         target_chat_id=target_chat_id,
         target_message_id=target_message_id,
+    )
+
+
+def _render_month_history_calendar(month_iso: str, days: list[dict]) -> str:
+    taken = {str(d.get("day") or "") for d in days if str(d.get("status") or "") == "taken"}
+    skipped = {str(d.get("day") or "") for d in days if str(d.get("status") or "") == "skipped"}
+    try:
+        year, month = [int(x) for x in str(month_iso).split("-")[:2]]
+    except Exception:
+        return "Календарь недоступен."
+    weeks = calendar.monthcalendar(year, month)
+    lines = ["Пн Вт Ср Чт Пт Сб Вс"]
+    for week in weeks:
+        cells = []
+        for day_num in week:
+            if day_num <= 0:
+                cells.append("  ")
+                continue
+            day_iso = f"{year:04d}-{month:02d}-{day_num:02d}"
+            mark = "🟢" if day_iso in taken else ("🔴" if day_iso in skipped else "⚪")
+            cells.append(f"{day_num:02d}{mark}")
+        lines.append(" ".join(cells))
+    return "\n".join(lines)
+
+
+async def _show_my_supp_history(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    conn,
+    tg_uid: int,
+    supplement_id: int,
+    month_offset: int = 0,
+) -> None:
+    payload = await db.get_user_supplement_intake_history(conn, tg_uid, supplement_id, limit=40, month_offset=month_offset)
+    calendar_payload = payload.get("calendar") or {}
+    cal_text = _render_month_history_calendar(str(calendar_payload.get("month") or ""), list(calendar_payload.get("days") or []))
+    summary = payload.get("summary") or {}
+    text = (
+        "📊 <b>История приёма</b>\n"
+        f"Месяц: {calendar_payload.get('month') or '—'}\n\n"
+        f"{cal_text}\n\n"
+        f"✅ Дней с приёмом: {int(summary.get('taken_days') or 0)}\n"
+        f"Последний приём: {summary.get('last_taken_day') or '—'}"
+    )
+    await show(
+        update,
+        context,
+        text,
+        my_supplement_history_kb(supplement_id, int(month_offset)),
+        route=f"mysupp:hist:{supplement_id}:{int(month_offset)}",
     )
 
 async def _show_supplement_page(

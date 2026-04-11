@@ -731,10 +731,24 @@ def my_supplement_hub(
     btns = [
         [InlineKeyboardButton("🧾 Доза", callback_data=f"mysupp:set_dose:{supplement_id}")],
         [InlineKeyboardButton("⏰ Время приёма", callback_data=f"supplement:set_time:{supplement_id}")],
+        [InlineKeyboardButton("📊 История приёма", callback_data=f"mysupp:hist:{supplement_id}:0")],
+        [InlineKeyboardButton("➗ Разделить приём", callback_data=f"mysupp:split:{supplement_id}")],
         [InlineKeyboardButton("🗑 Удалить из моих", callback_data=f"mysupp:remove:{supplement_id}")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="mysupp:list:0")],
     ]
     return InlineKeyboardMarkup(btns)
+
+
+def my_supplement_history_kb(supplement_id: int, month_offset: int) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    rows.append(
+        [
+            InlineKeyboardButton("◀️", callback_data=f"mysupp:hist:{supplement_id}:{month_offset - 1}"),
+            InlineKeyboardButton("▶️", callback_data=f"mysupp:hist:{supplement_id}:{month_offset + 1}"),
+        ]
+    )
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"mysupp:open:{supplement_id}")])
+    return InlineKeyboardMarkup(rows)
 
 def my_supplement_reminders(
     supplement_id: int,

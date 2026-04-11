@@ -727,6 +727,8 @@ async def _show_supplement_time_screen(
     conn,
     tg_uid: int,
     supplement_id: int,
+    *,
+    split_origin_id: int | None = None,
 ) -> None:
     user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
     supplement = await db.get_user_supplement(conn, tg_uid, supplement_id)
@@ -761,12 +763,38 @@ async def _show_supplement_time_screen(
             "Напоминание ставится автоматически по времени слота.\n\n"
             "Можно выбрать другой слот или назначить своё время."
         )
+    intro_block = ""
+    extra_rows = None
+    back_cb = None
+    back_label = "⬅️ Назад"
+    if split_origin_id:
+        intro_block = (
+            "✅ <b>Создан второй приём (копия)</b>\n"
+            "Сейчас ты настраиваешь время напоминания именно для нового приёма.\n"
+            "Выбери слот или поставь своё время.\n\n"
+        )
+        back_cb = f"mysupp:split:cancel:{supplement_id}:{int(split_origin_id)}"
+        back_label = "✖️ Отменить второй приём"
+        extra_rows = [[InlineKeyboardButton("✅ Оставить второй приём", callback_data=f"mysupp:split:apply:{supplement_id}")]]
     text = (
         f"⏰ <b>Время приёма</b>\n\n"
+        f"{intro_block}"
         f"💊 {title}\n"
         f"{time_block}"
     )
-    await show(update, context, text, supplement_time_kb(supplement_id, slots), route=f"supplement:set_time:{supplement_id}")
+    await show(
+        update,
+        context,
+        text,
+        supplement_time_kb(
+            supplement_id,
+            slots,
+            back_cb=back_cb,
+            back_label=back_label,
+            extra_rows=extra_rows,
+        ),
+        route=f"supplement:set_time:{supplement_id}",
+    )
 
 
 CATALOG_TYPE_TITLES = {
@@ -4978,7 +5006,20 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         if data.startswith("supplement:set_time:"):
             supplement_id = int(data.split(":", 2)[2])
-            await _show_supplement_time_screen(update, context, conn, tg_uid, supplement_id)
+            split_ctx = context.user_data.get("split_flow")
+            split_origin_id = None
+            if isinstance(split_ctx, dict):
+                new_id = int(split_ctx.get("new_id") or 0)
+                if new_id == supplement_id:
+                    split_origin_id = int(split_ctx.get("origin_id") or 0) or None
+            await _show_supplement_time_screen(
+                update,
+                context,
+                conn,
+                tg_uid,
+                supplement_id,
+                split_origin_id=split_origin_id,
+            )
             return
 
         if data.startswith("supplement:set_slot:"):
@@ -4988,7 +5029,11 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 slot_id = parts[3]
                 user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
                 await db.set_schedule_slot(conn, user_id, supplement_id, slot_id)
-                await _show_supplement_time_screen(update, context, conn, tg_uid, supplement_id)
+                split_ctx = context.user_data.get("split_flow")
+                split_origin_id = None
+                if isinstance(split_ctx, dict) and int(split_ctx.get("new_id") or 0) == supplement_id:
+                    split_origin_id = int(split_ctx.get("origin_id") or 0) or None
+                await _show_supplement_time_screen(update, context, conn, tg_uid, supplement_id, split_origin_id=split_origin_id)
             return
 
         if data.startswith("supplement:set_override:"):
@@ -5001,7 +5046,11 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             supplement_id = int(data.split(":", 2)[2])
             user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
             await db.set_schedule_time_override(conn, user_id, supplement_id, None)
-            await _show_supplement_time_screen(update, context, conn, tg_uid, supplement_id)
+            split_ctx = context.user_data.get("split_flow")
+            split_origin_id = None
+            if isinstance(split_ctx, dict) and int(split_ctx.get("new_id") or 0) == supplement_id:
+                split_origin_id = int(split_ctx.get("origin_id") or 0) or None
+            await _show_supplement_time_screen(update, context, conn, tg_uid, supplement_id, split_origin_id=split_origin_id)
             return
 
         if data.startswith("mysupp:set_dose:"):
@@ -5045,15 +5094,43 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await _show_my_supp_history(update, context, conn, tg_uid, supplement_id, month_offset)
             return
 
-        if data.startswith("mysupp:split:"):
+        if data.startswith("mysupp:split:") and not data.startswith("mysupp:split:cancel:") and not data.startswith("mysupp:split:apply:"):
             supplement_id = int(data.split(":")[-1])
             try:
                 result = await db.split_user_supplement_intake(conn, tg_uid, supplement_id)
                 new_id = int(result.get("supplement_id") or 0)
-                await q.answer("Добавлен дополнительный приём", show_alert=False)
-                await show_my_supp_hub(update, context, tg_uid, new_id or supplement_id, conn=conn)
+                if new_id <= 0:
+                    raise ValueError("missing split id")
+                context.user_data["split_flow"] = {"origin_id": supplement_id, "new_id": new_id}
+                await q.answer("Создан второй приём", show_alert=False)
+                await _show_supplement_time_screen(
+                    update,
+                    context,
+                    conn,
+                    tg_uid,
+                    new_id,
+                    split_origin_id=supplement_id,
+                )
             except Exception:
                 await q.answer("Не удалось разделить приём", show_alert=False)
+            return
+
+        if data.startswith("mysupp:split:cancel:"):
+            _, _, _, _, new_id_raw, origin_id_raw = data.split(":", 5)
+            new_id = int(new_id_raw)
+            origin_id = int(origin_id_raw)
+            await db.remove_user_supp(conn, tg_uid, new_id)
+            await db.delete_reminders_for_supplement(conn, tg_uid, new_id)
+            context.user_data.pop("split_flow", None)
+            await q.answer("Второй приём отменён", show_alert=False)
+            await show_my_supp_hub(update, context, tg_uid, origin_id, conn=conn)
+            return
+
+        if data.startswith("mysupp:split:apply:"):
+            new_id = int(data.split(":")[-1])
+            context.user_data.pop("split_flow", None)
+            await q.answer("Второй приём сохранён", show_alert=False)
+            await show_my_supp_hub(update, context, tg_uid, new_id, conn=conn)
             return
 
         if data.startswith("mysupp:remove:"):
@@ -6754,12 +6831,21 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             elif waiting.startswith("supplement:set_override:"):
                 parsed_time = _parse_user_time_input(txt)
                 user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
+                split_ctx = context.user_data.get("split_flow")
+                split_origin_id = None
+                if isinstance(split_ctx, dict) and int(split_ctx.get("new_id") or 0) == supplement_id:
+                    split_origin_id = int(split_ctx.get("origin_id") or 0) or None
                 if not parsed_time:
-                    await show(update, context, "Не понял время. Пример: 16:00", my_hub_back(supplement_id), route=f"supplement:set_override:{supplement_id}")
+                    back_markup = my_hub_back(supplement_id)
+                    if split_origin_id:
+                        back_markup = InlineKeyboardMarkup(
+                            [[InlineKeyboardButton("✖️ Отменить второй приём", callback_data=f"mysupp:split:cancel:{supplement_id}:{split_origin_id}")]]
+                        )
+                    await show(update, context, "Не понял время. Пример: 16:00", back_markup, route=f"supplement:set_override:{supplement_id}")
                 else:
                     await db.set_schedule_time_override(conn, user_id, supplement_id, parsed_time)
                     context.user_data.pop(WAITING_KEY, None)
-                    await _show_supplement_time_screen(update, context, conn, tg_uid, supplement_id)
+                    await _show_supplement_time_screen(update, context, conn, tg_uid, supplement_id, split_origin_id=split_origin_id)
             else:
                 parsed_time = _parse_user_time_input(txt)
                 slot_id = waiting.split(":", 2)[2]

@@ -964,13 +964,22 @@ def schedule_slots_pick_kb(slots: list[dict], prefix: str = "schedule:slot_time_
     return InlineKeyboardMarkup(rows)
 
 
-def supplement_time_kb(supplement_id: int, slots: list[dict]) -> InlineKeyboardMarkup:
+def supplement_time_kb(
+    supplement_id: int,
+    slots: list[dict],
+    *,
+    back_cb: str | None = None,
+    back_label: str = "⬅️ Назад",
+    extra_rows: list[list[InlineKeyboardButton]] | None = None,
+) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     rows.append([InlineKeyboardButton("✍️ Назначить своё время", callback_data=f"supplement:set_override:{supplement_id}")])
     for slot in slots:
         rows.append([InlineKeyboardButton(f"Слот: {slot.get('title_ru','Слот')} ({slot.get('time_local','--:--')})", callback_data=f"supplement:set_slot:{supplement_id}:{slot.get('slot_id','')}")])
+    if extra_rows:
+        rows.extend(extra_rows)
     rows.append([InlineKeyboardButton("⚙️ Настроить слоты", callback_data="settings:schedule")])
-    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"mysupp:open:{supplement_id}")])
+    rows.append([InlineKeyboardButton(back_label, callback_data=back_cb or f"mysupp:open:{supplement_id}")])
     return InlineKeyboardMarkup(rows)
 
 

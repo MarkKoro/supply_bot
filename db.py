@@ -9338,6 +9338,73 @@ async def get_catalog_candidates(conn: aiosqlite.Connection, goals: list[str], l
         )
     return candidates[:limit]
 
+
+def infer_goals_from_text(note_text: str, *, limit: int = 4) -> list[str]:
+    text = str(note_text or "").strip().lower()
+    if not text:
+        return []
+    keyword_map: dict[str, list[str]] = {
+        "energy": ["энерг", "бодр", "устал", "сил", "тонус", "заряд"],
+        "training": ["трениров", "workout", "спорт", "силов", "вынослив", "мощ"],
+        "focus": ["фокус", "концентрац", "вниман", "продуктив", "мозг"],
+        "recovery": ["восстанов", "recovery", "мышц", "крепатур"],
+        "sleep": ["сон", "засып", "бессон", "выспат"],
+        "calm": ["стресс", "тревог", "спокой", "нерв"],
+        "mood": ["настроен", "апат", "депресс", "раздраж"],
+        "gut": ["жкт", "живот", "киш", "пищевар", "gut"],
+    }
+    out: list[str] = []
+    for goal, keys in keyword_map.items():
+        if any(key in text for key in keys):
+            out.append(goal)
+            if len(out) >= limit:
+                break
+    return out
+
+
+async def build_goal_based_fallback_adds(
+    conn: aiosqlite.Connection,
+    *,
+    base_stack_slugs: set[str],
+    goals: list[str],
+    note_text: str,
+    now_hhmm: str,
+    limit: int = 2,
+) -> list[dict]:
+    merged_goals: list[str] = []
+    for goal in goals + infer_goals_from_text(note_text):
+        if goal and goal not in merged_goals:
+            merged_goals.append(goal)
+    candidates = await get_catalog_candidates(conn, merged_goals, limit=60)
+    fallback_adds: list[dict] = []
+    for cand in candidates:
+        slug = str(cand.get("slug") or "").strip().lower()
+        if not slug or slug in base_stack_slugs:
+            continue
+        row = await fetchone(
+            conn,
+            "SELECT id, slug, COALESCE(NULLIF(name_ru,''), NULLIF(name_en,''), name) AS name_ru FROM supplements WHERE slug=?",
+            (slug,),
+        )
+        if not row:
+            continue
+        fallback_adds.append(
+            {
+                "action": "add",
+                "slug": str(row["slug"]),
+                "name_ru": str(row["name_ru"] or ""),
+                "reason": "Добавлено fallback по целям/запросу из чек-ина",
+                "priority": 2,
+                "suggested_time": _normalize_hhmm(now_hhmm) or "12:00",
+                "suggested_slot_id": None,
+                "prefer_existing_time": True,
+                "supplement_id": int(row["id"]),
+            }
+        )
+        if len(fallback_adds) >= max(1, int(limit)):
+            break
+    return fallback_adds
+
 async def clear_day_plan(conn: aiosqlite.Connection, user_id: int, date_local: str) -> None:
     await conn.execute(
         "DELETE FROM day_plan_items WHERE user_id=? AND date_local=?",

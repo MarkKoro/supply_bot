@@ -964,6 +964,24 @@ def schedule_slots_pick_kb(slots: list[dict], prefix: str = "schedule:slot_time_
     return InlineKeyboardMarkup(rows)
 
 
+def add_to_stack_slot_kb(supplement_id: int, slots: list[dict], back_cb: str) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    ordered = sorted(
+        list(slots or []),
+        key=lambda slot: (str(slot.get("time_local") or "99:99"), str(slot.get("slot_id") or "")),
+    )
+    for slot in ordered:
+        slot_id = str(slot.get("slot_id") or "").strip()
+        if not slot_id:
+            continue
+        title = str(slot.get("title_ru") or "Слот").strip() or "Слот"
+        time_local = str(slot.get("time_local") or "--:--")
+        rows.append([InlineKeyboardButton(f"{title} · {time_local}", callback_data=f"mysupp:addslot:pick:{supplement_id}:{slot_id}")])
+    rows.append([InlineKeyboardButton("➕ Добавить слот", callback_data=f"mysupp:addslot:newtime:{supplement_id}")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=back_cb)])
+    return InlineKeyboardMarkup(rows)
+
+
 def supplement_time_kb(
     supplement_id: int,
     slots: list[dict],

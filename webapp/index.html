@@ -926,8 +926,10 @@
       detailSection: null,
       focusSearchOnOpen: false,
       pickForComplexId: 0,
+      returnAfterComplexPick: null,
       pickForBodymapSystem: "",
-      addToComplexModal: { open: false, supplementId: 0, creating: false }
+      addToComplexModal: { open: false, supplementId: 0, creating: false },
+      addToStackSlotModal: { open: false, supplementId: 0, adding: false, creatingSlot: false, newSlotTime: "" }
     },
     searchDebounce: null,
     bodyMap: null,
@@ -2702,6 +2704,7 @@
       ${c.filtersOpen ? renderFilterSheet(filters) : ''}
       ${c.detail ? renderDetailModal(c.detail) : ''}
       ${renderAddToComplexModal()}
+      ${renderAddToStackSlotModal()}
     `;
   }
 
@@ -2724,18 +2727,36 @@
     </div>`;
   }
 
+  function renderAddToStackSlotModal() {
+    const modal = state.catalog?.addToStackSlotModal || { open: false };
+    if (!modal.open) return '';
+    const supplementId = Number(modal.supplementId || 0);
+    const slots = (state.settingsSchedule?.slots || []).filter((slot) => !!slot?.slot_id).sort((a, b) => String(a.time_local || '').localeCompare(String(b.time_local || '')));
+    const title = state.catalog.detail && Number(state.catalog.detail.id || 0) === supplementId
+      ? (state.catalog.detail.name_ru || state.catalog.detail.name_en || state.catalog.detail.slug || 'добавки')
+      : 'добавки';
+    return `<div class="modal-overlay" data-add-stack-slot-close></div>
+      <section class="sheet fade" style="max-width:560px; left:10px; right:10px; max-height:78vh; overflow:auto;">
+        <div class="row"><strong>Выберите слот</strong><button class="btn secondary" type="button" data-add-stack-slot-close>Закрыть</button></div>
+        <div class="muted" style="margin-top:8px">Куда добавить: <strong>${esc(title)}</strong></div>
+        <div class="hub-slot-list" style="margin-top:12px">
+          ${slots.length ? slots.map((slot)=>`<button class="hub-slot-item" type="button" data-add-stack-slot-pick="${esc(String(slot.slot_id || ''))}" ${modal.adding ? 'disabled' : ''}><strong>${esc(slot.title_ru || 'Слот')}</strong><div class="muted" style="margin-top:4px">${esc(slot.time_local || '--:--')}</div></button>`).join('') : '<div class="sheet-empty">Слоты не найдены</div>'}
+        </div>
+        ${modal.creatingSlot ? `<div class="card" style="margin-top:12px"><label class="muted">Новое время</label><input id="addStackSlotTime" type="time" class="input" value="${esc(String(modal.newSlotTime || ''))}" style="margin-top:6px" /><div class="row" style="margin-top:10px"><button class="btn secondary" type="button" data-add-stack-slot-create-cancel ${modal.adding ? 'disabled' : ''}>Назад</button><button class="btn" type="button" data-add-stack-slot-create-confirm ${modal.adding ? 'disabled' : ''}>ОК</button></div></div>` : `<div class="row" style="margin-top:12px"><button class="btn secondary" type="button" data-add-stack-slot-create-open ${modal.adding ? 'disabled' : ''}>➕ Добавить слот</button><button class="btn secondary" type="button" data-add-stack-slot-back ${modal.adding ? 'disabled' : ''}>Назад</button></div>`}
+      </section>`;
+  }
+
   function renderFilterSheet(filters) {
     const ev = ['A','B','C','D'];
     const tgts = ['brain','heart','gut','liver','kidney','sleep','mood','joints','muscle','skin','immune'];
     const br = ['liver','kidney','gut'];
     const chip=(v,arr,key,labels)=>`<button class="chip ${arr.includes(v)?'green':''}" data-filter-toggle="${key}:${v}">${labels?.[v] || v}</button>`;
     return `<div class="card" style="position:fixed;left:10px;right:10px;bottom:90px;z-index:30;max-height:60vh;overflow:auto">
-      <div class="row"><strong>Фильтры</strong><button class="btn secondary" data-filter-close>Закрыть</button></div>
+      <div class="row"><strong>Фильтры</strong><div style="display:flex; gap:8px"><button class="btn secondary" id="resetFilters" type="button">Сброс</button><button class="btn secondary" data-filter-close>Закрыть</button></div></div>
       <div style="margin-top:8px">Доказательность: ${ev.map(v=>chip(v,filters.evidence,'evidence')).join(' ')}</div>
       <div style="margin-top:8px">Куда/зачем: ${tgts.map(v=>chip(v,filters.targets,'targets',TARGET_LABELS_RU)).join(' ')}</div>
       <div style="margin-top:8px">Нагрузка: ${br.map(v=>chip(v,filters.burdens,'burdens',BURDEN_LABELS_RU)).join(' ')}</div>
       <div style="margin-top:8px"><select id="sortSelect" style="width:100%;padding:8px;border-radius:10px"><option value="alpha" ${filters.sort==='alpha'?'selected':''}>По алфавиту</option><option value="evidence" ${filters.sort==='evidence'?'selected':''}>По доказательности</option><option value="trials" ${filters.sort==='trials'?'selected':''}>По исследованиям</option><option value="effect" ${filters.sort==='effect'?'selected':''}>По эффекту</option></select></div>
-      <div class="row" style="margin-top:10px"><button class="btn secondary" id="resetFilters">Сбросить</button></div>
     </div>`;
   }
 
@@ -2942,10 +2963,24 @@
       closeAddToComplexModal();
       await Promise.all([loadComplexHubMeta(true), loadToday(true)]);
     };
+    const openAddToStackSlotModal = async (supplementId) => {
+      state.catalog.addToStackSlotModal = {
+        open: true,
+        supplementId: Number(supplementId || 0),
+        adding: false,
+        creatingSlot: false,
+        newSlotTime: ''
+      };
+      if (!Array.isArray(state.settingsSchedule?.slots) || !state.settingsSchedule.slots.length) {
+        await loadScheduleData(true);
+      }
+      renderActiveTab();
+    };
     appEl.querySelectorAll('[data-detail-close]').forEach((el)=>el.addEventListener('click', ()=>{
       state.catalog.detail=null;
       state.catalog.detailSection = null;
       state.catalog.addToComplexModal = { open: false, supplementId: 0, creating: false };
+      state.catalog.addToStackSlotModal = { open: false, supplementId: 0, adding: false, creatingSlot: false, newSlotTime: "" };
       renderActiveTab();
     }));
     appEl.querySelector('[data-open-shop]')?.addEventListener('click', ()=>{ const u=state.catalog.detail?.purchase_url; if(u) tg?.openLink?.(u); });
@@ -2971,7 +3006,17 @@
           await api(`./api/complexes/${preselectedComplexId}/items/add`,{method:'POST',body:{supplement_id:id}});
           state.catalog.pickForComplexId = 0;
           showToast('БАД добавлен в выбранный комплекс');
-          await Promise.all([loadComplexHubMeta(true), loadToday(true)]);
+          await Promise.all([loadComplexHubMeta(true), loadToday(true), loadComplexItems(preselectedComplexId, true)]);
+          const back = state.catalog.returnAfterComplexPick || null;
+          state.catalog.returnAfterComplexPick = null;
+          if (back) {
+            state.activeTab = String(back.tab || "today");
+            if (back.tab === "today") {
+              state.complexHub.open = true;
+              if (back.complexId) state.complexHub.expanded[back.complexId] = true;
+            }
+            renderMainApp();
+          }
           return;
         }
         await loadComplexes(true);
@@ -3018,6 +3063,10 @@
         const id = Number(b.dataset.id || 0);
         if (!id) return;
         haptic();
+        if (action === 'add') {
+          await openAddToStackSlotModal(id);
+          return;
+        }
         const detail = state.catalog.detail || {};
         const prev = !!detail.in_stack;
         const optimistic = action === 'add';
@@ -3041,6 +3090,19 @@
   }
 
   function bindCatalogEvents() {
+    const returnAfterComplexPick = async () => {
+      const back = state.catalog.returnAfterComplexPick || null;
+      state.catalog.returnAfterComplexPick = null;
+      if (!back) return;
+      state.activeTab = String(back.tab || "today");
+      if (back.tab === "today") {
+        state.complexHub.open = true;
+        if (back.complexId) state.complexHub.expanded[back.complexId] = true;
+      }
+      renderMainApp();
+      renderActiveTab();
+    };
+
     if (state.catalog.focusSearchOnOpen) {
       requestAnimationFrame(() => {
         const input = document.getElementById('catalogSearch');
@@ -3150,7 +3212,8 @@
         try {
           await api(`./api/complexes/${pickForComplexId}/items/add`, { method:'POST', body:{ supplement_id: supplementId } });
           state.catalog.pickForComplexId = 0;
-          await Promise.all([loadComplexHubMeta(true), loadToday(true)]);
+          await Promise.all([loadComplexHubMeta(true), loadToday(true), loadComplexItems(pickForComplexId, true)]);
+          await returnAfterComplexPick();
           showToast('БАД добавлен в комплекс');
           return;
         } catch {
@@ -3179,6 +3242,7 @@
     }));
     appEl.querySelector('[data-catalog-cancel-complex-pick]')?.addEventListener('click', () => {
       state.catalog.pickForComplexId = 0;
+      state.catalog.returnAfterComplexPick = null;
       renderActiveTab();
     });
     appEl.querySelector('[data-catalog-cancel-bodymap-pick]')?.addEventListener('click', () => {
@@ -3219,6 +3283,61 @@
       state.catalog.hasMore = true;
       await loadCatalog(true);
     });
+
+    appEl.querySelectorAll('[data-add-stack-slot-close],[data-add-stack-slot-back]').forEach((el) => el.addEventListener('click', () => {
+      state.catalog.addToStackSlotModal = { open: false, supplementId: 0, adding: false, creatingSlot: false, newSlotTime: "" };
+      renderActiveTab();
+    }));
+    appEl.querySelector('[data-add-stack-slot-create-open]')?.addEventListener('click', () => {
+      state.catalog.addToStackSlotModal.creatingSlot = true;
+      state.catalog.addToStackSlotModal.newSlotTime = normalizeHHMM(state.catalog.addToStackSlotModal.newSlotTime || '') || '';
+      renderActiveTab();
+    });
+    appEl.querySelector('[data-add-stack-slot-create-cancel]')?.addEventListener('click', () => {
+      state.catalog.addToStackSlotModal.creatingSlot = false;
+      renderActiveTab();
+    });
+    appEl.querySelector('[data-add-stack-slot-create-confirm]')?.addEventListener('click', async () => {
+      const timeInput = document.getElementById('addStackSlotTime');
+      const time = normalizeHHMM(timeInput?.value || state.catalog.addToStackSlotModal.newSlotTime || '');
+      if (!time) return showToast('Выберите корректное время');
+      try {
+        state.catalog.addToStackSlotModal.adding = true;
+        renderActiveTab();
+        await createScheduleSlot(time, `Слот ${time}`);
+        state.catalog.addToStackSlotModal.creatingSlot = false;
+        state.catalog.addToStackSlotModal.newSlotTime = time;
+        showToast('Слот добавлен');
+      } catch {
+        showToast('Не удалось добавить слот');
+      } finally {
+        state.catalog.addToStackSlotModal.adding = false;
+        renderActiveTab();
+      }
+    });
+    appEl.querySelectorAll('[data-add-stack-slot-pick]').forEach((el) => el.addEventListener('click', async () => {
+      const sid = Number(state.catalog.addToStackSlotModal?.supplementId || 0);
+      const slotId = String(el.dataset.addStackSlotPick || '').trim();
+      if (!sid || !slotId) return;
+      const detail = state.catalog.detail || {};
+      state.catalog.addToStackSlotModal.adding = true;
+      applyCatalogInStackState(sid, true);
+      renderActiveTab();
+      try {
+        const r = await api('./api/my_supplements/toggle', { method: 'POST', body: { supplement_id: sid, action: 'add' } });
+        await api('./api/schedule/set', { method: 'POST', body: { supplement_id: sid, slot_id: slotId, time_hhmm: null } });
+        applyCatalogInStackState(sid, !!r.in_stack);
+        state.catalog.addToStackSlotModal = { open: false, supplementId: 0, adding: false, creatingSlot: false, newSlotTime: "" };
+        await Promise.all([loadToday(true), loadBodyMap(true), loadScheduleData(true)]);
+        showToast('Добавлено в выбранный слот');
+      } catch {
+        applyCatalogInStackState(sid, !!detail.in_stack);
+        showToast('Не удалось добавить в слот');
+      } finally {
+        state.catalog.addToStackSlotModal.adding = false;
+        renderActiveTab();
+      }
+    }));
 
     hydrateOrganIcons(CATALOG_QUICK_CATEGORIES.map((c)=>c.token));
     setupCatalogInfiniteScroll();
@@ -6787,6 +6906,8 @@ function adminField(label, field, value, kind='input') {
         const cid = Number(el.dataset.complexAddItem || 0);
         if (!cid) return;
         state.catalog.pickForComplexId = cid;
+        state.catalog.returnAfterComplexPick = { tab: state.activeTab, complexId: cid };
+        state.complexHub.expanded[cid] = true;
         state.catalog.focusSearchOnOpen = true;
         state.catalog.q = '';
         state.catalog.page = 0;

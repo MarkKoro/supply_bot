@@ -5882,6 +5882,10 @@ async def remove_user_supplements_bulk(
         f"DELETE FROM reminders WHERE user_id=? AND supplement_id IN ({placeholders})",
         (tg_user_id, *cleaned),
     )
+    await conn.execute(
+        f"DELETE FROM user_supplement_split_groups WHERE user_id=? AND supplement_id IN ({placeholders})",
+        (user_id, *cleaned),
+    )
     await conn.commit()
 
 
@@ -5893,9 +5897,39 @@ async def get_user_supplement_intake_history(
     month_offset: int = 0,
 ) -> dict:
     user_id = await get_or_create_user(conn, int(tg_user_id))
+    group_row = await fetchone(
+        conn,
+        "SELECT base_supplement_id FROM user_supplement_split_groups WHERE user_id=? AND supplement_id=? LIMIT 1",
+        (user_id, int(supplement_id)),
+    )
+    group_base_id = int(group_row["base_supplement_id"] or 0) if group_row else 0
+    if not group_base_id:
+        group_base_id = int(supplement_id)
+        reverse_group_row = await fetchone(
+            conn,
+            "SELECT 1 AS x FROM user_supplement_split_groups WHERE user_id=? AND base_supplement_id=? LIMIT 1",
+            (user_id, int(supplement_id)),
+        )
+        if not reverse_group_row:
+            group_base_id = 0
+    supplement_ids: list[int] = [int(supplement_id)]
+    if group_base_id > 0:
+        split_rows = await fetchall(
+            conn,
+            "SELECT supplement_id FROM user_supplement_split_groups WHERE user_id=? AND base_supplement_id=?",
+            (user_id, group_base_id),
+        )
+        supplement_ids = sorted(
+            {
+                int(supplement_id),
+                group_base_id,
+                *[int(row["supplement_id"] or 0) for row in split_rows if int(row["supplement_id"] or 0) > 0],
+            }
+        )
+    ids_placeholders = ",".join("?" for _ in supplement_ids)
     rows = await fetchall(
         conn,
-        """SELECT sds.day, sds.status,
+        f"""SELECT sds.day, sds.status,
                   COALESCE(NULLIF(dpi.dose_text,''), NULLIF(uss.dose_text,''), NULLIF(us.dose_text,''), '') AS dose_text,
                   COALESCE(NULLIF(dpi.time_hint,''), NULLIF(sch.time_hhmm,''), '') AS time_hint
            FROM supplement_day_state sds
@@ -5907,27 +5941,30 @@ async def get_user_supplement_intake_history(
              ON us.user_id=? AND us.supplement_id=sds.supplement_id
            LEFT JOIN user_schedules sch
              ON sch.user_id=? AND sch.supplement_id=sds.supplement_id
-           WHERE sds.user_id=? AND sds.supplement_id=?
+           WHERE sds.user_id=? AND sds.supplement_id IN ({ids_placeholders})
            ORDER BY sds.day DESC
            LIMIT ?""",
-        (user_id, user_id, user_id, user_id, user_id, int(supplement_id), int(limit)),
+        (user_id, user_id, user_id, user_id, user_id, *supplement_ids, int(limit)),
     )
-    entries = []
-    taken_days = []
+    entries_by_day: dict[str, dict] = {}
+    status_rank = {"none": 0, "skipped": 1, "taken": 2}
     for row in rows:
         day = str(row["day"] or "")
         status = str(row["status"] or "")
-        if status == "taken":
-            taken_days.append(day)
-        entries.append(
-            {
-                "day": day,
-                "status": status,
-                "status_label": "Принято" if status == "taken" else ("Пропуск" if status == "skipped" else "Не отмечено"),
-                "dose_text": str(row["dose_text"] or "").strip(),
-                "time_hint": str(row["time_hint"] or "").strip(),
-            }
-        )
+        existing = entries_by_day.get(day)
+        current_rank = status_rank.get(status, 0)
+        existing_rank = status_rank.get(str(existing.get("status") or "none"), 0) if existing else -1
+        if existing and current_rank < existing_rank:
+            continue
+        entries_by_day[day] = {
+            "day": day,
+            "status": status,
+            "status_label": "Принято" if status == "taken" else ("Пропуск" if status == "skipped" else "Не отмечено"),
+            "dose_text": str(row["dose_text"] or "").strip(),
+            "time_hint": str(row["time_hint"] or "").strip(),
+        }
+    entries = sorted(entries_by_day.values(), key=lambda item: str(item.get("day") or ""), reverse=True)[: int(limit)]
+    taken_days = [str(item.get("day") or "") for item in entries if str(item.get("status") or "") == "taken"]
 
     today = date.today()
     month_anchor = today.replace(day=1)
@@ -5938,13 +5975,20 @@ async def get_user_supplement_intake_history(
     end_month = date(year, month, calendar.monthrange(year, month)[1])
     month_rows = await fetchall(
         conn,
-        """SELECT day, status
+        f"""SELECT day, status
            FROM supplement_day_state
-           WHERE user_id=? AND supplement_id=? AND day>=? AND day<=?
+           WHERE user_id=? AND supplement_id IN ({ids_placeholders}) AND day>=? AND day<=?
            ORDER BY day ASC""",
-        (user_id, int(supplement_id), start_month.isoformat(), end_month.isoformat()),
+        (user_id, *supplement_ids, start_month.isoformat(), end_month.isoformat()),
     )
-    month_days = [{"day": str(r["day"] or ""), "status": str(r["status"] or "none")} for r in month_rows]
+    month_status: dict[str, str] = {}
+    for row in month_rows:
+        day = str(row["day"] or "")
+        status = str(row["status"] or "none")
+        prev = month_status.get(day, "none")
+        if status_rank.get(status, 0) >= status_rank.get(prev, 0):
+            month_status[day] = status
+    month_days = [{"day": day, "status": month_status[day]} for day in sorted(month_status.keys())]
     summary = {
         "taken_days": len(taken_days),
         "last_taken_day": taken_days[0] if taken_days else "",

@@ -2051,9 +2051,16 @@ async def _finalize_ai_checkin(
         target_day_status_rows = await db.list_supplement_day_states(conn, tg_uid, supplement_ids, day, day)
     target_day_state_payload = []
     locked_taken_slugs: set[str] = set()
+    supplement_slug_by_id: dict[int, str] = {}
+    for item in stack:
+        supplement_id = int(item.get("supplement_id") or 0)
+        slug = str(item.get("slug") or "").strip()
+        if supplement_id and slug:
+            supplement_slug_by_id[supplement_id] = slug
     for row in target_day_status_rows:
-        slug = str(row.get("slug") or "").strip()
-        status = str(row.get("status") or "").strip().lower()
+        supplement_id = int(row["supplement_id"] or 0)
+        status = str(row["status"] or "").strip().lower()
+        slug = supplement_slug_by_id.get(supplement_id, "")
         if not slug:
             continue
         target_day_state_payload.append({"slug": slug, "status": status})

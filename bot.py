@@ -6870,7 +6870,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     await _show_schedule_home(update, context, conn, tg_uid)
             elif waiting.startswith("mysupp:addslot:newtime:"):
                 supplement_id = int(waiting.split(":")[-1])
-                parsed_time = _parse_time_input(txt)
+                parsed_time = _parse_user_time_input(txt)
                 if not parsed_time:
                     await show(
                         update,
@@ -6880,6 +6880,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         route=f"mysupp:addslot:newtime:{supplement_id}",
                     )
                 else:
+                    user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
                     await db.add_custom_slot(conn, user_id, parsed_time, parsed_time)
                     context.user_data.pop(WAITING_KEY, None)
                     await _show_add_to_stack_slot_picker(update, context, conn, tg_uid, supplement_id)

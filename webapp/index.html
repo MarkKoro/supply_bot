@@ -781,6 +781,29 @@
     .profile-stat { border:1px solid rgba(255,255,255,.14); border-radius:12px; padding:8px; background:rgba(255,255,255,.04); }
     .modal-overlay { position:fixed; inset:0; background:rgba(2,6,18,.64); z-index:40; display:flex; align-items:flex-end; padding:0 10px calc(92px + env(safe-area-inset-bottom)); }
     .modal-card { width:100%; max-height:calc(100vh - 130px - env(safe-area-inset-bottom)); overflow:auto; border-radius:18px; margin:0 auto; max-width:560px; }
+    .stack-slot-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 46;
+      background: rgba(2,6,18,.72);
+      display: flex;
+      align-items: flex-start;
+      justify-content: center;
+      padding: calc(12px + env(safe-area-inset-top)) 10px calc(96px + env(safe-area-inset-bottom));
+    }
+    .stack-slot-panel {
+      width: 100%;
+      max-width: 560px;
+      max-height: calc(100vh - 120px - env(safe-area-inset-top) - env(safe-area-inset-bottom));
+      overflow: auto;
+      border-radius: 18px;
+      border: 1px solid rgba(189,216,255,.34);
+      background: linear-gradient(180deg, rgba(18,24,48,.98), rgba(11,16,34,.98));
+      box-shadow: 0 24px 40px rgba(0,0,0,.48), 0 1px 0 rgba(255,255,255,.2) inset;
+      padding: 12px;
+    }
+    .stack-slot-actions { margin-top: 12px; display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+    @media (max-width: 460px) { .stack-slot-actions { grid-template-columns: 1fr; } }
     .field-grid { display:grid; gap:8px; }
     .field-grid.two { grid-template-columns:repeat(2,minmax(0,1fr)); }
     .lab-result-row { border:1px solid rgba(255,255,255,.14); border-radius:12px; padding:8px; margin-bottom:8px; background:rgba(255,255,255,.03); }
@@ -2735,15 +2758,16 @@
     const title = state.catalog.detail && Number(state.catalog.detail.id || 0) === supplementId
       ? (state.catalog.detail.name_ru || state.catalog.detail.name_en || state.catalog.detail.slug || 'добавки')
       : 'добавки';
-    return `<div class="modal-overlay" data-add-stack-slot-close></div>
-      <section class="sheet fade" style="max-width:560px; left:10px; right:10px; max-height:78vh; overflow:auto;">
+    return `<div class="stack-slot-overlay" data-add-stack-slot-close>
+      <section class="stack-slot-panel fade" onclick="event.stopPropagation()">
         <div class="row"><strong>Выберите слот</strong><button class="btn secondary" type="button" data-add-stack-slot-close>Закрыть</button></div>
         <div class="muted" style="margin-top:8px">Куда добавить: <strong>${esc(title)}</strong></div>
         <div class="hub-slot-list" style="margin-top:12px">
           ${slots.length ? slots.map((slot)=>`<button class="hub-slot-item" type="button" data-add-stack-slot-pick="${esc(String(slot.slot_id || ''))}" ${modal.adding ? 'disabled' : ''}><strong>${esc(slot.title_ru || 'Слот')}</strong><div class="muted" style="margin-top:4px">${esc(slot.time_local || '--:--')}</div></button>`).join('') : '<div class="sheet-empty">Слоты не найдены</div>'}
         </div>
-        ${modal.creatingSlot ? `<div class="card" style="margin-top:12px"><label class="muted">Новое время</label><input id="addStackSlotTime" type="time" class="input" value="${esc(String(modal.newSlotTime || ''))}" style="margin-top:6px" /><div class="row" style="margin-top:10px"><button class="btn secondary" type="button" data-add-stack-slot-create-cancel ${modal.adding ? 'disabled' : ''}>Назад</button><button class="btn" type="button" data-add-stack-slot-create-confirm ${modal.adding ? 'disabled' : ''}>ОК</button></div></div>` : `<div class="row" style="margin-top:12px"><button class="btn secondary" type="button" data-add-stack-slot-create-open ${modal.adding ? 'disabled' : ''}>➕ Добавить слот</button><button class="btn secondary" type="button" data-add-stack-slot-back ${modal.adding ? 'disabled' : ''}>Назад</button></div>`}
-      </section>`;
+        ${modal.creatingSlot ? `<div class="card" style="margin-top:12px"><label class="muted">Новое время</label><input id="addStackSlotTime" type="time" class="input" value="${esc(String(modal.newSlotTime || ''))}" style="margin-top:6px" /><div class="row" style="margin-top:10px"><button class="btn secondary" type="button" data-add-stack-slot-create-cancel ${modal.adding ? 'disabled' : ''}>Назад</button><button class="btn" type="button" data-add-stack-slot-create-confirm ${modal.adding ? 'disabled' : ''}>ОК</button></div></div>` : `<div class="stack-slot-actions"><button class="btn secondary" type="button" data-add-stack-slot-create-open ${modal.adding ? 'disabled' : ''}>➕ Добавить слот</button><button class="btn secondary" type="button" data-add-stack-slot-back ${modal.adding ? 'disabled' : ''}>Назад</button></div>`}
+      </section>
+    </div>`;
   }
 
   function renderFilterSheet(filters) {

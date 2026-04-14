@@ -51,6 +51,7 @@ from keyboards import (
     settings_notifications_kb,
     schedule_menu_kb,
     schedule_slots_pick_kb,
+    add_to_stack_slot_kb,
     supplement_time_kb,
     ai_checkin_entry_kb,
     ai_checkin_voice_kb,
@@ -4219,8 +4220,13 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             slug = data.split(":", 1)[1]
             row = await db.get_supplement_by_slug(conn, slug)
             if row:
-                await db.add_user_supplement(conn, tg_uid, int(row["id"]))
-                await show(update, context, f"✅ Добавлено: <b>{row['name']}</b>", back(), route=f"add_pick:{slug}")
+                supplement_id = int(row["id"])
+                context.user_data["add_to_stack_pending"] = {
+                    "mode": "mysupp_hub",
+                    "supplement_id": supplement_id,
+                    "back_cb": "menu:add",
+                }
+                await _show_add_to_stack_slot_picker(update, context, conn, tg_uid, supplement_id)
             else:
                 await show(update, context, "Не нашёл в каталоге.", back(), route="menu:add")
             return
@@ -4738,8 +4744,12 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         if data.startswith("card:add:"):
             supplement_id = int(data.split(":")[-1])
-            await db.add_user_supplement(conn, tg_uid, supplement_id)
-            await _show_catalog_card(update, context, conn, tg_uid, supplement_id)
+            context.user_data["add_to_stack_pending"] = {
+                "mode": "card",
+                "supplement_id": supplement_id,
+                "back_cb": f"cat:open:{supplement_id}",
+            }
+            await _show_add_to_stack_slot_picker(update, context, conn, tg_uid, supplement_id)
             return
 
         if data.startswith("card:remove:"):
@@ -4810,20 +4820,19 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     tab = payload_data.get("tab") or "brief"
                     page = int(payload_data.get("page") or 0)
                     prev_payload = payload_data.get("prev_payload") if payload_data.get("return_mode") == "supp_back" else None
-                    await db.add_user_supplement(conn, tg_uid, supplement_id)
-                    await render_supplement_card(
-                        update,
-                        context,
-                        conn,
-                        supplement_id,
-                        return_page,
-                        tab=tab,
-                        page=page,
-                        show_added=True,
-                        return_mode=payload_data.get("return_mode") or "catalog",
-                        search_query=payload_data.get("query"),
-                        prev_payload=prev_payload,
-                    )
+                    context.user_data["add_to_stack_pending"] = {
+                        "mode": "supp_card",
+                        "supplement_id": supplement_id,
+                        "return_tag": "retcat",
+                        "return_page": return_page,
+                        "tab": tab,
+                        "page": page,
+                        "return_mode": payload_data.get("return_mode") or "catalog",
+                        "query": payload_data.get("query"),
+                        "prev_payload": prev_payload,
+                        "back_cb": "supp:back",
+                    }
+                    await _show_add_to_stack_slot_picker(update, context, conn, tg_uid, supplement_id)
                     return
 
         if data.startswith("mysupp:add:") and ":retsearch:" in data:
@@ -4846,20 +4855,18 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     tab = payload_data.get("tab") or "brief"
                     page = int(payload_data.get("page") or 0)
                     prev_payload = payload_data.get("prev_payload") if payload_data.get("return_mode") == "supp_back" else None
-                    await db.add_user_supplement(conn, tg_uid, supplement_id)
-                    await render_supplement_card(
-                        update,
-                        context,
-                        conn,
-                        supplement_id,
-                        return_page,
-                        tab=tab,
-                        page=page,
-                        return_mode="search",
-                        search_query=query or None,
-                        show_added=True,
-                        prev_payload=prev_payload,
-                    )
+                    context.user_data["add_to_stack_pending"] = {
+                        "mode": "supp_card",
+                        "supplement_id": supplement_id,
+                        "return_tag": "retsearch",
+                        "return_page": return_page,
+                        "tab": tab,
+                        "page": page,
+                        "query": query,
+                        "prev_payload": prev_payload,
+                        "back_cb": "supp:back",
+                    }
+                    await _show_add_to_stack_slot_picker(update, context, conn, tg_uid, supplement_id)
                     return
 
         if data.startswith("mysupp:add:") and ":retai" in data:
@@ -4879,18 +4886,15 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         payload_data = {}
                     tab = payload_data.get("tab") or "brief"
                     page = int(payload_data.get("page") or 0)
-                    await db.add_user_supplement(conn, tg_uid, supplement_id)
-                    await render_supplement_card(
-                        update,
-                        context,
-                        conn,
-                        supplement_id,
-                        0,
-                        tab=tab,
-                        page=page,
-                        return_mode="onboard_back",
-                        show_added=True,
-                    )
+                    context.user_data["add_to_stack_pending"] = {
+                        "mode": "supp_card",
+                        "supplement_id": supplement_id,
+                        "return_tag": "retai",
+                        "tab": tab,
+                        "page": page,
+                        "back_cb": "supp:back",
+                    }
+                    await _show_add_to_stack_slot_picker(update, context, conn, tg_uid, supplement_id)
                     return
 
         if data.startswith("mysupp:add:") and ":ret_onboard" in data:
@@ -4910,19 +4914,15 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         payload_data = {}
                     tab = payload_data.get("tab") or "brief"
                     page = int(payload_data.get("page") or 0)
-                    await db.add_user_supplement(conn, tg_uid, supplement_id)
-                    await db.add_user_initial_stack_id(conn, tg_uid, supplement_id)
-                    await render_supplement_card(
-                        update,
-                        context,
-                        conn,
-                        supplement_id,
-                        0,
-                        tab=tab,
-                        page=page,
-                        return_mode="onboard_back",
-                        show_added=True,
-                    )
+                    context.user_data["add_to_stack_pending"] = {
+                        "mode": "supp_card",
+                        "supplement_id": supplement_id,
+                        "return_tag": "ret_onboard",
+                        "tab": tab,
+                        "page": page,
+                        "back_cb": "supp:back",
+                    }
+                    await _show_add_to_stack_slot_picker(update, context, conn, tg_uid, supplement_id)
                     return
 
         if data.startswith("mysupp:add:") and ":retback" in data:
@@ -4944,19 +4944,17 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     page = int(payload_data.get("page") or 0)
                     return_page = int(payload_data.get("return_page") or 0)
                     prev_payload = payload_data.get("prev_payload")
-                    await db.add_user_supplement(conn, tg_uid, supplement_id)
-                    await render_supplement_card(
-                        update,
-                        context,
-                        conn,
-                        supplement_id,
-                        return_page,
-                        tab=tab,
-                        page=page,
-                        return_mode="supp_back",
-                        prev_payload=prev_payload,
-                        show_added=True,
-                    )
+                    context.user_data["add_to_stack_pending"] = {
+                        "mode": "supp_card",
+                        "supplement_id": supplement_id,
+                        "return_tag": "retback",
+                        "return_page": return_page,
+                        "tab": tab,
+                        "page": page,
+                        "prev_payload": prev_payload,
+                        "back_cb": "supp:back",
+                    }
+                    await _show_add_to_stack_slot_picker(update, context, conn, tg_uid, supplement_id)
                     return
 
         if data == "mysupp:add":
@@ -4974,16 +4972,54 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             slug = data.split(":", 2)[-1]
             row = await db.get_supplement_by_slug(conn, slug)
             if row:
-                await db.add_user_supp(conn, tg_uid, int(row["id"]))
-                await show_my_supp_hub(update, context, tg_uid, int(row["id"]), conn=conn)
+                supplement_id = int(row["id"])
+                context.user_data["add_to_stack_pending"] = {
+                    "mode": "mysupp_hub",
+                    "supplement_id": supplement_id,
+                    "back_cb": "mysupp:add",
+                }
+                await _show_add_to_stack_slot_picker(update, context, conn, tg_uid, supplement_id)
             else:
                 await show(update, context, "Не нашёл в каталоге.", my_list_back(), route="mysupp:add")
             return
 
         if data.startswith("mysupp:add_direct:"):
             supplement_id = int(data.split(":")[-1])
-            await db.add_user_supp(conn, tg_uid, supplement_id)
-            await show_my_supp_hub(update, context, tg_uid, supplement_id, conn=conn)
+            context.user_data["add_to_stack_pending"] = {
+                "mode": "mysupp_hub",
+                "supplement_id": supplement_id,
+                "back_cb": f"mysupp:open:{supplement_id}",
+            }
+            await _show_add_to_stack_slot_picker(update, context, conn, tg_uid, supplement_id)
+            return
+
+        if data.startswith("mysupp:addslot:pick:"):
+            parts = data.split(":")
+            if len(parts) >= 5:
+                supplement_id = int(parts[3])
+                slot_id = str(parts[4] or "").strip()
+                if slot_id:
+                    await _complete_add_to_stack_with_slot(update, context, conn, tg_uid, supplement_id, slot_id)
+            return
+
+        if data.startswith("mysupp:addslot:newtime:"):
+            parts = data.split(":")
+            if len(parts) >= 4:
+                supplement_id = int(parts[3])
+                context.user_data[WAITING_KEY] = f"mysupp:addslot:newtime:{supplement_id}"
+                back_cb = f"mysupp:addslot:{supplement_id}"
+                await show(
+                    update,
+                    context,
+                    "Введите время нового слота в формате HH:MM.",
+                    InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=back_cb)]]),
+                    route=f"mysupp:addslot:newtime:{supplement_id}",
+                )
+            return
+
+        if data.startswith("mysupp:addslot:") and data.count(":") == 2:
+            supplement_id = int(data.split(":")[-1])
+            await _show_add_to_stack_slot_picker(update, context, conn, tg_uid, supplement_id)
             return
 
         if data.startswith("mysupp:open:") or data.startswith("mysupp:hub:"):
@@ -6065,6 +6101,10 @@ async def _render_route(
             target_message_id=target_message_id,
         )
         return
+    if route.startswith("mysupp:addslot:"):
+        supplement_id = int(route.split(":")[-1])
+        await _show_add_to_stack_slot_picker(update, context, conn, tg_uid, supplement_id)
+        return
     if route.startswith("cat:page:"):
         payload = {"mode": "list", "list_mode": "alpha", "page": int(route.split(":")[-1]), "query": "", "class_key": "", "body_token": "", "return_page": int(route.split(":")[-1])}
         await _show_catalog_list(
@@ -6771,7 +6811,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     finally:
         await conn.close()
     waiting = context.user_data.get(WAITING_KEY)
-    if waiting and waiting.startswith(("mysupp:set_dose:", "mysupp:rem_add:", "rem:set:", "schedule:add_custom", "schedule:slot_time_set:", "supplement:set_override:")):
+    if waiting and waiting.startswith(("mysupp:set_dose:", "mysupp:rem_add:", "rem:set:", "schedule:add_custom", "schedule:slot_time_set:", "supplement:set_override:", "mysupp:addslot:newtime:")):
         supplement_id = None
         if waiting.startswith(("mysupp:set_dose:", "mysupp:rem_add:", "supplement:set_override:")):
             _, _, value_text = waiting.split(":", 2)
@@ -6828,6 +6868,21 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     await db.set_user_slot_time(conn, user_id, slot_id, parsed_time)
                     context.user_data.pop(WAITING_KEY, None)
                     await _show_schedule_home(update, context, conn, tg_uid)
+            elif waiting.startswith("mysupp:addslot:newtime:"):
+                supplement_id = int(waiting.split(":")[-1])
+                parsed_time = _parse_time_input(txt)
+                if not parsed_time:
+                    await show(
+                        update,
+                        context,
+                        "Не понял время. Пример: 08:30",
+                        InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"mysupp:addslot:{supplement_id}")]]),
+                        route=f"mysupp:addslot:newtime:{supplement_id}",
+                    )
+                else:
+                    await db.add_custom_slot(conn, user_id, parsed_time, parsed_time)
+                    context.user_data.pop(WAITING_KEY, None)
+                    await _show_add_to_stack_slot_picker(update, context, conn, tg_uid, supplement_id)
             elif waiting.startswith("supplement:set_override:"):
                 parsed_time = _parse_user_time_input(txt)
                 user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
@@ -9087,6 +9142,95 @@ async def show_my_supp_hub(
     finally:
         if close_conn:
             await conn.close()
+
+
+async def _show_add_to_stack_slot_picker(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    conn,
+    tg_uid: int,
+    supplement_id: int,
+) -> None:
+    row = await db.get_supplement_by_id(conn, int(supplement_id))
+    if not row:
+        await show(update, context, "Не нашёл БАД в каталоге.", back(), route="menu:catalog")
+        return
+    user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
+    slots = await db.get_user_slots(conn, user_id)
+    enabled_slots = [slot for slot in slots if bool(slot.get("is_enabled", True))]
+    title = str(row.get("name_ru") or row.get("name_en") or row.get("name") or "Добавка")
+    pending = context.user_data.get("add_to_stack_pending") if isinstance(context.user_data.get("add_to_stack_pending"), dict) else {}
+    back_cb = str(pending.get("back_cb") or "cat:back")
+    text = (
+        "🧭 <b>Выбор слота</b>\n\n"
+        f"Добавка: <b>{title}</b>\n"
+        "Выберите слот, в который хотите добавить БАД."
+    )
+    await show(
+        update,
+        context,
+        text,
+        add_to_stack_slot_kb(int(supplement_id), enabled_slots or slots, back_cb),
+        route=f"mysupp:addslot:{int(supplement_id)}",
+    )
+
+
+async def _complete_add_to_stack_with_slot(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    conn,
+    tg_uid: int,
+    supplement_id: int,
+    slot_id: str,
+) -> None:
+    await db.add_user_supplement(conn, tg_uid, int(supplement_id))
+    user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
+    await db.set_schedule_slot(conn, user_id, int(supplement_id), str(slot_id or "morning"))
+    await db.set_schedule_time_override(conn, user_id, int(supplement_id), None)
+    pending = context.user_data.get("add_to_stack_pending") if isinstance(context.user_data.get("add_to_stack_pending"), dict) else {}
+    mode = str(pending.get("mode") or "")
+    context.user_data.pop("add_to_stack_pending", None)
+    context.user_data.pop(WAITING_KEY, None)
+
+    if mode == "card":
+        await _show_catalog_card(update, context, conn, tg_uid, int(supplement_id))
+        return
+    if mode == "mysupp_hub":
+        await show_my_supp_hub(update, context, tg_uid, int(supplement_id), conn=conn)
+        return
+    if mode == "supp_card":
+        return_tag = str(pending.get("return_tag") or "retcat")
+        return_page = int(pending.get("return_page") or 0)
+        tab = str(pending.get("tab") or "brief")
+        page = int(pending.get("page") or 0)
+        query = pending.get("query")
+        prev_payload = pending.get("prev_payload")
+        if return_tag == "retsearch":
+            await render_supplement_card(
+                update, context, conn, int(supplement_id), return_page,
+                tab=tab, page=page, return_mode="search", search_query=(str(query or "").strip() or None), show_added=True, prev_payload=prev_payload,
+            )
+            return
+        if return_tag == "retai":
+            await render_supplement_card(update, context, conn, int(supplement_id), 0, tab=tab, page=page, return_mode="onboard_back", show_added=True)
+            return
+        if return_tag == "ret_onboard":
+            await db.add_user_initial_stack_id(conn, tg_uid, int(supplement_id))
+            await render_supplement_card(update, context, conn, int(supplement_id), 0, tab=tab, page=page, return_mode="onboard_back", show_added=True)
+            return
+        if return_tag == "retback":
+            await render_supplement_card(
+                update, context, conn, int(supplement_id), return_page,
+                tab=tab, page=page, return_mode="supp_back", prev_payload=prev_payload, show_added=True,
+            )
+            return
+        await render_supplement_card(
+            update, context, conn, int(supplement_id), return_page,
+            tab=tab, page=page, show_added=True, return_mode=str(pending.get("return_mode") or "catalog"),
+            search_query=query, prev_payload=prev_payload,
+        )
+        return
+    await show_my_supp_hub(update, context, tg_uid, int(supplement_id), conn=conn)
 
 async def _show_my_supp_reminders(
     update: Update,

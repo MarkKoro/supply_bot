@@ -41,7 +41,7 @@ def today_slots_kb(slots: list[dict], date_local: str) -> InlineKeyboardMarkup:
     for slot in slots:
         title = str(slot.get("title") or slot.get("title_ru") or "Слот")
         time_local = str(slot.get("time") or slot.get("time_local") or "--:--")
-        slot_id = str(slot.get("slot_id") or "")
+        slot_id = str(slot.get("slot_ref") or slot.get("slot_id") or "")
         taken = int(slot.get("taken") or 0)
         skipped = int(slot.get("skipped") or 0)
         total = int(slot.get("total") or 0)
@@ -71,7 +71,7 @@ def intake_pick_kb(slot_id: str, items: list[dict], selected_set: set[str], page
     rows: list[list[InlineKeyboardButton]] = []
     for item in page_items:
         supplement_id = int(item.get("supplement_id") or 0)
-        title = str(item.get("ru_name") or item.get("name_ru") or item.get("name") or item.get("slug") or f"ID {supplement_id}")
+        title = str(item.get("picker_title") or item.get("ru_name") or item.get("name_ru") or item.get("name") or item.get("slug") or f"ID {supplement_id}")
         mark = "☑️" if str(supplement_id) in selected_set else "⬜"
         rows.append([InlineKeyboardButton(f"{mark} {title}", callback_data=f"intake:toggle:{slot_id}:{supplement_id}:{safe_page}")])
 

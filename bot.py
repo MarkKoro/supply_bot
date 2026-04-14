@@ -1309,6 +1309,7 @@ def build_ai_checkin_prompt(
     adherence_payload: list[dict],
     recent_checkins_payload: list[dict],
     ai_plan_history_payload: list[dict],
+    target_day_state_payload: list[dict],
 ) -> list[dict]:
     target_day = str(checkin.get("target_day") or "today")
     target_day_ru = "завтра" if target_day == "tomorrow" else "сегодня"
@@ -1323,6 +1324,8 @@ def build_ai_checkin_prompt(
         "Добавки из текущего стека (base_stack) можно только remove или adjust, но не add. "
         "Для action=add разрешены только новые добавки из catalog_candidates, которых нет в base_stack. "
         "Для action=remove и action=adjust разрешены только добавки из base_stack. "
+        "Если в today_checkin.target_day_state есть статус taken, значит добавка уже принята за целевой день: "
+        "для таких добавок запрещены remove/adjust. "
         "Нельзя предлагать добавки вне списка кандидатов и текущего стека. "
         "Если пользователь явно просит рекомендации (особенно по энергии/силе/тренировке) "
         "и нет противопоказаний в контексте, обязательно дай минимум 1 безопасное действие add из catalog_candidates. "
@@ -1341,6 +1344,7 @@ def build_ai_checkin_prompt(
         "adherence_14d": adherence_payload,
         "ai_plan_14d": ai_plan_history_payload,
         "recent_checkins_14d": recent_checkins_payload,
+        "target_day_state": target_day_state_payload,
         "catalog_candidates": candidates,
     }
     context_json = json.dumps(context_payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
@@ -2042,6 +2046,19 @@ async def _finalize_ai_checkin(
             days_range[-1],
         )
     adherence_payload = _build_adherence_payload(stack, status_rows, days_range)
+    target_day_status_rows = []
+    if supplement_ids:
+        target_day_status_rows = await db.list_supplement_day_states(conn, tg_uid, supplement_ids, day, day)
+    target_day_state_payload = []
+    locked_taken_slugs: set[str] = set()
+    for row in target_day_status_rows:
+        slug = str(row.get("slug") or "").strip()
+        status = str(row.get("status") or "").strip().lower()
+        if not slug:
+            continue
+        target_day_state_payload.append({"slug": slug, "status": status})
+        if status == "taken":
+            locked_taken_slugs.add(slug)
     start_14d = days_range[0]
     end_14d = days_range[-1]
     recent_checkins_rows = await db.list_recent_checkins_window(conn, user_id, start_14d, end_14d, limit=14)
@@ -2085,6 +2102,7 @@ async def _finalize_ai_checkin(
         adherence_payload,
         recent_checkins_payload,
         ai_plan_history_payload,
+        target_day_state_payload,
     )
     cfg = OpenAIConfig(api_key=s.OPENAI_API_KEY, model=s.OPENAI_MODEL)
     await show(
@@ -2159,6 +2177,8 @@ async def _finalize_ai_checkin(
             is_valid_action = slug not in stack_slugs
         elif action_type in {"remove", "adjust"}:
             is_valid_action = slug in stack_slugs
+            if is_valid_action and slug in locked_taken_slugs:
+                is_valid_action = False
         if not is_valid_action:
             missing_count += 1
             continue

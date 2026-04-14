@@ -2892,6 +2892,8 @@ async def _ai_recommendations(answers: dict, ctx: dict) -> tuple[list[dict], dic
         "Добавки из context.stack можно только remove или adjust, но не add. "
         "Для action=add разрешены только новые добавки из context.catalog_candidates, которых нет в context.stack. "
         "Для action=remove и action=adjust разрешены только добавки из context.stack. "
+        "Добавки со статусом taken в context.target_day_state уже приняты за целевой день: "
+        "их запрещено предлагать для remove/adjust. "
         "Если пользователь просит рекомендации по энергии/силе/тренировке в answers.goals или answers.note, "
         "и нет явных противопоказаний в контексте, обязательно верни хотя бы один action=add."
     )
@@ -2909,9 +2911,11 @@ async def _normalize_recommendations(
     *,
     stack_slugs: set[str],
     candidate_slugs: set[str],
+    locked_taken_slugs: set[str] | None = None,
 ) -> list[dict]:
     out = []
     seen_action_keys: set[tuple[str, str]] = set()
+    locked = {str(x or "").strip().lower() for x in list(locked_taken_slugs or set()) if str(x or "").strip()}
     for item in recs:
         slug = str(item.get("slug") or "").strip().lower()
         if not slug:
@@ -2927,6 +2931,8 @@ async def _normalize_recommendations(
             is_valid_action = slug in candidate_slugs and slug not in stack_slugs
         elif action in {"remove", "adjust"}:
             is_valid_action = slug in stack_slugs
+            if is_valid_action and slug in locked:
+                is_valid_action = False
         if not is_valid_action:
             continue
         dedup_key = (action, slug)
@@ -3025,6 +3031,11 @@ async def api_checkin(body: CheckinBody, x_telegram_init_data: str = Header(defa
                 recs_raw,
                 stack_slugs=stack_slugs,
                 candidate_slugs=candidate_slugs,
+                locked_taken_slugs={
+                    str(slug).strip().lower()
+                    for slug, status in (ctx.get("target_day_state") or {}).items()
+                    if str(status or "").strip().lower() == "taken" and str(slug).strip()
+                },
             )
 
             # safeguard: always provide at least one add suggestion when user asks for goals/energy in note

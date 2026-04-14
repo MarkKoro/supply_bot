@@ -7423,6 +7423,19 @@ async def build_ai_context_compact(conn: aiosqlite.Connection, tg_user_id: int, 
         }
         for r in stack_rows
     ]
+    target_day_rows = await fetchall(
+        conn,
+        """SELECT s.slug, sds.status
+           FROM supplement_day_state sds
+           JOIN supplements s ON s.id=sds.supplement_id
+           WHERE sds.user_id=? AND sds.day=?""",
+        (user_id, local_date),
+    )
+    target_day_state = {
+        str(r["slug"] or ""): str(r["status"] or "")
+        for r in target_day_rows
+        if str(r["slug"] or "").strip()
+    }
 
     end = datetime.strptime(local_date, "%Y-%m-%d").date()
     start = end - timedelta(days=6)
@@ -7494,7 +7507,15 @@ async def build_ai_context_compact(conn: aiosqlite.Connection, tg_user_id: int, 
         complexes.append({"name": str(row["name"] or ""), "slugs": [str(x["slug"] or "") for x in items if str(x["slug"] or "").strip()]})
 
     stats = await build_stats_compact(conn, tg_user_id, local_date)
-    return {"date": local_date, "stack": stack, "last7": last7, "burdens": burden_out, "complexes": complexes, "stats": stats}
+    return {
+        "date": local_date,
+        "stack": stack,
+        "last7": last7,
+        "burdens": burden_out,
+        "complexes": complexes,
+        "stats": stats,
+        "target_day_state": target_day_state,
+    }
 
 
 async def get_daily_checkin_by_id(conn: aiosqlite.Connection, checkin_id: int, tg_user_id: int) -> dict | None:

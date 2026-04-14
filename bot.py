@@ -640,11 +640,50 @@ async def _show_today_slots(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     await _show_today_home(update, context, conn, tg_uid)
 
 
+def _slot_intake_items(slot: dict | None) -> list[dict]:
+    if not slot:
+        return []
+    intake_items: list[dict] = []
+    seen_ids: set[int] = set()
+    for item in list((slot or {}).get("items") or []):
+        sid = int(item.get("supplement_id") or 0)
+        if sid <= 0 or sid in seen_ids:
+            continue
+        seen_ids.add(sid)
+        intake_items.append(item)
+    for complex_row in list((slot or {}).get("complexes") or []):
+        complex_name = str(complex_row.get("name") or "Комплект").strip()
+        for item in list(complex_row.get("items") or []):
+            sid = int(item.get("supplement_id") or 0)
+            if sid <= 0 or sid in seen_ids:
+                continue
+            seen_ids.add(sid)
+            enriched = dict(item)
+            base_title = str(
+                item.get("ru_name")
+                or item.get("name_ru")
+                or item.get("name")
+                or item.get("slug")
+                or f"ID {sid}"
+            ).strip()
+            enriched["picker_title"] = f"{base_title} · 🧩 {complex_name}"
+            intake_items.append(enriched)
+    return intake_items
+
+
+def _find_today_slot(slots: list[dict], slot_ref_or_id: str) -> dict | None:
+    key = str(slot_ref_or_id or "").strip()
+    if not key:
+        return None
+    slot = next((s for s in slots if str(s.get("slot_ref") or "") == key), None)
+    if slot:
+        return slot
+    return next((s for s in slots if str(s.get("slot_id") or "") == key), None)
+
+
 async def _show_slot_screen(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, tg_uid: int, slot_id: str) -> None:
     date_local, slots = await _today_slots_payload(conn, tg_uid)
-    slot = next((s for s in slots if str(s.get("slot_ref") or "") == slot_id), None)
-    if not slot:
-        slot = next((s for s in slots if str(s.get("slot_id") or "") == slot_id), None)
+    slot = _find_today_slot(slots, slot_id)
     if not slot:
         await show(update, context, "Слот не найден.", back("today:home"), route="today:home")
         return
@@ -672,14 +711,12 @@ async def _show_intake_picker(
     page: int,
 ) -> None:
     date_local, slots = await _today_slots_payload(conn, tg_uid)
-    slot = next((s for s in slots if str(s.get("slot_ref") or "") == slot_id), None)
-    if not slot:
-        slot = next((s for s in slots if str(s.get("slot_id") or "") == slot_id), None)
+    slot = _find_today_slot(slots, slot_id)
     if not slot:
         await show(update, context, "Слот не найден.", back("today:home"), route="today:home")
         return
     state_map = await db.get_day_state_map(conn, tg_uid, date_local)
-    items = list(slot.get("items") or [])
+    items = _slot_intake_items(slot)
     selected = {str(int(item.get("supplement_id") or 0)) for item in items if state_map.get(int(item.get("supplement_id") or 0)) == "taken"}
     title = str(slot.get("title") or "Слот")
     time_local = str(slot.get("time") or "--:--")
@@ -4207,8 +4244,8 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if data.startswith("intake:all:"):
             slot_id = data.split(":", 2)[2]
             date_local, slots = await _today_slots_payload(conn, tg_uid)
-            slot = next((s for s in slots if str(s.get("slot_id") or "") == slot_id), None)
-            for item in list(slot.get("items") or []) if slot else []:
+            slot = _find_today_slot(slots, slot_id)
+            for item in _slot_intake_items(slot):
                 await db.set_day_state(conn, tg_uid, date_local, int(item.get("supplement_id") or 0), "taken")
             await q.answer("Отмечено: выпил всё", show_alert=False)
             await _show_slot_screen(update, context, conn, tg_uid, slot_id)
@@ -4217,8 +4254,8 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if data.startswith("intake:skip:"):
             slot_id = data.split(":", 2)[2]
             date_local, slots = await _today_slots_payload(conn, tg_uid)
-            slot = next((s for s in slots if str(s.get("slot_id") or "") == slot_id), None)
-            for item in list(slot.get("items") or []) if slot else []:
+            slot = _find_today_slot(slots, slot_id)
+            for item in _slot_intake_items(slot):
                 await db.set_day_state(conn, tg_uid, date_local, int(item.get("supplement_id") or 0), "skipped")
             await q.answer("Отмечено: пропустить всё", show_alert=False)
             await _show_slot_screen(update, context, conn, tg_uid, slot_id)

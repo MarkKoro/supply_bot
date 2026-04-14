@@ -1,4 +1,6 @@
 from __future__ import annotations
+from datetime import datetime
+
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 
 import tz
@@ -188,6 +190,13 @@ def catalog_list(
     btns = []
     for r in rows:
         title = r["name_ru"] or r["name_en"] or r["name"]
+        last_taken_day = str(r.get("last_taken_day") or "").strip()
+        if last_taken_day:
+            try:
+                last_taken_day = datetime.strptime(last_taken_day, "%Y-%m-%d").strftime("%d.%m.%Y")
+            except Exception:
+                pass
+            title = f"{title} ({last_taken_day})"
         btns.append([InlineKeyboardButton(f"• {title}", callback_data=f"cat:open:{r['id']}")])
     if mode_switch_body_token:
         support_mark = "✅ " if mode_switch_current == "body_benefit" else ""

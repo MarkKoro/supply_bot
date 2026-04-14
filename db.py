@@ -6377,10 +6377,43 @@ async def user_has_supplement(conn: aiosqlite.Connection, tg_user_id: int, suppl
     user_id = await get_or_create_user(conn, tg_user_id)
     row = await fetchone(
         conn,
-        "SELECT 1 FROM user_supplements WHERE user_id=? AND supplement_id=?",
+        """SELECT 1
+           FROM user_supplements
+           WHERE user_id=? AND supplement_id=? AND is_active=1
+           LIMIT 1""",
         (user_id, supplement_id),
     )
     return row is not None
+
+
+async def get_user_last_intake_stats(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    supplement_ids: list[int],
+) -> dict[int, dict[str, int | str]]:
+    cleaned = sorted({int(item) for item in supplement_ids if int(item) > 0})
+    if not cleaned:
+        return {}
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    placeholders = ",".join("?" for _ in cleaned)
+    rows = await fetchall(
+        conn,
+        f"""SELECT supplement_id,
+                   MAX(day) AS last_taken_day,
+                   COUNT(DISTINCT day) AS taken_days
+            FROM supplement_day_state
+            WHERE user_id=? AND status='taken' AND supplement_id IN ({placeholders})
+            GROUP BY supplement_id""",
+        (user_id, *cleaned),
+    )
+    out: dict[int, dict[str, int | str]] = {}
+    for row in rows:
+        sid = int(row["supplement_id"])
+        out[sid] = {
+            "last_taken_day": str(row["last_taken_day"] or ""),
+            "taken_days": int(row["taken_days"] or 0),
+        }
+    return out
 
 async def get_supplement_name(conn: aiosqlite.Connection, supplement_id: int) -> str | None:
     row = await fetchone(conn, "SELECT name FROM supplements WHERE id=?", (supplement_id,))

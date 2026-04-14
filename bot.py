@@ -8296,6 +8296,16 @@ async def _show_catalog_list(
     else:
         has_next = (offset + len(rows)) < total
 
+    display_rows = rows
+    if rows:
+        intake_stats = await db.get_user_last_intake_stats(conn, tg_uid, [int(r["id"]) for r in rows if int(r["id"] or 0) > 0])
+        display_rows = []
+        for row in rows:
+            row_data = dict(row)
+            stats = intake_stats.get(int(row["id"]), {})
+            row_data["last_taken_day"] = str(stats.get("last_taken_day") or "")
+            display_rows.append(row_data)
+
     if not rows:
         if total == 0 and list_mode in {"alpha"}:
             await show(
@@ -8354,7 +8364,7 @@ async def _show_catalog_list(
         context,
         "\n".join(lines),
         catalog_list(
-            rows,
+            display_rows,
             has_prev=page > 0,
             has_next=has_next,
             back_cb=list_back_cb,
@@ -8412,6 +8422,11 @@ async def _show_catalog_card(
     participants = engine.metric_or_no_data(row.get("participants_total_est"))
     avg_effect = engine.metric_or_no_data(row.get("avg_effect_percent_est"))
 
+    intake_stats = await db.get_user_last_intake_stats(conn, tg_uid, [int(row["id"])])
+    card_stats = intake_stats.get(int(row["id"]), {})
+    last_taken_day = str(card_stats.get("last_taken_day") or "")
+    taken_days = int(card_stats.get("taken_days") or 0)
+
     text = (
         f"💊 <b>{title}</b>\n\n"
         f"Кратко: {summary}\n\n"
@@ -8421,6 +8436,10 @@ async def _show_catalog_card(
         f"Участников суммарно: {participants}\n"
         f"Средний эффект: {avg_effect}"
     )
+    if last_taken_day:
+        text += f"\n\nПоследний приём: {_format_day_ru(last_taken_day)}"
+        if taken_days > 0:
+            text += f"\nПринимался: {taken_days} дн."
 
     in_my = await db.user_has_supplement(conn, tg_uid, int(row["id"]))
     btns: list[list[InlineKeyboardButton]] = []

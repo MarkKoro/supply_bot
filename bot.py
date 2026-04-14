@@ -3443,7 +3443,11 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await show(update, context, "Удалить комплекс?", InlineKeyboardMarkup([[InlineKeyboardButton("🗑 Да, удалить", callback_data=f"cx:delete:confirm:{complex_id}")],[InlineKeyboardButton("⬅️ Отмена", callback_data=f"cx:open:{complex_id}")]]), route=f"cx:delete:{complex_id}")
             return
         if data.startswith("cx:add_pick:"):
-            _, _, _, cx_id, supp_id = data.split(":", 4)
+            parts = data.split(":", 3)
+            if len(parts) != 4:
+                logger.warning("Invalid complex pick callback payload: %s", data)
+                return
+            _, _, cx_id, supp_id = parts
             await db.add_item_to_complex(conn, tg_uid, int(cx_id), int(supp_id), dose_override="")
             await _show_complex_detail(update, context, conn, tg_uid, int(cx_id))
             return

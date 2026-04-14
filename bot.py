@@ -503,6 +503,7 @@ async def _today_slots_payload(conn, tg_uid: int) -> tuple[str, list[dict]]:
                     skipped += 1
         slots_payload.append(
             {
+                "slot_ref": f"{str(group.get('slot_id') or '')}|{str(group.get('time') or '').replace(':', '')}",
                 "slot_id": str(group.get("slot_id") or ""),
                 "title": str(group.get("title") or "Слот"),
                 "time": str(group.get("time") or "--:--"),
@@ -610,6 +611,22 @@ async def _show_today_home(update: Update, context: ContextTypes.DEFAULT_TYPE, c
             lines.append(f"После этого ожидается ещё {remaining} приём(а).")
     else:
         lines.append("На сегодня уже всё принято.")
+
+    ai_rows = await db.list_day_plan_items_with_status(conn, tg_uid, date_local)
+    ai_lines: list[str] = []
+    for item in ai_rows:
+        action = str(item.get("action") or "").strip().lower()
+        if action not in {"add", "remove", "adjust"}:
+            continue
+        name = str(item.get("name_ru") or item.get("name_en") or item.get("name") or "Добавка").strip()
+        time_local = db._normalize_hhmm(str(item.get("time_local") or item.get("time_hint") or "").strip())
+        time_part = f"в {time_local}" if time_local else "без времени"
+        action_label = {"add": "добавить", "remove": "убрать", "adjust": "изменить"}.get(action, action)
+        ai_lines.append(f"• {name} — {action_label}, {time_part}")
+    if ai_lines:
+        lines.extend(["", "<b>🤖 Предложения AI на сегодня:</b>", *ai_lines[:6]])
+        if len(ai_lines) > 6:
+            lines.append(f"…и ещё {len(ai_lines) - 6}.")
     await show(
         update,
         context,
@@ -625,7 +642,9 @@ async def _show_today_slots(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
 async def _show_slot_screen(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, tg_uid: int, slot_id: str) -> None:
     date_local, slots = await _today_slots_payload(conn, tg_uid)
-    slot = next((s for s in slots if str(s.get("slot_id") or "") == slot_id), None)
+    slot = next((s for s in slots if str(s.get("slot_ref") or "") == slot_id), None)
+    if not slot:
+        slot = next((s for s in slots if str(s.get("slot_id") or "") == slot_id), None)
     if not slot:
         await show(update, context, "Слот не найден.", back("today:home"), route="today:home")
         return
@@ -653,7 +672,9 @@ async def _show_intake_picker(
     page: int,
 ) -> None:
     date_local, slots = await _today_slots_payload(conn, tg_uid)
-    slot = next((s for s in slots if str(s.get("slot_id") or "") == slot_id), None)
+    slot = next((s for s in slots if str(s.get("slot_ref") or "") == slot_id), None)
+    if not slot:
+        slot = next((s for s in slots if str(s.get("slot_id") or "") == slot_id), None)
     if not slot:
         await show(update, context, "Слот не найден.", back("today:home"), route="today:home")
         return
@@ -9129,8 +9150,6 @@ async def _show_my_list(
             target_message_id=target_message_id,
         )
         return
-    ai_rows = await db.list_day_plan_items_with_status(conn, tg_uid, local_date)
-
     suffix = f" (стр. {page + 1})" if total > MY_PAGE_SIZE else ""
     lines = [
         f"💊 <b>Мои БАДы</b>{suffix}",
@@ -9141,22 +9160,11 @@ async def _show_my_list(
         dose = str(row["dose_text"] or "").strip() or "—"
         lines.append(f"{idx}) {row['name']} — доза: {dose}")
 
-    lines.extend(["", "<b>Добавлено AI на сегодня</b>"])
-    if ai_rows:
-        for idx, item in enumerate(ai_rows, start=1):
-            name = str(item.get("name_ru") or item.get("name_en") or item.get("name") or "Добавка")
-            dose = str(item.get("dose_text") or "").strip() or "—"
-            action = str(item.get("action") or "")
-            action_label = {"add": "добавить", "remove": "убрать", "adjust": "изменить"}.get(action, action or "изменить")
-            lines.append(f"{idx}) {name} — {action_label}, доза: {dose}")
-    else:
-        lines.append("На сегодня AI ничего не добавил.")
-
     await show(
         update,
         context,
         "\n".join(lines),
-        my_supplements_overview_kb(rows, ai_rows, page, has_prev=page > 0, has_next=has_next),
+        my_supplements_overview_kb(rows, page, has_prev=page > 0, has_next=has_next),
         route=f"mysupp:list:{page}",
         target_chat_id=target_chat_id,
         target_message_id=target_message_id,

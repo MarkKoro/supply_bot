@@ -27,7 +27,7 @@ def main_menu(
 def today_home_kb(slots: list[dict]) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     for slot in slots:
-        slot_id = str(slot.get("slot_id") or "")
+        slot_id = str(slot.get("slot_ref") or slot.get("slot_id") or "")
         title = str(slot.get("title") or "Слот")
         time_local = str(slot.get("time") or "--:--")
         pending = int(slot.get("pending") or 0)
@@ -341,7 +341,7 @@ def my_supplements_list(rows, page: int, has_prev: bool, has_next: bool, *, show
 
 
 
-def my_supplements_overview_kb(base_rows, ai_rows, page: int, has_prev: bool, has_next: bool) -> InlineKeyboardMarkup:
+def my_supplements_overview_kb(base_rows, page: int, has_prev: bool, has_next: bool) -> InlineKeyboardMarkup:
     btns = []
     def _row_val(row, key, default=None):
         if isinstance(row, dict):
@@ -356,13 +356,6 @@ def my_supplements_overview_kb(base_rows, ai_rows, page: int, has_prev: bool, ha
         if sid <= 0:
             continue
         btns.append([InlineKeyboardButton(label, callback_data=f"mysupp:open:{sid}")])
-
-    if ai_rows:
-        btns.append([InlineKeyboardButton("🤖 AI-добавления на сегодня", callback_data="noop")])
-        for item in ai_rows:
-            name = (item.get("name_ru") or item.get("name_en") or item.get("name") or "Добавка").strip()
-            sid = int(item.get("supplement_id") or 0)
-            btns.append([InlineKeyboardButton(f"🤖 {name}", callback_data=f"supp:open:{sid}")])
 
     btns.append([InlineKeyboardButton("➕ Добавить", callback_data="mysupp:add")])
     btns.append([InlineKeyboardButton("🧩 Комплексы", callback_data=f"mysupp:complexes:{page}")])

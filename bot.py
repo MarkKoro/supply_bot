@@ -1324,6 +1324,8 @@ def build_ai_checkin_prompt(
         "Для action=add разрешены только новые добавки из catalog_candidates, которых нет в base_stack. "
         "Для action=remove и action=adjust разрешены только добавки из base_stack. "
         "Нельзя предлагать добавки вне списка кандидатов и текущего стека. "
+        "Если пользователь явно просит рекомендации (особенно по энергии/силе/тренировке) "
+        "и нет противопоказаний в контексте, обязательно дай минимум 1 безопасное действие add из catalog_candidates. "
         "Не предлагай рецептурные препараты. "
         "Будь консервативным, максимум 6 действий. "
         "Если уверенность низкая — явно скажи. "
@@ -2069,7 +2071,12 @@ async def _finalize_ai_checkin(
             }
         )
 
-    candidates = await db.get_catalog_candidates(conn, goals, limit=60)
+    inferred_goals = db.infer_goals_from_text(str(answers.get("note") or ""))
+    merged_goals: list[str] = []
+    for goal in goals + inferred_goals:
+        if goal and goal not in merged_goals:
+            merged_goals.append(goal)
+    candidates = await db.get_catalog_candidates(conn, merged_goals, limit=60)
     messages = build_ai_checkin_prompt(
         {"tz_name": tz_name},
         stack,
@@ -2186,6 +2193,40 @@ async def _finalize_ai_checkin(
         "summary_ru": _truncate_text(data.get("summary_ru"), 600) or "Короткое резюме недоступно.",
         "disclaimer_ru": _truncate_text(data.get("disclaimer_ru"), 300),
     }
+    if not any(str(action.get("type") or "") == "add" for action in clean_actions):
+        now_hhmm = db.local_now(tz_name or None).strftime("%H:00")
+        fallback_adds = await db.build_goal_based_fallback_adds(
+            conn,
+            base_stack_slugs=stack_slugs,
+            goals=merged_goals,
+            note_text=str(answers.get("note") or ""),
+            now_hhmm=now_hhmm,
+            limit=2,
+        )
+        for item in fallback_adds:
+            if len(clean_actions) >= 6:
+                break
+            dedup_key = ("add", str(item.get("slug") or ""))
+            if dedup_key in seen_action_keys:
+                continue
+            clean_actions.append(
+                {
+                    "id": f"fb_{len(clean_actions) + 1}",
+                    "type": "add",
+                    "slug": str(item.get("slug") or ""),
+                    "supplement_id": int(item.get("supplement_id") or 0),
+                    "ru_name": str(item.get("name_ru") or ""),
+                    "dose_text": "",
+                    "suggested_time": str(item.get("suggested_time") or "12:00"),
+                    "prefer_existing_time": True,
+                    "time_hint": "",
+                    "confidence": 0.55,
+                    "reason_short_ru": str(item.get("reason") or "Подобрано fallback по цели из чек-ина"),
+                    "safety_ru": "Начинай с базовой дозы и оцени самочувствие.",
+                }
+            )
+            seen_action_keys.add(dedup_key)
+        payload["actions"] = clean_actions
     state["last_ai_actions_json"] = json.dumps(payload, ensure_ascii=False)
     state["selected_action_ids"] = []
     state["last_date_local"] = day

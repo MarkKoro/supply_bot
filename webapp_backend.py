@@ -2891,7 +2891,9 @@ async def _ai_recommendations(answers: dict, ctx: dict) -> tuple[list[dict], dic
         "Контекст context.last7 и context.stats содержит историю прошлых и сегодняшних приёмов — обязательно используй её. "
         "Добавки из context.stack можно только remove или adjust, но не add. "
         "Для action=add разрешены только новые добавки из context.catalog_candidates, которых нет в context.stack. "
-        "Для action=remove и action=adjust разрешены только добавки из context.stack."
+        "Для action=remove и action=adjust разрешены только добавки из context.stack. "
+        "Если пользователь просит рекомендации по энергии/силе/тренировке в answers.goals или answers.note, "
+        "и нет явных противопоказаний в контексте, обязательно верни хотя бы один action=add."
     )
     prompt = json.dumps({"answers": answers, "context": ctx}, ensure_ascii=False)
     text = await __import__('asyncio').to_thread(_sync_call, cfg, instructions=instructions, input_text=prompt, max_output_tokens=800, timeout_s=20)
@@ -2987,7 +2989,12 @@ async def api_checkin(body: CheckinBody, x_telegram_init_data: str = Header(defa
             mapped = goal_map.get(str(goal).strip().lower())
             if mapped and mapped not in mapped_goals:
                 mapped_goals.append(mapped)
-        catalog_candidates = await db.get_catalog_candidates(conn, mapped_goals, limit=60)
+        inferred_goals = db.infer_goals_from_text(str(answers.get("note") or ""))
+        merged_goals: list[str] = []
+        for goal in mapped_goals + inferred_goals:
+            if goal and goal not in merged_goals:
+                merged_goals.append(goal)
+        catalog_candidates = await db.get_catalog_candidates(conn, merged_goals, limit=60)
         ctx["catalog_candidates"] = [
             {
                 "slug": str(item.get("slug") or ""),
@@ -3020,29 +3027,16 @@ async def api_checkin(body: CheckinBody, x_telegram_init_data: str = Header(defa
                 candidate_slugs=candidate_slugs,
             )
 
-            # safeguard: when user selected goals, ensure at least one add suggestion exists
-            if mapped_goals and not any(str(r.get("action") or "") == "add" for r in recs):
-                fallback_adds: list[dict] = []
-                for cand in catalog_candidates:
-                    slug = str(cand.get("slug") or "").strip().lower()
-                    if not slug or slug in stack_slugs:
-                        continue
-                    row = await db.fetchone(conn, "SELECT id, slug, COALESCE(NULLIF(name_ru,''), NULLIF(name_en,''), name) AS name_ru FROM supplements WHERE slug=?", (slug,))
-                    if not row:
-                        continue
-                    fallback_adds.append({
-                        "action": "add",
-                        "slug": str(row["slug"]),
-                        "name_ru": str(row["name_ru"] or ""),
-                        "reason": "Подобрано по цели из опроса",
-                        "priority": 2,
-                        "suggested_time": now_local.strftime("%H:00"),
-                        "suggested_slot_id": None,
-                        "prefer_existing_time": True,
-                        "supplement_id": int(row["id"]),
-                    })
-                    if len(fallback_adds) >= 2:
-                        break
+            # safeguard: always provide at least one add suggestion when user asks for goals/energy in note
+            if (merged_goals or str(answers.get("note") or "").strip()) and not any(str(r.get("action") or "") == "add" for r in recs):
+                fallback_adds = await db.build_goal_based_fallback_adds(
+                    conn,
+                    base_stack_slugs=stack_slugs,
+                    goals=merged_goals,
+                    note_text=str(answers.get("note") or ""),
+                    now_hhmm=now_local.strftime("%H:00"),
+                    limit=2,
+                )
                 recs.extend(fallback_adds)
 
             await db.save_ai_result(conn, checkin_id, recs, p_hash)

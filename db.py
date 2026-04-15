@@ -3727,8 +3727,8 @@ async def search_supplements(
             {
                 "id": int(row["id"]),
                 "slug": str(row["slug"] or ""),
-                "name_ru": str(row["name_ru"] or ""),
-                "name_en": str(row["name_en"] or ""),
+                "name_ru": _display_name_without_intake_suffix(row["name_ru"], row["name_en"], ""),
+                "name_en": _display_name_without_intake_suffix(row["name_en"], row["name_ru"], ""),
                 "evidence_grade": str(row["evidence_grade"] or ""),
                 "has_link": bool(int(row["has_link"] or 0)),
             }
@@ -5603,8 +5603,8 @@ async def catalog_search(
             {
                 "id": int(row["id"]),
                 "slug": str(row["slug"] or ""),
-                "name_ru": str(row["name_ru"] or ""),
-                "name_en": str(row["name_en"] or ""),
+                "name_ru": _display_name_without_intake_suffix(row["name_ru"], row["name_en"], ""),
+                "name_en": _display_name_without_intake_suffix(row["name_en"], row["name_ru"], ""),
                 "evidence_grade": str(row["evidence_grade"] or ""),
                 "confidence": str(row["confidence"] or ""),
                 "in_stack": row["in_stack_id"] is not None,
@@ -5653,8 +5653,8 @@ async def get_supplement_detail_for_user(
     return {
         "id": int(row["id"]),
         "slug": str(row["slug"] or ""),
-        "name_ru": str(row["name_ru"] or row["name_en"] or row["name"] or ""),
-        "name_en": str(row["name_en"] or row["name"] or ""),
+        "name_ru": _display_name_without_intake_suffix(row["name_ru"], row["name_en"], row["name"]),
+        "name_en": _display_name_without_intake_suffix(row["name_en"], row["name_ru"], row["name"]),
         "evidence_grade": str(row["evidence_grade"] or ""),
         "confidence": str(row["confidence"] or ""),
         "summary_verified": str(row["summary_verified"] or ""),
@@ -5711,6 +5711,11 @@ async def add_user_supp(conn: aiosqlite.Connection, user_id: int, supplement_id:
 
 def _strip_intake_suffix(name: str) -> str:
     return re.sub(r"\s*\(прием\s*\d+\)\s*$", "", str(name or "").strip(), flags=re.IGNORECASE).strip()
+
+
+def _display_name_without_intake_suffix(name_ru: str | None, name_en: str | None, name: str | None) -> str:
+    label = str(name_ru or name_en or name or "").strip()
+    return _strip_intake_suffix(label)
 
 
 async def _refresh_split_titles(conn: aiosqlite.Connection, user_id: int, base_supplement_id: int) -> None:
@@ -5882,6 +5887,25 @@ async def remove_user_supplements_bulk(
         f"DELETE FROM reminders WHERE user_id=? AND supplement_id IN ({placeholders})",
         (tg_user_id, *cleaned),
     )
+    split_rows = await fetchall(
+        conn,
+        f"SELECT DISTINCT base_supplement_id FROM user_supplement_split_groups WHERE user_id=? AND supplement_id IN ({placeholders})",
+        (user_id, *cleaned),
+    )
+    base_ids = [int(row["base_supplement_id"] or 0) for row in split_rows if int(row["base_supplement_id"] or 0) > 0]
+    if base_ids:
+        ph = ",".join("?" for _ in base_ids)
+        name_rows = await fetchall(
+            conn,
+            f"SELECT id, name_ru, name_en, name FROM supplements WHERE id IN ({ph})",
+            tuple(base_ids),
+        )
+        for row in name_rows:
+            normalized = _display_name_without_intake_suffix(row["name_ru"], row["name_en"], row["name"])
+            await conn.execute(
+                "UPDATE supplements SET name_ru=?, name=? WHERE id=?",
+                (normalized, normalized, int(row["id"] or 0)),
+            )
     await conn.execute(
         f"DELETE FROM user_supplement_split_groups WHERE user_id=? AND supplement_id IN ({placeholders})",
         (user_id, *cleaned),

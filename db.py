@@ -2648,12 +2648,32 @@ async def admin_delete_user(conn: aiosqlite.Connection, admin_tg_id: int, tg_use
         "user_schedule_slots",
         "user_intake_log",
         "user_supp_settings",
-        "reminders",
-        "reminder_fires",
         "intake_log",
-        "ui_state",
+        "lab_results",
+        "lab_reports",
+        "nutrient_plan_runs",
+        "nutrient_followup_reminders",
+        "llm_assistant_runs",
+        "llm_assistant_plan_actions",
     ):
         await conn.execute(f"DELETE FROM {table} WHERE user_id=?", (user_id,))
+    # NOTE: reminders/ui_state/reminder_fires store Telegram user id, not internal users.id.
+    for table in ("reminders", "reminder_fires", "ui_state"):
+        await conn.execute(f"DELETE FROM {table} WHERE user_id=?", (int(tg_user_id),))
+    # Complex items don't have user_id, so delete via owned complexes first.
+    owned_complex_rows = await fetchall(conn, "SELECT id FROM user_complexes WHERE user_id=?", (user_id,))
+    owned_complex_ids = [int(r["id"] or 0) for r in owned_complex_rows if int(r["id"] or 0) > 0]
+    if owned_complex_ids:
+        ph = ",".join("?" for _ in owned_complex_ids)
+        await conn.execute(
+            f"DELETE FROM user_complex_items WHERE complex_id IN ({ph})",
+            tuple(owned_complex_ids),
+        )
+        await conn.execute(
+            f"DELETE FROM user_complex_schedules WHERE user_id=? AND complex_id IN ({ph})",
+            (user_id, *owned_complex_ids),
+        )
+    await conn.execute("DELETE FROM user_complexes WHERE user_id=?", (user_id,))
     await conn.execute(
         """INSERT INTO admin_audit(admin_tg_id, entity_type, entity_id, field, old_value, new_value, action, created_at_utc)
            VALUES(?,?,?,?,?,?,?,?)""",
@@ -5650,11 +5670,22 @@ async def get_supplement_detail_for_user(
         and int(row["user_frozen"] or 0) == 0
     )
     is_frozen = bool(in_stack and int(row["user_is_active"] or 0) == 1 and int(row["user_frozen"] or 0) == 1)
+    intake_order, group_size = await _split_intake_meta(conn, user_id, int(row["id"] or 0))
+    name_ru = _with_intake_suffix(
+        _display_name_without_intake_suffix(row["name_ru"], row["name_en"], row["name"]),
+        intake_order,
+        group_size,
+    )
+    name_en = _with_intake_suffix(
+        _display_name_without_intake_suffix(row["name_en"], row["name_ru"], row["name"]),
+        intake_order,
+        group_size,
+    )
     return {
         "id": int(row["id"]),
         "slug": str(row["slug"] or ""),
-        "name_ru": _display_name_without_intake_suffix(row["name_ru"], row["name_en"], row["name"]),
-        "name_en": _display_name_without_intake_suffix(row["name_en"], row["name_ru"], row["name"]),
+        "name_ru": name_ru,
+        "name_en": name_en,
         "evidence_grade": str(row["evidence_grade"] or ""),
         "confidence": str(row["confidence"] or ""),
         "summary_verified": str(row["summary_verified"] or ""),
@@ -5719,35 +5750,47 @@ def _display_name_without_intake_suffix(name_ru: str | None, name_en: str | None
 
 
 async def _refresh_split_titles(conn: aiosqlite.Connection, user_id: int, base_supplement_id: int) -> None:
-    rows = await fetchall(
+    # NOTE:
+    # Intake split labels are user-scoped and must not mutate catalog data in `supplements`.
+    # Kept as a compatibility no-op because callers may still invoke this helper.
+    return
+
+
+async def _split_intake_meta(
+    conn: aiosqlite.Connection,
+    user_id: int,
+    supplement_id: int,
+) -> tuple[int, int]:
+    row = await fetchone(
         conn,
-        """SELECT sg.supplement_id, sg.intake_order,
-                  COALESCE(NULLIF(s.name_ru,''), NULLIF(s.name_en,''), s.name, '') AS label
-           FROM user_supplement_split_groups sg
-           JOIN supplements s ON s.id=sg.supplement_id
-           JOIN user_supplements us ON us.user_id=sg.user_id AND us.supplement_id=sg.supplement_id
-           WHERE sg.user_id=? AND sg.base_supplement_id=? AND us.is_active=1 AND us.enabled=1
-           ORDER BY sg.intake_order ASC""",
+        """SELECT intake_order, base_supplement_id
+           FROM user_supplement_split_groups
+           WHERE user_id=? AND supplement_id=?
+           LIMIT 1""",
+        (int(user_id), int(supplement_id)),
+    )
+    if not row:
+        return 0, 0
+    intake_order = int(row["intake_order"] or 0)
+    base_supplement_id = int(row["base_supplement_id"] or 0)
+    if intake_order <= 0 or base_supplement_id <= 0:
+        return 0, 0
+    count_row = await fetchone(
+        conn,
+        """SELECT COUNT(*) AS cnt
+           FROM user_supplement_split_groups
+           WHERE user_id=? AND base_supplement_id=?""",
         (int(user_id), int(base_supplement_id)),
     )
-    if not rows:
-        return
-    base_name = _strip_intake_suffix(str(rows[0]["label"] or ""))
-    if len(rows) == 1:
-        sid = int(rows[0]["supplement_id"] or 0)
-        await conn.execute(
-            "UPDATE supplements SET name_ru=?, name=? WHERE id=?",
-            (base_name, base_name, sid),
-        )
-        return
-    for row in rows:
-        sid = int(row["supplement_id"] or 0)
-        idx = int(row["intake_order"] or 1)
-        title = f"{base_name} (прием {idx})"
-        await conn.execute(
-            "UPDATE supplements SET name_ru=?, name=? WHERE id=?",
-            (title, title, sid),
-        )
+    group_size = int(count_row["cnt"] or 0) if count_row else 0
+    return intake_order, group_size
+
+
+def _with_intake_suffix(label: str, intake_order: int, group_size: int) -> str:
+    cleaned = _strip_intake_suffix(label)
+    if intake_order > 0 and group_size > 1:
+        return f"{cleaned} (прием {intake_order})"
+    return cleaned
 
 
 async def split_user_supplement_intake(conn: aiosqlite.Connection, tg_user_id: int, supplement_id: int) -> dict:
@@ -5887,25 +5930,6 @@ async def remove_user_supplements_bulk(
         f"DELETE FROM reminders WHERE user_id=? AND supplement_id IN ({placeholders})",
         (tg_user_id, *cleaned),
     )
-    split_rows = await fetchall(
-        conn,
-        f"SELECT DISTINCT base_supplement_id FROM user_supplement_split_groups WHERE user_id=? AND supplement_id IN ({placeholders})",
-        (user_id, *cleaned),
-    )
-    base_ids = [int(row["base_supplement_id"] or 0) for row in split_rows if int(row["base_supplement_id"] or 0) > 0]
-    if base_ids:
-        ph = ",".join("?" for _ in base_ids)
-        name_rows = await fetchall(
-            conn,
-            f"SELECT id, name_ru, name_en, name FROM supplements WHERE id IN ({ph})",
-            tuple(base_ids),
-        )
-        for row in name_rows:
-            normalized = _display_name_without_intake_suffix(row["name_ru"], row["name_en"], row["name"])
-            await conn.execute(
-                "UPDATE supplements SET name_ru=?, name=? WHERE id=?",
-                (normalized, normalized, int(row["id"] or 0)),
-            )
     await conn.execute(
         f"DELETE FROM user_supplement_split_groups WHERE user_id=? AND supplement_id IN ({placeholders})",
         (user_id, *cleaned),
@@ -6209,25 +6233,32 @@ async def get_user_supplements_with_enabled(conn: aiosqlite.Connection, tg_user_
            ORDER BY COALESCE(NULLIF(s.name_ru,''), NULLIF(s.name_en,''), s.name), us.supplement_id""",
         (user_id,),
     )
-    return [
-        {
-            "supplement_id": int(r["supplement_id"] or 0),
-            "enabled": int(r["enabled"] or 0),
-            "is_active": int(r["is_active"] or 0),
-            "user_frozen": int(r["user_frozen"] or 0),
-            "is_frozen": int(r["user_frozen"] or 0) == 1 or int(r["enabled"] or 0) == 0,
-            "status": "frozen" if int(r["user_frozen"] or 0) == 1 else ("active" if int(r["enabled"] or 0) == 1 else "paused"),
-            "slug": str(r["slug"] or "").strip(),
-            "name_ru": str(r["name_ru"] or "").strip(),
-            "name_en": str(r["name_en"] or "").strip(),
-            "name": str(r["name"] or "").strip(),
-            "dose_text": str(r["dose_text"] or "").strip(),
-            "note_text": str(r["note_text"] or "").strip(),
-            "created_at": str(r["created_at"] or "").strip(),
-            "taken_count": int(r["taken_count"] or 0),
-        }
-        for r in rows
-    ]
+    out: list[dict] = []
+    for r in rows:
+        supplement_id = int(r["supplement_id"] or 0)
+        intake_order, group_size = await _split_intake_meta(conn, user_id, supplement_id)
+        name_ru = _with_intake_suffix(str(r["name_ru"] or "").strip(), intake_order, group_size)
+        name_en = _with_intake_suffix(str(r["name_en"] or "").strip(), intake_order, group_size)
+        name = _with_intake_suffix(str(r["name"] or "").strip(), intake_order, group_size)
+        out.append(
+            {
+                "supplement_id": supplement_id,
+                "enabled": int(r["enabled"] or 0),
+                "is_active": int(r["is_active"] or 0),
+                "user_frozen": int(r["user_frozen"] or 0),
+                "is_frozen": int(r["user_frozen"] or 0) == 1 or int(r["enabled"] or 0) == 0,
+                "status": "frozen" if int(r["user_frozen"] or 0) == 1 else ("active" if int(r["enabled"] or 0) == 1 else "paused"),
+                "slug": str(r["slug"] or "").strip(),
+                "name_ru": name_ru,
+                "name_en": name_en,
+                "name": name,
+                "dose_text": str(r["dose_text"] or "").strip(),
+                "note_text": str(r["note_text"] or "").strip(),
+                "created_at": str(r["created_at"] or "").strip(),
+                "taken_count": int(r["taken_count"] or 0),
+            }
+        )
+    return out
 
 
 async def set_user_supp_enabled(conn: aiosqlite.Connection, user_id: int, supp_id: int, enabled: int) -> bool:
@@ -6379,7 +6410,7 @@ async def list_user_stack_details(conn: aiosqlite.Connection, tg_user_id: int, l
     user_id = await get_or_create_user(conn, tg_user_id)
     params: list = [local_date or "", user_id]
     status_join = "LEFT JOIN supplement_day_state sds ON sds.user_id=us.user_id AND sds.supplement_id=us.supplement_id AND sds.day=?"
-    return await fetchall(
+    rows = await fetchall(
         conn,
         f"""SELECT us.supplement_id,
                    COALESCE(NULLIF(uss.dose_text, ''), us.dose_text) AS dose_text,
@@ -6396,6 +6427,14 @@ async def list_user_stack_details(conn: aiosqlite.Connection, tg_user_id: int, l
             ORDER BY s.name""",
         tuple(params),
     )
+    out = []
+    for row in rows:
+        item = dict(row)
+        supplement_id = int(item.get("supplement_id") or 0)
+        intake_order, group_size = await _split_intake_meta(conn, user_id, supplement_id)
+        item["name"] = _with_intake_suffix(str(item.get("name") or ""), intake_order, group_size)
+        out.append(item)
+    return out
 
 async def user_has_supplement(conn: aiosqlite.Connection, tg_user_id: int, supplement_id: int) -> bool:
     user_id = await get_or_create_user(conn, tg_user_id)
@@ -7956,14 +7995,24 @@ async def create_complex(conn: aiosqlite.Connection, tg_user_id: int, name: str,
     title = str(name or "").strip()
     if not title:
         raise ValueError("name_required")
-    await conn.execute(
-        """INSERT INTO user_complexes(user_id, name, note, created_at_utc, updated_at_utc)
-           VALUES(?,?,?,?,?)""",
-        (user_id, title[:120], str(note or "").strip()[:500], now, now),
+    try:
+        cur = await conn.execute(
+            """INSERT INTO user_complexes(user_id, name, note, created_at_utc, updated_at_utc)
+               VALUES(?,?,?,?,?)""",
+            (user_id, title[:120], str(note or "").strip()[:500], now, now),
+        )
+    except Exception as exc:
+        if "UNIQUE constraint failed: user_complexes.user_id, user_complexes.name" in str(exc):
+            raise ValueError("name_already_exists") from exc
+        raise
+    complex_id = int(cur.lastrowid or 0)
+    row = await fetchone(
+        conn,
+        "SELECT id, name, note, created_at_utc, updated_at_utc FROM user_complexes WHERE id=? AND user_id=?",
+        (complex_id, user_id),
     )
-    row = await fetchone(conn, "SELECT id, name, note, created_at_utc, updated_at_utc FROM user_complexes WHERE user_id=? AND name=?", (user_id, title[:120]))
     await conn.commit()
-    return dict(row) if row else {"id": 0, "name": title[:120], "note": str(note or "").strip()[:500]}
+    return dict(row) if row else {"id": complex_id, "name": title[:120], "note": str(note or "").strip()[:500]}
 
 
 async def rename_complex(conn: aiosqlite.Connection, tg_user_id: int, complex_id: int, new_name: str) -> None:
@@ -7980,7 +8029,16 @@ async def rename_complex(conn: aiosqlite.Connection, tg_user_id: int, complex_id
 
 async def delete_complex(conn: aiosqlite.Connection, tg_user_id: int, complex_id: int) -> None:
     user_id = await get_or_create_user(conn, int(tg_user_id))
-    await conn.execute("DELETE FROM user_complex_items WHERE complex_id=?", (int(complex_id),))
+    owner = await fetchone(conn, "SELECT 1 FROM user_complexes WHERE id=? AND user_id=?", (int(complex_id), user_id))
+    if not owner:
+        raise ValueError("complex_not_found")
+    await conn.execute(
+        """DELETE FROM user_complex_items
+           WHERE complex_id IN (
+               SELECT id FROM user_complexes WHERE id=? AND user_id=?
+           )""",
+        (int(complex_id), user_id),
+    )
     await conn.execute("DELETE FROM user_complex_schedules WHERE user_id=? AND complex_id=?", (user_id, int(complex_id)))
     await conn.execute("DELETE FROM user_complexes WHERE user_id=? AND id=?", (user_id, int(complex_id)))
     await conn.commit()

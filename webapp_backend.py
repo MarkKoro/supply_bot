@@ -1521,6 +1521,8 @@ async def api_complexes_create(body: ComplexCreateBody, x_telegram_init_data: st
     conn = await db.connect(s.DB_PATH)
     try:
         item = await db.create_complex(conn, tg_user_id, body.name, body.note or "")
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "code": str(exc)}, status_code=400)
     finally:
         await conn.close()
     return JSONResponse({"ok": True, "item": item})
@@ -1534,6 +1536,8 @@ async def api_complexes_rename(body: ComplexRenameBody, x_telegram_init_data: st
     conn = await db.connect(s.DB_PATH)
     try:
         await db.rename_complex(conn, tg_user_id, int(body.complex_id), body.new_name)
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "code": str(exc)}, status_code=400)
     finally:
         await conn.close()
     return JSONResponse({"ok": True})
@@ -1547,6 +1551,8 @@ async def api_complexes_delete(body: ComplexDeleteBody, x_telegram_init_data: st
     conn = await db.connect(s.DB_PATH)
     try:
         await db.delete_complex(conn, tg_user_id, int(body.complex_id))
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "code": str(exc)}, status_code=404)
     finally:
         await conn.close()
     return JSONResponse({"ok": True})
@@ -1573,6 +1579,10 @@ async def api_complex_items_add(complex_id: int, body: ComplexItemBody, x_telegr
     conn = await db.connect(s.DB_PATH)
     try:
         await db.add_item_to_complex(conn, tg_user_id, int(complex_id), int(body.supplement_id), body.dose_override or "")
+    except ValueError as exc:
+        code = str(exc)
+        status_code = 404 if code == "complex_not_found" else 400
+        return JSONResponse({"ok": False, "code": code}, status_code=status_code)
     finally:
         await conn.close()
     return JSONResponse({"ok": True})
@@ -1612,6 +1622,10 @@ async def api_complex_schedules_set(body: ComplexScheduleSetBody, x_telegram_ini
     conn = await db.connect(s.DB_PATH)
     try:
         await db.set_complex_schedule(conn, tg_user_id, int(body.complex_id), body.slot_id, body.time_local)
+    except ValueError as exc:
+        code = str(exc)
+        status_code = 404 if code == "complex_not_found" else 400
+        return JSONResponse({"ok": False, "code": code}, status_code=status_code)
     finally:
         await conn.close()
     return JSONResponse({"ok": True})
@@ -2781,6 +2795,8 @@ async def api_schedule_slot_time(body: SlotTimeBody, x_telegram_init_data: str =
     try:
         user_id = await db.get_or_create_user(conn, tg_user_id, tz_name="")
         await db.set_user_slot_time(conn, user_id, body.slot_id, body.time_local)
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "code": str(exc)}, status_code=400)
     finally:
         await conn.close()
     return JSONResponse({"ok": True})
@@ -2795,10 +2811,14 @@ async def api_schedule_slot_enabled(body: SlotEnabledBody, x_telegram_init_data:
     try:
         user_id = await db.get_or_create_user(conn, tg_user_id, tz_name="")
         slots = await db.get_user_slots(conn, user_id)
+        target_slot_id = str(body.slot_id or "").strip()
+        slot_exists = any(str(slot.get("slot_id") or "") == target_slot_id for slot in slots)
+        if not slot_exists:
+            return JSONResponse({"ok": False, "code": "slot_not_found"}, status_code=404)
         updated: list[dict] = []
         for slot in slots:
             next_slot = dict(slot)
-            if str(slot.get("slot_id") or "") == str(body.slot_id or ""):
+            if str(slot.get("slot_id") or "") == target_slot_id:
                 next_slot["is_enabled"] = bool(body.is_enabled)
             updated.append(next_slot)
         await db.set_user_slots(conn, user_id, updated)
@@ -2816,6 +2836,8 @@ async def api_schedule_add_slot(body: AddSlotBody, x_telegram_init_data: str = H
     try:
         user_id = await db.get_or_create_user(conn, tg_user_id, tz_name="")
         slot_id = await db.add_custom_slot(conn, user_id, body.time_local, body.title_ru)
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "code": str(exc)}, status_code=400)
     finally:
         await conn.close()
     return JSONResponse({"ok": True, "slot_id": slot_id})
@@ -2847,6 +2869,8 @@ async def api_schedule_set(body: ScheduleSetBody, x_telegram_init_data: str = He
         user_id = await db.get_or_create_user(conn, tg_user_id, tz_name="")
         await db.set_schedule_slot(conn, user_id, int(body.supplement_id), body.slot_id)
         await db.set_schedule_time_override(conn, user_id, int(body.supplement_id), body.time_hhmm)
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "code": str(exc)}, status_code=400)
     finally:
         await conn.close()
     return JSONResponse({"ok": True})

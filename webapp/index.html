@@ -1295,9 +1295,13 @@
 
   function showToast(text) {
     const wrap = document.getElementById("toastWrap");
-    wrap.innerHTML = `<div class="toast fade">${text}</div>`;
+    if (!wrap) return;
+    const toast = document.createElement("div");
+    toast.className = "toast fade";
+    toast.textContent = String(text ?? "");
+    wrap.replaceChildren(toast);
     clearTimeout(state.toastTimer);
-    state.toastTimer = setTimeout(() => { wrap.innerHTML = ""; }, 2200);
+    state.toastTimer = setTimeout(() => { wrap.replaceChildren(); }, 2200);
   }
 
   function isValidEmail(v) {
@@ -1904,7 +1908,7 @@
         <div class="card devbox fade">
           <h3 style="margin:0">Dev fallback</h3>
           <p class="muted">Вставьте initData для теста в обычном браузере.</p>
-          ${errorText ? `<p class="muted">${errorText}</p>` : ""}
+          ${errorText ? `<p class="muted">${esc(errorText)}</p>` : ""}
           <textarea id="initDataInput" placeholder="query_id=...&user=...&hash=..."></textarea>
           <div style="margin-top:8px">
             <button class="btn" id="saveInitBtn">Применить</button>

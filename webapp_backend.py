@@ -2882,7 +2882,7 @@ def _validate_answers(payload: dict) -> dict:
     stress = str(payload.get("stress") or "").strip().lower()
     training = str(payload.get("training") or "").strip().lower()
     goals = [str(x).strip().lower() for x in list(payload.get("goals") or []) if str(x).strip()]
-    note = str(payload.get("note") or "").strip()[:280]
+    note = str(payload.get("note") or "").strip()[:180]
     if energy not in {"low", "ok", "high"}:
         raise HTTPException(status_code=400, detail="invalid energy")
     if sleep not in {"poor", "ok", "great"}:
@@ -3027,6 +3027,45 @@ async def api_checkin(body: CheckinBody, x_telegram_init_data: str = Header(defa
         tz_name = await db.get_user_tz(conn, tg_user_id)
         target_raw = body.target_day if body.target_day is not None else body.target
         target, local_date, now_local = _resolve_target_day(tz_name, target_raw)
+        existing = await db.get_today_checkin(conn, tg_user_id, local_date)
+        if existing:
+            existing_recs = []
+            existing_applied = None
+            try:
+                parsed = json.loads(existing.get("ai_raw_json") or "[]")
+                existing_recs = parsed if isinstance(parsed, list) else []
+            except Exception:
+                existing_recs = []
+            try:
+                parsed_applied = json.loads(existing.get("applied_json") or "null")
+                if isinstance(parsed_applied, dict) and parsed_applied:
+                    existing_applied = parsed_applied
+            except Exception:
+                existing_applied = None
+            if existing_recs or existing_applied:
+                existing_answers = {}
+                try:
+                    parsed_answers = json.loads(existing.get("answers_json") or "{}")
+                    if isinstance(parsed_answers, dict):
+                        existing_answers = parsed_answers
+                except Exception:
+                    existing_answers = {}
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "code": "CHECKIN_LIMIT_REACHED",
+                        "message": "Daily limit reached for this target date",
+                        "checkin": {
+                            "id": int(existing.get("id") or 0),
+                            "answers": existing_answers,
+                            "recommendations": existing_recs,
+                            "applied": existing_applied,
+                        },
+                        "date_local": local_date,
+                        "target": target,
+                    },
+                    status_code=409,
+                )
         checkin_id = await db.upsert_daily_checkin(conn, tg_user_id, local_date, answers)
         ctx = await db.build_ai_context_compact(conn, tg_user_id, local_date)
         goal_map = {
@@ -3168,6 +3207,24 @@ async def api_checkin_apply(body: CheckinApplyBody, x_telegram_init_data: str = 
         )
         summary["new_time_groups"] = sorted(created_times)
         summary["reminders_added"] = reminders_added
+        applied_notice = {
+            "applied_at_utc": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "target_day": target_day,
+            "date_local": target_date,
+            "mode": body.mode or "selected",
+            "items": [
+                {
+                    "supplement_id": int(item.get("supplement_id") or 0),
+                    "name_ru": str(item.get("name_ru") or item.get("name") or ""),
+                    "slug": str(item.get("slug") or ""),
+                    "action": str(item.get("action") or "add"),
+                }
+                for item in picked
+                if int(item.get("supplement_id") or 0) > 0
+            ],
+            "summary": summary,
+        }
+        await db.set_daily_checkin_applied(conn, int(body.checkin_id), tg_user_id, applied_notice)
         newly = await db.evaluate_and_unlock_achievements(conn, tg_user_id, target_date)
         newly_unlocked_details = await _build_newly_unlocked_details(conn, newly)
     finally:
@@ -3176,6 +3233,7 @@ async def api_checkin_apply(body: CheckinApplyBody, x_telegram_init_data: str = 
         "ok": True,
         "summary": summary,
         "date_local": target_date,
+        "applied_notice": applied_notice,
         "newly_unlocked": newly,
         "newly_unlocked_details": newly_unlocked_details,
     })
@@ -3265,7 +3323,14 @@ async def api_checkin_today(target: str | None = None, x_telegram_init_data: str
         answers = json.loads(row.get("answers_json") or "{}")
     except Exception:
         pass
-    return JSONResponse({"ok": True, "checkin": {"id": int(row.get("id") or 0), "answers": answers, "recommendations": recs}, "date_local": local_date, "target": resolved_target})
+    applied = None
+    try:
+        parsed_applied = json.loads(row.get("applied_json") or "null")
+        if isinstance(parsed_applied, dict) and parsed_applied:
+            applied = parsed_applied
+    except Exception:
+        pass
+    return JSONResponse({"ok": True, "checkin": {"id": int(row.get("id") or 0), "answers": answers, "recommendations": recs, "applied": applied}, "date_local": local_date, "target": resolved_target})
 
 
 @app.post("/api/admin/diagnostics/run")

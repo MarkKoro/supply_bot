@@ -7587,6 +7587,20 @@ async def get_daily_checkin_by_id(conn: aiosqlite.Connection, checkin_id: int, t
     return dict(row) if row else None
 
 
+async def set_daily_checkin_applied(
+    conn: aiosqlite.Connection,
+    checkin_id: int,
+    tg_user_id: int,
+    payload: dict,
+) -> None:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    await conn.execute(
+        "UPDATE daily_checkins SET applied_json=? WHERE id=? AND user_id=?",
+        (json.dumps(payload or {}, ensure_ascii=False), int(checkin_id), user_id),
+    )
+    await conn.commit()
+
+
 async def get_today_checkin(conn: aiosqlite.Connection, tg_user_id: int, local_date: str) -> dict | None:
     user_id = await get_or_create_user(conn, int(tg_user_id))
     row = await fetchone(

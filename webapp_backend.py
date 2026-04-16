@@ -2916,6 +2916,7 @@ async def _ai_recommendations(answers: dict, ctx: dict) -> tuple[list[dict], dic
         "Добавки из context.stack можно только remove или adjust, но не add. "
         "Для action=add разрешены только новые добавки из context.catalog_candidates, которых нет в context.stack. "
         "Для action=remove и action=adjust разрешены только добавки из context.stack. "
+        "Добавки, входящие в любые комплексы пользователя (context.complexes), не предлагай ни для add, ни для remove/adjust: комплексы в этом сценарии не меняем. "
         "Добавки со статусом taken в context.target_day_state уже приняты за целевой день: "
         "их запрещено предлагать для remove/adjust. "
         "Если пользователь просит рекомендации по энергии/силе/тренировке в answers.goals или answers.note, "
@@ -2935,14 +2936,18 @@ async def _normalize_recommendations(
     *,
     stack_slugs: set[str],
     candidate_slugs: set[str],
+    complex_protected_slugs: set[str] | None = None,
     locked_taken_slugs: set[str] | None = None,
 ) -> list[dict]:
     out = []
     seen_action_keys: set[tuple[str, str]] = set()
     locked = {str(x or "").strip().lower() for x in list(locked_taken_slugs or set()) if str(x or "").strip()}
+    protected = {str(x or "").strip().lower() for x in list(complex_protected_slugs or set()) if str(x or "").strip()}
     for item in recs:
         slug = str(item.get("slug") or "").strip().lower()
         if not slug:
+            continue
+        if slug in protected:
             continue
         row = await db.fetchone(conn, "SELECT id, COALESCE(NULLIF(name_ru,''), NULLIF(name_en,''), name) AS name_ru, slug FROM supplements WHERE slug=?", (slug,))
         if not row:
@@ -3068,6 +3073,12 @@ async def api_checkin(body: CheckinBody, x_telegram_init_data: str = Header(defa
                 )
         checkin_id = await db.upsert_daily_checkin(conn, tg_user_id, local_date, answers)
         ctx = await db.build_ai_context_compact(conn, tg_user_id, local_date)
+        complex_protected_slugs = {
+            str(slug or "").strip().lower()
+            for c in (ctx.get("complexes") if isinstance(ctx.get("complexes"), list) else [])
+            for slug in ((c or {}).get("slugs") if isinstance((c or {}).get("slugs"), list) else [])
+            if str(slug or "").strip()
+        }
         goal_map = {
             "brain": "focus",
             "mood": "mood",
@@ -3093,7 +3104,7 @@ async def api_checkin(body: CheckinBody, x_telegram_init_data: str = Header(defa
                 "name_ru": str(item.get("name_ru") or item.get("name") or ""),
             }
             for item in catalog_candidates
-            if str(item.get("slug") or "").strip()
+            if str(item.get("slug") or "").strip() and str(item.get("slug") or "").strip().lower() not in complex_protected_slugs
         ]
         ctx["now_local_hhmm"] = now_local.strftime("%H:%M")
         ctx["target_day"] = target
@@ -3117,6 +3128,7 @@ async def api_checkin(body: CheckinBody, x_telegram_init_data: str = Header(defa
                 recs_raw,
                 stack_slugs=stack_slugs,
                 candidate_slugs=candidate_slugs,
+                complex_protected_slugs=complex_protected_slugs,
                 locked_taken_slugs={
                     str(slug).strip().lower()
                     for slug, status in (ctx.get("target_day_state") or {}).items()
@@ -3134,7 +3146,10 @@ async def api_checkin(body: CheckinBody, x_telegram_init_data: str = Header(defa
                     now_hhmm=now_local.strftime("%H:00"),
                     limit=2,
                 )
-                recs.extend(fallback_adds)
+                recs.extend([
+                    x for x in fallback_adds
+                    if str(x.get("slug") or "").strip().lower() not in complex_protected_slugs
+                ])
 
             await db.save_ai_result(conn, checkin_id, recs, p_hash)
             return JSONResponse({"ok": True, "checkin_id": checkin_id, "recommendations": recs, "meta": meta, "date_local": local_date, "target": target})
@@ -3176,6 +3191,18 @@ async def api_checkin_apply(body: CheckinApplyBody, x_telegram_init_data: str = 
                 },
                 status_code=400,
             )
+        ctx_for_apply = await db.build_ai_context_compact(conn, tg_user_id, target_date)
+        complex_protected_slugs = {
+            str(slug or "").strip().lower()
+            for c in (ctx_for_apply.get("complexes") if isinstance(ctx_for_apply.get("complexes"), list) else [])
+            for slug in ((c or {}).get("slugs") if isinstance((c or {}).get("slugs"), list) else [])
+            if str(slug or "").strip()
+        }
+        if complex_protected_slugs:
+            picked = [
+                x for x in picked
+                if str(x.get("slug") or "").strip().lower() not in complex_protected_slugs
+            ]
         status_map = await db.get_day_status_map(conn, tg_user_id, target_date)
         picked = [
             x for x in picked

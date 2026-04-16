@@ -2992,6 +2992,29 @@ def _resolve_target_day(tz_name: str | None, target_raw: str | None) -> tuple[st
     return target, local_date, now_local
 
 
+def _normalize_local_date(value: str | None) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        return datetime.strptime(raw, "%Y-%m-%d").date().isoformat()
+    except ValueError:
+        return None
+
+
+def _target_day_from_local_date(local_date: str, today_local: str) -> str | None:
+    if local_date == today_local:
+        return "today"
+    try:
+        today_dt = datetime.strptime(today_local, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+    tomorrow_local = (today_dt + timedelta(days=1)).isoformat()
+    if local_date == tomorrow_local:
+        return "tomorrow"
+    return None
+
+
 @app.post("/api/checkin")
 async def api_checkin(body: CheckinBody, x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
     tg_user_id = await _auth_user_id(x_telegram_init_data)
@@ -3104,6 +3127,16 @@ async def api_checkin_apply(body: CheckinApplyBody, x_telegram_init_data: str = 
         tz_name = await db.get_user_tz(conn, tg_user_id)
         _, today_local, _ = _resolve_target_day(tz_name, "today")
         target_date = str(checkin.get("date_local") or "").strip() or today_local
+        target_day = _target_day_from_local_date(target_date, today_local)
+        if not target_day:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "code": "UNSUPPORTED_LOCAL_DATE",
+                    "message": "Only today's or tomorrow's local date is supported for applying recommendations",
+                },
+                status_code=400,
+            )
         status_map = await db.get_day_status_map(conn, tg_user_id, target_date)
         picked = [
             x for x in picked
@@ -3117,6 +3150,7 @@ async def api_checkin_apply(body: CheckinApplyBody, x_telegram_init_data: str = 
             conn,
             user_id,
             picked,
+            target_day=target_day,
             action_field="action",
             add_actions={"add", "adjust"},
             time_field="suggested_time",
@@ -3158,12 +3192,31 @@ async def api_recommendations_apply_all(body: RecommendationsApplyBody, x_telegr
     conn = await db.connect(s.DB_PATH)
     try:
         tz_name = await db.get_user_tz(conn, tg_user_id)
-        local_date = str(body.local_date or "").strip() or db.get_user_local_date(tz_name or None)
+        today_local = db.get_user_local_date(tz_name or None)
+        local_date = _normalize_local_date(body.local_date)
+        if body.local_date is not None and str(body.local_date).strip() and not local_date:
+            return JSONResponse(
+                {"ok": False, "code": "INVALID_LOCAL_DATE", "error": "local_date must be in YYYY-MM-DD format"},
+                status_code=400,
+            )
+        if not local_date:
+            local_date = today_local
+        target_day = _target_day_from_local_date(local_date, today_local)
+        if not target_day:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "code": "UNSUPPORTED_LOCAL_DATE",
+                    "message": "Only today's or tomorrow's local date is supported for applying recommendations",
+                },
+                status_code=400,
+            )
         user_id = await db.get_or_create_user(conn, tg_user_id, tz_name="")
         prepared, created_times = await engine.assign_slots_by_time(
             conn,
             user_id,
             recs,
+            target_day=target_day,
             action_field="action",
             add_actions={"add", "adjust"},
             time_field="suggested_time",

@@ -1035,6 +1035,8 @@
       selected: {},
       applying: false,
       helpOpen: false,
+      limitReached: false,
+      appliedNotice: null,
       answers: { energy:"", sleep:"", stress:"", training:"", goals:[], note:"" }
     },
     admin: {
@@ -2488,27 +2490,43 @@
     return `survey:${uid}:${surveyTargetDateISO(target)}:${target}`;
   }
 
-  async function loadSurveyForTarget(force=false) {
-    initSurveyTarget();
-    const key = `${state.survey.target}:${surveyTargetDateISO(state.survey.target)}`;
-    if (state.survey.loadedKey === key && !force) return;
+  function resetSurveyDraftForCurrentTarget() {
     state.survey.step = 0;
     state.survey.view = 'wizard';
     state.survey.checkinId = null;
     state.survey.recommendations = [];
     state.survey.selected = {};
     state.survey.helpOpen = false;
+    state.survey.limitReached = false;
     state.survey.answers = { energy:"", sleep:"", stress:"", training:"", goals:[], note:"" };
+    try { localStorage.removeItem(surveyStorageKey()); } catch {}
+  }
+
+  async function loadSurveyForTarget(force=false) {
+    initSurveyTarget();
+    const key = `${state.survey.target}:${surveyTargetDateISO(state.survey.target)}`;
+    if (state.survey.loadedKey === key && !force) return;
+    resetSurveyDraftForCurrentTarget();
+    state.survey.appliedNotice = null;
     try {
       const data = await api(`./api/checkin/today?target=${state.survey.target}`);
-      const saved = localStorage.getItem(surveyStorageKey());
-      if (saved) state.survey.answers = { ...state.survey.answers, ...JSON.parse(saved) };
       if (data?.checkin) {
-        state.survey.checkinId = data.checkin.id;
-        state.survey.answers = { ...state.survey.answers, ...(data.checkin.answers || {}) };
-        state.survey.recommendations = data.checkin.recommendations || [];
-        state.survey.selected = Object.fromEntries((state.survey.recommendations || []).map((x) => [x.supplement_id, true]));
-        if (state.survey.recommendations.length) state.survey.view = 'review';
+        state.survey.limitReached = true;
+        if (data.checkin.applied) {
+          state.survey.appliedNotice = data.checkin.applied;
+          try { localStorage.removeItem(surveyStorageKey()); } catch {}
+        } else {
+          const saved = localStorage.getItem(surveyStorageKey());
+          if (saved) state.survey.answers = { ...state.survey.answers, ...JSON.parse(saved) };
+          state.survey.checkinId = data.checkin.id;
+          state.survey.answers = { ...state.survey.answers, ...(data.checkin.answers || {}) };
+          state.survey.recommendations = data.checkin.recommendations || [];
+          state.survey.selected = Object.fromEntries((state.survey.recommendations || []).map((x) => [x.supplement_id, true]));
+          if (state.survey.recommendations.length) state.survey.view = 'review';
+        }
+      } else {
+        const saved = localStorage.getItem(surveyStorageKey());
+        if (saved) state.survey.answers = { ...state.survey.answers, ...JSON.parse(saved) };
       }
       state.survey.loadedKey = key;
     } catch {}
@@ -2519,6 +2537,21 @@
     const sv = state.survey;
     const surveyHelpHtml = `<div class="survey-help muted"><div><strong>Что это за раздел:</strong> здесь мы собираем ваш короткий чек-ин и на его основе корректируем план БАДов: можем предложить добавить новые позиции, изменить дозировки или убрать лишнее.</div><div style="margin-top:8px"><strong>Если выбрать «Сегодня»:</strong> мы посмотрим, что вы уже выпили за текущий день, что пропущено, и подскажем, что добавить или убрать сегодня с учётом ваших целей и запроса.</div><div style="margin-top:8px"><strong>Если выбрать «Завтра»:</strong> мы учтём ваш обычный средний паттерн приёма и цели, чтобы заранее предложить, что добавить или убрать в плане на завтра.</div></div>`;
     if (sv.loading) return `<div class="card">⏳ анализ…</div>`;
+    const appliedItems = Array.isArray(sv.appliedNotice?.items) ? sv.appliedNotice.items : [];
+    const appliedNames = appliedItems
+      .map((x) => String(x?.name_ru || x?.name || x?.slug || '').trim())
+      .filter(Boolean)
+      .slice(0, 3);
+    const appliedTail = appliedItems.length > 3 ? ` и ещё ${appliedItems.length - 3}` : '';
+    const appliedWhen = sv.target === 'today' ? 'сегодня' : 'на завтра';
+    let surveyLimitBanner = '';
+    if (sv.limitReached && sv.appliedNotice) {
+      surveyLimitBanner = `<div class="card fade"><div><strong>Опрос уже применён ${appliedWhen}.</strong></div><div class="muted" style="margin-top:6px">${appliedNames.length ? `Добавлено/обновлено: ${esc(appliedNames.join(', '))}${appliedTail}.` : 'Изменения уже внесены в план.'} Повторный запрос для этого дня недоступен.</div></div>`;
+    } else if (sv.limitReached && sv.view === 'review') {
+      surveyLimitBanner = `<div class="card fade"><div><strong>Опрос на ${appliedWhen} уже сформирован.</strong></div><div class="muted" style="margin-top:6px">Повторно запрашивать рекомендации нельзя. Можно применить текущие рекомендации или переключиться на другой день.</div></div>`;
+    } else if (sv.limitReached) {
+      surveyLimitBanner = `<div class="card fade"><div><strong>Опрос на ${appliedWhen} уже пройден.</strong></div><div class="muted" style="margin-top:6px">Лимит — 1 запрос на этот день. Повторный запуск станет доступен после смены дня.</div></div>`;
+    }
     if (sv.view === 'review') {
       const todaySet = new Set();
       for (const slot of (state.today?.slots || [])) {
@@ -2531,7 +2564,7 @@
         const checked = removeTaken ? false : (sv.selected[r.supplement_id] !== false);
         return `<div class="rec-card"><div class="row"><label><input type="checkbox" data-rec-toggle="${r.supplement_id}" ${checked ? 'checked' : ''} ${removeTaken ? 'disabled' : ''}/> <strong>${esc(r.name_ru || r.slug)}</strong></label><span class="badge ${r.action==='remove'?'minus':(r.action==='adjust'?'':'plus')}">${r.action==='add'?'+':(r.action==='remove'?'−':'≈')}</span></div><div class="muted" style="margin-top:6px">${esc(r.reason || '')}${removeTaken ? ' • уже выпито сегодня — убирать не нужно' : (already ? ' • уже в плане' : '')}</div></div>`;
       }).join('');
-      return `<div class="card fade survey-card"><button class="btn secondary survey-help-btn survey-help-corner" type="button" data-survey-help>?</button><div class="row survey-head"><div class="survey-title-wrap"><h3 style="margin:0">Рекомендации</h3></div><div class="survey-target-wrap"><span class="muted" style="font-size:12px">Рекомендация на:</span><div class="segmented" data-survey-target><button class="seg-btn ${sv.target==='today'?'active':''}" data-set-target="today">Сегодня</button><button class="seg-btn ${sv.target==='tomorrow'?'active':''}" data-set-target="tomorrow">Завтра</button></div></div></div>${sv.helpOpen ? surveyHelpHtml : ''}${rows || '<div class="muted">Нет рекомендаций</div>'}<div style="margin-top:10px"><button class="btn" id="applyAll" style="width:100%; font-weight:800" ${sv.applying ? 'disabled' : ''}>✅ Применить всё</button></div><div class="survey-actions"><button class="btn secondary" id="applySelected" ${sv.applying ? 'disabled' : ''}>Применить выбранное</button><button class="btn secondary" id="cancelSurvey" ${sv.applying ? 'disabled' : ''}>Отмена</button></div></div>`;
+      return `${surveyLimitBanner}<div class="card fade survey-card"><button class="btn secondary survey-help-btn survey-help-corner" type="button" data-survey-help>?</button><div class="row survey-head"><div class="survey-title-wrap"><h3 style="margin:0">Рекомендации</h3></div><div class="survey-target-wrap"><span class="muted" style="font-size:12px">Рекомендация на:</span><div class="segmented" data-survey-target><button class="seg-btn ${sv.target==='today'?'active':''}" data-set-target="today">Сегодня</button><button class="seg-btn ${sv.target==='tomorrow'?'active':''}" data-set-target="tomorrow">Завтра</button></div></div></div>${sv.helpOpen ? surveyHelpHtml : ''}${rows || '<div class="muted">Нет рекомендаций</div>'}<div style="margin-top:10px"><button class="btn" id="applyAll" style="width:100%; font-weight:800" ${sv.applying ? 'disabled' : ''}>✅ Применить всё</button></div><div class="survey-actions"><button class="btn secondary" id="applySelected" ${sv.applying ? 'disabled' : ''}>Применить выбранное</button><button class="btn secondary" id="cancelSurvey" ${sv.applying ? 'disabled' : ''}>Отмена</button></div></div>`;
     }
     const step = SURVEY_STEPS[sv.step];
     const p = Math.round(((sv.step+1)/SURVEY_STEPS.length)*100);
@@ -2541,9 +2574,9 @@
     } else if (step.goals) {
       body = `<div class="survey-goals">${step.goals.map((g)=>`<button class="chip ${sv.answers.goals.includes(g)?'green':''}" data-goal-toggle="${g}">${GOAL_LABELS_RU[g] || g}</button>`).join('')}</div>`;
     } else {
-      body = `<textarea id="surveyNote" maxlength="280" class="survey-note" placeholder="Короткая заметка">${esc(sv.answers.note || '')}</textarea><div class="muted" style="margin-top:6px">${(sv.answers.note||'').length}/280</div>`;
+      body = `<textarea id="surveyNote" maxlength="180" class="survey-note" placeholder="Короткая заметка">${esc(sv.answers.note || '')}</textarea><div class="muted" style="margin-top:6px">${(sv.answers.note||'').length}/180</div>`;
     }
-    return `<div class="card fade survey-card"><button class="btn secondary survey-help-btn survey-help-corner" type="button" data-survey-help>?</button><div class="row survey-head"><div class="survey-title-wrap"><strong>${step.title}</strong></div><div class="survey-target-wrap"><span class="muted" style="font-size:12px">Рекомендация на:</span><div class="segmented" data-survey-target><button class="seg-btn ${sv.target==='today'?'active':''}" data-set-target="today">Сегодня</button><button class="seg-btn ${sv.target==='tomorrow'?'active':''}" data-set-target="tomorrow">Завтра</button></div><span class="muted">${sv.step+1}/${SURVEY_STEPS.length}</span></div></div>${sv.helpOpen ? surveyHelpHtml : ''}<div class="progress"><i style="width:${p}%"></i></div>${body}<div class="survey-actions" style="margin-top:12px"><button class="btn secondary" id="surveyBack" ${sv.step===0?'disabled':''}>Назад</button><button class="btn" id="surveyNext">${sv.step===SURVEY_STEPS.length-1?'Получить рекомендации':'Далее'}</button></div></div>`;
+    return `${surveyLimitBanner}<div class="card fade survey-card"><button class="btn secondary survey-help-btn survey-help-corner" type="button" data-survey-help>?</button><div class="row survey-head"><div class="survey-title-wrap"><strong>${step.title}</strong></div><div class="survey-target-wrap"><span class="muted" style="font-size:12px">Рекомендация на:</span><div class="segmented" data-survey-target><button class="seg-btn ${sv.target==='today'?'active':''}" data-set-target="today">Сегодня</button><button class="seg-btn ${sv.target==='tomorrow'?'active':''}" data-set-target="tomorrow">Завтра</button></div><span class="muted">${sv.step+1}/${SURVEY_STEPS.length}</span></div></div>${sv.helpOpen ? surveyHelpHtml : ''}<div class="progress"><i style="width:${p}%"></i></div>${body}<div class="survey-actions" style="margin-top:12px"><button class="btn secondary" id="surveyBack" ${sv.step===0?'disabled':''}>Назад</button><button class="btn" id="surveyNext" ${sv.limitReached ? 'disabled' : ''}>${sv.limitReached ? 'Лимит на день исчерпан' : (sv.step===SURVEY_STEPS.length-1?'Получить рекомендации':'Далее')}</button></div></div>`;
   }
 
   function bindSurveyEvents() {
@@ -2561,7 +2594,7 @@
     appEl.querySelectorAll('[data-survey-pick]').forEach((el)=>el.addEventListener('click', ()=>{ haptic(); const [k,v]=el.dataset.surveyPick.split(':'); state.survey.answers[k]=v; localStorage.setItem(surveyStorageKey(), JSON.stringify(state.survey.answers)); renderActiveTab(); }));
     appEl.querySelectorAll('[data-goal-toggle]').forEach((el)=>el.addEventListener('click', ()=>{ haptic(); const g=el.dataset.goalToggle; const set=new Set(state.survey.answers.goals||[]); if (set.has(g)) set.delete(g); else set.add(g); state.survey.answers.goals=[...set]; localStorage.setItem(surveyStorageKey(), JSON.stringify(state.survey.answers)); renderActiveTab(); }));
     appEl.querySelectorAll('[data-survey-help]').forEach((el)=>el.addEventListener('click', ()=>{ state.survey.helpOpen = !state.survey.helpOpen; renderActiveTab(); }));
-    document.getElementById('surveyNote')?.addEventListener('input', (e)=>{ state.survey.answers.note=String(e.target.value||'').slice(0,280); localStorage.setItem(surveyStorageKey(), JSON.stringify(state.survey.answers)); const noteLen = e.target.parentElement?.querySelector('.muted'); if (noteLen) noteLen.textContent = `${state.survey.answers.note.length}/280`; });
+    document.getElementById('surveyNote')?.addEventListener('input', (e)=>{ state.survey.answers.note=String(e.target.value||'').slice(0,180); localStorage.setItem(surveyStorageKey(), JSON.stringify(state.survey.answers)); const noteLen = e.target.parentElement?.querySelector('.muted'); if (noteLen) noteLen.textContent = `${state.survey.answers.note.length}/180`; });
     document.getElementById('surveyBack')?.addEventListener('click', ()=>{ haptic(); state.survey.step=Math.max(0,state.survey.step-1); renderActiveTab(); });
 
     document.getElementById('surveyNext')?.addEventListener('click', async ()=>{
@@ -2579,10 +2612,29 @@
         state.survey.checkinId=res.checkin_id;
         state.survey.recommendations=res.recommendations||[];
         state.survey.selected=Object.fromEntries((state.survey.recommendations||[]).map((x)=>[x.supplement_id,true]));
+        state.survey.limitReached = true;
         state.survey.view='review';
         renderActiveTab();
       } catch(e){
         state.survey.loading=false;
+        if (e?.code === 'CHECKIN_LIMIT_REACHED') {
+          if (e?.serverPayload?.checkin?.applied) {
+            state.survey.appliedNotice = e.serverPayload.checkin.applied;
+            resetSurveyDraftForCurrentTarget();
+            state.survey.limitReached = true;
+          } else if (e?.serverPayload?.checkin?.id) {
+            state.survey.limitReached = true;
+            state.survey.checkinId = e.serverPayload.checkin.id;
+            state.survey.recommendations = e.serverPayload.checkin.recommendations || [];
+            state.survey.selected = Object.fromEntries((state.survey.recommendations||[]).map((x)=>[x.supplement_id,true]));
+            state.survey.view = state.survey.recommendations.length ? 'review' : 'wizard';
+          } else {
+            state.survey.limitReached = true;
+          }
+          showToast('Лимит: 1 опрос на выбранный день');
+          renderActiveTab();
+          return;
+        }
         showToast('AI временно недоступен, попробуйте ещё раз');
         renderActiveTab();
       }
@@ -2598,10 +2650,12 @@
         const out = await api('./api/checkin/apply',{method:'POST', body:{checkin_id: state.survey.checkinId, selected_ids:[], mode:'all'}});
         if (out.date_local === localDateISO()) showToast('✅ Применено к плану: сегодня');
         else showToast('✅ Применено на завтра');
+        state.survey.appliedNotice = out.applied_notice || null;
+        resetSurveyDraftForCurrentTarget();
+        state.survey.loadedKey = '';
         if (out.date_local === localDateISO()) {
           await loadToday(true);
-          state.activeTab='today';
-          renderActiveTab();
+          activateTab('today');
         } else {
           await loadSurveyForTarget(true);
           renderActiveTab();
@@ -2622,10 +2676,12 @@
         const out = await api('./api/checkin/apply',{method:'POST', body:{checkin_id: state.survey.checkinId, selected_ids:ids, mode:'selected'}});
         if (out.date_local === localDateISO()) showToast('✅ Применено к плану: сегодня');
         else showToast('✅ Применено на завтра');
+        state.survey.appliedNotice = out.applied_notice || null;
+        resetSurveyDraftForCurrentTarget();
+        state.survey.loadedKey = '';
         if (out.date_local === localDateISO()) {
           await loadToday(true);
-          state.activeTab='today';
-          renderActiveTab();
+          activateTab('today');
         } else {
           await loadSurveyForTarget(true);
           renderActiveTab();

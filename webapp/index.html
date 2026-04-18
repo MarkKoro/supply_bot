@@ -1615,11 +1615,13 @@
       const err = new Error(errPayload?.message || errPayload?.error || errPayload?.code || data?.message || data?.error || data?.code || `HTTP_${res.status}`);
       err.httpStatus = res.status;
       if (errPayload && typeof errPayload === 'object') {
+        err.payload = errPayload;
         if (errPayload.code) err.code = String(errPayload.code);
         if (errPayload.message) err.serverMessage = String(errPayload.message);
         if (errPayload.stage) err.stage = String(errPayload.stage);
         if (errPayload.message_ru) err.messageRu = String(errPayload.message_ru);
         if (errPayload.action_ru) err.actionRu = String(errPayload.action_ru);
+        if (errPayload.checkin && typeof errPayload.checkin === 'object') err.checkin = errPayload.checkin;
       }
       throw err;
     }
@@ -2490,7 +2492,28 @@
     return `survey:${uid}:${surveyTargetDateISO(target)}:${target}`;
   }
 
-  function resetSurveyDraftForCurrentTarget() {
+  function readSurveyDraftFromStorage() {
+    try {
+      const raw = localStorage.getItem(surveyStorageKey());
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      return (parsed && typeof parsed === 'object') ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function normalizeSurveyCheckinPayload(checkin) {
+    if (!checkin || typeof checkin !== 'object') return null;
+    const id = Number(checkin.id || 0);
+    if (!Number.isFinite(id) || id <= 0) return null;
+    const answers = (checkin.answers && typeof checkin.answers === 'object') ? checkin.answers : {};
+    const recommendations = Array.isArray(checkin.recommendations) ? checkin.recommendations : [];
+    const applied = (checkin.applied && typeof checkin.applied === 'object') ? checkin.applied : null;
+    return { id, answers, recommendations, applied };
+  }
+
+  function resetSurveyDraftForCurrentTarget({ clearStorage = true } = {}) {
     state.survey.step = 0;
     state.survey.view = 'wizard';
     state.survey.checkinId = null;
@@ -2499,34 +2522,37 @@
     state.survey.helpOpen = false;
     state.survey.limitReached = false;
     state.survey.answers = { energy:"", sleep:"", stress:"", training:"", goals:[], note:"" };
-    try { localStorage.removeItem(surveyStorageKey()); } catch {}
+    if (clearStorage) {
+      try { localStorage.removeItem(surveyStorageKey()); } catch {}
+    }
   }
 
   async function loadSurveyForTarget(force=false) {
     initSurveyTarget();
     const key = `${state.survey.target}:${surveyTargetDateISO(state.survey.target)}`;
     if (state.survey.loadedKey === key && !force) return;
-    resetSurveyDraftForCurrentTarget();
+    resetSurveyDraftForCurrentTarget({ clearStorage: false });
     state.survey.appliedNotice = null;
     try {
       const data = await api(`./api/checkin/today?target=${state.survey.target}`);
-      if (data?.checkin) {
+      const normalizedCheckin = normalizeSurveyCheckinPayload(data?.checkin);
+      if (normalizedCheckin) {
         state.survey.limitReached = true;
-        if (data.checkin.applied) {
-          state.survey.appliedNotice = data.checkin.applied;
+        if (normalizedCheckin.applied) {
+          state.survey.appliedNotice = normalizedCheckin.applied;
           try { localStorage.removeItem(surveyStorageKey()); } catch {}
         } else {
-          const saved = localStorage.getItem(surveyStorageKey());
-          if (saved) state.survey.answers = { ...state.survey.answers, ...JSON.parse(saved) };
-          state.survey.checkinId = data.checkin.id;
-          state.survey.answers = { ...state.survey.answers, ...(data.checkin.answers || {}) };
-          state.survey.recommendations = data.checkin.recommendations || [];
+          const savedDraft = readSurveyDraftFromStorage();
+          if (savedDraft) state.survey.answers = { ...state.survey.answers, ...savedDraft };
+          state.survey.checkinId = normalizedCheckin.id;
+          state.survey.answers = { ...state.survey.answers, ...normalizedCheckin.answers };
+          state.survey.recommendations = normalizedCheckin.recommendations;
           state.survey.selected = Object.fromEntries((state.survey.recommendations || []).map((x) => [x.supplement_id, true]));
           if (state.survey.recommendations.length) state.survey.view = 'review';
         }
       } else {
-        const saved = localStorage.getItem(surveyStorageKey());
-        if (saved) state.survey.answers = { ...state.survey.answers, ...JSON.parse(saved) };
+        const savedDraft = readSurveyDraftFromStorage();
+        if (savedDraft) state.survey.answers = { ...state.survey.answers, ...savedDraft };
       }
       state.survey.loadedKey = key;
     } catch {}
@@ -2618,14 +2644,17 @@
       } catch(e){
         state.survey.loading=false;
         if (e?.code === 'CHECKIN_LIMIT_REACHED') {
-          if (e?.serverPayload?.checkin?.applied) {
-            state.survey.appliedNotice = e.serverPayload.checkin.applied;
+          const limitCheckin = normalizeSurveyCheckinPayload(e?.checkin || e?.payload?.checkin || null);
+          if (limitCheckin?.applied) {
+            state.survey.appliedNotice = limitCheckin.applied;
             resetSurveyDraftForCurrentTarget();
             state.survey.limitReached = true;
-          } else if (e?.serverPayload?.checkin?.id) {
+          } else if (limitCheckin) {
+            state.survey.appliedNotice = null;
             state.survey.limitReached = true;
-            state.survey.checkinId = e.serverPayload.checkin.id;
-            state.survey.recommendations = e.serverPayload.checkin.recommendations || [];
+            state.survey.checkinId = limitCheckin.id;
+            state.survey.recommendations = limitCheckin.recommendations || [];
+            state.survey.answers = { ...state.survey.answers, ...(limitCheckin.answers || {}) };
             state.survey.selected = Object.fromEntries((state.survey.recommendations||[]).map((x)=>[x.supplement_id,true]));
             state.survey.view = state.survey.recommendations.length ? 'review' : 'wizard';
           } else {

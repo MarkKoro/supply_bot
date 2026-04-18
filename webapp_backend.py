@@ -3047,30 +3047,29 @@ async def api_checkin(body: CheckinBody, x_telegram_init_data: str = Header(defa
                     existing_applied = parsed_applied
             except Exception:
                 existing_applied = None
-            if existing_recs or existing_applied:
+            existing_answers = {}
+            try:
+                parsed_answers = json.loads(existing.get("answers_json") or "{}")
+                if isinstance(parsed_answers, dict):
+                    existing_answers = parsed_answers
+            except Exception:
                 existing_answers = {}
-                try:
-                    parsed_answers = json.loads(existing.get("answers_json") or "{}")
-                    if isinstance(parsed_answers, dict):
-                        existing_answers = parsed_answers
-                except Exception:
-                    existing_answers = {}
-                return JSONResponse(
-                    {
-                        "ok": False,
-                        "code": "CHECKIN_LIMIT_REACHED",
-                        "message": "Daily limit reached for this target date",
-                        "checkin": {
-                            "id": int(existing.get("id") or 0),
-                            "answers": existing_answers,
-                            "recommendations": existing_recs,
-                            "applied": existing_applied,
-                        },
-                        "date_local": local_date,
-                        "target": target,
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "code": "CHECKIN_LIMIT_REACHED",
+                    "message": "Daily limit reached for this target date",
+                    "checkin": {
+                        "id": int(existing.get("id") or 0),
+                        "answers": existing_answers,
+                        "recommendations": existing_recs,
+                        "applied": existing_applied,
                     },
-                    status_code=409,
-                )
+                    "date_local": local_date,
+                    "target": target,
+                },
+                status_code=409,
+            )
         checkin_id = await db.upsert_daily_checkin(conn, tg_user_id, local_date, answers)
         ctx = await db.build_ai_context_compact(conn, tg_user_id, local_date)
         complex_protected_slugs = {

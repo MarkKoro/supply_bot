@@ -750,7 +750,8 @@
       z-index: 65;
       display: flex;
       flex-direction: column;
-      padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom);
+      justify-content: center;
+      padding: calc(10px + env(safe-area-inset-top)) 10px calc(96px + env(safe-area-inset-bottom));
       overscroll-behavior: contain;
       touch-action: pan-y;
       width: 100%;
@@ -758,27 +759,30 @@
       pointer-events: auto;
     }
     .catalog-modal-head,
-    .catalog-modal-body { margin-bottom: 0; }
+    .catalog-modal-body {
+      width: min(560px, 100%);
+      margin: 0 auto;
+      margin-bottom: 0;
+    }
     .catalog-modal-head {
       padding: 12px;
       background: linear-gradient(160deg, rgba(26,35,71,0.98), rgba(12,18,38,0.94));
       border-color: rgba(189,216,255,0.36);
       box-shadow: 0 20px 34px rgba(1,3,12,0.58), 0 1px 0 rgba(255,255,255,0.28) inset;
-      position: sticky;
-      top: 0;
+      border-radius: 18px 18px 0 0;
       z-index: 1;
     }
     .catalog-modal-head .modal-title { font-size: 17px; line-height: 1.3; }
     .catalog-modal-body {
       overflow: auto;
-      max-height: none;
+      max-height: calc(100vh - 180px - env(safe-area-inset-top) - env(safe-area-inset-bottom));
       min-height: 0;
-      flex: 1 1 auto;
       padding: 14px 14px calc(120px + env(safe-area-inset-bottom));
       background: linear-gradient(180deg, rgba(14,18,36,0.95), rgba(10,14,30,0.95));
       overscroll-behavior: contain;
       -webkit-overflow-scrolling: touch;
       touch-action: pan-y;
+      border-radius: 0 0 18px 18px;
     }
     .bodymap-sheet-overlay {
       position: fixed;
@@ -2369,6 +2373,17 @@
     appEl?.classList?.toggle('modal-scroll-lock', locked);
   }
 
+  function renderGlobalModals() {
+    return `${state.catalog?.detail ? renderDetailModal(state.catalog.detail) : ''}`;
+  }
+
+  function syncGlobalModals() {
+    const root = document.getElementById('globalModalRoot');
+    if (!root) return;
+    root.innerHTML = renderGlobalModals();
+    bindDetailModalEvents();
+  }
+
   function renderMainApp() {
     const topbarBadgeHtml = renderTopbarBadgeHtml();
     appEl.innerHTML = `
@@ -2386,6 +2401,7 @@
       ${renderUnlockToastCard()}
       ${renderPaymentSuccessModal()}
       ${renderGuideOverlay()}
+      <div id="globalModalRoot">${renderGlobalModals()}</div>
     `;
 
     lastRenderedTabKey = "";
@@ -2576,11 +2592,13 @@
     const previousTabKey = lastRenderedTabKey;
     if (previousTabKey === tabKey && lastRenderedTabHtml === nextHtml) {
       syncModalScrollLock();
+      syncGlobalModals();
       return;
     }
     const focusSnapshot = getFocusableSnapshot(target);
     target.innerHTML = nextHtml;
     syncModalScrollLock();
+    syncGlobalModals();
     lastRenderedTabKey = tabKey;
     lastRenderedTabHtml = nextHtml;
     target.scrollTop = previousTabKey === tabKey ? prevScrollTop : 0;
@@ -2962,7 +2980,6 @@
       <div id="catalogSentinel" style="height:1px"></div>
       ${c.loadingMore ? '<div class="catalog-status">Загружаем ещё...</div>' : (!c.hasMore && c.items.length ? '<div class="catalog-status">Конец списка</div>' : '')}
       ${c.filtersOpen ? renderFilterSheet(filters) : ''}
-      ${c.detail ? renderDetailModal(c.detail) : ''}
       ${renderAddToComplexModal()}
       ${renderAddToStackSlotModal()}
     `;
@@ -4168,7 +4185,6 @@ function adminField(label, field, value, kind='input') {
         </div>
       </div>
       ${sheet}
-      ${state.catalog.detail ? renderDetailModal(state.catalog.detail) : ""}
     `;
   }
 

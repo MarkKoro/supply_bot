@@ -740,23 +740,22 @@
     .catalog-modal-overlay {
       position: fixed;
       inset: 0;
-      z-index: 34;
+      z-index: 64;
       background: rgba(2,5,16,0.72);
       overscroll-behavior: contain;
     }
     .catalog-modal-shell {
       position: fixed;
       inset: 0;
-      z-index: 35;
+      z-index: 65;
       display: flex;
       flex-direction: column;
-      padding: calc(10px + env(safe-area-inset-top)) 10px calc(96px + env(safe-area-inset-bottom));
+      padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom);
       overscroll-behavior: contain;
       touch-action: pan-y;
-      max-width: 620px;
-      margin: 0 auto;
-      max-height: calc(100vh - env(safe-area-inset-top) - env(safe-area-inset-bottom));
-      pointer-events: none;
+      width: 100%;
+      height: 100%;
+      pointer-events: auto;
     }
     .catalog-modal-head,
     .catalog-modal-body { margin-bottom: 0; }
@@ -765,7 +764,9 @@
       background: linear-gradient(160deg, rgba(26,35,71,0.98), rgba(12,18,38,0.94));
       border-color: rgba(189,216,255,0.36);
       box-shadow: 0 20px 34px rgba(1,3,12,0.58), 0 1px 0 rgba(255,255,255,0.28) inset;
-      pointer-events: auto;
+      position: sticky;
+      top: 0;
+      z-index: 1;
     }
     .catalog-modal-head .modal-title { font-size: 17px; line-height: 1.3; }
     .catalog-modal-body {
@@ -778,7 +779,22 @@
       overscroll-behavior: contain;
       -webkit-overflow-scrolling: touch;
       touch-action: pan-y;
-      pointer-events: auto;
+    }
+    .bodymap-sheet-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 50;
+      background: rgba(2,6,18,.68);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 12px;
+    }
+    .bodymap-sheet-card {
+      width: min(560px, 100%);
+      max-height: min(82vh, calc(100vh - 24px));
+      overflow: auto;
+      border-radius: 18px;
     }
     .catalog-modal-body .section-content {
       max-height: none;
@@ -2337,7 +2353,13 @@
   }
 
   function syncModalScrollLock() {
-    appEl?.classList?.toggle('modal-scroll-lock', Boolean(state.catalog?.detail));
+    const locked = Boolean(
+      state.catalog?.detail ||
+      state.bodyMapSheet ||
+      state.catalog?.addToComplexModal?.open ||
+      state.catalog?.addToStackSlotModal?.open
+    );
+    appEl?.classList?.toggle('modal-scroll-lock', locked);
   }
 
   function renderMainApp() {
@@ -4149,8 +4171,8 @@ function adminField(label, field, value, kind='input') {
   function renderBodyMapSheet(systemKey) {
     const data = bodyMapSystem(systemKey);
     const list = data.top || [];
-    return `<div class="modal-overlay" data-sheet-close>
-      <section class="card modal-card" role="dialog" data-bodymap-sheet onclick="event.stopPropagation()">
+    return `<div class="bodymap-sheet-overlay" data-sheet-close>
+      <section class="card bodymap-sheet-card" role="dialog" data-bodymap-sheet onclick="event.stopPropagation()">
         <div class="row"><strong>${SYSTEM_LABELS[systemKey] || systemKey}</strong><button class="btn secondary" data-sheet-close>Закрыть</button></div>
         <div class="row" style="margin-top:8px"><span class="badge plus">Польза: ${data.benefit_count || 0}</span><span class="badge minus">Нагрузка: ${data.burden_count || 0}</span>${(data.mixed_count || 0) > 0 ? `<span class="badge mixed">Смешанное: ${data.mixed_count || 0}</span>` : ''}</div>
         <div style="margin-top:10px">${list.length ? list.map((item)=>{ const cls = item.direction==='burden' ? 'minus' : (item.direction==='mixed' ? 'mixed' : 'plus'); const sign = item.direction==='burden' ? '-' : (item.direction==='mixed' ? '±' : '+'); return `<button class="item-row" data-bodymap-open="${esc(item.slug)}"><span class="badge ${cls}">${sign}</span><span>${esc(item.name_ru || item.slug)}</span></button>`; }).join('') : '<div class="sheet-empty">нет данных</div>'}</div>

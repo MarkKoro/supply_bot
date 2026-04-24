@@ -736,8 +736,9 @@
     .settings-checkbox-wrap input:checked + .settings-checkbox-custom::after { content: '\2713'; color: #fff; font-size: 15px; font-weight: 900; display:grid; place-items:center; line-height: 1; }
     .settings-checkbox-wrap input:disabled + .settings-checkbox-custom { opacity: .45; }
 
-    .catalog-modal-overlay { position: fixed; inset: 0; z-index: 34; background: rgba(2,5,16,0.62); }
-    .catalog-modal-shell { position: fixed; left: 10px; right: 10px; bottom: calc(88px + env(safe-area-inset-bottom)); z-index: 35; display: grid; gap: 8px; max-height: calc(100vh - 130px - env(safe-area-inset-bottom)); }
+    #app.modal-scroll-lock .main-content { overflow: hidden; }
+    .catalog-modal-overlay { position: fixed; inset: 0; z-index: 34; background: rgba(2,5,16,0.62); overscroll-behavior: contain; }
+    .catalog-modal-shell { position: fixed; left: 10px; right: 10px; bottom: calc(88px + env(safe-area-inset-bottom)); z-index: 35; display: grid; gap: 8px; max-height: calc(100vh - 130px - env(safe-area-inset-bottom)); overscroll-behavior: contain; }
     .catalog-modal-head,
     .catalog-modal-body { margin-bottom: 0; }
     .catalog-modal-head {
@@ -752,6 +753,9 @@
       max-height: min(60vh, calc(100vh - 220px - env(safe-area-inset-bottom)));
       padding: 14px;
       background: linear-gradient(180deg, rgba(14,18,36,0.95), rgba(10,14,30,0.95));
+      overscroll-behavior: contain;
+      -webkit-overflow-scrolling: touch;
+      touch-action: pan-y;
     }
     .catalog-modal-body .modal-content { line-height: 1.65; letter-spacing: .01em; }
     .modal-summary p,
@@ -2306,6 +2310,10 @@
     if (!showProfileDot && dot) dot.remove();
   }
 
+  function syncModalScrollLock() {
+    appEl?.classList?.toggle('modal-scroll-lock', Boolean(state.catalog?.detail));
+  }
+
   function renderMainApp() {
     const topbarBadgeHtml = renderTopbarBadgeHtml();
     appEl.innerHTML = `
@@ -2331,6 +2339,7 @@
     bindUnlockToastEvents();
     bindPaymentSuccessEvents();
     bindGuideEvents();
+    syncModalScrollLock();
     renderActiveTab();
   }
 
@@ -2510,9 +2519,13 @@
     renderTopbarActions();
 
     const previousTabKey = lastRenderedTabKey;
-    if (previousTabKey === tabKey && lastRenderedTabHtml === nextHtml) return;
+    if (previousTabKey === tabKey && lastRenderedTabHtml === nextHtml) {
+      syncModalScrollLock();
+      return;
+    }
     const focusSnapshot = getFocusableSnapshot(target);
     target.innerHTML = nextHtml;
+    syncModalScrollLock();
     lastRenderedTabKey = tabKey;
     lastRenderedTabHtml = nextHtml;
     target.scrollTop = previousTabKey === tabKey ? prevScrollTop : 0;

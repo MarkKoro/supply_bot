@@ -1944,10 +1944,10 @@
     const plans = state.me?.plans || [];
     const starterUsed = Boolean(state.me?.starter_trial_used);
     const starterExpired = starterUsed && !state.me?.starter_trial_active;
-    const title = starterExpired ? "Ваш Starter Pack закончился" : "Оформите доступ к Premium";
+    const title = starterExpired ? "Доступ к WebApp остановлен" : "WebApp доступен только с Premium";
     const subtitle = starterExpired
-      ? "Продлите подписку, чтобы снова открыть ежедневный опрос, комплексы и расширенные напоминания."
-      : "База добавок доступна бесплатно, а полный режим открывается по подписке.";
+      ? "Starter Pack завершён. Чтобы снова открыть разделы WebApp, продлите подписку Premium."
+      : "Без активной подписки Premium разделы WebApp заблокированы.";
     const plansHtml = plans.map((p) => {
       const rub = p.price_rub ? Math.round(p.price_rub / 100) : null;
       const planLabel = planNameRu(p.plan_id, p.months);
@@ -1969,6 +1969,10 @@
         <div class="card fade">
           <h2 style="margin:0 0 4px">${title}</h2>
           <div class="muted">${subtitle}</div>
+          <div class="card" style="margin-top:10px; padding:12px;">
+            <div><strong>🚫 Сейчас доступ к WebApp закрыт</strong></div>
+            <div class="muted" style="margin-top:6px">После оплаты Premium сразу откроются Today, Каталог, Карта органов, AI check-in и расширенные напоминания.</div>
+          </div>
           <div class="muted" style="margin-top:8px">Что даёт Premium: Today • Каталог • Карта органов • AI check-in • расширенный трекинг и напоминания.</div>
         </div>
 

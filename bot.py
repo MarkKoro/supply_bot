@@ -2790,16 +2790,16 @@ def _home_text(
             "",
             "🎉 <b>Premium активирован.</b>",
             "Теперь тебе доступно:",
-            "• полный WebApp с расширенным трекингом и планом на день;",
-            "• AI check-in и персональные подсказки;",
-            "• расширенные Premium-функции и автоматизация.",
+            "• полное веб-приложение с расширенным трекингом и планом на день;",
+            "• ИИ-опрос и персональные подсказки;",
+            "• расширенные функции подписки и автоматизация.",
         ]
     next_step_block = f"Следующий шаг: {next_step}" if show_next_step_hint else "Открой нужный раздел в меню ниже."
     return (
         "💊 <b>Supply Bot</b>\n\n"
         "• Каталог: быстро найди добавку и проверь совместимость.\n"
         "• Мои БАДы: собери свой список и настрой напоминания.\n"
-        "• AI / WebApp: стартовый подбор и удобный ежедневный трекинг.\n\n"
+        "• ИИ и веб-приложение: стартовый подбор и удобный ежедневный трекинг.\n\n"
         f"{next_step_block}"
         + ("\n".join(contextual_lines) if contextual_lines else "")
     )
@@ -2817,16 +2817,17 @@ def _subscription_expired_kb() -> InlineKeyboardMarkup:
 def _subscription_expired_text() -> str:
     return (
         "⚠️ <b>Ваш доступ закончился</b>\n\n"
-        "Starter/Premium больше не активны.\n\n"
+        "Пробный или платный доступ больше не активен.\n\n"
         "Что остаётся в базовой версии:\n"
         "• Каталог добавок и карточки;\n"
         "• Мои БАДы и ручные отметки;\n"
         "• Базовые разделы меню.\n\n"
         "Что временно недоступно без подписки:\n"
-        "• ежедневный AI-опрос;\n"
+        "• ежедневный ИИ-опрос;\n"
         "• комплексы;\n"
         "• расширенные автоматические напоминания и Premium-функции.\n\n"
-        "Продлите подписку, чтобы снова включить полный режим."
+        "Продлите подписку, чтобы снова включить полный режим в веб-приложении.\n\n"
+        "Бот и каталог внутри бота продолжают работать без подписки."
     )
 
 def _initial_pick_prompt_text(prefix: str | None = None) -> str:
@@ -3307,13 +3308,13 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         source="starter_activation",
                         tutorial="main",
                     )
-                    rows.append([InlineKeyboardButton("🔓 Открыть WebApp", web_app=WebAppInfo(url=webapp_url))])
+                    rows.append([InlineKeyboardButton("🔓 Открыть веб-приложение", web_app=WebAppInfo(url=webapp_url))])
                 rows.append([InlineKeyboardButton("🏠 В меню", callback_data="menu:home")])
                 await show(
                     update,
                     context,
                     f"Премиум доступ активирован до <b>{until_iso}</b>\n\n"
-                    "<i>Открой WebApp и начни пользоваться полным режимом.</i>",
+                    "<i>Открой веб-приложение и начни пользоваться полным режимом.</i>",
                     InlineKeyboardMarkup(rows),
                     route="starter:active",
                 )
@@ -3321,7 +3322,7 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await show(
                 update,
                 context,
-                "У тебя уже активен Premium — WebApp открыт без ограничений.",
+                "У тебя уже активна подписка — веб-приложение открыто без ограничений.",
                 InlineKeyboardMarkup([[InlineKeyboardButton("🏠 В меню", callback_data="menu:home")]]),
                 route="menu:home",
             )
@@ -3334,10 +3335,10 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await show(
                 update,
                 context,
-                "⭐ <b>Что входит в Premium</b>\n\n"
-                "• полный доступ к WebApp\n"
+                "⭐ <b>Что входит в подписку</b>\n\n"
+                "• полный доступ к веб-приложению\n"
                 "• карта органов с деталями по системам\n"
-                "• AI check-in и подсказки по самочувствию\n"
+                "• ИИ-опрос и подсказки по самочувствию\n"
                 "• удобный трекинг приёма и напоминаний\n"
                 "• достижения и персонализация интерфейса\n\n"
                 "База добавок и стартовый подбор по-прежнему доступны бесплатно.",
@@ -3407,10 +3408,10 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await show(
                 update,
                 context,
-                "⭐ <b>Что входит в Premium</b>\n\n"
-                "• полный доступ к WebApp\n"
+                "⭐ <b>Что входит в подписку</b>\n\n"
+                "• полный доступ к веб-приложению\n"
                 "• карта органов с деталями по системам\n"
-                "• AI check-in и подсказки по самочувствию\n"
+                "• ИИ-опрос и подсказки по самочувствию\n"
                 "• удобный трекинг приёма и напоминаний\n"
                 "• достижения и персонализация интерфейса\n\n"
                 "База добавок и стартовый подбор по-прежнему доступны бесплатно.",

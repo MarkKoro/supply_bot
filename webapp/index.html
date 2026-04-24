@@ -2010,7 +2010,7 @@
         <div><strong>🎁 У вас есть неиспользованный подарок в боте</strong></div>
         <div class="muted" style="margin-top:6px">Активируйте Starter-пак на 3 дня в боте — и получите полный доступ к WebApp без оплаты на время пробного периода.</div>
         <div class="gift-reminder-row" style="margin-top:10px;">
-          <button class="btn" type="button" data-open-bot-start data-bot-target="starter_offer">Перейти в бота</button>
+          <button class="btn" type="button" data-open-bot-start data-bot-target="starter_offer" data-close-webapp="1">Перейти в бота</button>
         </div>
       </div>
     ` : "";
@@ -2039,7 +2039,7 @@
     appEl.querySelectorAll("[data-open-bot-start]").forEach((el) => {
       el.addEventListener("click", () => {
         haptic();
-        openBotWithStart(el.dataset.botTarget || "onboarding");
+        openBotWithStart(el.dataset.botTarget || "onboarding", { closeWebApp: el.dataset.closeWebapp === "1" });
       });
     });
   }
@@ -2504,7 +2504,7 @@
       binder = bindSurveyEvents;
     }
     const giftReminder = hasUnusedStarterGift()
-      ? `<section class="card gift-reminder-card fade"><div class="gift-reminder-row"><div><strong>🎁 У вас есть неиспользованный подарок в боте</strong><div class="muted" style="margin-top:4px">Активируйте Starter-пак на 3 дня — это можно сделать прямо в боте.</div></div><button class="btn secondary" type="button" data-open-bot-start data-bot-target="starter_offer">Открыть бота</button></div></section>`
+      ? `<section class="card gift-reminder-card fade"><div class="gift-reminder-row"><div><strong>🎁 У вас есть неиспользованный подарок в боте</strong><div class="muted" style="margin-top:4px">Активируйте Starter-пак на 3 дня — это можно сделать прямо в боте.</div></div><button class="btn secondary" type="button" data-open-bot-start data-bot-target="starter_offer" data-close-webapp="1">Открыть бота</button></div></section>`
       : "";
     if (giftReminder) nextHtml = `${giftReminder}${nextHtml}`;
     renderTopbarActions();
@@ -2521,7 +2521,7 @@
     target.querySelectorAll("[data-open-bot-start]").forEach((btn) => {
       btn.addEventListener("click", () => {
         haptic();
-        openBotWithStart(btn.dataset.botTarget || "onboarding");
+        openBotWithStart(btn.dataset.botTarget || "onboarding", { closeWebApp: btn.dataset.closeWebapp === "1" });
       });
     });
     requestAnimationFrame(() => {
@@ -6324,14 +6324,6 @@ function adminField(label, field, value, kind='input') {
     const sectionsOpen = state.settingsUi?.sectionsOpen || {};
     const slotEdit = state.settingsUi?.slotEdit || { open: false, slotId: "", time: "" };
     const slotEditIsCustom = slotEdit.open && !isDefaultScheduleSlot(slotEdit.slotId);
-    const summaryStats = state.stats || {};
-    const topMiss = Array.isArray(summaryStats.top_misses_7) ? summaryStats.top_misses_7 : [];
-    const topStreaks = Array.isArray(summaryStats.top_streaks) ? summaryStats.top_streaks : [];
-    const hasAnyTakenMarks = Number(summaryStats?.today?.taken || 0) + Number(summaryStats?.last7?.taken || 0) + Number(summaryStats?.last30?.taken || 0) > 0;
-    const topMissText = topMiss.length ? `${topMiss[0].name_ru || topMiss[0].slug || '—'} (${Number(topMiss[0].missed || 0)})` : '';
-    const topStreakText = topStreaks.length ? `${topStreaks[0].name_ru || topStreaks[0].slug || '—'} (${Number(topStreaks[0].streak || 0)} дн)` : '';
-    const topMissList = topMiss.slice(0,3).map((x, i) => `<div class="muted">${i+1}) ${esc(x.name_ru || x.slug || '—')} — ${Number(x.missed || 0)}</div>`).join('');
-    const topStreakList = topStreaks.slice(0,3).map((x, i) => `<div class="muted">${i+1}) ${esc(x.name_ru || x.slug || '—')} — ${Number(x.streak || 0)} дн</div>`).join('');
     return `
       <h2 class="settings-heading">Настройки</h2>
       <section class="card fade">
@@ -6398,16 +6390,6 @@ function adminField(label, field, value, kind='input') {
                   </div>
                 </div>
               </article>`).join('') || '<div class="muted">Слоты загрузятся после подключения.</div>'}</div>
-              </div>
-            </details>
-          </div>
-          <div class="settings-section">
-            <details ${sectionsOpen.stats ? 'open' : ''} data-settings-section="stats">
-              <summary><span>📈 Статистика</span><span class="ios-arrow">▾</span></summary>
-              <div class="ios-content">
-                ${hasAnyTakenMarks ? `<div class="muted" style="margin-top:8px">Лучший стрик: ${esc(topStreakText || '—')}</div>${topStreakList ? `<div style="margin-top:4px">${topStreakList}</div>` : ''}` : ''}
-                ${topMiss.length ? `<div class="muted" style="margin-top:8px">Частые пропуски (7д): ${esc(topMissText || '—')}</div><div style="margin-top:4px">${topMissList}</div>` : ''}
-                ${renderStatsBlock() || '<div class="muted" style="margin-top:8px">Пока нет данных для отображения.</div>'}
               </div>
             </details>
           </div>

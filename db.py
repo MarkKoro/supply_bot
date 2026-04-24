@@ -5374,7 +5374,13 @@ async def add_stack_items_to_user(conn: aiosqlite.Connection, user_id: int, item
                VALUES(?,?,1,1,?)
                ON CONFLICT(user_id, supplement_id) DO UPDATE SET
                  is_active=1,
-                 enabled=1""",
+                 enabled=1,
+                 user_frozen=0,
+                 created_at=CASE
+                   WHEN COALESCE(user_supplements.is_active,0)=0 OR COALESCE(user_supplements.enabled,0)=0
+                     THEN excluded.created_at
+                   ELSE user_supplements.created_at
+                 END""",
             (user_id, supplement_id, utc_now_iso()),
         )
 
@@ -5715,7 +5721,13 @@ async def add_user_supplement(conn: aiosqlite.Connection, tg_user_id: int, suppl
            VALUES(?,?,1,1,?)
            ON CONFLICT(user_id, supplement_id) DO UPDATE SET
              is_active=1,
-             enabled=1""",
+             enabled=1,
+             user_frozen=0,
+             created_at=CASE
+               WHEN COALESCE(user_supplements.is_active,0)=0 OR COALESCE(user_supplements.enabled,0)=0
+                 THEN excluded.created_at
+               ELSE user_supplements.created_at
+             END""",
         (user_id, supplement_id, utc_now_iso()),
     )
     await conn.execute(
@@ -8101,7 +8113,13 @@ async def add_item_to_complex(conn: aiosqlite.Connection, tg_user_id: int, compl
            VALUES(?,?,1,1,?)
            ON CONFLICT(user_id, supplement_id) DO UPDATE SET
              is_active=1,
-             enabled=1""",
+             enabled=1,
+             user_frozen=0,
+             created_at=CASE
+               WHEN COALESCE(user_supplements.is_active,0)=0 OR COALESCE(user_supplements.enabled,0)=0
+                 THEN excluded.created_at
+               ELSE user_supplements.created_at
+             END""",
         (user_id, int(supplement_id), utc_now_iso()),
     )
     await conn.execute(
@@ -11213,8 +11231,15 @@ async def process_due_nutrient_lifecycle(conn: aiosqlite.Connection, limit: int 
                 if supp_row and int(supp_row["user_frozen"] or 0) == 1:
                     continue
                 await conn.execute(
-                    "UPDATE user_supplements SET is_active=1, enabled=1 WHERE user_id=? AND supplement_id=? AND COALESCE(user_frozen,0)=0",
-                    (int(row["user_id"]), supplement_id),
+                    """UPDATE user_supplements
+                       SET is_active=1,
+                           enabled=1,
+                           created_at=CASE
+                             WHEN COALESCE(is_active,0)=0 OR COALESCE(enabled,0)=0 THEN ?
+                             ELSE created_at
+                           END
+                       WHERE user_id=? AND supplement_id=? AND COALESCE(user_frozen,0)=0""",
+                    (now_iso, int(row["user_id"]), supplement_id),
                 )
                 reminder_profile = await get_effective_reminders_for_supplement(conn, int(row["user_id"]), supplement_id)
                 for hhmm in list(reminder_profile.get("times") or []):

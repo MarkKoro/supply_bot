@@ -740,23 +740,22 @@
     .catalog-modal-overlay {
       position: fixed;
       inset: 0;
-      z-index: 34;
+      z-index: 64;
       background: rgba(2,5,16,0.72);
       overscroll-behavior: contain;
     }
     .catalog-modal-shell {
       position: fixed;
       inset: 0;
-      z-index: 35;
+      z-index: 65;
       display: flex;
       flex-direction: column;
-      padding: calc(10px + env(safe-area-inset-top)) 10px calc(96px + env(safe-area-inset-bottom));
+      padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom);
       overscroll-behavior: contain;
       touch-action: pan-y;
-      max-width: 620px;
-      margin: 0 auto;
-      max-height: calc(100vh - env(safe-area-inset-top) - env(safe-area-inset-bottom));
-      pointer-events: none;
+      width: 100%;
+      height: 100%;
+      pointer-events: auto;
     }
     .catalog-modal-head,
     .catalog-modal-body { margin-bottom: 0; }
@@ -765,7 +764,9 @@
       background: linear-gradient(160deg, rgba(26,35,71,0.98), rgba(12,18,38,0.94));
       border-color: rgba(189,216,255,0.36);
       box-shadow: 0 20px 34px rgba(1,3,12,0.58), 0 1px 0 rgba(255,255,255,0.28) inset;
-      pointer-events: auto;
+      position: sticky;
+      top: 0;
+      z-index: 1;
     }
     .catalog-modal-head .modal-title { font-size: 17px; line-height: 1.3; }
     .catalog-modal-body {
@@ -778,7 +779,22 @@
       overscroll-behavior: contain;
       -webkit-overflow-scrolling: touch;
       touch-action: pan-y;
-      pointer-events: auto;
+    }
+    .bodymap-sheet-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 50;
+      background: rgba(2,6,18,.68);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 12px;
+    }
+    .bodymap-sheet-card {
+      width: min(560px, 100%);
+      max-height: min(82vh, calc(100vh - 24px));
+      overflow: auto;
+      border-radius: 18px;
     }
     .catalog-modal-body .section-content {
       max-height: none;
@@ -989,7 +1005,7 @@
       stacksLoading: false,
       stacksOpen: false,
       readyStacks: [],
-      filters: { evidence: [], targets: [], burdens: [], sort: "alpha" },
+      filters: { evidence: [], targets: [], sort: "alpha" },
       detail: null, detailLoading: false, filtersOpen: false,
       detailSection: null,
       focusSearchOnOpen: false,
@@ -1125,6 +1141,14 @@
   const APP_NAME = "ГУДы БАДы";
   const appEl = document.getElementById("app");
   const TARGET_LABELS_RU = {
+    brain_cns: "Мозг/ЦНС",
+    heart_cv: "Сердце",
+    vessels_blood: "Сосуды/кровь",
+    pancreas_glucose: "Глюкоза/инсулин",
+    thyroid: "Щитовидка",
+    bone: "Кости",
+    skin_hair: "Кожа/волосы",
+    reproductive_hormones: "Гормоны/репродукция",
     brain: "Мозг",
     heart: "Сердце",
     gut: "ЖКТ",
@@ -1137,11 +1161,10 @@
     sleep: "Сон",
     mood: "Настроение"
   };
-  const BURDEN_LABELS_RU = {
-    liver: "Печень",
-    kidney: "Почки",
-    gut: "ЖКТ"
-  };
+  const CATALOG_FILTER_TARGETS = [
+    "brain_cns", "heart_cv", "vessels_blood", "liver", "kidney", "gut", "pancreas_glucose",
+    "thyroid", "immune", "joints", "bone", "muscle", "skin_hair", "reproductive_hormones"
+  ];
   const CATALOG_QUICK_CATEGORIES = [
     { token: "liver", label: "Печень" },
     { token: "kidney", label: "Почки" },
@@ -2337,7 +2360,13 @@
   }
 
   function syncModalScrollLock() {
-    appEl?.classList?.toggle('modal-scroll-lock', Boolean(state.catalog?.detail));
+    const locked = Boolean(
+      state.catalog?.detail ||
+      state.bodyMapSheet ||
+      state.catalog?.addToComplexModal?.open ||
+      state.catalog?.addToStackSlotModal?.open
+    );
+    appEl?.classList?.toggle('modal-scroll-lock', locked);
   }
 
   function renderMainApp() {
@@ -2854,8 +2883,7 @@
     const skeletons = Array.from({ length: 8 }, () => '<div class="catalog-skeleton"></div>').join('');
     const activeFilterChips = [
       ...filters.evidence.map((v) => ({ key: 'evidence', value: v, label: `Доказательность: ${v}` })),
-      ...filters.targets.map((v) => ({ key: 'targets', value: v, label: `Куда/зачем: ${TARGET_LABELS_RU[v] || v}` })),
-      ...filters.burdens.map((v) => ({ key: 'burdens', value: v, label: `Нагрузка: ${BURDEN_LABELS_RU[v] || v}` }))
+      ...filters.targets.map((v) => ({ key: 'targets', value: v, label: `Куда/зачем: ${TARGET_LABELS_RU[v] || v}` }))
     ];
     const itemsHtml = c.items.map((item) => `
       <button type="button" class="card item-row" data-catalog-open="${item.slug}" style="display:block; width:100%; margin-top:0;">
@@ -2981,14 +3009,12 @@
 
   function renderFilterSheet(filters) {
     const ev = ['A','B','C','D'];
-    const tgts = ['brain','heart','gut','liver','kidney','sleep','mood','joints','muscle','skin','immune'];
-    const br = ['liver','kidney','gut'];
+    const tgts = CATALOG_FILTER_TARGETS;
     const chip=(v,arr,key,labels)=>`<button class="chip ${arr.includes(v)?'green':''}" data-filter-toggle="${key}:${v}">${labels?.[v] || v}</button>`;
     return `<div class="card" style="position:fixed;left:10px;right:10px;bottom:90px;z-index:30;max-height:60vh;overflow:auto">
       <div class="row"><strong>Фильтры</strong><div style="display:flex; gap:8px"><button class="btn secondary" id="resetFilters" type="button">Сброс</button><button class="btn secondary" data-filter-close>Закрыть</button></div></div>
       <div style="margin-top:8px">Доказательность: ${ev.map(v=>chip(v,filters.evidence,'evidence')).join(' ')}</div>
       <div style="margin-top:8px">Куда/зачем: ${tgts.map(v=>chip(v,filters.targets,'targets',TARGET_LABELS_RU)).join(' ')}</div>
-      <div style="margin-top:8px">Нагрузка: ${br.map(v=>chip(v,filters.burdens,'burdens',BURDEN_LABELS_RU)).join(' ')}</div>
       <div style="margin-top:8px"><select id="sortSelect" style="width:100%;padding:8px;border-radius:10px"><option value="alpha" ${filters.sort==='alpha'?'selected':''}>По алфавиту</option><option value="evidence" ${filters.sort==='evidence'?'selected':''}>По доказательности</option><option value="trials" ${filters.sort==='trials'?'selected':''}>По исследованиям</option><option value="effect" ${filters.sort==='effect'?'selected':''}>По эффекту</option></select></div>
     </div>`;
   }
@@ -3093,7 +3119,6 @@
     const qp = new URLSearchParams({ q: c.q || '', page: String(c.page), page_size: '20', sort: f.sort || 'alpha' });
     if (f.evidence.length) qp.set('evidence', f.evidence.join(','));
     if (f.targets.length) qp.set('targets', f.targets.join(','));
-    if (f.burdens.length) qp.set('burdens', f.burdens.join(','));
     try {
       const res = await api(`./api/catalog?${qp.toString()}`);
       const nextItems = Array.isArray(res.items) ? res.items : [];
@@ -3516,7 +3541,7 @@
     });
 
     document.getElementById('resetFilters')?.addEventListener('click', async ()=>{
-      state.catalog.filters={evidence:[],targets:[],burdens:[],sort:'alpha'};
+      state.catalog.filters={evidence:[],targets:[],sort:'alpha'};
       state.catalog.filtersOpen=false;
       state.catalog.page=0;
       state.catalog.hasMore = true;
@@ -4149,8 +4174,8 @@ function adminField(label, field, value, kind='input') {
   function renderBodyMapSheet(systemKey) {
     const data = bodyMapSystem(systemKey);
     const list = data.top || [];
-    return `<div class="modal-overlay" data-sheet-close>
-      <section class="card modal-card" role="dialog" data-bodymap-sheet onclick="event.stopPropagation()">
+    return `<div class="bodymap-sheet-overlay" data-sheet-close>
+      <section class="card bodymap-sheet-card" role="dialog" data-bodymap-sheet onclick="event.stopPropagation()">
         <div class="row"><strong>${SYSTEM_LABELS[systemKey] || systemKey}</strong><button class="btn secondary" data-sheet-close>Закрыть</button></div>
         <div class="row" style="margin-top:8px"><span class="badge plus">Польза: ${data.benefit_count || 0}</span><span class="badge minus">Нагрузка: ${data.burden_count || 0}</span>${(data.mixed_count || 0) > 0 ? `<span class="badge mixed">Смешанное: ${data.mixed_count || 0}</span>` : ''}</div>
         <div style="margin-top:10px">${list.length ? list.map((item)=>{ const cls = item.direction==='burden' ? 'minus' : (item.direction==='mixed' ? 'mixed' : 'plus'); const sign = item.direction==='burden' ? '-' : (item.direction==='mixed' ? '±' : '+'); return `<button class="item-row" data-bodymap-open="${esc(item.slug)}"><span class="badge ${cls}">${sign}</span><span>${esc(item.name_ru || item.slug)}</span></button>`; }).join('') : '<div class="sheet-empty">нет данных</div>'}</div>

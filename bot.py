@@ -2453,12 +2453,20 @@ async def home(
         target_message_id=target_message_id,
     )
 
+def _stars_amount_for_plan(s, plan_id: str) -> int:
+    price_minor = int(s.PREMIUM_PRICES_RUB.get(plan_id, 0) or 0)
+    if price_minor <= 0:
+        return 0
+    rub = round(price_minor / 100)
+    return max(1, round(rub / 1.5))
+
+
 def _premium_plans_payload(s) -> list[dict]:
     labels = {"m1": "1 месяц", "m3": "3 месяца", "m6": "6 месяцев", "m12": "12 месяцев"}
     plans: list[dict] = []
     for plan_id, months in s.PREMIUM_PLANS.items():
         rub_kop = int(s.PREMIUM_PRICES_RUB.get(plan_id, 0) or 0)
-        stars = int(s.PREMIUM_PRICES_STARS.get(plan_id, 0) or 0)
+        stars = _stars_amount_for_plan(s, plan_id)
         period = labels.get(plan_id, f"{int(months)} мес.")
         rub_title = f"{period} · {rub_kop / 100:.0f} ₽" if rub_kop > 0 else period
         stars_title = f"{period} · {stars} ⭐" if stars > 0 else period
@@ -2634,7 +2642,7 @@ async def _send_subscription_invoice(update: Update, context: ContextTypes.DEFAU
         if not s.BILLING_ENABLED_STARS:
             await show(update, context, "Оплата Stars сейчас недоступна.", premium_upsell_kb(), route="menu:premium")
             return
-        amount = int(s.PREMIUM_PRICES_STARS.get(plan_id, 0) or 0)
+        amount = _stars_amount_for_plan(s, plan_id)
         await context.bot.send_invoice(
             chat_id=chat_id,
             title="Premium подписка",
@@ -2693,7 +2701,7 @@ async def on_precheckout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     if method == "stars":
-        expected_amount = int(s.PREMIUM_PRICES_STARS.get(plan_id, 0) or 0)
+        expected_amount = _stars_amount_for_plan(s, plan_id)
         if str(query.currency or "") != "XTR" or int(query.total_amount or 0) != expected_amount:
             await query.answer(ok=False, error_message="Сумма или валюта не совпадает")
             return

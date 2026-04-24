@@ -432,6 +432,14 @@ async def supply_http_exception_handler(request, exc: HTTPException):
 app.add_exception_handler(HTTPException, supply_http_exception_handler)
 
 
+def _stars_amount_for_plan(plan_id: str) -> int:
+    price_minor = int(s.PREMIUM_PRICES_RUB.get(plan_id, 0) or 0)
+    if price_minor <= 0:
+        return 0
+    rub = round(price_minor / 100)
+    return max(1, round(rub / 1.5))
+
+
 def _plans_payload() -> list[dict]:
     rows = []
     for plan_id, months in s.PREMIUM_PLANS.items():
@@ -440,7 +448,7 @@ def _plans_payload() -> list[dict]:
                 "plan_id": plan_id,
                 "months": int(months),
                 "price_rub": int(s.PREMIUM_PRICES_RUB.get(plan_id, 0) or 0),
-                "price_stars": int(s.PREMIUM_PRICES_STARS.get(plan_id, 0) or 0),
+                "price_stars": _stars_amount_for_plan(plan_id),
                 "rub_enabled": bool(s.BILLING_ENABLED_RUB),
                 "stars_enabled": bool(s.BILLING_ENABLED_STARS),
             }
@@ -1146,7 +1154,7 @@ async def api_billing_create_invoice_link(
         raise HTTPException(status_code=400, detail="Stars disabled")
     req["currency"] = "XTR"
     req["provider_token"] = ""
-    req["prices"] = [{"label": "Premium", "amount": int(s.PREMIUM_PRICES_STARS.get(plan_id, 0) or 0)}]
+    req["prices"] = [{"label": "Premium", "amount": _stars_amount_for_plan(plan_id)}]
 
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/createInvoiceLink"
     async with httpx.AsyncClient(timeout=15.0) as client:

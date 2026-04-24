@@ -737,8 +737,25 @@
     .settings-checkbox-wrap input:disabled + .settings-checkbox-custom { opacity: .45; }
 
     #app.modal-scroll-lock .main-content { overflow: hidden; }
-    .catalog-modal-overlay { position: fixed; inset: 0; z-index: 34; background: rgba(2,5,16,0.62); overscroll-behavior: contain; }
-    .catalog-modal-shell { position: fixed; left: 10px; right: 10px; bottom: calc(88px + env(safe-area-inset-bottom)); z-index: 35; display: grid; gap: 8px; max-height: calc(100vh - 130px - env(safe-area-inset-bottom)); overscroll-behavior: contain; }
+    .catalog-modal-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 34;
+      background: rgba(2,5,16,0.72);
+      overscroll-behavior: contain;
+    }
+    .catalog-modal-shell {
+      position: fixed;
+      inset: 0;
+      z-index: 35;
+      display: grid;
+      grid-template-rows: auto 1fr;
+      padding: calc(10px + env(safe-area-inset-top)) 10px calc(96px + env(safe-area-inset-bottom));
+      overscroll-behavior: contain;
+      touch-action: pan-y;
+      max-width: 620px;
+      margin: 0 auto;
+    }
     .catalog-modal-head,
     .catalog-modal-body { margin-bottom: 0; }
     .catalog-modal-head {
@@ -746,15 +763,25 @@
       background: linear-gradient(160deg, rgba(26,35,71,0.98), rgba(12,18,38,0.94));
       border-color: rgba(189,216,255,0.36);
       box-shadow: 0 20px 34px rgba(1,3,12,0.58), 0 1px 0 rgba(255,255,255,0.28) inset;
+      position: sticky;
+      top: 0;
+      z-index: 2;
     }
     .catalog-modal-head .modal-title { font-size: 17px; line-height: 1.3; }
     .catalog-modal-body {
       overflow: auto;
-      max-height: min(60vh, calc(100vh - 220px - env(safe-area-inset-bottom)));
+      max-height: none;
       padding: 14px;
       background: linear-gradient(180deg, rgba(14,18,36,0.95), rgba(10,14,30,0.95));
       overscroll-behavior: contain;
       -webkit-overflow-scrolling: touch;
+      touch-action: pan-y;
+    }
+    .catalog-modal-body .section-content {
+      max-height: min(42vh, 320px);
+      overflow: auto;
+      -webkit-overflow-scrolling: touch;
+      overscroll-behavior: contain;
       touch-action: pan-y;
     }
     .catalog-modal-body .modal-content { line-height: 1.65; letter-spacing: .01em; }
@@ -2997,7 +3024,7 @@
         <div class="card catalog-modal-head">
           <div class="row" style="align-items:flex-start; gap:8px; flex-wrap:nowrap">
             <strong class="modal-title">${displayName}</strong>
-            <button type="button" class="btn secondary" data-detail-close>Закрыть</button>
+            <button type="button" class="btn secondary" data-detail-close style="margin-left:auto; position:sticky; top:0;">Закрыть</button>
           </div>
           <div class="muted" style="margin-top:6px">${isLoading ? 'Загружаем карточку…' : `${esc(evidenceUserLabel(item.evidence_grade))} • ${esc(confidenceUserLabel(item.confidence))}`}</div>
         </div>
@@ -3284,6 +3311,12 @@
           applyCatalogInStackState(id, !!r.in_stack);
           await Promise.all([loadToday(true), loadBodyMap(true)]);
           showToast((!!r.in_stack) ? 'Добавлено в стек' : 'Убрано из стека');
+          if (action === 'remove' && !r.in_stack) {
+            state.catalog.detail = null;
+            state.catalog.detailSection = null;
+            state.catalog.addToComplexModal = { open: false, supplementId: 0, creating: false };
+            state.catalog.addToStackSlotModal = { open: false, supplementId: 0, adding: false, creatingSlot: false, newSlotTime: "" };
+          }
           renderActiveTab();
         } catch {
           applyCatalogInStackState(id, prev);

@@ -8551,7 +8551,6 @@ async def _show_catalog_card(
     confidence_text = engine.confidence_label(row.get("confidence"))
     human_trials = engine.metric_or_no_data(row.get("human_trials_count_est"))
     participants = engine.metric_or_no_data(row.get("participants_total_est"))
-    avg_effect = engine.metric_or_no_data(row.get("avg_effect_percent_est"))
 
     intake_stats = await db.get_user_last_intake_stats(conn, tg_uid, [int(row["id"])])
     card_stats = intake_stats.get(int(row["id"]), {})
@@ -8564,8 +8563,7 @@ async def _show_catalog_card(
         f"Доказательность: {evidence_text}\n"
         f"Уверенность: {confidence_text}\n"
         f"Исследования на людях: {human_trials}\n"
-        f"Участников суммарно: {participants}\n"
-        f"Средний эффект: {avg_effect}"
+        f"Участников суммарно: {participants}"
     )
     if last_taken_day:
         text += f"\n\nПоследний приём: {_format_day_ru(last_taken_day)}"
@@ -8618,7 +8616,6 @@ async def _show_catalog_evidence(
     confidence_text = engine.confidence_label(row.get("confidence"))
     human_trials = engine.metric_or_no_data(row.get("human_trials_count_est"))
     participants = engine.metric_or_no_data(row.get("participants_total_est"))
-    avg_effect = engine.metric_or_no_data(row.get("avg_effect_percent_est"))
 
     text = (
         f"📊 <b>Доказательность</b>\n"
@@ -8626,8 +8623,7 @@ async def _show_catalog_evidence(
         f"Уровень базы: {evidence_text}\n"
         f"Уверенность: {confidence_text}\n"
         f"Исследования на людях: {human_trials}\n"
-        f"Участников суммарно: {participants}\n"
-        f"Средний эффект: {avg_effect}"
+        f"Участников суммарно: {participants}"
     )
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"cat:open:{row['id']}")]])
     payload = await _load_catalog_payload(conn, tg_uid)
@@ -8836,7 +8832,6 @@ async def render_supplement_card(
     confidence_text = engine.confidence_label(row.get("confidence"))
     human_trials = engine.metric_or_no_data(row.get("human_trials_count_est"))
     participants = engine.metric_or_no_data(row.get("participants_total_est"))
-    avg_effect = engine.metric_or_no_data(row.get("avg_effect_percent_est"))
     short_desc = str(row.get("summary_ru") or "").strip()
     esc = lambda value: html.escape(str(value or "").strip())
 
@@ -8958,7 +8953,6 @@ async def render_supplement_card(
         lines.append(f"Уверенность: {confidence_text}")
         lines.append(f"Исследования на людях: {human_trials}")
         lines.append(f"Участников суммарно: {participants}")
-        lines.append(f"Средний эффект: {avg_effect}")
     else:
         links = await db.get_supplement_links(conn, supplement_id)
         link_ids = links["synergy"] if tab == "synergy" else links["antagonists"]

@@ -1562,7 +1562,8 @@
     return Boolean(state.me?.has_unused_starter_gift) && !Boolean(state.me?.premium);
   }
 
-  function openBotWithStart(target = "onboarding") {
+  function openBotWithStart(target = "onboarding", options = {}) {
+    const opts = (options && typeof options === "object") ? options : {};
     const rawUsername = String(state.me?.bot_username || "").trim().replace(/^@+/, "");
     if (!rawUsername) {
       showToast("Не удалось открыть бота: username не настроен");
@@ -1573,6 +1574,11 @@
     if (tg?.openTelegramLink) tg.openTelegramLink(link);
     else if (tg?.openLink) tg.openLink(link);
     else window.open(link, "_blank", "noopener");
+    if (opts.closeWebApp && tg?.close) {
+      setTimeout(() => {
+        try { tg.close(); } catch {}
+      }, 120);
+    }
   }
   function formatRuDate(value) {
     const raw = String(value || "").trim();
@@ -2052,7 +2058,7 @@
             <div class="muted" style="margin-top:6px">После этого продолжите короткий стартовый сценарий. Как только дойдёте до предложения Starter-пака, этот экран исчезнет.</div>
           </div>
           <div style="margin-top:12px; display:grid; gap:10px;">
-            <button class="btn" type="button" data-open-bot-start style="min-height:52px; font-size:16px;">Перейти в бота и начать</button>
+            <button class="btn" type="button" data-open-bot-start data-close-webapp="1" style="min-height:52px; font-size:16px;">Перейти в бота и начать</button>
           </div>
         </div>
       </div>
@@ -2061,7 +2067,7 @@
     appEl.querySelectorAll("[data-open-bot-start]").forEach((el) => {
       el.addEventListener("click", () => {
         haptic();
-        openBotWithStart(el.dataset.botTarget || "onboarding");
+        openBotWithStart(el.dataset.botTarget || "onboarding", { closeWebApp: el.dataset.closeWebapp === "1" });
       });
     });
   }
@@ -2681,10 +2687,9 @@
       const rows = (sv.recommendations || []).map((r) => {
         const already = todaySet.has(Number(r.supplement_id || 0));
         const removeTaken = r.action === 'remove' && already;
-        const checked = removeTaken ? false : (sv.selected[r.supplement_id] !== false);
-        return `<div class="rec-card"><div class="row"><label><input type="checkbox" data-rec-toggle="${r.supplement_id}" ${checked ? 'checked' : ''} ${removeTaken ? 'disabled' : ''}/> <strong>${esc(r.name_ru || r.slug)}</strong></label><span class="badge ${r.action==='remove'?'minus':(r.action==='adjust'?'':'plus')}">${r.action==='add'?'+':(r.action==='remove'?'−':'≈')}</span></div><div class="muted" style="margin-top:6px">${esc(r.reason || '')}${removeTaken ? ' • уже выпито сегодня — убирать не нужно' : (already ? ' • уже в плане' : '')}</div></div>`;
+        return `<div class="rec-card"><div class="row"><strong>${esc(r.name_ru || r.slug)}</strong><span class="badge ${r.action==='remove'?'minus':(r.action==='adjust'?'':'plus')}">${r.action==='add'?'+':(r.action==='remove'?'−':'≈')}</span></div><div class="muted" style="margin-top:6px">${esc(r.reason || '')}${removeTaken ? ' • уже выпито сегодня — убирать не нужно' : (already ? ' • уже в плане' : '')}</div></div>`;
       }).join('');
-      return `${surveyLimitBanner}<div class="card fade survey-card"><button class="btn secondary survey-help-btn survey-help-corner" type="button" data-survey-help>?</button><div class="row survey-head"><div class="survey-title-wrap"><h3 style="margin:0">Рекомендации</h3></div><div class="survey-target-wrap"><span class="muted" style="font-size:12px">Рекомендация на:</span><div class="segmented" data-survey-target><button class="seg-btn ${sv.target==='today'?'active':''}" data-set-target="today">Сегодня</button><button class="seg-btn ${sv.target==='tomorrow'?'active':''}" data-set-target="tomorrow">Завтра</button></div></div></div>${sv.helpOpen ? surveyHelpHtml : ''}${rows || '<div class="muted">Нет рекомендаций</div>'}<div style="margin-top:10px"><button class="btn" id="applyAll" style="width:100%; font-weight:800" ${sv.applying ? 'disabled' : ''}>✅ Применить всё</button></div><div class="survey-actions"><button class="btn secondary" id="applySelected" ${sv.applying ? 'disabled' : ''}>Применить выбранное</button><button class="btn secondary" id="cancelSurvey" ${sv.applying ? 'disabled' : ''}>Отмена</button></div></div>`;
+      return `${surveyLimitBanner}<div class="card fade survey-card"><button class="btn secondary survey-help-btn survey-help-corner" type="button" data-survey-help>?</button><div class="row survey-head"><div class="survey-title-wrap"><h3 style="margin:0">Рекомендации</h3></div><div class="survey-target-wrap"><span class="muted" style="font-size:12px">Рекомендация на:</span><div class="segmented" data-survey-target><button class="seg-btn ${sv.target==='today'?'active':''}" data-set-target="today">Сегодня</button><button class="seg-btn ${sv.target==='tomorrow'?'active':''}" data-set-target="tomorrow">Завтра</button></div></div></div>${sv.helpOpen ? surveyHelpHtml : ''}${rows || '<div class="muted">Нет рекомендаций</div>'}<div style="margin-top:10px"><button class="btn" id="applyAll" style="width:100%; font-weight:800" ${sv.applying ? 'disabled' : ''}>✅ Применить всё</button></div><div class="survey-actions"><button class="btn secondary" id="cancelSurvey" ${sv.applying ? 'disabled' : ''}>Отмена</button></div></div>`;
     }
     const step = SURVEY_STEPS[sv.step];
     const p = Math.round(((sv.step+1)/SURVEY_STEPS.length)*100);
@@ -2763,8 +2768,6 @@
       }
     });
 
-    appEl.querySelectorAll('[data-rec-toggle]').forEach((el)=>el.addEventListener('change',(e)=>{ state.survey.selected[Number(el.dataset.recToggle)] = !!e.target.checked; }));
-
     document.getElementById('applyAll')?.addEventListener('click', async ()=>{
       haptic();
       state.survey.applying = true;
@@ -2791,33 +2794,17 @@
       }
     });
 
-    document.getElementById('applySelected')?.addEventListener('click', async ()=>{
+    document.getElementById('cancelSurvey')?.addEventListener('click', ()=>{
       haptic();
-      state.survey.applying = true;
-      const ids=Object.keys(state.survey.selected).filter((k)=>state.survey.selected[k]).map(Number);
-      try {
-        const out = await api('./api/checkin/apply',{method:'POST', body:{checkin_id: state.survey.checkinId, selected_ids:ids, mode:'selected'}});
-        if (out.date_local === localDateISO()) showToast('✅ Применено к плану: сегодня');
-        else showToast('✅ Применено на завтра');
-        state.survey.appliedNotice = out.applied_notice || null;
-        resetSurveyDraftForCurrentTarget();
-        state.survey.loadedKey = '';
-        if (out.date_local === localDateISO()) {
-          await loadToday(true);
-          activateTab('today');
-        } else {
-          await loadSurveyForTarget(true);
-          renderActiveTab();
-        }
-        await showUnlockToastFromPayload(out);
-      } catch {
-        showToast('Не удалось применить выбранные');
-      } finally {
-        state.survey.applying = false;
-      }
+      const currentTarget = state.survey.target;
+      resetSurveyDraftForCurrentTarget();
+      state.survey.target = currentTarget;
+      state.survey.limitReached = true;
+      state.survey.appliedNotice = null;
+      state.survey.loadedKey = '';
+      showToast('Опрос отменён. Повторный запуск для этого дня недоступен.');
+      renderActiveTab();
     });
-
-    document.getElementById('cancelSurvey')?.addEventListener('click', ()=>{ haptic(); state.survey.view='wizard'; renderActiveTab(); });
   }
 
 

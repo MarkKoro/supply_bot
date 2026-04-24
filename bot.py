@@ -2926,6 +2926,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     conn = await db.connect(s.DB_PATH)
     try:
         await db.get_or_create_user(conn, tg_uid, tz_name="")
+        start_payload = str((context.args or [""])[0] or "").strip().lower()
         has_consent = await db.has_required_consent(
             conn,
             tg_uid,
@@ -2935,6 +2936,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not has_consent:
             await _render_consent_screen(update, context)
             return
+        if start_payload in {"webapp_starter_gift", "starter_offer"}:
+            onboarding_state = await db.get_onboarding_state(conn, tg_uid)
+            onboarding_status = str(onboarding_state.get("onboarding_status") or "").strip().lower()
+            starter_used_row = await db.fetchone(
+                conn,
+                "SELECT starter_trial_used FROM users WHERE tg_user_id=?",
+                (int(tg_uid),),
+            )
+            starter_used = int(starter_used_row["starter_trial_used"] or 0) if starter_used_row else 0
+            has_premium = await db.is_premium_active(conn, tg_uid)
+            if onboarding_status == "done" and starter_used == 0 and not has_premium:
+                await _show_starter_trial_offer(update, context)
+                return
         await _continue_after_consent(update, context, conn, tg_uid)
     finally:
         await conn.close()

@@ -642,6 +642,9 @@ async def api_me(x_telegram_init_data: str = Header(default="", alias="X-Telegra
             (int(tg_user_id),),
         )
         starter_trial_used = int(starter_row["starter_trial_used"] or 0) if starter_row else 0
+        onboarding_state = await db.get_onboarding_state(conn, tg_user_id)
+        onboarding_status = str(onboarding_state.get("onboarding_status") or "").strip().lower()
+        onboarding_reached_starter_offer = onboarding_status == "done"
         premium = is_admin or premium_active
         webapp_access = is_admin or premium_active or starter_trial_active
         premium_until = None if is_admin else await db.get_premium_until(conn, tg_user_id)
@@ -658,8 +661,11 @@ async def api_me(x_telegram_init_data: str = Header(default="", alias="X-Telegra
         "starter_trial_active": bool(starter_trial_active),
         "starter_trial_until_utc": starter_trial_until_utc,
         "starter_trial_used": int(starter_trial_used),
+        "has_unused_starter_gift": bool(onboarding_reached_starter_offer and starter_trial_used == 0 and not starter_trial_active and not premium_active),
+        "onboarding_reached_starter_offer": bool(onboarding_reached_starter_offer),
         "webapp_access": bool(webapp_access),
         "plans": _plans_payload(),
+        "bot_username": str(s.BOT_USERNAME or "").strip(),
         "is_admin": is_admin,
         "role": role,
         "perms": perms,

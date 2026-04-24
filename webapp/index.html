@@ -198,6 +198,20 @@
     .mode-banner { gap: 10px; align-items: flex-start; flex-wrap: wrap; }
     .mode-banner .btn { flex: 0 0 auto; }
     .mode-banner .muted { overflow-wrap: anywhere; word-break: break-word; }
+    .gift-reminder-card {
+      border-color: rgba(255, 214, 128, 0.48);
+      background: linear-gradient(180deg, rgba(255, 227, 170, 0.22), rgba(255, 190, 100, 0.1));
+    }
+    .gift-reminder-row {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+    }
+    .gift-reminder-row .btn {
+      min-width: 170px;
+    }
     .row > * { min-width: 0; }
     .muted { color: var(--muted); }
 
@@ -1539,6 +1553,27 @@
     }
     return 'Без активной подписки';
   }
+
+  function hasReachedStarterOffer() {
+    return Boolean(state.me?.onboarding_reached_starter_offer);
+  }
+
+  function hasUnusedStarterGift() {
+    return Boolean(state.me?.has_unused_starter_gift) && !Boolean(state.me?.premium);
+  }
+
+  function openBotWithStart(target = "onboarding") {
+    const rawUsername = String(state.me?.bot_username || "").trim().replace(/^@+/, "");
+    if (!rawUsername) {
+      showToast("Не удалось открыть бота: username не настроен");
+      return;
+    }
+    const payload = target === "starter_offer" ? "webapp_starter_gift" : "webapp_onboarding";
+    const link = `https://t.me/${encodeURIComponent(rawUsername)}?start=${encodeURIComponent(payload)}`;
+    if (tg?.openTelegramLink) tg.openTelegramLink(link);
+    else if (tg?.openLink) tg.openLink(link);
+    else window.open(link, "_blank", "noopener");
+  }
   function formatRuDate(value) {
     const raw = String(value || "").trim();
     if (!raw) return "без даты";
@@ -1885,7 +1920,8 @@
       }
       await checkPendingPaymentStatus({ silent: true });
       if (!me.webapp_access) {
-        renderPaywall();
+        if (!hasReachedStarterOffer()) renderOnboardingGate();
+        else renderPaywall();
       } else {
         if (sp.tutorial === "main_reset") {
           Object.values(GUIDE_KEYS).forEach((key) => localStorage.removeItem(guideStorageKey(key)));
@@ -1963,6 +1999,15 @@
         </div>
       `;
     }).join("");
+    const starterGiftHint = hasUnusedStarterGift() ? `
+      <div class="card gift-reminder-card" style="margin-top:10px; padding:12px;">
+        <div><strong>🎁 У вас есть неиспользованный подарок в боте</strong></div>
+        <div class="muted" style="margin-top:6px">Активируйте Starter-пак на 3 дня в боте — и получите полный доступ к WebApp без оплаты на время пробного периода.</div>
+        <div class="gift-reminder-row" style="margin-top:10px;">
+          <button class="btn" type="button" data-open-bot-start data-bot-target="starter_offer">Перейти в бота</button>
+        </div>
+      </div>
+    ` : "";
 
     appEl.innerHTML = `
       <div class="main-content">
@@ -1973,6 +2018,7 @@
             <div><strong>🚫 Сейчас доступ к веб-приложению закрыт</strong></div>
             <div class="muted" style="margin-top:6px">После оплаты сразу откроются разделы «Сегодня», «Каталог», «Карта органов», ИИ-опрос и расширенные напоминания.</div>
           </div>
+          ${starterGiftHint}
           <div class="muted" style="margin-top:8px">Без подписки вам по-прежнему доступны бот и каталог внутри бота. В подписке: «Сегодня» • «Каталог» • «Карта органов» • ИИ-опрос • расширенный трекинг и напоминания.</div>
         </div>
 
@@ -1983,6 +2029,40 @@
 
     appEl.querySelectorAll("[data-plan]").forEach((el) => {
       el.addEventListener("click", () => purchase(el.dataset.plan, el.dataset.method, el));
+    });
+    appEl.querySelectorAll("[data-open-bot-start]").forEach((el) => {
+      el.addEventListener("click", () => {
+        haptic();
+        openBotWithStart(el.dataset.botTarget || "onboarding");
+      });
+    });
+  }
+
+  function renderOnboardingGate() {
+    appEl.innerHTML = `
+      <div class="main-content">
+        <div class="card fade" style="margin-top:16px;">
+          <h2 style="margin:0 0 6px">Рады вас видеть 💙</h2>
+          <div class="muted">
+            Чтобы открыть WebApp, сначала завершите первичное знакомство в боте.
+            Там же вас ждёт подарок — Starter-пак на 3 дня с полным доступом.
+          </div>
+          <div class="card gift-reminder-card" style="margin-top:12px; padding:12px;">
+            <div><strong>Сначала зайдите в бота и нажмите «Старт»</strong></div>
+            <div class="muted" style="margin-top:6px">После этого продолжите короткий стартовый сценарий. Как только дойдёте до предложения Starter-пака, этот экран исчезнет.</div>
+          </div>
+          <div style="margin-top:12px; display:grid; gap:10px;">
+            <button class="btn" type="button" data-open-bot-start style="min-height:52px; font-size:16px;">Перейти в бота и начать</button>
+          </div>
+        </div>
+      </div>
+      ${renderTabs(true)}
+    `;
+    appEl.querySelectorAll("[data-open-bot-start]").forEach((el) => {
+      el.addEventListener("click", () => {
+        haptic();
+        openBotWithStart(el.dataset.botTarget || "onboarding");
+      });
     });
   }
 
@@ -2417,6 +2497,10 @@
       nextHtml = renderSurvey();
       binder = bindSurveyEvents;
     }
+    const giftReminder = hasUnusedStarterGift()
+      ? `<section class="card gift-reminder-card fade"><div class="gift-reminder-row"><div><strong>🎁 У вас есть неиспользованный подарок в боте</strong><div class="muted" style="margin-top:4px">Активируйте Starter-пак на 3 дня — это можно сделать прямо в боте.</div></div><button class="btn secondary" type="button" data-open-bot-start data-bot-target="starter_offer">Открыть бота</button></div></section>`
+      : "";
+    if (giftReminder) nextHtml = `${giftReminder}${nextHtml}`;
     renderTopbarActions();
 
     const previousTabKey = lastRenderedTabKey;
@@ -2428,6 +2512,12 @@
     target.scrollTop = previousTabKey === tabKey ? prevScrollTop : 0;
     restoreFocusableSnapshot(target, focusSnapshot);
     if (typeof binder === "function") binder();
+    target.querySelectorAll("[data-open-bot-start]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        haptic();
+        openBotWithStart(btn.dataset.botTarget || "onboarding");
+      });
+    });
     requestAnimationFrame(() => {
       if (state.activeTab === "survey") maybeStartGuide(GUIDE_KEYS.survey);
       if (state.activeTab === "profile") maybeStartGuide(GUIDE_KEYS.profile);

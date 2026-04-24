@@ -1944,10 +1944,10 @@
     const plans = state.me?.plans || [];
     const starterUsed = Boolean(state.me?.starter_trial_used);
     const starterExpired = starterUsed && !state.me?.starter_trial_active;
-    const title = starterExpired ? "Доступ к WebApp остановлен" : "WebApp доступен только с Premium";
+    const title = starterExpired ? "Доступ к веб-приложению приостановлен" : "Веб-приложение доступно только по подписке";
     const subtitle = starterExpired
-      ? "Starter Pack завершён. Чтобы снова открыть разделы WebApp, продлите подписку Premium."
-      : "Без активной подписки Premium разделы WebApp заблокированы.";
+      ? "Пробный период завершён. Чтобы снова открыть разделы веб-приложения, продлите подписку."
+      : "Без активной подписки разделы веб-приложения заблокированы.";
     const plansHtml = plans.map((p) => {
       const rub = p.price_rub ? Math.round(p.price_rub / 100) : null;
       const planLabel = planNameRu(p.plan_id, p.months);
@@ -1970,10 +1970,10 @@
           <h2 style="margin:0 0 4px">${title}</h2>
           <div class="muted">${subtitle}</div>
           <div class="card" style="margin-top:10px; padding:12px;">
-            <div><strong>🚫 Сейчас доступ к WebApp закрыт</strong></div>
-            <div class="muted" style="margin-top:6px">После оплаты Premium сразу откроются Today, Каталог, Карта органов, AI check-in и расширенные напоминания.</div>
+            <div><strong>🚫 Сейчас доступ к веб-приложению закрыт</strong></div>
+            <div class="muted" style="margin-top:6px">После оплаты сразу откроются разделы «Сегодня», «Каталог», «Карта органов», ИИ-опрос и расширенные напоминания.</div>
           </div>
-          <div class="muted" style="margin-top:8px">Что даёт Premium: Today • Каталог • Карта органов • AI check-in • расширенный трекинг и напоминания.</div>
+          <div class="muted" style="margin-top:8px">Без подписки вам по-прежнему доступны бот и каталог внутри бота. В подписке: «Сегодня» • «Каталог» • «Карта органов» • ИИ-опрос • расширенный трекинг и напоминания.</div>
         </div>
 
         <div class="plans">${plansHtml || '<div class="card">Планы пока недоступны.</div>'}</div>

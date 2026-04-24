@@ -6343,9 +6343,8 @@ function adminField(label, field, value, kind='input') {
       .filter((p) => p.stars_enabled)
       .map((p) => {
         const months = Number(p.months || 0);
-        const rub = Math.round(Number(p.price_rub || 0) / 100);
-        const stars = Math.max(1, Math.round(rub / 1.5));
-        return `<button class="btn secondary premium-plan-tile" data-settings-open-premium-plan-stars="${esc(p.plan_id)}">${months} мес · ${stars} ⭐</button>`;
+        const stars = Number(p.price_stars || 0);
+        return `<button class="btn secondary premium-plan-tile" data-settings-open-premium-plan-stars="${esc(p.plan_id)}">${months} мес · ${stars > 0 ? stars : '—'} ⭐</button>`;
       })
       .join('');
     const scheduleSlots = Array.isArray(state.settingsSchedule?.slots) ? state.settingsSchedule.slots : [];

@@ -3667,7 +3667,7 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             context.user_data[WAITING_KEY] = "gift:redeem"
             await _show_gift_code_hub(update, context, conn, tg_uid)
             return
-        if data == "gift:create":
+        if data in {"gift:create", "gift:create_new", "gift:new"}:
             if not _is_admin(tg_uid):
                 await _show_gift_code_hub(update, context, conn, tg_uid)
                 return
@@ -3675,7 +3675,8 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await show(
                 update,
                 context,
-                "Введи количество дней для нового кода.\n"
+                "🎁 <b>Создание подарочного кода</b>\n\n"
+                "Напиши одним сообщением, на сколько дней дать Premium.\n"
                 "Например: <b>7</b>, <b>30</b> или <b>90</b>.",
                 InlineKeyboardMarkup([
                     [InlineKeyboardButton("⬅️ Назад", callback_data="settings:gift")],
@@ -3683,7 +3684,7 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 route="settings:gift",
             )
             return
-        if data == "gift:codes":
+        if data in {"gift:codes", "gift:list"}:
             if not _is_admin(tg_uid):
                 await _show_gift_code_hub(update, context, conn, tg_uid)
                 return
@@ -3699,7 +3700,7 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 route="settings:gift",
             )
             return
-        if data == "gift:codes:unused":
+        if data in {"gift:codes:unused", "gift:list:unused"}:
             rows = await db.list_unused_gift_codes(conn, limit=50)
             lines = ["🟢 <b>Неиспользованные коды</b>", "", "Нажми на любой код для копирования:", ""]
             for item in rows:
@@ -7157,7 +7158,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 else:
                     context.user_data.pop(WAITING_KEY, None)
                     created = await db.create_gift_code(conn, days=int(txt.strip()), admin_tg_id=tg_uid)
-                    await show(update, context, f"✅ Создан код на {created['days']} дн:\n<code>{created['code']}</code>", gift_code_admin_kb(), route="settings:gift")
+                    await show(update, context, f"✅ <b>Код создан</b>\n\nКод: <code>{created['code']}</code>\nДней Premium: <b>{created['days']}</b>\n\nЕго можно скопировать и отправить пользователю.", gift_code_admin_kb(), route="settings:gift")
                 try:
                     await update.message.delete()
                 except Exception:

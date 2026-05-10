@@ -3523,7 +3523,7 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if data.startswith("cx:add_pick:"):
             parts = data.split(":", 3)
             if len(parts) != 4:
-                logger.warning("Invalid complex pick callback payload: %s", data)
+                log.warning("Invalid complex pick callback payload: %s", data)
                 return
             _, _, cx_id, supp_id = parts
             await db.add_item_to_complex(conn, tg_uid, int(cx_id), int(supp_id), dose_override="")
@@ -6721,7 +6721,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             try:
                 code = await db.create_gift_code(conn, admin_tg_id=tg_uid, days=days)
             except Exception:
-                logger.exception("Gift code generation failed for admin_tg_id=%s", tg_uid)
+                log.exception("Gift code generation failed for admin_tg_id=%s", tg_uid)
                 await show(
                     update,
                     context,

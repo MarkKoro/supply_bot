@@ -3671,21 +3671,13 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if not _is_admin(tg_uid):
                 await _show_gift_code_hub(update, context, conn, tg_uid)
                 return
-            context.user_data.pop(WAITING_KEY, None)
-            created = await db.create_gift_code(conn, days=30, admin_tg_id=tg_uid)
-            stats = await db.gift_code_stats(conn)
+            context.user_data[WAITING_KEY] = "gift:create:days"
             await show(
                 update,
                 context,
-                (
-                    "✅ <b>Код создан</b> (30 дней).\n"
-                    f"<code>{created['code']}</code>\n\n"
-                    "Нажми на код выше, чтобы скопировать.\n\n"
-                    f"Всего: <b>{stats['total']}</b> · Активные: <b>{stats['unused']}</b> · Использованные: <b>{stats['used']}</b>"
-                ),
+                "Введи количество дней для нового кода.\n"
+                "Например: <b>7</b>, <b>30</b> или <b>90</b>.",
                 InlineKeyboardMarkup([
-                    [InlineKeyboardButton("➕ Создать ещё", callback_data="gift:create")],
-                    [InlineKeyboardButton("📋 Коды", callback_data="gift:codes")],
                     [InlineKeyboardButton("⬅️ Назад", callback_data="settings:gift")],
                 ]),
                 route="settings:gift",

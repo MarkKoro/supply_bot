@@ -820,10 +820,20 @@ def settings_menu(*, show_starter_activation: bool = False) -> InlineKeyboardMar
         [InlineKeyboardButton("📈 Статистика", callback_data="menu:stats")],
         [InlineKeyboardButton("⭐ Премиум", callback_data="menu:premium")],
         [InlineKeyboardButton("🧩 Комплексы", callback_data="settings:complexes")],
+        [InlineKeyboardButton("🎁 Подарочный код", callback_data="settings:gift")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")],
     ]
     if show_starter_activation:
         rows.insert(5, [InlineKeyboardButton("🎁 Активировать 3 дня", callback_data="starter:activate")])
+    return InlineKeyboardMarkup(rows)
+
+
+def gift_user_kb(*, is_admin: bool = False) -> InlineKeyboardMarkup:
+    rows = []
+    if is_admin:
+        rows.append([InlineKeyboardButton("➕ Создать новый код", callback_data="gift:admin:create")])
+        rows.append([InlineKeyboardButton("📋 Коды", callback_data="gift:admin:codes")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="menu:settings")])
     return InlineKeyboardMarkup(rows)
 
 

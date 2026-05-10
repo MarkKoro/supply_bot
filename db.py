@@ -723,6 +723,7 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     await _ensure_curated_stacks(conn)
     await _ensure_curated_stack_items(conn)
     await _ensure_payments_table(conn)
+    await _ensure_gift_codes(conn)
     await _ensure_achievements_tables(conn)
     await _ensure_integrity_unique_indexes(conn)
     await conn.execute(
@@ -737,6 +738,76 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     await conn.execute(
         "UPDATE supplements SET body_effects_json='[]' WHERE body_effects_json IS NULL OR body_effects_json=''"
     )
+
+async def _ensure_gift_codes(conn: aiosqlite.Connection) -> None:
+    await conn.execute(
+        """CREATE TABLE IF NOT EXISTS gift_codes (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          code TEXT UNIQUE NOT NULL,
+          days INTEGER NOT NULL,
+          created_by_tg_id INTEGER NOT NULL,
+          created_at_utc TEXT NOT NULL,
+          used_by_tg_id INTEGER DEFAULT 0,
+          used_at_utc TEXT DEFAULT ''
+        )"""
+    )
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_gift_codes_used ON gift_codes(used_at_utc)")
+
+
+def generate_gift_code(length: int = 14) -> str:
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    import secrets
+    return "".join(secrets.choice(alphabet) for _ in range(max(8, int(length))))
+
+
+async def create_gift_code(conn: aiosqlite.Connection, *, days: int, admin_tg_id: int) -> dict:
+    safe_days = max(1, int(days))
+    now = utc_now_iso()
+    for _ in range(10):
+        code = generate_gift_code()
+        try:
+            await conn.execute(
+                "INSERT INTO gift_codes(code, days, created_by_tg_id, created_at_utc) VALUES(?,?,?,?)",
+                (code, safe_days, int(admin_tg_id), now),
+            )
+            await conn.commit()
+            return {"code": code, "days": safe_days}
+        except Exception:
+            continue
+    raise RuntimeError("gift_code_create_failed")
+
+
+async def get_gift_code(conn: aiosqlite.Connection, code: str) -> dict | None:
+    row = await fetchone(conn, "SELECT * FROM gift_codes WHERE UPPER(code)=UPPER(?)", (str(code or "").strip(),))
+    return dict(row) if row else None
+
+
+async def mark_gift_code_used(conn: aiosqlite.Connection, code: str, tg_user_id: int) -> bool:
+    now = utc_now_iso()
+    cur = await conn.execute(
+        """UPDATE gift_codes
+           SET used_by_tg_id=?, used_at_utc=?
+           WHERE UPPER(code)=UPPER(?) AND TRIM(COALESCE(used_at_utc,''))=''""",
+        (int(tg_user_id), now, str(code or "").strip()),
+    )
+    await conn.commit()
+    return int(cur.rowcount or 0) > 0
+
+
+async def list_unused_gift_codes(conn: aiosqlite.Connection, limit: int = 30) -> list[dict]:
+    rows = await fetchall(
+        conn,
+        "SELECT * FROM gift_codes WHERE TRIM(COALESCE(used_at_utc,''))='' ORDER BY id DESC LIMIT ?",
+        (max(1, int(limit)),),
+    )
+    return [dict(r) for r in rows]
+
+
+async def gift_code_stats(conn: aiosqlite.Connection) -> dict:
+    total = await fetchone(conn, "SELECT COUNT(*) AS c FROM gift_codes")
+    unused = await fetchone(conn, "SELECT COUNT(*) AS c FROM gift_codes WHERE TRIM(COALESCE(used_at_utc,''))=''")
+    used = await fetchone(conn, "SELECT COUNT(*) AS c FROM gift_codes WHERE TRIM(COALESCE(used_at_utc,''))!=''")
+    return {"total": int((total or {}).get("c") or 0), "unused": int((unused or {}).get("c") or 0), "used": int((used or {}).get("c") or 0)}
     await conn.execute(
         "UPDATE supplements SET body_targets_json='[]' WHERE body_targets_json IS NULL OR body_targets_json=''"
     )
@@ -1985,6 +2056,21 @@ async def _ensure_payments_table(conn: aiosqlite.Connection) -> None:
     )
 
 
+async def _ensure_gift_codes(conn: aiosqlite.Connection) -> None:
+    await conn.execute(
+        """CREATE TABLE IF NOT EXISTS gift_codes (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          code TEXT UNIQUE NOT NULL,
+          days INTEGER NOT NULL,
+          created_by_tg_id INTEGER NOT NULL,
+          created_at_utc TEXT NOT NULL,
+          used_by_tg_id INTEGER DEFAULT 0,
+          used_at_utc TEXT DEFAULT ''
+        )"""
+    )
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_gift_codes_used ON gift_codes(used_at_utc)")
+
+
 async def _ensure_integrity_unique_indexes(conn: aiosqlite.Connection) -> None:
     await _dedupe_keep_latest(conn, "supplement_day_state", ["user_id", "day", "supplement_id"], "created_at")
     await conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_sds ON supplement_day_state(user_id, day, supplement_id)")
@@ -2802,12 +2888,79 @@ async def extend_premium(
     return until_value
 
 
+async def extend_premium_days(
+    conn: aiosqlite.Connection,
+    tg_user_id: int,
+    days: int,
+    source: str,
+    plan_id: str,
+) -> str:
+    safe_days = max(1, int(days))
+    now = datetime.now(timezone.utc)
+    current_until = _parse_utc_iso_dt(await get_premium_until(conn, tg_user_id))
+    baseline = current_until if (current_until is not None and current_until > now) else now
+    new_until = baseline + timedelta(days=safe_days)
+    return await set_premium_until(conn, tg_user_id, new_until, source, plan_id)
+
+
 async def get_starter_trial_until(conn: aiosqlite.Connection, tg_user_id: int) -> str | None:
     row = await fetchone(conn, "SELECT starter_trial_until_utc FROM users WHERE tg_user_id=?", (tg_user_id,))
     if not row:
         return None
     value = str(row["starter_trial_until_utc"] or "").strip()
     return value or None
+
+
+def generate_gift_code(length: int = 14) -> str:
+    import secrets
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    return "".join(secrets.choice(alphabet) for _ in range(max(8, int(length))))
+
+
+async def create_gift_code(conn: aiosqlite.Connection, *, days: int, admin_tg_id: int) -> dict:
+    safe_days = max(1, int(days))
+    now = utc_now_iso()
+    for _ in range(10):
+        code = generate_gift_code()
+        try:
+            await conn.execute(
+                "INSERT INTO gift_codes(code, days, created_by_tg_id, created_at_utc) VALUES(?,?,?,?)",
+                (code, safe_days, int(admin_tg_id), now),
+            )
+            await conn.commit()
+            return {"code": code, "days": safe_days}
+        except Exception:
+            continue
+    raise RuntimeError("gift_code_create_failed")
+
+
+async def get_gift_code(conn: aiosqlite.Connection, code: str) -> dict | None:
+    row = await fetchone(conn, "SELECT * FROM gift_codes WHERE UPPER(code)=UPPER(?)", (str(code or "").strip(),))
+    return dict(row) if row else None
+
+
+async def mark_gift_code_used(conn: aiosqlite.Connection, code: str, tg_user_id: int) -> bool:
+    now = utc_now_iso()
+    cur = await conn.execute(
+        """UPDATE gift_codes
+           SET used_by_tg_id=?, used_at_utc=?
+           WHERE UPPER(code)=UPPER(?) AND TRIM(COALESCE(used_at_utc,''))=''""",
+        (int(tg_user_id), now, str(code or "").strip()),
+    )
+    await conn.commit()
+    return int(cur.rowcount or 0) > 0
+
+
+async def list_unused_gift_codes(conn: aiosqlite.Connection, limit: int = 30) -> list[dict]:
+    rows = await fetchall(conn, "SELECT * FROM gift_codes WHERE TRIM(COALESCE(used_at_utc,''))='' ORDER BY id DESC LIMIT ?", (max(1, int(limit)),))
+    return [dict(r) for r in rows]
+
+
+async def gift_code_stats(conn: aiosqlite.Connection) -> dict:
+    total = await fetchone(conn, "SELECT COUNT(*) AS c FROM gift_codes")
+    unused = await fetchone(conn, "SELECT COUNT(*) AS c FROM gift_codes WHERE TRIM(COALESCE(used_at_utc,''))=''")
+    used = await fetchone(conn, "SELECT COUNT(*) AS c FROM gift_codes WHERE TRIM(COALESCE(used_at_utc,''))!=''")
+    return {"total": int((total or {}).get("c") or 0), "unused": int((unused or {}).get("c") or 0), "used": int((used or {}).get("c") or 0)}
 
 
 async def is_starter_trial_active(

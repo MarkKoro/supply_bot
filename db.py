@@ -461,7 +461,6 @@ CREATE TABLE IF NOT EXISTS curated_stacks (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_curated_stacks_active ON curated_stacks(is_active);
 
 CREATE TABLE IF NOT EXISTS curated_stack_items (
   id INTEGER PRIMARY KEY,
@@ -572,7 +571,6 @@ CREATE TABLE IF NOT EXISTS gift_codes (
   redeemed_at_utc TEXT NOT NULL DEFAULT '',
   is_active INTEGER NOT NULL DEFAULT 1
 );
-CREATE INDEX IF NOT EXISTS idx_gift_codes_active ON gift_codes(is_active, id DESC);
 """
 
 async def connect(db_path: str) -> aiosqlite.Connection:
@@ -646,6 +644,7 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
           is_active INTEGER NOT NULL DEFAULT 1
         )"""
     )
+    await _ensure_column(conn, "gift_codes", "is_active", "INTEGER NOT NULL DEFAULT 1")
     await conn.execute("CREATE INDEX IF NOT EXISTS idx_gift_codes_active ON gift_codes(is_active, id DESC)")
     await conn.execute(
         """CREATE TABLE IF NOT EXISTS user_complexes (

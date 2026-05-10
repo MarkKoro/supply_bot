@@ -48,6 +48,7 @@ from keyboards import (
     my_supplement_reminders,
     timezone_picker,
     settings_menu,
+    gift_user_kb,
     settings_notifications_kb,
     schedule_menu_kb,
     schedule_slots_pick_kb,
@@ -998,6 +999,18 @@ async def _render_settings_menu(update: Update, context: ContextTypes.DEFAULT_TY
         settings_menu(show_starter_activation=(not premium_active and not starter_active and starter_used == 0)),
         route="menu:settings",
     )
+
+
+async def _show_gift_hub(update: Update, context: ContextTypes.DEFAULT_TYPE, tg_uid: int) -> None:
+    is_admin = _is_admin(tg_uid)
+    text = (
+        "🎁 <b>Подарочный код</b>\n\n"
+        "Отправьте код отдельным сообщением, чтобы активировать Premium.\n"
+        "Мы удалим сообщение с кодом автоматически."
+    )
+    if is_admin:
+        text += "\n\nДля администратора доступны создание и управление кодами."
+    await show(update, context, text, gift_user_kb(is_admin=is_admin), route="settings:gift")
 
 
 def _format_link_names(items: list[dict]) -> str:
@@ -2427,6 +2440,7 @@ async def home(
     used = int(onboarding_state.get("onboarding_free_pick_used") or 0)
     has_unfinished = status in {"active", "results"} and bool(raw)
     entry_reason = str(context.user_data.pop("home_entry_reason", "") or "")
+    entry_extra = str(context.user_data.pop("home_entry_extra", "") or "")
 
     text = _home_text(
         has_unfinished_onboarding=has_unfinished,
@@ -2434,6 +2448,7 @@ async def home(
         starter_active=starter_active,
         entry_reason=entry_reason,
         show_next_step_hint=show_next_step_hint,
+        entry_extra=entry_extra,
     )
 
     base_menu = main_menu(
@@ -2776,6 +2791,7 @@ def _home_text(
     starter_active: bool = False,
     entry_reason: str = "",
     show_next_step_hint: bool = True,
+    entry_extra: str = "",
 ) -> str:
     next_step = "Начни со стартового подбора или открой каталог."
     if has_unfinished_onboarding:
@@ -2811,6 +2827,7 @@ def _home_text(
         "• ИИ и веб-приложение: стартовый подбор и удобный ежедневный трекинг.\n\n"
         f"{next_step_block}"
         + ("\n".join(contextual_lines) if contextual_lines else "")
+        + (f"\n\n{entry_extra}" if entry_extra else "")
     )
 
 
@@ -3658,6 +3675,70 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if data == "settings:complexes":
             context.user_data[COMPLEXES_BACK_ROUTE_KEY] = "menu:settings"
             await _show_complexes_hub(update, context, conn, tg_uid)
+            return
+        if data == "settings:gift":
+            await _show_gift_hub(update, context, tg_uid)
+            return
+        if data == "gift:admin:create":
+            if not _is_admin(tg_uid):
+                await _show_gift_hub(update, context, tg_uid)
+                return
+            await show(
+                update,
+                context,
+                "Введите количество дней Premium для нового кода (целое число).",
+                InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="settings:gift")]]),
+                route="gift:admin:create_wait",
+            )
+            return
+        if data == "gift:admin:codes":
+            if not _is_admin(tg_uid):
+                await _show_gift_hub(update, context, tg_uid)
+                return
+            stats = await db.gift_codes_stats(conn)
+            await show(
+                update,
+                context,
+                (
+                    "🎟 <b>Коды</b>\n"
+                    f"Всего создано: <b>{stats['total']}</b>\n"
+                    f"Активные: <b>{stats['active']}</b>\n"
+                    f"Использованные/деактивированные: <b>{stats['used']}</b>"
+                ),
+                InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🟢 Неиспользованные", callback_data="gift:admin:list:active")],
+                    [InlineKeyboardButton("⬅️ Назад", callback_data="settings:gift")],
+                ]),
+                route="gift:admin:codes",
+            )
+            return
+        if data == "gift:admin:list:active":
+            if not _is_admin(tg_uid):
+                await _show_gift_hub(update, context, tg_uid)
+                return
+            rows = await db.gift_codes_list(conn, only_active=True, limit=20)
+            kb_rows = [[InlineKeyboardButton(f"{r['code']} · {int(r['days'])} дн.", callback_data=f"gift:admin:open:{r['code']}")] for r in rows]
+            kb_rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="gift:admin:codes")])
+            text = "Активные коды:\n" + ("\n".join([f"• <code>{r['code']}</code> — {int(r['days'])} дн." for r in rows]) if rows else "Пока нет активных кодов.")
+            await show(update, context, text, InlineKeyboardMarkup(kb_rows), route="gift:admin:list:active")
+            return
+        if data.startswith("gift:admin:open:"):
+            if not _is_admin(tg_uid):
+                await _show_gift_hub(update, context, tg_uid)
+                return
+            code = data.split(":", 3)[3]
+            await show(update, context, f"Код: <code>{code}</code>", InlineKeyboardMarkup([
+                [InlineKeyboardButton("🗑 Деактивировать", callback_data=f"gift:admin:delete:{code}")],
+                [InlineKeyboardButton("⬅️ Назад", callback_data="gift:admin:list:active")],
+            ]), route="gift:admin:open")
+            return
+        if data.startswith("gift:admin:delete:"):
+            if not _is_admin(tg_uid):
+                await _show_gift_hub(update, context, tg_uid)
+                return
+            code = data.split(":", 3)[3]
+            await db.gift_code_deactivate(conn, code)
+            await show(update, context, "Код деактивирован.", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ К кодам", callback_data="gift:admin:codes")]]), route="gift:admin:codes")
             return
         if data == "schedule:slot_pick":
             user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
@@ -6628,6 +6709,41 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 await update.message.delete()
             except Exception:
                 pass
+            return
+        if ui_screen == "gift:admin:create_wait":
+            if not _is_admin(tg_uid):
+                await _show_gift_hub(update, context, tg_uid)
+                return
+            if not txt.isdigit() or int(txt) <= 0:
+                await show(update, context, "Введите корректное число дней (например, 30).", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="settings:gift")]]), route="gift:admin:create_wait")
+                return
+            days = int(txt)
+            code = await db.create_gift_code(conn, admin_tg_id=tg_uid, days=days)
+            await show(
+                update,
+                context,
+                f"✅ Код создан.\nДней Premium: <b>{days}</b>\nКод для копирования:\n<code>{code}</code>",
+                InlineKeyboardMarkup([
+                    [InlineKeyboardButton("➕ Создать ещё", callback_data="gift:admin:create")],
+                    [InlineKeyboardButton("📋 Коды", callback_data="gift:admin:codes")],
+                    [InlineKeyboardButton("⬅️ Назад", callback_data="settings:gift")],
+                ]),
+                route="settings:gift",
+            )
+            return
+        if ui_screen == "settings:gift":
+            status, days, until_iso = await db.redeem_gift_code(conn, tg_user_id=tg_uid, code=txt)
+            if status == "ok":
+                context.user_data["home_entry_reason"] = "premium_activated"
+                context.user_data["home_entry_extra"] = (
+                    f"🎁 Подарочный код активирован: +{days} дн. Premium до {_format_until_ru(until_iso)}."
+                )
+                await home(update, context)
+                return
+            if status == "used":
+                await show(update, context, "Извините, этот код уже истёк или был использован.", gift_user_kb(is_admin=_is_admin(tg_uid)), route="settings:gift")
+                return
+            await show(update, context, "Извините, такого кода не существует.", gift_user_kb(is_admin=_is_admin(tg_uid)), route="settings:gift")
             return
 
         if ui_screen == "admin_wait_query":

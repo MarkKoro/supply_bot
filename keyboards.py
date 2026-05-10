@@ -819,7 +819,6 @@ def settings_menu(*, show_starter_activation: bool = False) -> InlineKeyboardMar
         [InlineKeyboardButton("🔔 Уведомления", callback_data="settings:notifications")],
         [InlineKeyboardButton("📈 Статистика", callback_data="menu:stats")],
         [InlineKeyboardButton("⭐ Премиум", callback_data="menu:premium")],
-        [InlineKeyboardButton("🎁 Подарочный код", callback_data="settings:gift")],
         [InlineKeyboardButton("🧩 Комплексы", callback_data="settings:complexes")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")],
     ]
@@ -827,17 +826,6 @@ def settings_menu(*, show_starter_activation: bool = False) -> InlineKeyboardMar
         rows.insert(5, [InlineKeyboardButton("🎁 Активировать 3 дня", callback_data="starter:activate")])
     return InlineKeyboardMarkup(rows)
 
-
-def gift_code_user_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="menu:settings")]])
-
-
-def gift_code_admin_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ Создать новый код", callback_data="gift:create")],
-        [InlineKeyboardButton("📋 Коды", callback_data="gift:codes")],
-        [InlineKeyboardButton("⬅️ Назад", callback_data="menu:settings")],
-    ])
 
 
 def settings_notifications_kb(*, reminders_enabled: bool, slots: list[dict]) -> InlineKeyboardMarkup:

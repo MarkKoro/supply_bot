@@ -3672,7 +3672,16 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 await _show_gift_code_hub(update, context, conn, tg_uid)
                 return
             context.user_data[WAITING_KEY] = "gift:create:days"
-            await show(update, context, "Введи количество дней для подписки по новому коду.", gift_code_admin_kb(), route="settings:gift")
+            await show(
+                update,
+                context,
+                "Введи количество дней для нового кода.\n"
+                "Например: <b>7</b>, <b>30</b> или <b>90</b>.",
+                InlineKeyboardMarkup([
+                    [InlineKeyboardButton("⬅️ Назад", callback_data="settings:gift")],
+                ]),
+                route="settings:gift",
+            )
             return
         if data == "gift:codes":
             if not _is_admin(tg_uid):
@@ -3691,10 +3700,10 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             return
         if data == "gift:codes:unused":
-            rows = await db.list_unused_gift_codes(conn, limit=20)
-            lines = ["🟢 <b>Неиспользованные коды</b>", ""]
+            rows = await db.list_unused_gift_codes(conn, limit=50)
+            lines = ["🟢 <b>Неиспользованные коды</b>", "", "Нажми на любой код для копирования:", ""]
             for item in rows:
-                lines.append(f"<code>{item.get('code')}</code> · {int(item.get('days') or 0)} дн")
+                lines.append(f"• <code>{item.get('code')}</code> · {int(item.get('days') or 0)} дн")
             if not rows:
                 lines.append("Сейчас нет активных кодов.")
             await show(update, context, "\n".join(lines), InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="gift:codes")]]), route="settings:gift")

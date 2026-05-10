@@ -6718,7 +6718,21 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 await show(update, context, "Введите корректное число дней (например, 30).", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="settings:gift")]]), route="gift:admin:create_wait")
                 return
             days = int(txt)
-            code = await db.create_gift_code(conn, admin_tg_id=tg_uid, days=days)
+            try:
+                code = await db.create_gift_code(conn, admin_tg_id=tg_uid, days=days)
+            except Exception:
+                logger.exception("Gift code generation failed for admin_tg_id=%s", tg_uid)
+                await show(
+                    update,
+                    context,
+                    "⚠️ Не удалось создать код из-за внутренней ошибки. Попробуйте ещё раз.",
+                    InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔁 Повторить", callback_data="gift:admin:create")],
+                        [InlineKeyboardButton("⬅️ Назад", callback_data="settings:gift")],
+                    ]),
+                    route="gift:admin:create_wait",
+                )
+                return
             await show(
                 update,
                 context,

@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 import json
 import time
 import re
+import sqlite3
 from typing import Any
 import aiosqlite
 
@@ -2689,6 +2690,7 @@ def _generate_gift_code(length: int = 14) -> str:
 
 async def create_gift_code(conn: aiosqlite.Connection, *, admin_tg_id: int, days: int) -> str:
     safe_days = max(1, min(3650, int(days)))
+    last_error: Exception | None = None
     for _ in range(10):
         code = _generate_gift_code()
         try:
@@ -2699,8 +2701,14 @@ async def create_gift_code(conn: aiosqlite.Connection, *, admin_tg_id: int, days
             )
             await conn.commit()
             return code
-        except Exception:
+        except sqlite3.IntegrityError:
+            # Коллизия кода (UNIQUE) — пробуем следующий.
             continue
+        except Exception as exc:
+            last_error = exc
+            break
+    if last_error is not None:
+        raise RuntimeError("gift_code_generation_failed") from last_error
     raise RuntimeError("gift_code_generation_failed")
 
 

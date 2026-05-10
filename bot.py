@@ -106,6 +106,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 log = logging.getLogger("supply-bot")
 
 WAITING_KEY = "waiting"
+GIFT_FLOW_KEY = "gift_flow"
 CATALOG_PAGE_SIZE = 8
 CATALOG_CLASS_PAGE_SIZE = 8
 MY_PAGE_SIZE = 10
@@ -1015,6 +1016,17 @@ async def _show_gift_code_hub(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         kb = gift_code_user_kb()
     await show(update, context, text, kb, route="settings:gift")
+
+
+def _gift_reset_state(context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.pop(WAITING_KEY, None)
+    context.user_data.pop(GIFT_FLOW_KEY, None)
+
+
+def _gift_set_mode(context: ContextTypes.DEFAULT_TYPE, mode: str) -> None:
+    context.user_data[GIFT_FLOW_KEY] = mode
+    context.user_data[WAITING_KEY] = f"gift:{mode}"
+
 
 def _format_link_names(items: list[dict]) -> str:
     if not items:
@@ -3664,14 +3676,14 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await _show_notifications_settings(update, context, conn, tg_uid)
             return
         if data == "settings:gift":
-            context.user_data[WAITING_KEY] = "gift:redeem"
+            _gift_set_mode(context, "redeem")
             await _show_gift_code_hub(update, context, conn, tg_uid)
             return
         if data in {"gift:create", "gift:create_new", "gift:new"}:
             if not _is_admin(tg_uid):
                 await _show_gift_code_hub(update, context, conn, tg_uid)
                 return
-            context.user_data[WAITING_KEY] = "gift:create:days"
+            _gift_set_mode(context, "create_days")
             await show(
                 update,
                 context,
@@ -7130,7 +7142,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     await _show_supplement_time_screen(update, context, conn, tg_uid, supplement_id, split_origin_id=split_origin_id)
             elif waiting == "gift:redeem":
                 code = txt.strip()
-                context.user_data.pop(WAITING_KEY, None)
+                _gift_set_mode(context, "redeem")
                 payload = await db.get_gift_code(conn, code)
                 if not payload:
                     await show(update, context, "Извините, такого кода не существует.", gift_code_user_kb(), route="settings:gift")
@@ -7143,22 +7155,23 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     else:
                         days = int(payload.get("days") or 0)
                         until_iso = await db.extend_premium_days(conn, tg_uid, max(1, days), "gift_code", f"gift_{days}d")
+                        _gift_reset_state(context)
                         context.user_data["home_entry_reason"] = f"gift_activated:{days}:{until_iso}"
                         await home(update, context)
                 try:
                     await update.message.delete()
                 except Exception:
                     pass
-            elif waiting == "gift:create:days":
+            elif waiting == "gift:create_days":
                 if not _is_admin(tg_uid):
-                    context.user_data.pop(WAITING_KEY, None)
+                    _gift_set_mode(context, "redeem")
                     await _show_gift_code_hub(update, context, conn, tg_uid)
                 elif not txt.strip().isdigit() or int(txt.strip()) <= 0:
-                    await show(update, context, "Нужно положительное число дней. Например: 30", gift_code_admin_kb(), route="settings:gift")
+                    await show(update, context, "Нужно положительное число дней. Например: 30", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="settings:gift")]]), route="settings:gift")
                 else:
-                    context.user_data.pop(WAITING_KEY, None)
                     created = await db.create_gift_code(conn, days=int(txt.strip()), admin_tg_id=tg_uid)
-                    await show(update, context, f"✅ <b>Код создан</b>\n\nКод: <code>{created['code']}</code>\nДней Premium: <b>{created['days']}</b>\n\nЕго можно скопировать и отправить пользователю.", gift_code_admin_kb(), route="settings:gift")
+                    _gift_set_mode(context, "redeem")
+                    await show(update, context, f"✅ <b>Код создан</b>\n\nКод: <code>{created['code']}</code>\nДней Premium: <b>{created['days']}</b>\n\nТеперь можно создать ещё один код или вернуться назад.", gift_code_admin_kb(), route="settings:gift")
                 try:
                     await update.message.delete()
                 except Exception:

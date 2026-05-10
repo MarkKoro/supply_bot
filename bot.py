@@ -8040,7 +8040,7 @@ async def _bootstrap() -> Application:
     app.add_handler(CommandHandler("purge_me", purge_me_command))
     app.add_handler(CallbackQueryHandler(
         on_menu,
-        pattern=r"^(main$|menu:|settings:|schedule:|cx:|supplement:|admin:|add_pick:|compat_pick:|cat:|curated:|supp:|card:|mysupp:|today:|intake:|premium:|onboard:|starter:|consent:|rem:(home|edit|set:|toggle:))",
+        pattern=r"^(main$|menu:|settings:|gift:|schedule:|cx:|supplement:|admin:|add_pick:|compat_pick:|cat:|curated:|supp:|card:|mysupp:|today:|intake:|premium:|onboard:|starter:|consent:|rem:(home|edit|set:|toggle:))",
     ))
     app.add_handler(CallbackQueryHandler(on_ai_add, pattern=r"^aiadd:"))
     app.add_handler(CallbackQueryHandler(on_ai_checkin, pattern=r"^aicheck:"))

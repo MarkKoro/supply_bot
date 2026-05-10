@@ -645,6 +645,8 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
           is_active INTEGER NOT NULL DEFAULT 1
         )"""
     )
+    await _ensure_column(conn, "gift_codes", "redeemed_by_tg_id", "INTEGER NOT NULL DEFAULT 0")
+    await _ensure_column(conn, "gift_codes", "redeemed_at_utc", "TEXT NOT NULL DEFAULT ''")
     await _ensure_column(conn, "gift_codes", "is_active", "INTEGER NOT NULL DEFAULT 1")
     await conn.execute("CREATE INDEX IF NOT EXISTS idx_gift_codes_active ON gift_codes(is_active, id DESC)")
     await conn.execute(

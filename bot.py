@@ -48,8 +48,6 @@ from keyboards import (
     my_supplement_reminders,
     timezone_picker,
     settings_menu,
-    gift_code_user_kb,
-    gift_code_admin_kb,
     settings_notifications_kb,
     schedule_menu_kb,
     schedule_slots_pick_kb,
@@ -106,7 +104,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 log = logging.getLogger("supply-bot")
 
 WAITING_KEY = "waiting"
-GIFT_FLOW_KEY = "gift_flow"
 CATALOG_PAGE_SIZE = 8
 CATALOG_CLASS_PAGE_SIZE = 8
 MY_PAGE_SIZE = 10
@@ -1001,31 +998,6 @@ async def _render_settings_menu(update: Update, context: ContextTypes.DEFAULT_TY
         settings_menu(show_starter_activation=(not premium_active and not starter_active and starter_used == 0)),
         route="menu:settings",
     )
-
-
-async def _show_gift_code_hub(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, tg_uid: int) -> None:
-    admin = _is_admin(tg_uid)
-    if admin:
-        text = "🎁 <b>Подарочные коды</b>\n\nЗдесь можно создать новый код или открыть список кодов."
-        kb = gift_code_admin_kb()
-    else:
-        text = (
-            "🎁 <b>Подарочный код</b>\n\n"
-            "Здесь вы можете ввести подарочный код, чтобы получить бонус.\n"
-            "Отправьте код следующим сообщением."
-        )
-        kb = gift_code_user_kb()
-    await show(update, context, text, kb, route="settings:gift")
-
-
-def _gift_reset_state(context: ContextTypes.DEFAULT_TYPE) -> None:
-    context.user_data.pop(WAITING_KEY, None)
-    context.user_data.pop(GIFT_FLOW_KEY, None)
-
-
-def _gift_set_mode(context: ContextTypes.DEFAULT_TYPE, mode: str) -> None:
-    context.user_data[GIFT_FLOW_KEY] = mode
-    context.user_data[WAITING_KEY] = f"gift:{mode}"
 
 
 def _format_link_names(items: list[dict]) -> str:
@@ -2831,16 +2803,6 @@ def _home_text(
             "• ИИ-опрос и персональные подсказки;",
             "• расширенные функции подписки и автоматизация.",
         ]
-    elif entry_reason.startswith("gift_activated:"):
-        parts = entry_reason.split(":", 2)
-        days = parts[1] if len(parts) > 1 else "?"
-        until = _format_until_ru(parts[2] if len(parts) > 2 else "")
-        contextual_lines = [
-            "",
-            "🎁 <b>Подарочный код активирован.</b>",
-            f"Получено Premium на <b>{days}</b> дн.",
-            f"Действует до: <b>{until}</b>.",
-        ]
     next_step_block = f"Следующий шаг: {next_step}" if show_next_step_hint else "Открой нужный раздел в меню ниже."
     return (
         "💊 <b>Supply Bot</b>\n\n"
@@ -3674,52 +3636,6 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
         if data == "settings:notifications":
             await _show_notifications_settings(update, context, conn, tg_uid)
-            return
-        if data == "settings:gift":
-            _gift_set_mode(context, "redeem")
-            await _show_gift_code_hub(update, context, conn, tg_uid)
-            return
-        if data in {"gift:create", "gift:create_new", "gift:new"}:
-            if not _is_admin(tg_uid):
-                await _show_gift_code_hub(update, context, conn, tg_uid)
-                return
-            _gift_set_mode(context, "create_days")
-            await show(
-                update,
-                context,
-                "🎁 <b>Создание подарочного кода</b>\n\n"
-                "Напиши одним сообщением, на сколько дней дать Premium.\n"
-                "Например: <b>7</b>, <b>30</b> или <b>90</b>.",
-                InlineKeyboardMarkup([
-                    [InlineKeyboardButton("⬅️ Назад", callback_data="settings:gift")],
-                ]),
-                route="settings:gift",
-            )
-            return
-        if data in {"gift:codes", "gift:list"}:
-            if not _is_admin(tg_uid):
-                await _show_gift_code_hub(update, context, conn, tg_uid)
-                return
-            stats = await db.gift_code_stats(conn)
-            await show(
-                update,
-                context,
-                f"📋 <b>Коды</b>\n\nВсего: <b>{stats['total']}</b>\nАктивные: <b>{stats['unused']}</b>\nИспользованные: <b>{stats['used']}</b>",
-                InlineKeyboardMarkup([
-                    [InlineKeyboardButton("Неиспользованные", callback_data="gift:codes:unused")],
-                    [InlineKeyboardButton("⬅️ Назад", callback_data="settings:gift")],
-                ]),
-                route="settings:gift",
-            )
-            return
-        if data in {"gift:codes:unused", "gift:list:unused"}:
-            rows = await db.list_unused_gift_codes(conn, limit=50)
-            lines = ["🟢 <b>Неиспользованные коды</b>", "", "Нажми на любой код для копирования:", ""]
-            for item in rows:
-                lines.append(f"• <code>{item.get('code')}</code> · {int(item.get('days') or 0)} дн")
-            if not rows:
-                lines.append("Сейчас нет активных кодов.")
-            await show(update, context, "\n".join(lines), InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="gift:codes")]]), route="settings:gift")
             return
         if data.startswith("settings:notifications:global:"):
             enabled = data.split(":")[-1] == "1"
@@ -7049,7 +6965,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     finally:
         await conn.close()
     waiting = context.user_data.get(WAITING_KEY)
-    if waiting and waiting.startswith(("mysupp:set_dose:", "mysupp:rem_add:", "rem:set:", "schedule:add_custom", "schedule:slot_time_set:", "supplement:set_override:", "mysupp:addslot:newtime:", "gift:")):
+    if waiting and waiting.startswith(("mysupp:set_dose:", "mysupp:rem_add:", "rem:set:", "schedule:add_custom", "schedule:slot_time_set:", "supplement:set_override:", "mysupp:addslot:newtime:")):
         supplement_id = None
         if waiting.startswith(("mysupp:set_dose:", "mysupp:rem_add:", "supplement:set_override:")):
             _, _, value_text = waiting.split(":", 2)
@@ -7140,42 +7056,6 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     await db.set_schedule_time_override(conn, user_id, supplement_id, parsed_time)
                     context.user_data.pop(WAITING_KEY, None)
                     await _show_supplement_time_screen(update, context, conn, tg_uid, supplement_id, split_origin_id=split_origin_id)
-            elif waiting == "gift:redeem":
-                code = txt.strip()
-                _gift_set_mode(context, "redeem")
-                payload = await db.get_gift_code(conn, code)
-                if not payload:
-                    await show(update, context, "Извините, такого кода не существует.", gift_code_user_kb(), route="settings:gift")
-                elif str(payload.get("used_at_utc") or "").strip():
-                    await show(update, context, "Извините, этот код уже истёк или был использован.", gift_code_user_kb(), route="settings:gift")
-                else:
-                    claimed = await db.mark_gift_code_used(conn, code, tg_uid)
-                    if not claimed:
-                        await show(update, context, "Извините, этот код уже истёк или был использован.", gift_code_user_kb(), route="settings:gift")
-                    else:
-                        days = int(payload.get("days") or 0)
-                        until_iso = await db.extend_premium_days(conn, tg_uid, max(1, days), "gift_code", f"gift_{days}d")
-                        _gift_reset_state(context)
-                        context.user_data["home_entry_reason"] = f"gift_activated:{days}:{until_iso}"
-                        await home(update, context)
-                try:
-                    await update.message.delete()
-                except Exception:
-                    pass
-            elif waiting == "gift:create_days":
-                if not _is_admin(tg_uid):
-                    _gift_set_mode(context, "redeem")
-                    await _show_gift_code_hub(update, context, conn, tg_uid)
-                elif not txt.strip().isdigit() or int(txt.strip()) <= 0:
-                    await show(update, context, "Нужно положительное число дней. Например: 30", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="settings:gift")]]), route="settings:gift")
-                else:
-                    created = await db.create_gift_code(conn, days=int(txt.strip()), admin_tg_id=tg_uid)
-                    _gift_set_mode(context, "redeem")
-                    await show(update, context, f"✅ <b>Код создан</b>\n\nКод: <code>{created['code']}</code>\nДней Premium: <b>{created['days']}</b>\n\nТеперь можно создать ещё один код или вернуться назад.", gift_code_admin_kb(), route="settings:gift")
-                try:
-                    await update.message.delete()
-                except Exception:
-                    pass
             else:
                 parsed_time = _parse_user_time_input(txt)
                 slot_id = waiting.split(":", 2)[2]

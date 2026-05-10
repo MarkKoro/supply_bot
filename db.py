@@ -723,7 +723,6 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     await _ensure_curated_stacks(conn)
     await _ensure_curated_stack_items(conn)
     await _ensure_payments_table(conn)
-    await _ensure_gift_codes(conn)
     await _ensure_achievements_tables(conn)
     await _ensure_integrity_unique_indexes(conn)
     await conn.execute(
@@ -739,242 +738,11 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
         "UPDATE supplements SET body_effects_json='[]' WHERE body_effects_json IS NULL OR body_effects_json=''"
     )
 
-async def _ensure_gift_codes(conn: aiosqlite.Connection) -> None:
-    await conn.execute(
-        """CREATE TABLE IF NOT EXISTS gift_codes (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          code TEXT UNIQUE NOT NULL,
-          days INTEGER NOT NULL,
-          created_by_tg_id INTEGER NOT NULL,
-          created_at_utc TEXT NOT NULL,
-          used_by_tg_id INTEGER DEFAULT 0,
-          used_at_utc TEXT DEFAULT ''
-        )"""
-    )
-    await conn.execute("CREATE INDEX IF NOT EXISTS idx_gift_codes_used ON gift_codes(used_at_utc)")
 
 
-def generate_gift_code(length: int = 14) -> str:
-    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-    import secrets
-    return "".join(secrets.choice(alphabet) for _ in range(max(8, int(length))))
 
 
-async def create_gift_code(conn: aiosqlite.Connection, *, days: int, admin_tg_id: int) -> dict:
-    safe_days = max(1, int(days))
-    now = utc_now_iso()
-    for _ in range(10):
-        code = generate_gift_code()
-        try:
-            await conn.execute(
-                "INSERT INTO gift_codes(code, days, created_by_tg_id, created_at_utc) VALUES(?,?,?,?)",
-                (code, safe_days, int(admin_tg_id), now),
-            )
-            await conn.commit()
-            return {"code": code, "days": safe_days}
-        except Exception:
-            continue
-    raise RuntimeError("gift_code_create_failed")
 
-
-async def get_gift_code(conn: aiosqlite.Connection, code: str) -> dict | None:
-    row = await fetchone(conn, "SELECT * FROM gift_codes WHERE UPPER(code)=UPPER(?)", (str(code or "").strip(),))
-    return dict(row) if row else None
-
-
-async def mark_gift_code_used(conn: aiosqlite.Connection, code: str, tg_user_id: int) -> bool:
-    now = utc_now_iso()
-    cur = await conn.execute(
-        """UPDATE gift_codes
-           SET used_by_tg_id=?, used_at_utc=?
-           WHERE UPPER(code)=UPPER(?) AND TRIM(COALESCE(used_at_utc,''))=''""",
-        (int(tg_user_id), now, str(code or "").strip()),
-    )
-    await conn.commit()
-    return int(cur.rowcount or 0) > 0
-
-
-async def list_unused_gift_codes(conn: aiosqlite.Connection, limit: int = 30) -> list[dict]:
-    rows = await fetchall(
-        conn,
-        "SELECT * FROM gift_codes WHERE TRIM(COALESCE(used_at_utc,''))='' ORDER BY id DESC LIMIT ?",
-        (max(1, int(limit)),),
-    )
-    return [dict(r) for r in rows]
-
-
-async def gift_code_stats(conn: aiosqlite.Connection) -> dict:
-    total = await fetchone(conn, "SELECT COUNT(*) AS c FROM gift_codes")
-    unused = await fetchone(conn, "SELECT COUNT(*) AS c FROM gift_codes WHERE TRIM(COALESCE(used_at_utc,''))=''")
-    used = await fetchone(conn, "SELECT COUNT(*) AS c FROM gift_codes WHERE TRIM(COALESCE(used_at_utc,''))!=''")
-    return {"total": int((total or {}).get("c") or 0), "unused": int((unused or {}).get("c") or 0), "used": int((used or {}).get("c") or 0)}
-    await conn.execute(
-        "UPDATE supplements SET body_targets_json='[]' WHERE body_targets_json IS NULL OR body_targets_json=''"
-    )
-    await conn.execute(
-        "UPDATE supplements SET body_burdens_json='[]' WHERE body_burdens_json IS NULL OR body_burdens_json=''"
-    )
-    await conn.execute(
-        "UPDATE supplements SET aliases='' WHERE aliases IS NULL"
-    )
-    await conn.execute(
-        "UPDATE supplements SET aliases_json='[]' WHERE aliases_json IS NULL OR aliases_json=''"
-    )
-    await conn.execute(
-        "UPDATE supplements SET alias_norm='' WHERE alias_norm IS NULL"
-    )
-    await conn.execute(
-        "UPDATE supplements SET search_blob='' WHERE search_blob IS NULL"
-    )
-    await conn.execute(
-        "UPDATE supplements SET tags='' WHERE tags IS NULL"
-    )
-    await conn.execute(
-        "UPDATE supplements SET tags_json='[]' WHERE tags_json IS NULL OR tags_json=''"
-    )
-    await conn.execute(
-        "UPDATE supplements SET goals='' WHERE goals IS NULL"
-    )
-    await conn.execute(
-        "UPDATE users SET onboarding_status='' WHERE onboarding_status IS NULL"
-    )
-    await conn.execute(
-        "UPDATE users SET onboarding_goal_text='' WHERE onboarding_goal_text IS NULL"
-    )
-    await conn.execute(
-        "UPDATE users SET onboarding_raw_json='' WHERE onboarding_raw_json IS NULL"
-    )
-    await conn.execute(
-        "UPDATE users SET onboarding_prefix_line='' WHERE onboarding_prefix_line IS NULL"
-    )
-    await conn.execute(
-        "UPDATE users SET onboarding_free_pick_used=0 WHERE onboarding_free_pick_used IS NULL"
-    )
-    await conn.execute(
-        "UPDATE users SET onboarding_started_at_utc='' WHERE onboarding_started_at_utc IS NULL"
-    )
-    await conn.execute(
-        "UPDATE users SET onboarding_completed_at_utc='' WHERE onboarding_completed_at_utc IS NULL"
-    )
-    await conn.execute("UPDATE users SET assistant_onboarding_seen=0 WHERE assistant_onboarding_seen IS NULL")
-    await conn.execute(
-        "UPDATE users SET assistant_onboarding_completed_at_utc='' WHERE assistant_onboarding_completed_at_utc IS NULL"
-    )
-    await conn.execute(
-        "UPDATE users SET assistant_onboarding_dismissed_at_utc='' WHERE assistant_onboarding_dismissed_at_utc IS NULL"
-    )
-    await conn.execute("UPDATE users SET assistant_last_home_state='' WHERE assistant_last_home_state IS NULL")
-    await conn.execute("UPDATE users SET assistant_last_opened_at_utc='' WHERE assistant_last_opened_at_utc IS NULL")
-    await conn.execute(
-        "UPDATE users SET starter_trial_used=0 WHERE starter_trial_used IS NULL"
-    )
-    await conn.execute(
-        "UPDATE users SET starter_trial_started_at_utc='' WHERE starter_trial_started_at_utc IS NULL"
-    )
-    await conn.execute(
-        "UPDATE users SET starter_trial_until_utc='' WHERE starter_trial_until_utc IS NULL"
-    )
-    await conn.execute(
-        "UPDATE users SET starter_trial_source='' WHERE starter_trial_source IS NULL"
-    )
-    await conn.execute(
-        "UPDATE users SET access_expired_notice_key='' WHERE access_expired_notice_key IS NULL"
-    )
-    await conn.execute(
-        "UPDATE users SET consent_given=0 WHERE consent_given IS NULL"
-    )
-    await conn.execute(
-        "UPDATE users SET consent_given_at_utc='' WHERE consent_given_at_utc IS NULL"
-    )
-    await conn.execute(
-        "UPDATE users SET consent_offer_version='' WHERE consent_offer_version IS NULL"
-    )
-    await conn.execute(
-        "UPDATE users SET consent_privacy_version='' WHERE consent_privacy_version IS NULL"
-    )
-    await conn.execute(
-        "UPDATE users SET consent_source='' WHERE consent_source IS NULL"
-    )
-    await conn.execute(
-        "UPDATE users SET receipt_email='' WHERE receipt_email IS NULL"
-    )
-    await conn.execute(
-        "UPDATE users SET receipt_email_status='missing' WHERE receipt_email_status IS NULL OR receipt_email_status=''"
-    )
-    await conn.execute(
-        "UPDATE users SET receipt_email_collected_at='' WHERE receipt_email_collected_at IS NULL"
-    )
-    await conn.execute(
-        "UPDATE users SET wants_receipt=0 WHERE wants_receipt IS NULL"
-    )
-    await conn.execute(
-        "UPDATE supplements SET rules_tags='' WHERE rules_tags IS NULL"
-    )
-    await conn.execute(
-        "UPDATE supplements SET supplement_type='' WHERE supplement_type IS NULL"
-    )
-    await conn.execute(
-        "UPDATE supplements SET functional_groups='' WHERE functional_groups IS NULL"
-    )
-    await conn.execute(
-        "UPDATE supplements SET body_targets='' WHERE body_targets IS NULL"
-    )
-    await conn.execute(
-        "UPDATE supplements SET body_burdens='' WHERE body_burdens IS NULL"
-    )
-    await conn.execute(
-        "UPDATE supplements SET updated_at_utc='' WHERE updated_at_utc IS NULL"
-    )
-    await conn.execute(
-        "UPDATE users SET last_view='menu' WHERE last_view IS NULL OR last_view=''"
-    )
-    await conn.execute(
-        "UPDATE users SET last_local_date='' WHERE last_local_date IS NULL"
-    )
-    await conn.execute(
-        "UPDATE users SET last_view_payload='' WHERE last_view_payload IS NULL"
-    )
-    await conn.execute(
-        "UPDATE users SET created_at_utc=COALESCE(created_at,'') WHERE created_at_utc IS NULL OR created_at_utc=''"
-    )
-    await conn.execute(
-        "UPDATE users SET last_seen_utc='' WHERE last_seen_utc IS NULL"
-    )
-    await conn.execute(
-        "UPDATE users SET tg_username='' WHERE tg_username IS NULL"
-    )
-    await conn.execute(
-        "UPDATE users SET tg_first_name='' WHERE tg_first_name IS NULL"
-    )
-    await conn.execute(
-        "UPDATE users SET tg_last_name='' WHERE tg_last_name IS NULL"
-    )
-    await conn.execute(
-        "UPDATE users SET is_banned=0 WHERE is_banned IS NULL"
-    )
-    await conn.execute(
-        "UPDATE users SET banned_reason='' WHERE banned_reason IS NULL"
-    )
-    await conn.execute(
-        "UPDATE users SET banned_at_utc='' WHERE banned_at_utc IS NULL"
-    )
-    await conn.execute(
-        "UPDATE users SET deleted_at_utc='' WHERE deleted_at_utc IS NULL"
-    )
-    await conn.execute(
-        "UPDATE users SET last_chat_id=0 WHERE last_chat_id IS NULL"
-    )
-    await conn.execute(
-        "UPDATE users SET last_message_id=0 WHERE last_message_id IS NULL"
-    )
-    await _backfill_alias_norm(conn)
-    await _backfill_supplement_alias_norm(conn)
-    await _backfill_aliases_json(conn)
-    await _backfill_search_blob(conn)
-    await _backfill_supplement_evidence(conn)
-    await _ensure_profile_foundation_tables(conn)
-    await bootstrap_nutrient_protocol_defs(conn)
-    await bootstrap_achievements(conn)
 
 
 async def _ensure_profile_foundation_tables(conn: aiosqlite.Connection) -> None:
@@ -2056,20 +1824,6 @@ async def _ensure_payments_table(conn: aiosqlite.Connection) -> None:
     )
 
 
-async def _ensure_gift_codes(conn: aiosqlite.Connection) -> None:
-    await conn.execute(
-        """CREATE TABLE IF NOT EXISTS gift_codes (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          code TEXT UNIQUE NOT NULL,
-          days INTEGER NOT NULL,
-          created_by_tg_id INTEGER NOT NULL,
-          created_at_utc TEXT NOT NULL,
-          used_by_tg_id INTEGER DEFAULT 0,
-          used_at_utc TEXT DEFAULT ''
-        )"""
-    )
-    await conn.execute("CREATE INDEX IF NOT EXISTS idx_gift_codes_used ON gift_codes(used_at_utc)")
-
 
 async def _ensure_integrity_unique_indexes(conn: aiosqlite.Connection) -> None:
     await _dedupe_keep_latest(conn, "supplement_day_state", ["user_id", "day", "supplement_id"], "created_at")
@@ -2911,56 +2665,10 @@ async def get_starter_trial_until(conn: aiosqlite.Connection, tg_user_id: int) -
     return value or None
 
 
-def generate_gift_code(length: int = 14) -> str:
-    import secrets
-    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-    return "".join(secrets.choice(alphabet) for _ in range(max(8, int(length))))
 
 
-async def create_gift_code(conn: aiosqlite.Connection, *, days: int, admin_tg_id: int) -> dict:
-    safe_days = max(1, int(days))
-    now = utc_now_iso()
-    for _ in range(10):
-        code = generate_gift_code()
-        try:
-            await conn.execute(
-                "INSERT INTO gift_codes(code, days, created_by_tg_id, created_at_utc) VALUES(?,?,?,?)",
-                (code, safe_days, int(admin_tg_id), now),
-            )
-            await conn.commit()
-            return {"code": code, "days": safe_days}
-        except Exception:
-            continue
-    raise RuntimeError("gift_code_create_failed")
 
 
-async def get_gift_code(conn: aiosqlite.Connection, code: str) -> dict | None:
-    row = await fetchone(conn, "SELECT * FROM gift_codes WHERE UPPER(code)=UPPER(?)", (str(code or "").strip(),))
-    return dict(row) if row else None
-
-
-async def mark_gift_code_used(conn: aiosqlite.Connection, code: str, tg_user_id: int) -> bool:
-    now = utc_now_iso()
-    cur = await conn.execute(
-        """UPDATE gift_codes
-           SET used_by_tg_id=?, used_at_utc=?
-           WHERE UPPER(code)=UPPER(?) AND TRIM(COALESCE(used_at_utc,''))=''""",
-        (int(tg_user_id), now, str(code or "").strip()),
-    )
-    await conn.commit()
-    return int(cur.rowcount or 0) > 0
-
-
-async def list_unused_gift_codes(conn: aiosqlite.Connection, limit: int = 30) -> list[dict]:
-    rows = await fetchall(conn, "SELECT * FROM gift_codes WHERE TRIM(COALESCE(used_at_utc,''))='' ORDER BY id DESC LIMIT ?", (max(1, int(limit)),))
-    return [dict(r) for r in rows]
-
-
-async def gift_code_stats(conn: aiosqlite.Connection) -> dict:
-    total = await fetchone(conn, "SELECT COUNT(*) AS c FROM gift_codes")
-    unused = await fetchone(conn, "SELECT COUNT(*) AS c FROM gift_codes WHERE TRIM(COALESCE(used_at_utc,''))=''")
-    used = await fetchone(conn, "SELECT COUNT(*) AS c FROM gift_codes WHERE TRIM(COALESCE(used_at_utc,''))!=''")
-    return {"total": int((total or {}).get("c") or 0), "unused": int((unused or {}).get("c") or 0), "used": int((used or {}).get("c") or 0)}
 
 
 async def is_starter_trial_active(

@@ -294,7 +294,8 @@ async def _import(
 
         if inter_path:
             for item in _read_jsonl(inter_path):
-                a = item["a"]; b = item["b"]
+                a = item["a"]
+                b = item["b"]
                 if a not in slug_to_id:
                     ra = await db.get_supplement_by_slug(conn, a)
                     if not ra:

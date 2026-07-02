@@ -1,7 +1,6 @@
 import hashlib
 import json
 import logging
-import os
 import re
 import uuid
 from datetime import timedelta
@@ -19,8 +18,6 @@ from telegram_webapp_auth import verify_init_data
 import db
 import engine
 from settings import get_settings
-from openai import APIConnectionError, APITimeoutError
-
 from openai_client import OpenAIConfig, _sync_call
 from nutrient_assistant_pipeline import NutrientAssistantPipelineError as PipelineError
 import nutrient_assistant_pipeline as nutrient_pipeline
@@ -1259,9 +1256,6 @@ async def api_payments_yookassa_status(
         raise HTTPException(status_code=502, detail=f"YooKassa status error: {resp.text[:300]}")
     payment = resp.json()
     metadata = payment.get("metadata") or {}
-    receipt_email = str(metadata.get("receipt_email") or "").strip().lower()
-    receipt_collected_at = str(metadata.get("receipt_email_collected_at") or "").strip()
-    wants_receipt = str(metadata.get("wants_receipt") or "0").strip() in {"1", "true", "True"}
     if str(metadata.get("project_key") or "") != s.PROJECT_KEY:
         raise HTTPException(status_code=403, detail="Project mismatch")
     if str(metadata.get("user_id") or "") != str(tg_user_id):
@@ -2596,7 +2590,7 @@ async def api_my_supplements_freeze(
 
     conn = await db.connect(s.DB_PATH)
     try:
-        user_id = await db.get_or_create_user(conn, tg_user_id, tz_name="")
+        await db.get_or_create_user(conn, tg_user_id, tz_name="")
         freeze_result = await db.set_user_supplement_manual_freeze(
             conn,
             tg_user_id=int(tg_user_id),

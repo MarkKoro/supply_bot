@@ -246,7 +246,8 @@ async def describe_interactions(conn: aiosqlite.Connection, supp_row, *, limit_e
 async def _hydrate(conn: aiosqlite.Connection, anchor_id: int, rows, origin: str) -> list[dict]:
     out = []
     for r in rows:
-        a_id = int(r["a_id"]); b_id = int(r["b_id"])
+        a_id = int(r["a_id"])
+        b_id = int(r["b_id"])
         other_id = b_id if a_id == anchor_id else a_id
         other = await db.fetchone(conn, "SELECT slug,name,evidence_grade FROM supplements WHERE id=?", (other_id,))
         out.append({

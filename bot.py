@@ -3181,7 +3181,6 @@ async def reminder_fire_batch(
         )
         if not user_row:
             return
-        tz_name = str(user_row["tz_name"] or "").strip()
         ui_message_id, ui_screen, ui_payload = await db.get_ui_state(conn, tg_user_id)
         try:
             payload_data = json.loads(ui_payload) if ui_payload else {}
@@ -8616,7 +8615,6 @@ async def _show_catalog_list(
         )
         return
 
-    total_pages = max(1, (total + CATALOG_PAGE_SIZE - 1) // CATALOG_PAGE_SIZE)
     lines = ["📚 <b>Каталог</b>"]
     if list_mode == "search":
         lines.append(f"Поиск: «{query}»")
@@ -8987,7 +8985,8 @@ async def render_supplement_card(
     human_trials = engine.metric_or_no_data(row.get("human_trials_count_est"))
     participants = engine.metric_or_no_data(row.get("participants_total_est"))
     short_desc = str(row.get("summary_ru") or "").strip()
-    esc = lambda value: html.escape(str(value or "").strip())
+    def esc(value) -> str:
+        return html.escape(str(value or "").strip())
 
     dose_raw = row.get("dose_ru")
     dose_typical = ""
@@ -9045,15 +9044,6 @@ async def render_supplement_card(
         ).strip()
 
     safety_ru = str(row.get("safety_ru") or "").strip()
-    tags_raw = row.get("tags_json")
-    tags = []
-    if tags_raw:
-        try:
-            tags = json.loads(tags_raw)
-        except json.JSONDecodeError:
-            tags = []
-    tags_text = ", ".join([str(tag).strip() for tag in tags if str(tag).strip()])
-
     lines: list[str] = []
     top_synergy = []
     top_antag = []
@@ -9375,7 +9365,7 @@ async def show_my_supp_hub(
         conn = await db.connect(s.DB_PATH)
         close_conn = True
     try:
-        internal_user_id = await db.get_or_create_user(conn, user_id)
+        await db.get_or_create_user(conn, user_id)
         row = await db.get_user_supplement(conn, user_id, supplement_id)
         if not row:
             await show(

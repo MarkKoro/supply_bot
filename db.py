@@ -113,12 +113,32 @@ async def _table_exists(conn: aiosqlite.Connection, name: str) -> bool:
     return row is not None
 
 
+def _column_cache(conn: aiosqlite.Connection) -> dict[str, set[str]]:
+    cache = getattr(conn, "_supply_bot_column_cache", None)
+    if cache is None:
+        cache = {}
+        setattr(conn, "_supply_bot_column_cache", cache)
+    return cache
+
+
 async def _table_columns(conn: aiosqlite.Connection, table: str) -> set[str]:
+    table_key = str(table or "").strip().lower()
+    if not table_key:
+        return set()
+    cache = _column_cache(conn)
+    cached = cache.get(table_key)
+    # Empty table_info results are ambiguous: the table may not exist yet, or it
+    # may have just been created by an earlier migration step on this connection.
+    # Refresh empty entries so CREATE TABLE paths see their new columns.
+    if cached:
+        return set(cached)
     try:
         rows = await fetchall(conn, f"PRAGMA table_info({table})")
     except Exception:
         return set()
-    return {str(row["name"]).strip().lower() for row in rows if row and row["name"]}
+    cols = {str(row["name"]).strip().lower() for row in rows if row and row["name"]}
+    cache[table_key] = cols
+    return set(cols)
 
 
 async def _get_date_col(conn: aiosqlite.Connection, table: str) -> str | None:
@@ -578,6 +598,11 @@ async def connect(db_path: str) -> aiosqlite.Connection:
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     conn = await aiosqlite.connect(db_path)
     conn.row_factory = aiosqlite.Row
+    # Keep per-request connections predictable under concurrent bot/WebApp load.
+    # foreign_keys is connection-local in SQLite, while busy_timeout avoids fast
+    # "database is locked" failures during short WAL write bursts.
+    await conn.execute("PRAGMA foreign_keys=ON")
+    await conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 async def init_db(db_path: str) -> None:
@@ -1386,6 +1411,7 @@ async def _ensure_user_schedule_slots(conn: aiosqlite.Connection) -> None:
         if "slots_json" in cols:
             legacy_rows = await fetchall(conn, "SELECT user_id, slots_json FROM user_schedule_slots")
             await conn.execute("ALTER TABLE user_schedule_slots RENAME TO user_schedule_slots_legacy")
+            _column_cache(conn).pop("user_schedule_slots", None)
             exists = False
 
     if not exists:
@@ -1399,6 +1425,7 @@ async def _ensure_user_schedule_slots(conn: aiosqlite.Connection) -> None:
               PRIMARY KEY(user_id, slot_id)
             )"""
         )
+        _column_cache(conn).pop("user_schedule_slots", None)
 
     cols = await _table_columns(conn, "user_schedule_slots")
     if "slot_id" not in cols:
@@ -2050,16 +2077,21 @@ async def _backfill_user_supplements(conn: aiosqlite.Connection) -> None:
     )
 
 async def _ensure_column(conn: aiosqlite.Connection, table: str, column: str, column_type: str) -> None:
-    cols = await fetchall(conn, f"PRAGMA table_info({table})")
-    if any(c["name"] == column for c in cols):
+    table_key = str(table or "").strip().lower()
+    column_key = str(column or "").strip().lower()
+    cols = await _table_columns(conn, table)
+    if column_key in cols:
         return
     await conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
+    if table_key:
+        _column_cache(conn)[table_key] = set(cols) | {column_key}
 
 async def _ensure_users_tz_name(conn: aiosqlite.Connection) -> None:
-    cols = await fetchall(conn, "PRAGMA table_info(users)")
-    if any(c["name"] == "tz_name" for c in cols):
+    cols = await _table_columns(conn, "users")
+    if "tz_name" in cols:
         return
     await conn.execute("ALTER TABLE users ADD COLUMN tz_name TEXT NOT NULL DEFAULT 'UTC'")
+    _column_cache(conn)["users"] = set(cols) | {"tz_name"}
 
 async def _backfill_alias_raw(conn: aiosqlite.Connection) -> None:
     cols = await fetchall(conn, "PRAGMA table_info(supplement_aliases)")

@@ -32,6 +32,18 @@ UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="ГУДы БАДы WebApp")
 app.mount("/assets", StaticFiles(directory=str(ASSETS_DIR)), name="assets")
+
+
+@app.middleware("http")
+async def add_cache_headers(request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/assets/"):
+        response.headers.setdefault("Cache-Control", "public, max-age=86400")
+    elif request.url.path in {"/", "/payment-return.html"}:
+        response.headers.setdefault("Cache-Control", "no-store")
+    return response
+
+
 s = get_settings()
 BOT_TOKEN = s.TG_TOKEN
 log = logging.getLogger(__name__)
@@ -288,22 +300,22 @@ async def _auth_user_id(init_data: str) -> int:
 
 
 async def _premium_guard(tg_user_id: int) -> bool:
-    role, _ = await _get_role_and_perms(tg_user_id)
-    if role in {db.ROLE_OWNER, db.ROLE_ADMIN}:
-        return True
     conn = await db.connect(s.DB_PATH)
     try:
+        role = await db.get_role(conn, int(tg_user_id))
+        if role in {db.ROLE_OWNER, db.ROLE_ADMIN}:
+            return True
         return await db.has_any_webapp_access(conn, tg_user_id)
     finally:
         await conn.close()
 
 
 async def _paid_premium_guard(tg_user_id: int) -> bool:
-    role, _ = await _get_role_and_perms(tg_user_id)
-    if role in {db.ROLE_OWNER, db.ROLE_ADMIN}:
-        return True
     conn = await db.connect(s.DB_PATH)
     try:
+        role = await db.get_role(conn, int(tg_user_id))
+        if role in {db.ROLE_OWNER, db.ROLE_ADMIN}:
+            return True
         return await db.is_premium_active(conn, tg_user_id)
     finally:
         await conn.close()

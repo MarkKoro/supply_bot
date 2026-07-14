@@ -194,6 +194,14 @@
       margin-bottom: 12px;
     }
 
+    .main-content > .card,
+    #tabContent > .card,
+    .catalog-list > .card,
+    .history-list > .history-item {
+      content-visibility: auto;
+      contain-intrinsic-size: 1px 220px;
+    }
+
     .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
     .mode-banner { gap: 10px; align-items: flex-start; flex-wrap: wrap; }
     .mode-banner .btn { flex: 0 0 auto; }
@@ -960,6 +968,15 @@
     .coach-actions-right { display:flex; align-items:center; gap:8px; }
     .coach-actions-spacer { width:96px; }
     .coach-step { font-size: 12px; color: var(--muted); }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: 0.001ms !important;
+        animation-iteration-count: 1 !important;
+        scroll-behavior: auto !important;
+        transition-duration: 0.001ms !important;
+      }
+    }
 
   </style>
 </head>
@@ -2368,7 +2385,19 @@
       state.catalog?.detail ||
       state.bodyMapSheet ||
       state.catalog?.addToComplexModal?.open ||
-      state.catalog?.addToStackSlotModal?.open
+      state.catalog?.addToStackSlotModal?.open ||
+      state.mySupplements?.open ||
+      state.complexHub?.open ||
+      state.complexHub?.schedulePicker?.open ||
+      state.suppHub?.open ||
+      state.profileUi?.editOpen ||
+      state.profileUi?.manualOpen ||
+      state.profileUi?.uploadOpen ||
+      state.profileUi?.reviewOpen ||
+      state.nutrientAssistant?.introOpen ||
+      state.nutrientAssistant?.myNutrientsOpen ||
+      state.nutrientAssistant?.pendingOverwriteRuns?.length ||
+      state.nutrientAssistant?.blocked
     );
     appEl?.classList?.toggle('modal-scroll-lock', locked);
   }
@@ -2377,11 +2406,16 @@
     return `${state.catalog?.detail ? renderDetailModal(state.catalog.detail) : ''}`;
   }
 
+  let lastGlobalModalsHtml = "";
   function syncGlobalModals() {
     const root = document.getElementById('globalModalRoot');
     if (!root) return;
-    root.innerHTML = renderGlobalModals();
-    bindDetailModalEvents();
+    const nextHtml = renderGlobalModals();
+    if (lastGlobalModalsHtml !== nextHtml) {
+      root.innerHTML = nextHtml;
+      lastGlobalModalsHtml = nextHtml;
+      bindDetailModalEvents();
+    }
   }
 
   function renderMainApp() {
@@ -2406,6 +2440,8 @@
 
     lastRenderedTabKey = "";
     lastRenderedTabHtml = "";
+    lastGlobalModalsHtml = "";
+    lastTopbarActionsHtml = "";
     bindMainEvents();
     bindUnlockToastEvents();
     bindPaymentSuccessEvents();
@@ -2483,6 +2519,7 @@
 
   let lastRenderedTabKey = "";
   let lastRenderedTabHtml = "";
+  let lastTopbarActionsHtml = "";
   function escSelector(value) {
     const raw = String(value ?? "");
     if (window.CSS?.escape) return window.CSS.escape(raw);
@@ -2552,8 +2589,9 @@
   function renderActiveTab() {
     const target = document.getElementById("tabContent");
     if (!target) return;
+    const scrollRoot = document.getElementById("mainContent");
     const tabKey = String(state.activeTab || "");
-    const prevScrollTop = target.scrollTop;
+    const prevScrollTop = scrollRoot ? scrollRoot.scrollTop : 0;
     let nextHtml = "";
     let binder = null;
 
@@ -2601,7 +2639,7 @@
     syncGlobalModals();
     lastRenderedTabKey = tabKey;
     lastRenderedTabHtml = nextHtml;
-    target.scrollTop = previousTabKey === tabKey ? prevScrollTop : 0;
+    if (scrollRoot) scrollRoot.scrollTop = previousTabKey === tabKey ? prevScrollTop : 0;
     restoreFocusableSnapshot(target, focusSnapshot);
     if (typeof binder === "function") binder();
     target.querySelectorAll("[data-open-bot-start]").forEach((btn) => {
@@ -3200,11 +3238,12 @@
     catalogObserver = null;
     const sentinel = document.getElementById('catalogSentinel');
     if (!sentinel || state.activeTab !== 'catalog') return;
+    const scrollRoot = document.getElementById('mainContent');
     catalogObserver = new IntersectionObserver((entries) => {
       const hit = entries.some((entry) => entry.isIntersecting);
       if (!hit) return;
       loadCatalogMore();
-    }, { root: null, rootMargin: '600px 0px', threshold: 0 });
+    }, { root: scrollRoot || null, rootMargin: '600px 0px', threshold: 0 });
     catalogObserver.observe(sentinel);
   }
 
@@ -4952,7 +4991,7 @@ function adminField(label, field, value, kind='input') {
     const helpOpenKey = String(a.helpOpenKey || '');
     const isMale = isAssistantMale(profile);
     const result = a.result || null;
-    const summary = profileSummary(profile).map((x)=>`<div class="muted">${x}</div>`).join('');
+    const summary = profileSummary(profile).map((x)=>`<div class="muted">${esc(x)}</div>`).join('');
     const history = Array.isArray(a.history) ? a.history : [];
     const draftLabs = normalizeAssistantLabs(Array.isArray(a.manualLabs) ? a.manualLabs : []);
     const hasHistory = history.length > 0;
@@ -5068,7 +5107,7 @@ function adminField(label, field, value, kind='input') {
   function renderProfile() {
     const p = state.profile.data || {};
     const labs = state.profileLabs.reports || [];
-    const summary = profileSummary(p).map((x)=>`<div class="muted">${x}</div>`).join('');
+    const summary = profileSummary(p).map((x)=>`<div class="muted">${esc(x)}</div>`).join('');
     const ach = state.ach || {};
     const level = Number(ach.level || 1);
     const levelPct = Math.max(0, Math.min(100, Number(ach.level_progress_pct || 0)));
@@ -5511,7 +5550,11 @@ function adminField(label, field, value, kind='input') {
       renderActiveTab();
     });
 
-    document.querySelector('[data-profile-open-bodymap]')?.addEventListener('click', async () => { await loadBodyMap(true); const target = document.getElementById('tabContent'); target.innerHTML += `<section class="card fade">${renderBodyMap()}</section>`; bindBodyMapEvents(); });
+    document.querySelector('[data-profile-open-bodymap]')?.addEventListener('click', async () => {
+      state.profileUi.activeModule = 'organs';
+      await loadBodyMap(true);
+      renderActiveTab();
+    });
     document.querySelector('[data-ach-next-details]')?.addEventListener('toggle', (e) => {
       state.ui = state.ui || {};
       state.ui.achNextExpanded = !!e.currentTarget?.open;
@@ -6113,24 +6156,24 @@ function adminField(label, field, value, kind='input') {
       const totalTaken = items.filter(i => i.status === "taken").length + complexes.reduce((acc,c)=>acc + (c.taken_count||0),0);
       const totalAll = items.length + complexes.reduce((acc,c)=>acc + (c.total_count||0),0);
       return `
-        <article class="card fade" data-slot="${slot.slot_id}">
+        <article class="card fade" data-slot="${esc(slot.slot_id)}">
           <div class="row">
-            <div><strong>${slot.title || "Слот"} · ${slot.time_local || "--:--"}</strong></div>
+            <div><strong>${esc(slot.title || "Слот")} · ${esc(slot.time_local || "--:--")}</strong></div>
             <div class="row" style="gap:8px">
-              <button type="button" class="btn secondary" data-slot-action="all-taken" data-slot-id="${slot.slot_id}" title="Отметить всё как принято">✅ Всё</button>
-              <button type="button" class="btn secondary" data-slot-action="reset" data-slot-id="${slot.slot_id}" title="Сбросить статусы">↺ Сброс</button>
+              <button type="button" class="btn secondary" data-slot-action="all-taken" data-slot-id="${esc(slot.slot_id)}" title="Отметить всё как принято">✅ Всё</button>
+              <button type="button" class="btn secondary" data-slot-action="reset" data-slot-id="${esc(slot.slot_id)}" title="Сбросить статусы">↺ Сброс</button>
               <span class="chip green">✅ ${totalTaken} / ${totalAll}</span>
             </div>
           </div>
           <div>
             ${complexes.map((c) => `
-              <div class="item-row" style="display:block" data-complex="${c.complex_id}">
+              <div class="item-row" style="display:block" data-complex="${esc(c.complex_id)}">
                 <div class="row">
-                  <span><strong>🧩 ${c.name}</strong> <span class="muted">✅ ${c.taken_count}/${c.total_count}</span></span>
-                  <button type="button" class="btn secondary" data-complex-toggle="${c.complex_id}" data-next="${c.status==='taken'?'none':'taken'}">${c.status==='taken'?'Снять':'Выпил комплекс'}</button>
+                  <span><strong>🧩 ${esc(c.name || 'Комплекс')}</strong> <span class="muted">✅ ${Number(c.taken_count || 0)}/${Number(c.total_count || 0)}</span></span>
+                  <button type="button" class="btn secondary" data-complex-toggle="${esc(c.complex_id)}" data-next="${c.status==='taken'?'none':'taken'}">${c.status==='taken'?'Снять':'Выпил комплекс'}</button>
                 </div>
                 <details><summary>Состав</summary>
-                  ${(c.items||[]).map((item)=>`<button type="button" class="item-row today-item-row" data-item="${item.supplement_id}" data-next="${item.status === "taken" ? "none" : "taken"}"><span class="status-pill ${statusClass(item.status)}">${statusText(item.status)}</span><span class="today-item-name">${item.name}</span></button>`).join('')}
+                  ${(c.items||[]).map((item)=>`<button type="button" class="item-row today-item-row" data-item="${esc(item.supplement_id)}" data-next="${item.status === "taken" ? "none" : "taken"}"><span class="status-pill ${statusClass(item.status)}">${statusText(item.status)}</span><span class="today-item-name">${esc(item.name || '')}</span></button>`).join('')}
                 </details>
               </div>
             `).join('')}
@@ -6138,9 +6181,9 @@ function adminField(label, field, value, kind='input') {
               const isBlocked = !!item.blocked;
               const aiAdd = item.source === 'ai' && item.action === 'add';
               const next = item.status === "taken" ? "none" : "taken";
-              return `<button type="button" class="item-row today-item-row ${isBlocked ? 'blocked' : ''}" data-item="${item.supplement_id}" data-next="${next}" ${isBlocked ? 'disabled' : ''}>
+              return `<button type="button" class="item-row today-item-row ${isBlocked ? 'blocked' : ''}" data-item="${esc(item.supplement_id)}" data-next="${next}" ${isBlocked ? 'disabled' : ''}>
                 <span class="status-pill ${statusClass(isBlocked ? 'skipped' : item.status)}">${isBlocked ? 'Не пить' : statusText(item.status)}</span>
-                <span class="today-item-name">${item.name}${aiAdd ? '<span class="today-ai-pill">AI</span>' : ''}${isBlocked ? '<span class="today-ai-pill">AI: пауза</span>' : ''}</span>
+                <span class="today-item-name">${esc(item.name || '')}${aiAdd ? '<span class="today-ai-pill">AI</span>' : ''}${isBlocked ? '<span class="today-ai-pill">AI: пауза</span>' : ''}</span>
               </button>${isBlocked ? `<div class="muted" style="margin:4px 0 8px 12px">На сегодня предложено не пить от ИИ${item.blocked_reason ? `: ${esc(item.blocked_reason)}` : ''}</div>` : ''}`;
             }).join("")}
           </div>
@@ -6766,16 +6809,23 @@ function adminField(label, field, value, kind='input') {
       header.classList.toggle('topbar-hidden', !showTopbar);
     }
     if (!showTodayActions) {
-      wrap.innerHTML = '';
+      if (lastTopbarActionsHtml !== '') {
+        wrap.innerHTML = '';
+        lastTopbarActionsHtml = '';
+      }
       return;
     }
-    wrap.innerHTML = `
+    const nextHtml = `
       <div class="today-header-actions">
         <button type="button" class="btn secondary" data-open-my-supp>Мои БАДы</button>
         <button type="button" class="btn secondary" data-open-complex-hub>Мои комплексы</button>
       </div>
     `;
-    bindTopbarActions();
+    if (lastTopbarActionsHtml !== nextHtml) {
+      wrap.innerHTML = nextHtml;
+      lastTopbarActionsHtml = nextHtml;
+      bindTopbarActions();
+    }
   }
 
   function renderTopbarBadgeHtml() {

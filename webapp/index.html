@@ -2,7 +2,7 @@
 <html lang="ru">
 <head>
   <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
   <title>ГУДы БАДы WebApp</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
@@ -77,6 +77,9 @@
 
     .main-content {
       flex: 1;
+      min-height: 0;
+      overscroll-behavior-y: contain;
+      scrollbar-gutter: stable;
       overflow-y: auto;
       overflow-x: hidden;
       padding: 14px 14px calc(100px + env(safe-area-inset-bottom));
@@ -706,7 +709,7 @@
     .badge.minus { background: rgba(255,107,121,0.24); color:#ffd0d5; }
     .badge.mixed { background: rgba(255,191,92,0.26); color:#ffe1b0; }
     .sheet-backdrop { position: fixed; inset:0; background: rgba(2,5,16,0.58); z-index: 32; }
-    .sheet { position: fixed; left:10px; right:10px; bottom: calc(82px + env(safe-area-inset-bottom)); z-index: 33; max-height: 66vh; overflow: auto; opacity:1; transform: translateY(0); transition: all .18s ease; }
+    .sheet { position: fixed; left:10px; right:10px; bottom: calc(82px + env(safe-area-inset-bottom)); z-index: 33; max-height: 66vh; overflow: auto; opacity:1; transform: translateY(0); transition: opacity .18s ease, transform .18s ease, border-color .18s ease; }
     .sheet-empty { padding:12px; border-radius: 14px; background: rgba(255,255,255,0.05); color: var(--muted); text-align:center; }
 
     .progress { height:8px; border-radius:999px; background: rgba(255,255,255,.15); overflow:hidden; margin-top:8px; }
@@ -739,7 +742,7 @@
     .settings-checkbox-label { font-weight: 600; }
     .settings-checkbox-wrap { position: relative; width: 28px; height: 28px; display:inline-flex; align-items:center; justify-content:center; }
     .settings-checkbox-wrap input { position:absolute; inset:0; opacity:0; margin:0; cursor:pointer; }
-    .settings-checkbox-custom { width: 26px; height: 26px; border-radius: 8px; border: 2px solid rgba(181,208,255,.62); background: rgba(255,255,255,.08); box-shadow: inset 0 1px 0 rgba(255,255,255,.2); transition: all .18s ease; }
+    .settings-checkbox-custom { width: 26px; height: 26px; border-radius: 8px; border: 2px solid rgba(181,208,255,.62); background: rgba(255,255,255,.08); box-shadow: inset 0 1px 0 rgba(255,255,255,.2); transition: opacity .18s ease, transform .18s ease, border-color .18s ease; }
     .settings-checkbox-wrap input:checked + .settings-checkbox-custom { background: linear-gradient(180deg, rgba(125,183,255,.75), rgba(78,126,214,.85)); border-color: rgba(203,227,255,.98); box-shadow: 0 0 0 3px rgba(125,183,255,.22); }
     .settings-checkbox-wrap input:checked + .settings-checkbox-custom::after { content: '\2713'; color: #fff; font-size: 15px; font-weight: 900; display:grid; place-items:center; line-height: 1; }
     .settings-checkbox-wrap input:disabled + .settings-checkbox-custom { opacity: .45; }
@@ -978,6 +981,22 @@
       }
     }
 
+    /* Stable viewport and touch inputs, with fallbacks for older Telegram clients. */
+    #app { height: var(--app-height, 100%); }
+    input, textarea, select, .input, .search-input, .select, .textarea { font-size: 16px; }
+    button, a { -webkit-tap-highlight-color: transparent; }
+    .btn, .tab { min-height: 44px; }
+    button:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+    .catalog-list { min-height: 88px; }
+    .catalog-status { min-height: 24px; }
+    .startup-card { max-width: 460px; margin: 12vh auto 0; }
+    @supports (height: 100svh) { #app { height: var(--app-height, 100svh); } }
+    .keyboard-open .tabs { visibility: hidden; pointer-events: none; }
+    .keyboard-open .sheet { bottom: 12px; max-height: calc(var(--visible-height, 100vh) - 24px); }
+    .keyboard-open .modal-card { max-height: calc(var(--visible-height, 100vh) - 24px); }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+    }
   </style>
 </head>
 <body>
@@ -1688,8 +1707,21 @@
     return 'Уверенность не указана';
   }
 
+  async function fetchWithDeadline(url, options) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 30000);
+    try {
+      const response = await fetch(url, { ...options, signal: controller.signal });
+      const body = await response.text();
+      return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
+    } catch (error) {
+      if (controller.signal.aborted) throw new Error('REQUEST_TIMEOUT');
+      throw error;
+    } finally { clearTimeout(timer); }
+  }
+
   async function api(path, { method = "GET", body } = {}) {
-    const doFetch = async () => fetch(normalizeApiPath(path), {
+    const doFetch = async () => fetchWithDeadline(normalizeApiPath(path), {
       method,
       headers: {
         "Content-Type": "application/json",
@@ -1703,7 +1735,7 @@
     }
 
     if (res.status === 401) {
-      showToast("Открой WebApp внутри Telegram");
+      showToast("Сессия истекла. Закройте и снова откройте приложение в Telegram.");
       throw new Error("UNAUTHORIZED");
     }
 
@@ -1727,7 +1759,7 @@
     const detail = (data && typeof data.detail === 'object' && data.detail !== null) ? data.detail : null;
     const errPayload = detail || data;
     if (!res.ok || data.ok === false || (detail && detail.ok === false)) {
-      const err = new Error(errPayload?.message || errPayload?.error || errPayload?.code || data?.message || data?.error || data?.code || `HTTP_${res.status}`);
+      const err = new Error((typeof data.detail === "string" ? data.detail : "") || errPayload?.message || errPayload?.error || errPayload?.code || data?.message || data?.error || data?.code || `HTTP_${res.status}`);
       err.httpStatus = res.status;
       if (errPayload && typeof errPayload === 'object') {
         err.payload = errPayload;
@@ -1744,7 +1776,7 @@
   }
 
   async function apiText(path, textBody) {
-    const doFetch = async () => fetch(normalizeApiPath(path), {
+    const doFetch = async () => fetchWithDeadline(normalizeApiPath(path), {
       method: "POST",
       headers: {
         "Content-Type": "text/plain; charset=utf-8",
@@ -1757,7 +1789,7 @@
       res = await doFetch();
     }
     if (res.status === 401) {
-      showToast("Открой WebApp внутри Telegram");
+      showToast("Сессия истекла. Закройте и снова откройте приложение в Telegram.");
       throw new Error("UNAUTHORIZED");
     }
     if (res.status === 402) {
@@ -1998,58 +2030,90 @@
         await checkPendingPaymentStatus({ silent: true });
         return;
       }
-      await checkPendingPaymentStatus({ silent: true });
-      if (!me.webapp_access) {
+      if (!state.me.webapp_access) {
         if (!hasReachedStarterOffer()) renderOnboardingGate();
         else renderPaywall();
       } else {
         if (sp.tutorial === "main_reset") {
           Object.values(GUIDE_KEYS).forEach((key) => localStorage.removeItem(guideStorageKey(key)));
         }
-        try { await loadAchievements(); } catch {}
+        restoreNavigation();
         renderMainApp();
         maybeStartGuide(GUIDE_KEYS.main);
-        await loadToday();
         startAutoSync();
-        await loadSurveyForTarget();
+        await Promise.allSettled([
+          loadToday(),
+          loadAchievements().then(() => { if (!isEditing()) renderActiveTab(); }),
+          checkPendingPaymentStatus({ silent: true }),
+          restoreActiveTabData()
+        ]);
       }
     } catch (e) {
-      if (String(e.message).includes("UNAUTHORIZED") && !state.initData) {
-        renderInitDataFallback();
-      } else if (!state.me) {
-        renderInitDataFallback("Не удалось загрузить /api/me");
-      }
+      if (e.message === 'BANNED' || e.message === 'PREMIUM_REQUIRED') return;
+      if (!state.me || !document.getElementById('mainContent')) renderStartupFailure(e);
+      else showToast('Не удалось обновить данные. Попробуйте ещё раз.');
     }
   }
 
-  function renderInitDataFallback(errorText) {
-    appEl.innerHTML = `
-      <div class="main-content">
-        <div class="card devbox fade">
-          <h3 style="margin:0">Dev fallback</h3>
-          <p class="muted">Вставьте initData для теста в обычном браузере.</p>
-          ${errorText ? `<p class="muted">${esc(errorText)}</p>` : ""}
-          <textarea id="initDataInput" placeholder="query_id=...&user=...&hash=..."></textarea>
-          <div style="margin-top:8px">
-            <button class="btn" id="saveInitBtn">Применить</button>
-          </div>
-        </div>
-      </div>
-    `;
-    document.getElementById("saveInitBtn")?.addEventListener("click", async () => {
-      const value = document.getElementById("initDataInput").value.trim();
-      if (!value) return showToast("Нужно вставить initData");
-      state.initData = value;
-      showToast("initData сохранён");
+  function renderStartupFailure(error) {
+    const expired = error?.message === 'UNAUTHORIZED';
+    appEl.innerHTML = `<div class="main-content"><section class="card startup-card" role="alert">
+      <h2>${expired ? 'Откройте приложение заново' : 'Не удалось подключиться'}</h2>
+      <p class="muted">${expired ? 'Закройте это окно и снова откройте приложение через бота в Telegram.' : 'Проверьте интернет и попробуйте ещё раз. Ваши записи остаются на сервере.'}</p>
+      <button class="btn" id="startupRetry">${expired && tg?.close ? 'Закрыть приложение' : 'Попробовать снова'}</button>
+    </section></div>`;
+    document.getElementById('startupRetry').onclick = async (event) => {
+      if (expired && tg?.close) { tg.close(); return; }
+      event.currentTarget.disabled = true;
       await boot();
-    });
+    };
+  }
+
+  function isEditing() { return !!document.activeElement?.matches('input,textarea,select,[contenteditable="true"]'); }
+  let resumeInFlight = false;
+  let lastResumeAt = 0;
+  async function refreshOnResume() {
+    if (document.visibilityState !== 'visible' || !state.me || isEditing() || resumeInFlight || Date.now() - lastResumeAt < 5000) return;
+    resumeInFlight = true;
+    lastResumeAt = Date.now();
+    try {
+      const hadAccess = !!state.me.webapp_access;
+      state.me = await api('api/me');
+      if (state.me.banned) { showBannedScreen(state.me.banned_reason || ''); return; }
+      if (!state.me.webapp_access) { renderPaywall(); return; }
+      if (!hadAccess) renderMainApp();
+      await Promise.allSettled([loadToday({ force: true, silent: true }), checkPendingPaymentStatus({ silent: true })]);
+    } catch (error) {
+      if (error.message === 'UNAUTHORIZED') renderStartupFailure(error);
+    } finally { resumeInFlight = false; }
+  }
+
+  function navigationKey() { return `goody_navigation:${state.userId}`; }
+  function saveNavigation() {
+    try { sessionStorage.setItem(navigationKey(), JSON.stringify({tab:state.activeTab,scroll:document.getElementById('mainContent')?.scrollTop || 0})); } catch {}
+  }
+  function restoreNavigation() {
+    try {
+      const saved = JSON.parse(sessionStorage.getItem(navigationKey()) || '{}');
+      if (['today','catalog','profile','survey','settings'].includes(saved.tab)) state.activeTab = saved.tab;
+      state.restoreScroll = Math.max(0, Number(saved.scroll) || 0);
+    } catch {}
+  }
+  async function restoreActiveTabData() {
+    if (state.activeTab === 'catalog') await loadCatalog();
+    else if (state.activeTab === 'profile') await loadProfileShell(true);
+    else if (state.activeTab === 'survey') await loadSurveyForTarget();
+    else if (state.activeTab === 'settings') await Promise.allSettled([loadSettingsData(true),loadScheduleData(true)]);
+    renderActiveTab();
+    const root = document.getElementById('mainContent');
+    if (root) root.scrollTop = state.restoreScroll || 0;
   }
 
   let autoSyncTimer = null;
   function startAutoSync() {
     if (autoSyncTimer) return;
     autoSyncTimer = setInterval(async () => {
-      if (document.visibilityState !== 'visible' || !state.me?.webapp_access) return;
+      if (document.visibilityState !== 'visible' || !state.me?.webapp_access || isEditing()) return;
       try {
         if (state.activeTab === 'today') await loadToday({ force: true, silent: true });
       } catch {}
@@ -2214,17 +2278,27 @@
         method: "POST",
         body: { kind: "subscription", plan_id: planId }
       });
+      if (data.status === 'canceled') {
+        clearPendingPayment();
+        showToast('Предыдущий счёт отменён. Можно подготовить новый.');
+        renderPaymentScreen(planId);
+        return;
+      }
       savePendingPayment(data);
       state.payment.pending = loadPendingPayment();
+      if (data.status === 'succeeded') {
+        await checkPendingPaymentStatus();
+        return;
+      }
       showToast("Платёж подготовлен");
-      renderPaymentScreen(planId);
+      renderPaymentScreen(data.plan_id || planId);
     } catch (e) {
       if (e?.code === 'RECEIPT_EMAIL_REQUIRED') {
         state.payment.emailError = 'Чтобы получить чек на почту, сначала укажите email.';
         showToast('Добавьте email для чека');
         renderPaymentScreen(planId);
       } else {
-        showToast("Не удалось подготовить платёж");
+        showToast(e?.httpStatus ? e.message : "Не удалось подготовить платёж. Попробуйте ещё раз.");
       }
     } finally {
       if (btnEl) {
@@ -2453,6 +2527,7 @@
   function activateTab(tab) {
     if (!tab || state.activeTab === tab) return;
     state.activeTab = tab;
+    saveNavigation();
     appEl.querySelectorAll(".tab[data-tab]").forEach((btn) => {
       btn.classList.toggle("active", btn.dataset.tab === tab);
     });
@@ -2634,14 +2709,33 @@
       return;
     }
     const focusSnapshot = getFocusableSnapshot(target);
-    target.innerHTML = nextHtml;
+    const keepToolbar = previousTabKey === tabKey && tabKey === 'catalog' && document.activeElement?.id === 'catalogSearch';
+    let keptToolbar = false;
+    if (keepToolbar) {
+      const toolbar = target.querySelector('.catalog-toolbar');
+      const template = document.createElement('template');
+      template.innerHTML = nextHtml;
+      const nextToolbar = template.content.querySelector('.catalog-toolbar');
+      if (toolbar && nextToolbar) {
+        for (const child of [...target.childNodes]) if (child !== toolbar) child.remove();
+        let afterToolbar = false;
+        for (const child of [...template.content.childNodes]) {
+          if (child === nextToolbar) { afterToolbar = true; continue; }
+          if (afterToolbar) target.append(child); else target.insertBefore(child,toolbar);
+        }
+        const count = toolbar.querySelector('#catalogResultCount');
+        if (count) count.textContent = `Найдено: ${state.catalog.total}`;
+        keptToolbar = true;
+      }
+    }
+    if (!keptToolbar) target.innerHTML = nextHtml;
     syncModalScrollLock();
     syncGlobalModals();
     lastRenderedTabKey = tabKey;
     lastRenderedTabHtml = nextHtml;
     if (scrollRoot) scrollRoot.scrollTop = previousTabKey === tabKey ? prevScrollTop : 0;
-    restoreFocusableSnapshot(target, focusSnapshot);
-    if (typeof binder === "function") binder();
+    if (!keptToolbar) restoreFocusableSnapshot(target, focusSnapshot);
+    if (typeof binder === "function") binder(keptToolbar);
     target.querySelectorAll("[data-open-bot-start]").forEach((btn) => {
       btn.addEventListener("click", () => {
         haptic();
@@ -3006,7 +3100,7 @@
             <option value="trials" ${filters.sort==='trials'?'selected':''}>${sortLabels.trials}</option>
             <option value="effect" ${filters.sort==='effect'?'selected':''}>${sortLabels.effect}</option>
           </select>
-          <span class="muted">Найдено: ${c.total}</span>
+          <span class="muted" id="catalogResultCount" aria-live="polite">Найдено: ${c.total}</span>
         </div>
         <div class="catalog-active-filters">
           ${activeFilterChips.length ? activeFilterChips.map((f)=>`<button class="chip" data-filter-remove="${f.key}:${f.value}">${esc(f.label)} ✕</button>`).join('') : '<span class="muted">Фильтры не выбраны</span>'}
@@ -3163,6 +3257,7 @@
     }
   }
 
+  let catalogRequestId = 0;
   async function loadCatalog(force) {
     const c = state.catalog;
     if ((c.loading || c.loadingMore) && !force) return;
@@ -3170,14 +3265,20 @@
     else c.loading = true;
     if (!c.items.length || c.page > 0) renderActiveTab();
 
+    const requestId = ++catalogRequestId;
+    const requestedPage = c.page;
+    const requestedQuery = c.q;
     const f = c.filters;
+    const requestedFilters = JSON.stringify(f);
+    const isCurrent = () => requestId === catalogRequestId && c.q === requestedQuery && JSON.stringify(c.filters) === requestedFilters;
     const qp = new URLSearchParams({ q: c.q || '', page: String(c.page), page_size: '20', sort: f.sort || 'alpha' });
     if (f.evidence.length) qp.set('evidence', f.evidence.join(','));
     if (f.targets.length) qp.set('targets', f.targets.join(','));
     try {
       const res = await api(`./api/catalog?${qp.toString()}`);
+      if (!isCurrent()) return;
       const nextItems = Array.isArray(res.items) ? res.items : [];
-      const mergedItems = c.page === 0 ? nextItems : c.items.concat(nextItems);
+      const mergedItems = requestedPage === 0 ? nextItems : c.items.concat(nextItems);
       state.catalog.items = mergedItems;
 
       let total = Number(res.total);
@@ -3198,16 +3299,20 @@
         total = Math.max(total, mergedItems.length, Number(state.catalog.total) || 0);
       }
 
+      if (!isCurrent()) return;
       state.catalog.total = total;
       state.catalog.hasMore = mergedItems.length < total;
       state.catalog.error = false;
     } catch (e) {
+      if (!isCurrent()) return;
       state.catalog.error = e.message !== 'PREMIUM_REQUIRED';
       if (c.page > 0) state.catalog.page = Math.max(0, c.page - 1);
     } finally {
-      state.catalog.loading = false;
-      state.catalog.loadingMore = false;
-      renderActiveTab();
+      if (requestId === catalogRequestId) {
+        state.catalog.loading = false;
+        state.catalog.loadingMore = false;
+        if (isCurrent()) renderActiveTab();
+      }
     }
   }
 
@@ -3410,7 +3515,16 @@
     bindStackAction('[data-stack-remove]', 'remove');
   }
 
-  function bindCatalogEvents() {
+  function bindCatalogEvents(preserveToolbar = false) {
+    const rootApp = document.getElementById('app');
+    const appEl = {
+      querySelectorAll: (selector) => [...rootApp.querySelectorAll(selector)].filter((el) => !preserveToolbar || !el.closest('.catalog-toolbar')),
+      querySelector: (selector) => appEl.querySelectorAll(selector)[0] || null
+    };
+    const catalogElement = (id) => {
+      const element = document.getElementById(id);
+      return preserveToolbar && element?.closest('.catalog-toolbar') ? null : element;
+    };
     const returnAfterComplexPick = async () => {
       const back = state.catalog.returnAfterComplexPick || null;
       state.catalog.returnAfterComplexPick = null;
@@ -3426,14 +3540,14 @@
 
     if (state.catalog.focusSearchOnOpen) {
       requestAnimationFrame(() => {
-        const input = document.getElementById('catalogSearch');
+        const input = catalogElement('catalogSearch');
         input?.focus();
         input?.setSelectionRange?.(input.value.length, input.value.length);
       });
       state.catalog.focusSearchOnOpen = false;
     }
 
-    document.getElementById('catalogSearch')?.addEventListener('input', (e) => {
+    catalogElement('catalogSearch')?.addEventListener('input', (e) => {
       state.catalog.q = e.target.value;
       clearTimeout(state.searchDebounce);
       state.searchDebounce = setTimeout(async () => {
@@ -3443,28 +3557,28 @@
       }, 300);
     });
 
-    document.getElementById('catalogSortInline')?.addEventListener('change', async (e) => {
+    catalogElement('catalogSortInline')?.addEventListener('change', async (e) => {
       state.catalog.filters.sort = e.target.value;
       state.catalog.page = 0;
       state.catalog.hasMore = true;
       await loadCatalog(true);
     });
 
-    document.getElementById('catalogRetry')?.addEventListener('click', async () => {
+    catalogElement('catalogRetry')?.addEventListener('click', async () => {
       haptic();
       state.catalog.page = 0;
       state.catalog.hasMore = true;
       await loadCatalog(true);
     });
 
-    document.getElementById('catalogReadyStacksToggle')?.addEventListener('click', async () => {
+    catalogElement('catalogReadyStacksToggle')?.addEventListener('click', async () => {
       haptic();
       state.catalog.stacksOpen = !state.catalog.stacksOpen;
       if (state.catalog.stacksOpen) await loadReadyStacks();
       renderActiveTab();
     });
 
-    document.getElementById('catalogReadyStacksRefresh')?.addEventListener('click', async () => {
+    catalogElement('catalogReadyStacksRefresh')?.addEventListener('click', async () => {
       haptic();
       await loadReadyStacks(true);
       renderActiveTab();
@@ -3504,11 +3618,11 @@
       await loadCatalog(true);
     }));
 
-    document.getElementById('catalogFilters')?.addEventListener('click', () => {
+    catalogElement('catalogFilters')?.addEventListener('click', () => {
       state.catalog.filtersOpen = true;
       haptic();
       renderActiveTab();
-      const s=document.getElementById('sortSelect');
+      const s=catalogElement('sortSelect');
       if(s) s.value=state.catalog.filters.sort || 'alpha';
     });
 
@@ -3583,11 +3697,11 @@
       state.catalog.hasMore = true;
       await loadCatalog(true);
       renderActiveTab();
-      const s=document.getElementById('sortSelect');
+      const s=catalogElement('sortSelect');
       if(s) s.value=state.catalog.filters.sort;
     }));
 
-    document.getElementById('sortSelect')?.addEventListener('change', async (e)=>{
+    catalogElement('sortSelect')?.addEventListener('change', async (e)=>{
       const nextSort = String(e?.target?.value || 'alpha');
       if (state.catalog.filters.sort === nextSort) return;
       state.catalog.filters.sort = nextSort;
@@ -3597,7 +3711,7 @@
       renderActiveTab();
     });
 
-    document.getElementById('resetFilters')?.addEventListener('click', async ()=>{
+    catalogElement('resetFilters')?.addEventListener('click', async ()=>{
       state.catalog.filters={evidence:[],targets:[],sort:'alpha'};
       state.catalog.filtersOpen=false;
       state.catalog.page=0;
@@ -3619,7 +3733,7 @@
       renderActiveTab();
     });
     appEl.querySelector('[data-add-stack-slot-create-confirm]')?.addEventListener('click', async () => {
-      const timeInput = document.getElementById('addStackSlotTime');
+      const timeInput = catalogElement('addStackSlotTime');
       const time = normalizeHHMM(timeInput?.value || state.catalog.addToStackSlotModal.newSlotTime || '');
       if (!time) return showToast('Выберите корректное время');
       try {
@@ -7609,9 +7723,31 @@ function adminField(label, field, value, kind='input') {
     return `${summaryHtml}${calHtml}${rowsHtml}`;
   }
 
-  window.addEventListener('focus', () => { checkPendingPaymentStatus({ silent: true }); });
+  let viewportFrame = 0;
+  let stableHeight = window.innerHeight;
+  function syncViewport() {
+    cancelAnimationFrame(viewportFrame);
+    viewportFrame = requestAnimationFrame(() => {
+      const visible = window.visualViewport?.height || window.innerHeight;
+      const keyboard = (isEditing() || document.documentElement.classList.contains('keyboard-open')) && stableHeight - visible > 120;
+      if (!keyboard) stableHeight = Number(tg?.viewportStableHeight) || window.innerHeight;
+      document.documentElement.style.setProperty('--app-height', `${stableHeight}px`);
+      document.documentElement.style.setProperty('--visible-height', `${visible}px`);
+      document.documentElement.classList.toggle('keyboard-open',keyboard);
+    });
+  }
+  window.visualViewport?.addEventListener('resize',syncViewport);
+  window.addEventListener('resize',syncViewport);
+  tg?.onEvent?.('viewportChanged',syncViewport);
+  tg?.onEvent?.('activated',refreshOnResume);
+  document.addEventListener('focusin',syncViewport);
+  document.addEventListener('focusout',() => { syncViewport(); });
+  window.addEventListener('pagehide',saveNavigation);
+  window.addEventListener('focus',refreshOnResume);
+  syncViewport();
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') checkPendingPaymentStatus({ silent: true });
+    if (document.visibilityState === 'visible') refreshOnResume();
+    else saveNavigation();
   });
 
   boot();

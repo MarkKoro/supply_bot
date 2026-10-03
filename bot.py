@@ -2752,9 +2752,14 @@ async def on_success_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
     starter_active_before_purchase = False
     try:
         starter_active_before_purchase = await db.is_starter_trial_active(conn, update.effective_user.id)
-        is_new = await db.log_payment_paid(
+        is_new, until_iso = await db.activate_subscription_payment(
             conn,
             update.effective_user.id,
+            months,
+            plan_id=plan_id,
+            project_key=s.PROJECT_KEY,
+            payment_kind="subscription",
+            finalized_at_utc=db.utc_now_iso(),
             provider=method,
             currency=str(sp.currency or ""),
             amount=int(sp.total_amount or 0),
@@ -2765,7 +2770,6 @@ async def on_success_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if not is_new:
             await msg.reply_text("Оплата уже учтена ✅")
             return
-        until_iso = await db.extend_premium(conn, update.effective_user.id, months, source=method, plan_id=plan_id)
     finally:
         await conn.close()
 
@@ -3002,6 +3006,11 @@ async def _show_timezone_picker(
 
 def _is_debug_user(settings, tg_uid: int) -> bool:
     return bool(settings.DEBUG or (tg_uid in settings.ADMIN_IDS))
+
+
+async def payments_reconcile_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
+    from webapp_backend import reconcile_redirect_payments
+    await reconcile_redirect_payments()
 
 
 async def reminders_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -8065,6 +8074,7 @@ async def _bootstrap() -> Application:
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, on_success_payment))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_error_handler(on_error)
+    app.job_queue.run_repeating(payments_reconcile_tick, interval=60, first=10, name="payments_reconcile")
     app.job_queue.run_repeating(reminders_tick, interval=60, first=5, name="reminders_tick")
     app.job_queue.run_repeating(nutrient_lifecycle_tick, interval=300, first=20, name="nutrient_lifecycle_tick")
     app.job_queue.run_repeating(daily_rollover_job, interval=600, first=30, name="daily_rollover")

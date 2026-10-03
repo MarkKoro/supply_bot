@@ -3,6 +3,7 @@ import json
 import logging
 import re
 import uuid
+from decimal import Decimal, InvalidOperation
 from datetime import timedelta
 from datetime import datetime, timezone
 from pathlib import Path
@@ -495,78 +496,127 @@ def _yookassa_headers(idem_key: str) -> dict[str, str]:
 
 async def _finalize_redirect_subscription_payment(payment: dict) -> dict:
     payment_id = str(payment.get("id") or "").strip()
-    if not payment_id:
-        raise HTTPException(status_code=400, detail="Missing payment id")
+    if not payment_id or payment.get("status") != "succeeded" or payment.get("paid") is not True:
+        raise HTTPException(status_code=400, detail="Payment is not confirmed")
     metadata = payment.get("metadata") or {}
-    receipt_email = str(metadata.get("receipt_email") or "").strip().lower()
-    receipt_collected_at = str(metadata.get("receipt_email_collected_at") or "").strip()
-    wants_receipt = str(metadata.get("wants_receipt") or "0").strip() in {"1", "true", "True"}
-    if str(metadata.get("project_key") or "") != s.PROJECT_KEY:
-        raise HTTPException(status_code=403, detail="Project mismatch")
-    if str(metadata.get("kind") or "") != "subscription":
-        raise HTTPException(status_code=400, detail="Unsupported payment kind")
-
-    user_id_raw = str(metadata.get("user_id") or "").strip()
-    plan_id = str(metadata.get("plan_id") or "").strip()
-    if not user_id_raw or not plan_id:
-        raise HTTPException(status_code=400, detail="Incomplete metadata")
+    if metadata.get("project_key") != s.PROJECT_KEY or metadata.get("kind") != "subscription":
+        raise HTTPException(status_code=403, detail="Payment project or kind mismatch")
     try:
-        tg_user_id = int(user_id_raw)
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail="Invalid metadata user_id") from exc
-    months = int(s.PREMIUM_PLANS.get(plan_id, 0) or 0)
-    if months <= 0:
-        raise HTTPException(status_code=400, detail="Invalid metadata plan_id")
-
-    amount_obj = payment.get("amount") or {}
-    amount_minor = int(round(float(amount_obj.get("value") or 0.0) * 100))
-
+        tg_user_id = int(metadata["user_id"])
+        value = Decimal(str(payment["amount"]["value"])) * 100
+        if not value.is_finite() or value <= 0 or value != value.to_integral_value():
+            raise ValueError("amount")
+        amount_minor = int(value)
+    except (KeyError, TypeError, ValueError, InvalidOperation) as exc:
+        raise HTTPException(status_code=400, detail="Invalid payment metadata or amount") from exc
+    plan_id = str(metadata.get("plan_id") or "")
     conn = await db.connect(s.DB_PATH)
     try:
-        inserted = await db.log_payment_paid(
-            conn,
-            tg_user_id=tg_user_id,
-            provider="yookassa_redirect",
-            currency="RUB",
-            amount=amount_minor,
-            payload=f"sub:{plan_id}:redirect:{payment_id}",
-            telegram_payment_charge_id=None,
-            provider_payment_charge_id=payment_id,
-            project_key=s.PROJECT_KEY,
-            payment_kind="subscription",
-            plan_id=plan_id,
-            finalized_at_utc=db.utc_now_iso(),
-            receipt_email=receipt_email,
-            receipt_email_status="provided" if receipt_email else "missing",
-            receipt_email_source="webapp" if receipt_email else "",
-            receipt_email_collected_at=receipt_collected_at,
-            wants_receipt=wants_receipt,
-        )
-        if not inserted:
-            return {
-                "finalized": False,
-                "already_finalized": True,
-                "payment_id": payment_id,
-                "plan_id": plan_id,
-                "kind": "subscription",
-            }
-        until_iso = await db.extend_premium(
-            conn,
-            tg_user_id,
-            months,
-            source="yookassa_redirect",
-            plan_id=plan_id,
-        )
-        return {
-            "finalized": True,
-            "already_finalized": False,
-            "payment_id": payment_id,
-            "plan_id": plan_id,
-            "kind": "subscription",
-            "premium_until_utc": until_iso,
-        }
+        async with db.transaction(conn) as tx:
+            order = await db.fetchone(tx, "SELECT * FROM redirect_orders WHERE id=?", (str(metadata.get('order_id') or ''),))
+            if metadata.get('order_id') and not order:
+                raise HTTPException(status_code=409, detail="Payment order not found")
+            if order:
+                if (int(order['tg_user_id']) != tg_user_id or order['plan_id'] != plan_id
+                        or order['provider_payment_id'] not in (None, '', payment_id)):
+                    raise HTTPException(status_code=403, detail="Payment order mismatch")
+                months, expected_amount = int(order['months']), int(order['amount_minor'])
+            else:
+                # Compatibility with invoices created before durable orders were deployed.
+                months = int(s.PREMIUM_PLANS.get(plan_id, 0) or 0)
+                previous = await db.fetchone(tx, "SELECT amount FROM payments WHERE provider_payment_charge_id=?", (payment_id,))
+                expected_amount = int(previous['amount']) if previous else int(s.PREMIUM_PRICES_RUB.get(plan_id, 0) or 0)
+            if months <= 0 or payment['amount'].get('currency') != 'RUB' or amount_minor != expected_amount:
+                raise HTTPException(status_code=409, detail="Payment amount, currency or plan mismatch")
+            receipt_email = str(metadata.get('receipt_email') or '').strip().lower()
+            inserted, until = await db.activate_subscription_payment(
+                tx, tg_user_id=tg_user_id, months=months, provider='yookassa_redirect',
+                plan_id=plan_id, currency='RUB', amount=amount_minor,
+                payload=f'sub:{plan_id}:redirect:{payment_id}', provider_payment_charge_id=payment_id,
+                project_key=s.PROJECT_KEY, payment_kind='subscription', finalized_at_utc=db.utc_now_iso(),
+                receipt_email=receipt_email, receipt_email_status='provided' if receipt_email else 'missing',
+                receipt_email_source='webapp' if receipt_email else '',
+                receipt_email_collected_at=str(metadata.get('receipt_email_collected_at') or ''),
+                wants_receipt=str(metadata.get('wants_receipt') or '0') in {'1','true','True'},
+            )
+            if order:
+                await tx.execute("UPDATE redirect_orders SET status='succeeded',provider_payment_id=?,updated_at_utc=? WHERE id=?",
+                                 (payment_id,db.utc_now_iso(),order['id']))
+        return {'finalized': inserted, 'already_finalized': not inserted, 'payment_id': payment_id,
+                'plan_id': plan_id, 'kind': 'subscription', 'premium_until_utc': until}
     finally:
         await conn.close()
+
+
+async def _resolve_redirect_order(order: dict) -> dict:
+    """Resume a stored request; never invent a new key after an ambiguous response."""
+    payment_id = str(order.get('provider_payment_id') or '')
+    created = db._parse_utc_iso_dt(order['created_at_utc'])
+    if not payment_id and (not created or datetime.now(timezone.utc) - created >= timedelta(hours=23)):
+        conn = await db.connect(s.DB_PATH)
+        try:
+            await conn.execute("UPDATE redirect_orders SET status='review' WHERE id=? AND status='creating'", (order['id'],))
+            await conn.commit()
+        finally:
+            await conn.close()
+        raise HTTPException(status_code=409, detail='Не удалось подтвердить предыдущий счёт. Обратитесь в поддержку — новый счёт пока не создаём.')
+    async with httpx.AsyncClient(timeout=20.0, auth=(s.YOOKASSA_SHOP_ID,s.YOOKASSA_SECRET_KEY)) as client:
+        try:
+            if payment_id:
+                resp = await client.get(f'https://api.yookassa.ru/v3/payments/{payment_id}')
+            else:
+                resp = await client.post('https://api.yookassa.ru/v3/payments', headers=_yookassa_headers(order['id']), json=json.loads(order['request_json']))
+        except httpx.RequestError as exc:
+            raise HTTPException(status_code=502, detail='Платёжный сервис пока не отвечает. Попробуйте ещё раз — ваш счёт сохранён.') from exc
+    if resp.status_code >= 400:
+        raise HTTPException(status_code=502, detail='Не удалось проверить счёт. Попробуйте ещё раз немного позже.')
+    payment = resp.json()
+    pid = str(payment.get('id') or '')
+    metadata = payment.get('metadata') or {}
+    if (not re.fullmatch(r'[A-Za-z0-9_-]{1,100}',pid) or (payment_id and pid != payment_id)
+            or metadata.get('order_id') != order['id'] or metadata.get('project_key') != s.PROJECT_KEY
+            or str(metadata.get('user_id')) != str(order['tg_user_id']) or metadata.get('plan_id') != order['plan_id']):
+        raise HTTPException(status_code=502, detail='Не удалось подтвердить данные счёта.')
+    status = str(payment.get('status') or '')
+    if status not in {'pending','waiting_for_capture','succeeded','canceled'}:
+        raise HTTPException(status_code=502, detail='Неизвестный статус счёта.')
+    confirmation_url = str((payment.get('confirmation') or {}).get('confirmation_url') or '')
+    conn = await db.connect(s.DB_PATH)
+    try:
+        # A stale poll must not move a terminal order back to pending.
+        await conn.execute("""UPDATE redirect_orders SET provider_payment_id=?,confirmation_url=?,status=?,updated_at_utc=?
+            WHERE id=? AND status IN ('creating','pending','review')""",
+            (pid,confirmation_url,'canceled' if status=='canceled' else 'pending',db.utc_now_iso(),order['id']))
+        await conn.commit()
+    finally:
+        await conn.close()
+    result = {'ok':True,'payment_id':pid,'confirmation_url':confirmation_url,'amount_minor':order['amount_minor'],
+              'amount_rub':order['amount_minor']/100,'plan_id':order['plan_id'],'kind':'subscription',
+              'project_key':s.PROJECT_KEY,'created_at':order['created_at_utc'],'status':status}
+    if status == 'succeeded':
+        result.update(await _finalize_redirect_subscription_payment(payment))
+    return result
+
+
+async def reconcile_redirect_payments() -> None:
+    if not s.YOOKASSA_SHOP_ID or not s.YOOKASSA_SECRET_KEY:
+        return
+    conn = await db.connect(s.DB_PATH)
+    try:
+        rows = await db.fetchall(conn, "SELECT * FROM redirect_orders WHERE status IN ('creating','pending') ORDER BY checked_at_utc,id LIMIT 20")
+    finally:
+        await conn.close()
+    for row in rows:
+        conn = await db.connect(s.DB_PATH)
+        try:
+            await conn.execute('UPDATE redirect_orders SET checked_at_utc=? WHERE id=?', (db.utc_now_iso(),row['id']))
+            await conn.commit()
+        finally:
+            await conn.close()
+        try:
+            await _resolve_redirect_order(dict(row))
+        except Exception as exc:
+            log.warning('Payment reconciliation postponed order=%s error=%s',row['id'],type(exc).__name__)
 
 
 async def _build_newly_unlocked_details(conn, newly_keys: list[str]) -> list[dict]:
@@ -1189,7 +1239,7 @@ async def api_payments_redirect_create(
     if plan_id not in s.PREMIUM_PLANS:
         raise HTTPException(status_code=400, detail="Unknown plan")
 
-    title, description, _, price_minor = _subscription_title_description(plan_id)
+    title, description, months, price_minor = _subscription_title_description(plan_id)
     metadata = {
         "project_key": s.PROJECT_KEY,
         "bot_username": s.BOT_USERNAME,
@@ -1223,32 +1273,14 @@ async def api_payments_redirect_create(
         "metadata": metadata,
     }
 
-    idem_key = str(uuid.uuid4())
-    async with httpx.AsyncClient(timeout=20.0, auth=(s.YOOKASSA_SHOP_ID, s.YOOKASSA_SECRET_KEY)) as client:
-        resp = await client.post(
-            "https://api.yookassa.ru/v3/payments",
-            headers=_yookassa_headers(idem_key),
-            json=yookassa_payload,
-        )
-    if resp.status_code >= 400:
-        raise HTTPException(status_code=502, detail=f"YooKassa error: {resp.text[:300]}")
-    data = resp.json()
-    payment_id = str(data.get("id") or "").strip()
-    confirmation_url = str((data.get("confirmation") or {}).get("confirmation_url") or "").strip()
-    if not payment_id or not confirmation_url:
-        raise HTTPException(status_code=502, detail="Invalid YooKassa response")
-    return JSONResponse({
-        "ok": True,
-        "payment_id": payment_id,
-        "confirmation_url": confirmation_url,
-        "amount_rub": price_minor / 100,
-        "amount_minor": price_minor,
-        "title": title,
-        "project_key": s.PROJECT_KEY,
-        "kind": "subscription",
-        "plan_id": plan_id,
-        "created_at": db.utc_now_iso(),
-    })
+    conn = await db.connect(s.DB_PATH)
+    try:
+        order = await db.get_or_create_redirect_order(conn,tg_user_id,plan_id,months,price_minor,yookassa_payload)
+    finally:
+        await conn.close()
+    result = await _resolve_redirect_order(order)
+    result['title'] = title if order['plan_id'] == plan_id else 'Ранее созданный счёт'
+    return JSONResponse(result)
 
 
 @app.get("/api/payments/yookassa/status")
@@ -1259,8 +1291,8 @@ async def api_payments_yookassa_status(
     tg_user_id = await _auth_user_id(x_telegram_init_data)
     _yookassa_guard()
     pid = str(payment_id or "").strip()
-    if not pid:
-        raise HTTPException(status_code=400, detail="payment_id is required")
+    if not re.fullmatch(r'[A-Za-z0-9_-]{1,100}', pid):
+        raise HTTPException(status_code=400, detail="Invalid payment_id")
 
     async with httpx.AsyncClient(timeout=20.0, auth=(s.YOOKASSA_SHOP_ID, s.YOOKASSA_SECRET_KEY)) as client:
         resp = await client.get(f"https://api.yookassa.ru/v3/payments/{pid}")
@@ -1277,6 +1309,12 @@ async def api_payments_yookassa_status(
     if status in {"pending", "waiting_for_capture"}:
         return JSONResponse({"ok": True, "status": status, "finalized": False})
     if status == "canceled":
+        conn = await db.connect(s.DB_PATH)
+        try:
+            await conn.execute("UPDATE redirect_orders SET status='canceled',updated_at_utc=? WHERE provider_payment_id=? AND tg_user_id=? AND status IN ('creating','pending')", (db.utc_now_iso(),pid,tg_user_id))
+            await conn.commit()
+        finally:
+            await conn.close()
         return JSONResponse({"ok": True, "status": "canceled", "finalized": False})
     if status == "succeeded":
         fin = await _finalize_redirect_subscription_payment(payment)

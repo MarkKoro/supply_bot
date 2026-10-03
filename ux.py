@@ -189,8 +189,12 @@ async def show(
                 message_id=target_message,
             )
             return msg
-        except BadRequest:
-            pass
+        except BadRequest as exc:
+            if "message is not modified" in str(exc).lower():
+                _last_screen[target_chat] = target_message
+                _set_last_menu(context, route=route, payload=payload, chat_id=target_chat, message_id=target_message)
+                await _persist_last_state(update, context, route=route, payload=payload, chat_id=target_chat, message_id=target_message)
+                return update.effective_message
 
     q = update.callback_query
     if q and q.message and target_message is None:
@@ -207,8 +211,12 @@ async def show(
                 message_id=q.message.message_id,
             )
             return q.message
-        except BadRequest:
-            pass
+        except BadRequest as exc:
+            if "message is not modified" in str(exc).lower():
+                _last_screen[chat_id] = q.message.message_id
+                _set_last_menu(context, route=route, payload=payload, chat_id=chat_id, message_id=q.message.message_id)
+                await _persist_last_state(update, context, route=route, payload=payload, chat_id=chat_id, message_id=q.message.message_id)
+                return q.message
 
     msg = await context.bot.send_message(
         chat_id=chat_id,

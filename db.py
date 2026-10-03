@@ -811,6 +811,7 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     await _ensure_curated_stacks(conn)
     await _ensure_curated_stack_items(conn)
     await _ensure_payments_table(conn)
+    await _ensure_redirect_orders(conn)
     await _ensure_achievements_tables(conn)
     await _ensure_profile_foundation_tables(conn)
     await _ensure_integrity_unique_indexes(conn)
@@ -2259,7 +2260,7 @@ async def get_or_create_user(conn: aiosqlite.Connection, tg_user_id: int, tz_nam
         return int(row["id"])
     tz_value = tz_name.strip() if isinstance(tz_name, str) and tz_name.strip() else "UTC"
     await conn.execute(
-        "INSERT INTO users(tg_user_id, tz_name, created_at) VALUES(?,?,?)",
+        "INSERT INTO users(tg_user_id, tz_name, created_at) VALUES(?,?,?) ON CONFLICT(tg_user_id) DO NOTHING",
         (tg_user_id, tz_value, utc_now_iso()),
     )
     await conn.commit()
@@ -2672,29 +2673,30 @@ async def extend_premium(
     source: str,
     plan_id: str,
 ) -> str:
-    if months <= 0:
-        raise ValueError("months must be > 0")
-    now = datetime.now(timezone.utc)
-    current_until = _parse_utc_iso_dt(await get_premium_until(conn, tg_user_id))
-    starter_until = _parse_utc_iso_dt(await get_starter_trial_until(conn, tg_user_id))
-    baseline = now
-    if current_until is not None and current_until > now:
-        baseline = current_until
-    starter_carryover = timedelta(0)
-    if starter_until is not None and starter_until > now:
-        starter_carryover = starter_until - now
-    new_until = _add_months_utc(baseline, months)
-    if starter_carryover.total_seconds() > 0:
-        new_until = new_until + starter_carryover
-    until_value = await set_premium_until(conn, tg_user_id, new_until, source, plan_id)
-    if starter_carryover.total_seconds() > 0:
-        now_iso = _to_utc_iso(now)
-        await conn.execute(
-            "UPDATE users SET starter_trial_until_utc=? WHERE tg_user_id=?",
-            (now_iso, int(tg_user_id)),
-        )
-        await conn.commit()
-    return until_value
+    async with transaction(conn) as conn:
+        if months <= 0:
+            raise ValueError("months must be > 0")
+        now = datetime.now(timezone.utc)
+        current_until = _parse_utc_iso_dt(await get_premium_until(conn, tg_user_id))
+        starter_until = _parse_utc_iso_dt(await get_starter_trial_until(conn, tg_user_id))
+        baseline = now
+        if current_until is not None and current_until > now:
+            baseline = current_until
+        starter_carryover = timedelta(0)
+        if starter_until is not None and starter_until > now:
+            starter_carryover = starter_until - now
+        new_until = _add_months_utc(baseline, months)
+        if starter_carryover.total_seconds() > 0:
+            new_until = new_until + starter_carryover
+        until_value = await set_premium_until(conn, tg_user_id, new_until, source, plan_id)
+        if starter_carryover.total_seconds() > 0:
+            now_iso = _to_utc_iso(now)
+            await conn.execute(
+                "UPDATE users SET starter_trial_until_utc=? WHERE tg_user_id=?",
+                (now_iso, int(tg_user_id)),
+            )
+            await conn.commit()
+        return until_value
 
 
 async def extend_premium_days(
@@ -2704,12 +2706,13 @@ async def extend_premium_days(
     source: str,
     plan_id: str,
 ) -> str:
-    safe_days = max(1, int(days))
-    now = datetime.now(timezone.utc)
-    current_until = _parse_utc_iso_dt(await get_premium_until(conn, tg_user_id))
-    baseline = current_until if (current_until is not None and current_until > now) else now
-    new_until = baseline + timedelta(days=safe_days)
-    return await set_premium_until(conn, tg_user_id, new_until, source, plan_id)
+    async with transaction(conn) as conn:
+        safe_days = max(1, int(days))
+        now = datetime.now(timezone.utc)
+        current_until = _parse_utc_iso_dt(await get_premium_until(conn, tg_user_id))
+        baseline = current_until if (current_until is not None and current_until > now) else now
+        new_until = baseline + timedelta(days=safe_days)
+        return await set_premium_until(conn, tg_user_id, new_until, source, plan_id)
 
 
 def _generate_gift_code(length: int = 14) -> str:
@@ -2743,26 +2746,27 @@ async def create_gift_code(conn: aiosqlite.Connection, *, admin_tg_id: int, days
 
 
 async def redeem_gift_code(conn: aiosqlite.Connection, *, tg_user_id: int, code: str) -> tuple[str, int, str | None]:
-    clean = str(code or "").strip().upper()
-    if not clean:
-        return ("not_found", 0, None)
-    row = await fetchone(conn, "SELECT id, days, is_active FROM gift_codes WHERE code=? LIMIT 1", (clean,))
-    if not row:
-        return ("not_found", 0, None)
-    if int(row["is_active"] or 0) != 1:
-        return ("used", 0, None)
-    gift_id = int(row["id"])
-    days = int(row["days"] or 0)
-    now = utc_now_iso()
-    cur = await conn.execute(
-        "UPDATE gift_codes SET is_active=0, redeemed_by_tg_id=?, redeemed_at_utc=? WHERE id=? AND is_active=1",
-        (int(tg_user_id), now, gift_id),
-    )
-    if int(cur.rowcount or 0) != 1:
-        return ("used", 0, None)
-    until_iso = await extend_premium_days(conn, tg_user_id, max(1, days), source="gift_code", plan_id=f"gift:{clean}")
-    await conn.commit()
-    return ("ok", max(1, days), until_iso)
+    async with transaction(conn) as conn:
+        clean = str(code or "").strip().upper()
+        if not clean:
+            return ("not_found", 0, None)
+        row = await fetchone(conn, "SELECT id, days, is_active FROM gift_codes WHERE code=? LIMIT 1", (clean,))
+        if not row:
+            return ("not_found", 0, None)
+        if int(row["is_active"] or 0) != 1:
+            return ("used", 0, None)
+        gift_id = int(row["id"])
+        days = int(row["days"] or 0)
+        now = utc_now_iso()
+        cur = await conn.execute(
+            "UPDATE gift_codes SET is_active=0, redeemed_by_tg_id=?, redeemed_at_utc=? WHERE id=? AND is_active=1",
+            (int(tg_user_id), now, gift_id),
+        )
+        if int(cur.rowcount or 0) != 1:
+            return ("used", 0, None)
+        until_iso = await extend_premium_days(conn, tg_user_id, max(1, days), source="gift_code", plan_id=f"gift:{clean}")
+        await conn.commit()
+        return ("ok", max(1, days), until_iso)
 
 
 async def gift_codes_stats(conn: aiosqlite.Connection) -> dict:
@@ -2949,6 +2953,50 @@ async def purge_user_data(conn: aiosqlite.Connection, tg_user_id: int) -> dict:
             return {"ok": True, "deleted": False, "tables_touched": 0}
         touched = await _purge_user_content(tx, int(row["id"]), int(tg_user_id))
     return {"ok": True, "deleted": True, "tables_touched": touched}
+
+
+async def _ensure_redirect_orders(conn) -> None:
+    await conn.execute("""CREATE TABLE IF NOT EXISTS redirect_orders (
+        id TEXT PRIMARY KEY, tg_user_id INTEGER NOT NULL, plan_id TEXT NOT NULL,
+        months INTEGER NOT NULL, amount_minor INTEGER NOT NULL, currency TEXT NOT NULL,
+        request_json TEXT NOT NULL, provider_payment_id TEXT UNIQUE,
+        confirmation_url TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'creating',
+        created_at_utc TEXT NOT NULL, updated_at_utc TEXT NOT NULL,
+        checked_at_utc TEXT NOT NULL DEFAULT '', notified_at_utc TEXT NOT NULL DEFAULT ''
+    )""")
+    await conn.execute("""CREATE UNIQUE INDEX IF NOT EXISTS idx_redirect_orders_open_user
+        ON redirect_orders(tg_user_id) WHERE status IN ('creating','pending','review')""")
+
+
+async def get_or_create_redirect_order(conn, tg_user_id: int, plan_id: str, months: int, amount_minor: int, payload: dict) -> dict:
+    import uuid
+    async with transaction(conn) as tx:
+        row = await fetchone(tx, "SELECT * FROM redirect_orders WHERE tg_user_id=? AND status IN ('creating','pending','review')", (tg_user_id,))
+        if row:
+            return dict(row)
+        order_id = str(uuid.uuid4())
+        payload = json.loads(json.dumps(payload))
+        payload['metadata']['order_id'] = order_id
+        now = utc_now_iso()
+        await tx.execute("""INSERT INTO redirect_orders(id,tg_user_id,plan_id,months,amount_minor,currency,request_json,created_at_utc,updated_at_utc)
+            VALUES(?,?,?,?,?,'RUB',?,?,?)""", (order_id,tg_user_id,plan_id,months,amount_minor,json.dumps(payload,ensure_ascii=False),now,now))
+        return dict(await fetchone(tx, "SELECT * FROM redirect_orders WHERE id=?", (order_id,)))
+
+
+async def activate_subscription_payment(
+    conn: aiosqlite.Connection, tg_user_id: int, months: int, *,
+    provider: str, plan_id: str, **payment_fields,
+) -> tuple[bool, str | None]:
+    """Record a payment and grant its period as a single retry-safe write."""
+    async with transaction(conn) as tx:
+        inserted = await log_payment_paid(
+            tx, tg_user_id=tg_user_id, provider=provider, plan_id=plan_id,
+            **payment_fields,
+        )
+        if not inserted:
+            return False, await get_premium_until(tx, tg_user_id)
+        until = await extend_premium(tx, tg_user_id, months, source=provider, plan_id=plan_id)
+        return True, until
 
 
 async def log_payment_paid(

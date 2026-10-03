@@ -5,7 +5,6 @@ import aiosqlite
 import db
 from rules import DEFAULT_CLASS_RULES
 
-COMPAT_MIN_DB = 2
 
 REL_LABELS = {
     "synergy": "✅ Хорошо вместе",
@@ -234,12 +233,20 @@ async def apply_day_plan_actions_with_slots(
     return inserted
 
 async def describe_interactions(conn: aiosqlite.Connection, supp_row, *, limit_each: int = 8) -> dict[str, dict[str, list[dict]]]:
-    supp_id = int(supp_row["id"])
-    explicit_groups: dict[str, list[dict]] = {}
-    for rel in ("avoid", "caution", "synergy", "neutral"):
-        rows = await db.list_interactions_for_supplement(conn, supp_id, relation=rel, limit=limit_each)
-        explicit_groups[rel] = await _hydrate(conn, supp_id, rows, origin="explicit")
-
+    explicit_groups: dict[str, list[dict]] = {key: [] for key in ("avoid", "caution", "synergy", "neutral")}
+    for item in await db.get_interactions_for_supplement(conn, int(supp_row["id"])):
+        relation = "avoid" if item["kind"] == "antagonism" else item["kind"]
+        explicit_groups[relation].append({
+            "other_slug": item["other_slug"], "other_name": item["title"],
+            "relation": relation, "severity": item.get("severity") or 0,
+            "evidence": item["evidence_grade"], "note": item["reason_ru"],
+            "source": item["source_url"], "origin": "explicit",
+        })
+    for relation in explicit_groups:
+        explicit_groups[relation].sort(key=_interaction_sort_key)
+        explicit_groups[relation] = explicit_groups[relation][:limit_each]
+    neutral_rows = await db.list_interactions_for_supplement(conn, int(supp_row["id"]), relation="neutral", limit=limit_each)
+    explicit_groups["neutral"] = await _hydrate(conn, int(supp_row["id"]), neutral_rows, origin="explicit")
     rule_groups = await _class_based_for_supplement(conn, supp_row, limit_each=limit_each)
     return {"explicit": explicit_groups, "rules": rule_groups}
 
@@ -340,6 +347,7 @@ async def build_compatibility(conn: aiosqlite.Connection, sid: int) -> dict:
                     "other_id": int(other_id),
                     "reason_ru": reason,
                     "strength": strength,
+                    "origin": "explicit",
                 }
             )
         elif other_label:
@@ -354,8 +362,8 @@ async def build_compatibility(conn: aiosqlite.Connection, sid: int) -> dict:
 
     db_total = sum(len(items) for items in grouped.values())
     source = "db"
-    if db_total == 0 or db_total < COMPAT_MIN_DB:
-        rules_grouped = await _build_rule_compatibility(conn, sid)
+    rules_grouped = await _build_rule_compatibility(conn, sid)
+    if any(rules_grouped.values()):
         if db_total == 0:
             grouped = rules_grouped
             source = "rules"
@@ -384,7 +392,7 @@ async def _build_rule_compatibility(conn: aiosqlite.Connection, sid: int) -> dic
 
     rows = await db.fetchall(
         conn,
-        "SELECT id,slug,name,name_ru,name_en,interaction_classes,interaction_classes_json FROM supplements",
+        "SELECT id,slug,name,name_ru,name_en,interaction_classes,interaction_classes_json FROM supplements WHERE is_active=1",
     )
     grouped: dict[str, list[dict]] = {"synergy": [], "antagonism": [], "caution": []}
     best: dict[tuple[int, str], dict] = {}
@@ -411,6 +419,7 @@ async def _build_rule_compatibility(conn: aiosqlite.Connection, sid: int) -> dic
                 "other_id": other_id,
                 "reason_ru": reason,
                 "strength": strength,
+                "origin": "rule",
             }
 
     for (other_id, kind), payload in best.items():
@@ -435,11 +444,13 @@ async def _attach_titles(conn: aiosqlite.Connection, grouped: dict[str, list[dic
                 ids.append(other_id)
     rows = await db.list_supplements_by_ids(conn, ids)
     titles = {int(r["id"]): _supp_title(r) for r in rows}
+    slugs = {int(r["id"]): str(r["slug"] or "") for r in rows}
     for kind, items in grouped.items():
         for item in items:
             other_id = item.get("other_id")
             if isinstance(other_id, int):
                 item["title"] = titles.get(other_id, "Неизвестно")
+                item["other_slug"] = slugs.get(other_id, "")
     return grouped
 
 def format_interactions(title_supp: str, groups: dict[str, dict[str, list[dict]]]) -> str:
@@ -462,21 +473,21 @@ async def stack_compatibility(conn: aiosqlite.Connection, supp_rows, *, limit: i
         return []
 
     classes_by_id = {int(r["id"]): _parse_classes(_classes_raw(r)) for r in rows}
+    explicit_by_id = {int(r["id"]): await db.get_interactions_for_supplement(conn, int(r["id"])) for r in rows}
 
     for i, a in enumerate(rows):
         for b in rows[i + 1:]:
             a_id = int(a["id"])
             b_id = int(b["id"])
-            explicit = await db.get_interaction_between(conn, a_id, b_id)
-            if explicit:
+            for explicit in explicit_by_id[a_id]:
+                if explicit.get("other_supplement_id") != b_id:
+                    continue
                 pairs.append({
-                    "a_name": a["name"],
-                    "b_name": b["name"],
+                    "a_name": a["name"], "b_name": b["name"],
                     "relation": explicit["relation"],
-                    "severity": int(explicit["severity"]),
-                    "evidence": explicit["evidence_grade"] or "",
-                    "note": explicit["note"] or "",
-                    "origin": "explicit",
+                    "severity": int(explicit.get("severity") or 0),
+                    "evidence": explicit["evidence_grade"],
+                    "note": explicit["reason_ru"], "origin": "explicit",
                 })
 
             class_hits = class_based_interactions(
@@ -520,7 +531,7 @@ async def _class_based_for_supplement(conn: aiosqlite.Connection, supp_row, *, l
     if not classes_a:
         return {rel: [] for rel in REL_ORDER}
 
-    rows = await db.fetchall(conn, "SELECT id,slug,name,interaction_classes,interaction_classes_json FROM supplements")
+    rows = await db.fetchall(conn, "SELECT id,slug,name,interaction_classes,interaction_classes_json FROM supplements WHERE is_active=1")
     rule_groups: dict[str, list[dict]] = {rel: [] for rel in REL_ORDER}
 
     for other in rows:

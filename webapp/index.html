@@ -678,7 +678,9 @@
       transition: transform .16s ease, box-shadow .18s ease, border-color .18s ease;
       cursor: pointer;
     }
-    .organ-tile:hover { transform: translateY(-2px); }
+    @media (hover: hover) { .organ-tile:hover { border-color: rgba(189,216,255,.7); } }
+    .organ-tile.state-empty { border-color: rgba(255,255,255,.18); }
+    .organ-tile { min-height: 90px; }
     .organ-tile:active { transform: translateY(1px) scale(0.995); }
     .organ-icon {
       width: 44px;
@@ -807,10 +809,28 @@
     }
     .bodymap-sheet-card {
       width: min(560px, 100%);
-      max-height: min(82vh, calc(100vh - 24px));
+      max-height: min(86dvh, calc(var(--app-height, 100vh) - 24px));
       overflow: auto;
+      overscroll-behavior: contain;
       border-radius: 18px;
+      padding-top: 0;
     }
+    .bodymap-sheet-head { position: sticky; top: 0; z-index: 1; padding: 14px 0 10px; background: #10162e; }
+    .bodymap-effect, .compat-item { padding: 12px 0; border-bottom: 1px solid rgba(255,255,255,.12); overflow-wrap: anywhere; }
+    .bodymap-effect:last-child, .compat-item:last-child { border-bottom: 0; }
+    .bodymap-effect .item-row { width: 100%; color: var(--text); text-align: left; margin: 0; }
+    .bodymap-effect .muted { margin-top: 8px; line-height: 1.5; }
+    .compat-panel { margin-top: 14px; }
+    .compat-panel summary { cursor: pointer; min-height: 44px; padding: 12px 0; font-weight: 700; }
+    .compat-item .btn { width: 100%; text-align: left; white-space: normal; }
+    .compat-item p { margin: 8px 0 0; line-height: 1.5; }
+    @media (max-width: 599px) {
+      .organ-tile { flex-direction: column; align-items: center; text-align: center; min-height: 136px; gap: 8px; }
+      .organ-text { width: 100%; }
+      .organ-text .title { font-size: 14px; }
+    }
+    @media (max-width: 359px) { .legend-grid { grid-template-columns: 1fr; } }
+    .catalog-modal-head [data-detail-close] { flex: 0 0 auto; white-space: nowrap; }
     .catalog-modal-body .section-content {
       max-height: none;
       overflow: visible;
@@ -2477,7 +2497,7 @@
   }
 
   function renderGlobalModals() {
-    return `${state.catalog?.detail ? renderDetailModal(state.catalog.detail) : ''}`;
+    return `${state.bodyMapSheet ? renderBodyMapSheet(state.bodyMapSheet) : ''}${state.catalog?.detail ? renderDetailModal(state.catalog.detail) : ''}`;
   }
 
   let lastGlobalModalsHtml = "";
@@ -2486,8 +2506,12 @@
     if (!root) return;
     const nextHtml = renderGlobalModals();
     if (lastGlobalModalsHtml !== nextHtml) {
+      const sheetScrollTop = root.querySelector('.bodymap-sheet-card')?.scrollTop || 0;
       root.innerHTML = nextHtml;
       lastGlobalModalsHtml = nextHtml;
+      const sheet = root.querySelector('.bodymap-sheet-card');
+      if (sheet) sheet.scrollTop = sheetScrollTop;
+      bindBodyMapSheetEvents();
       bindDetailModalEvents();
     }
   }
@@ -3177,6 +3201,25 @@
       .join('');
   }
 
+  function renderCompatibility(item) {
+    const groups = item.compatibility;
+    if (!groups) return '';
+    const definitions = [['synergy', 'Совместимость'], ['antagonism', 'Несовместимость'], ['caution', 'Осторожно']];
+    const total = definitions.reduce((count, [key]) => count + (groups[key] || []).length, 0);
+    return `<details class="compat-panel" data-compat-panel><summary>Взаимосвязи · ${total}</summary>
+      ${total ? definitions.map(([key, title]) => {
+        const entries = groups[key] || [];
+        if (!entries.length) return '';
+        return `<details data-compat-group="${key}"><summary>${title} · ${entries.length}</summary>
+          ${entries.map((entry) => `<div class="compat-item">
+            ${entry.other_slug ? `<button type="button" class="btn secondary" data-related-open="${esc(entry.other_slug)}">${esc(entry.title)} →</button>` : `<strong>${esc(entry.title)}</strong>`}
+            ${entry.reason_ru ? detailParagraphs(entry.reason_ru) : ''}
+            ${entry.origin === 'rule' ? '<div class="muted" style="margin-top:6px">Связь по классам добавок</div>' : ''}
+          </div>`).join('')}</details>`;
+      }).join('') : '<div class="muted">В библиотеке пока нет связей для этой карточки.</div>'}
+    </details>`;
+  }
+
   function renderDetailModal(item) {
     const isLoading = !!item?._loading;
     const displayName = esc(item.name_ru || item.name_en || item.slug || 'Добавка');
@@ -3208,6 +3251,7 @@
             <div class="modal-summary">${summary || '<p class="muted">Описание скоро появится.</p>'}</div>
             ${available.length ? `<div class="section-tabs">${sectionButtons}</div>` : ''}
             <div id="catalogSectionContent">${openedSection ? `<div class="section-content">${detailParagraphs(openedSection.text)}</div>` : ''}</div>
+            ${renderCompatibility(item)}
             <div class="action-grid">
               ${item.in_stack
                 ? '<button type="button" class="btn green" disabled>✅ Добавлено в стек</button><button type="button" class="btn secondary" data-stack-remove data-id="'+item.id+'">Убрать из стека</button>'
@@ -3232,9 +3276,11 @@
     return found ? found[0] : null;
   }
 
+  let detailRequestId = 0;
   async function openSupplementDetail(slug, { silent = false } = {}) {
     const key = String(slug || '').trim();
     if (!key) return;
+    const requestId = ++detailRequestId;
     state.catalog.detailCache = state.catalog.detailCache || {};
     const cached = state.catalog.detailCache[key];
     state.catalog.detail = cached || { slug: key, name_ru: 'Карточка добавки', _loading: true };
@@ -3244,10 +3290,12 @@
     try {
       const d = await api(`./api/supplement/${key}`);
       state.catalog.detailCache[key] = d.item;
+      if (requestId !== detailRequestId || state.catalog.detail?.slug !== key) return;
       state.catalog.detail = d.item;
       state.catalog.detailSection = defaultDetailSection(d.item);
       renderActiveTab();
     } catch {
+      if (requestId !== detailRequestId || state.catalog.detail?.slug !== key) return;
       if (!cached) {
         state.catalog.detail = null;
         state.catalog.detailSection = null;
@@ -3367,6 +3415,17 @@
     }
   }
 
+  const boundDetailControls = new WeakMap();
+  function unboundDetailControls(selector) {
+    return [...appEl.querySelectorAll(selector)].filter((el) => {
+      const selectors = boundDetailControls.get(el) || new Set();
+      if (selectors.has(selector)) return false;
+      selectors.add(selector);
+      boundDetailControls.set(el, selectors);
+      return true;
+    });
+  }
+
   function bindDetailModalEvents() {
     const closeAddToComplexModal = () => {
       state.catalog.addToComplexModal = { open: false, supplementId: 0, creating: false };
@@ -3396,15 +3455,20 @@
       }
       renderActiveTab();
     };
-    appEl.querySelectorAll('[data-detail-close]').forEach((el)=>el.addEventListener('click', ()=>{
+    unboundDetailControls('[data-detail-close]').forEach((el)=>el.addEventListener('click', ()=>{
+      detailRequestId++;
       state.catalog.detail=null;
       state.catalog.detailSection = null;
       state.catalog.addToComplexModal = { open: false, supplementId: 0, creating: false };
       state.catalog.addToStackSlotModal = { open: false, supplementId: 0, adding: false, creatingSlot: false, newSlotTime: "" };
       renderActiveTab();
     }));
-    appEl.querySelector('[data-open-shop]')?.addEventListener('click', ()=>{ const u=state.catalog.detail?.purchase_url; if(u) tg?.openLink?.(u); });
-    appEl.querySelectorAll('[data-detail-section]').forEach((el)=>el.addEventListener('click', ()=>{
+    unboundDetailControls('[data-related-open]').forEach((el)=>el.addEventListener('click', async ()=>{
+      haptic();
+      await openSupplementDetail(el.dataset.relatedOpen);
+    }));
+    unboundDetailControls('[data-open-shop]')[0]?.addEventListener('click', ()=>{ const u=state.catalog.detail?.purchase_url; if(u) tg?.openLink?.(u); });
+    unboundDetailControls('[data-detail-section]').forEach((el)=>el.addEventListener('click', ()=>{
       const key = el.dataset.detailSection;
       state.catalog.detailSection = state.catalog.detailSection === key ? null : key;
       appEl.querySelectorAll('[data-detail-section]').forEach((btn) => {
@@ -3417,7 +3481,7 @@
         wrap.innerHTML = text ? `<div class="section-content">${detailParagraphs(text)}</div>` : '';
       }
     }));
-    appEl.querySelector('[data-add-complex]')?.addEventListener('click', async (e)=>{
+    unboundDetailControls('[data-add-complex]')[0]?.addEventListener('click', async (e)=>{
       const preselectedComplexId = Number(state.catalog.pickForComplexId || 0);
       haptic();
       const id=Number(e.currentTarget.dataset.id);
@@ -3443,8 +3507,8 @@
         openAddToComplexModal(id);
       } catch { showToast('Не удалось добавить в комплекс'); }
     });
-    appEl.querySelectorAll('[data-add-complex-modal-close]').forEach((el) => el.addEventListener('click', closeAddToComplexModal));
-    appEl.querySelectorAll('[data-complex-pick-existing]').forEach((el) => el.addEventListener('click', async () => {
+    unboundDetailControls('[data-add-complex-modal-close]').forEach((el)=>el.addEventListener('click', closeAddToComplexModal));
+    unboundDetailControls('[data-complex-pick-existing]').forEach((el)=>el.addEventListener('click', async () => {
       haptic();
       const complexId = Number(el.dataset.complexPickExisting || 0);
       const supplementId = Number(state.catalog?.addToComplexModal?.supplementId || 0);
@@ -3456,12 +3520,12 @@
         showToast('Не удалось добавить в комплекс');
       }
     }));
-    appEl.querySelectorAll('[data-complex-create-start]').forEach((el) => el.addEventListener('click', () => {
+    unboundDetailControls('[data-complex-create-start]').forEach((el)=>el.addEventListener('click', () => {
       haptic();
       state.catalog.addToComplexModal.creating = true;
       renderActiveTab();
     }));
-    appEl.querySelectorAll('[data-complex-create-and-add]').forEach((el) => el.addEventListener('click', async () => {
+    unboundDetailControls('[data-complex-create-and-add]').forEach((el)=>el.addEventListener('click', async () => {
       haptic();
       const input = document.getElementById('addComplexNameInput');
       const name = String(input?.value || '').trim();
@@ -3478,7 +3542,7 @@
       }
     }));
     const bindStackAction = (selector, action) => {
-      appEl.querySelector(selector)?.addEventListener('click', async (e) => {
+      unboundDetailControls(selector)[0]?.addEventListener('click', async (e) => {
         const b = e.currentTarget;
         const id = Number(b.dataset.id || 0);
         if (!id) return;
@@ -4271,6 +4335,27 @@ function adminField(label, field, value, kind='input') {
     return state.bodyMap?.systems?.[key] || { benefit_count: 0, burden_count: 0, mixed_count: 0, benefit_strength_sum: 0, burden_strength_sum: 0, mixed_strength_sum: 0, top: [] };
   }
 
+  function bindBodyMapSheetEvents() {
+    appEl.querySelectorAll('[data-sheet-close]').forEach((el)=>el.addEventListener('click', ()=>{ state.bodyMapSheet = null; renderActiveTab(); }));
+    appEl.querySelectorAll('[data-bodymap-open]').forEach((el)=>el.addEventListener('click', async ()=>{
+      haptic();
+      await openSupplementDetail(el.dataset.bodymapOpen);
+    }));
+    appEl.querySelectorAll('[data-bodymap-catalog]').forEach((el)=>el.addEventListener('click', async ()=>{
+      haptic();
+      state.catalog.q='';
+      state.catalog.page=0;
+      state.catalog.filters = { ...state.catalog.filters, evidence: [], targets: [el.dataset.bodymapCatalog] };
+      state.bodyMapSheet = null;
+      state.catalog.pickForComplexId = 0;
+      state.catalog.pickForBodymapSystem = String(el.dataset.bodymapCatalog || '');
+      state.activeTab='catalog';
+      renderMainApp();
+      await loadCatalog(true);
+    }));
+  }
+
+  const organSvgRequests = new Map();
   async function fetchOrganSvg(key) {
     if (state.organSvgs[key]) return state.organSvgs[key];
     const fallback = `<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="icon"><circle cx="12" cy="12" r="7" fill="none" stroke="currentColor" stroke-width="2"/></svg>`;
@@ -4284,9 +4369,10 @@ function adminField(label, field, value, kind='input') {
   }
 
   async function hydrateOrganIcons(keys) {
-    for (const key of keys) {
-      await fetchOrganSvg(key);
-    }
+    await Promise.all(keys.map((key) => {
+      if (!organSvgRequests.has(key)) organSvgRequests.set(key, fetchOrganSvg(key));
+      return organSvgRequests.get(key);
+    }));
     keys.forEach((key) => {
       appEl.querySelectorAll(`[data-organ-icon="${key}"]`).forEach((el) => {
         el.innerHTML = state.organSvgs[key] || '';
@@ -4297,25 +4383,18 @@ function adminField(label, field, value, kind='input') {
   function renderBodyMap() {
     if (state.loadingBodyMap && !state.bodyMap) return '<div class="card">Загружаем BodyMap...</div>';
     if (!state.bodyMap) return '<div class="card">Нет данных BodyMap. Попробуйте открыть раздел позже — он обновляется автоматически.</div>';
-    const systems = BODYMAP_ORDER.map((key) => bodyMapSystem(key));
-    const maxBenefitSum = Math.max(1, ...systems.map((s) => Number(s.benefit_strength_sum || 0)));
-    const maxBurdenSum = Math.max(1, ...systems.map((s) => Number(s.burden_strength_sum || 0)));
-    const sheet = state.bodyMapSheet ? renderBodyMapSheet(state.bodyMapSheet) : '';
     return `
-      <div class="row" style="margin-bottom:8px; justify-content:flex-end;"><button class="btn secondary survey-help-btn" type="button" data-bodymap-help-toggle>?</button></div>
+      <div class="row" style="margin-bottom:8px"><span class="muted">План на сегодня · ${Number(state.bodyMap.supplements_count || 0)} БАДов</span><button class="btn secondary survey-help-btn" type="button" aria-label="Как читать карту" data-bodymap-help-toggle>?</button></div>
       ${state.bodyMapHelpOpen ? `<div class="survey-help muted" style="margin-bottom:8px">Контур показывает баланс по системе: зелёный — пользы больше, жёлтый — баланс, красный — нагрузки больше. Оценка строится по вашим активным добавкам, их профилю и истории применения. Это навигатор, чтобы быстрее понять, что поддерживаете и где стоит пересобрать схему вместе с рекомендациями.</div>` : ''}
       <div class="card fade">
         <div class="organs-grid">
           ${BODYMAP_ORDER.map((key)=>{
             const s = bodyMapSystem(key);
-            const benefitSum = Number(s.benefit_strength_sum || 0);
-            const burdenSum = Number(s.burden_strength_sum || 0);
             const mixedCount = Number(s.mixed_count || 0);
             const total = Number(s.benefit_count || 0) + Number(s.burden_count || 0) + mixedCount;
             const benefitCount = Number(s.benefit_count || 0);
             const burdenCount = Number(s.burden_count || 0);
-            const mixedBalanced = mixedCount > 0 && benefitCount === burdenCount;
-            let tileState = 'state-balanced';
+            let tileState = total ? 'state-balanced' : 'state-empty';
             if (benefitCount > burdenCount) tileState = 'state-benefit';
             else if (burdenCount > benefitCount) tileState = 'state-burden';
 
@@ -4323,7 +4402,7 @@ function adminField(label, field, value, kind='input') {
               <div class="organ-icon" data-organ-icon="${key}"></div>
               <div class="organ-text">
                 <div class="title">${SYSTEM_LABELS[key] || key}</div>
-                <div class="muted">${(() => { const mc = s.mixed_count || 0; return `${s.benefit_count||0} + / ${s.burden_count||0} -${mc ? ` · ${mc} ±` : ''}`; })()}</div>
+                <div class="muted">${total ? `${benefitCount} + / ${burdenCount} −${mixedCount ? ` · ${mixedCount} ±` : ''}` : 'Нет связей'}</div>
               </div>
               
             </button>`;
@@ -4337,7 +4416,6 @@ function adminField(label, field, value, kind='input') {
           <div class="legend-pill legend-mixed">Жёлтый контур = баланс</div>
         </div>
       </div>
-      ${sheet}
     `;
   }
 
@@ -4345,10 +4423,17 @@ function adminField(label, field, value, kind='input') {
     const data = bodyMapSystem(systemKey);
     const list = data.top || [];
     return `<div class="bodymap-sheet-overlay" data-sheet-close>
-      <section class="card bodymap-sheet-card" role="dialog" data-bodymap-sheet onclick="event.stopPropagation()">
-        <div class="row"><strong>${SYSTEM_LABELS[systemKey] || systemKey}</strong><button class="btn secondary" data-sheet-close>Закрыть</button></div>
-        <div class="row" style="margin-top:8px"><span class="badge plus">Польза: ${data.benefit_count || 0}</span><span class="badge minus">Нагрузка: ${data.burden_count || 0}</span>${(data.mixed_count || 0) > 0 ? `<span class="badge mixed">Смешанное: ${data.mixed_count || 0}</span>` : ''}</div>
-        <div style="margin-top:10px">${list.length ? list.map((item)=>{ const cls = item.direction==='burden' ? 'minus' : (item.direction==='mixed' ? 'mixed' : 'plus'); const sign = item.direction==='burden' ? '-' : (item.direction==='mixed' ? '±' : '+'); return `<button class="item-row" data-bodymap-open="${esc(item.slug)}"><span class="badge ${cls}">${sign}</span><span>${esc(item.name_ru || item.slug)}</span></button>`; }).join('') : '<div class="sheet-empty">нет данных</div>'}</div>
+      <section class="card bodymap-sheet-card" role="dialog" aria-modal="true" aria-labelledby="bodymapSheetTitle" data-bodymap-sheet onclick="event.stopPropagation()">
+        <div class="bodymap-sheet-head">
+          <div class="row"><strong id="bodymapSheetTitle">${SYSTEM_LABELS[systemKey] || systemKey}</strong><button class="btn secondary" data-sheet-close>Закрыть</button></div>
+          <div class="row" style="margin-top:8px; flex-wrap:wrap"><span class="badge plus">Польза: ${data.benefit_count || 0}</span><span class="badge minus">Нагрузка: ${data.burden_count || 0}</span>${(data.mixed_count || 0) > 0 ? `<span class="badge mixed">Смешанное: ${data.mixed_count || 0}</span>` : ''}</div>
+        </div>
+        <div>${list.length ? list.map((item)=>{
+          const cls = item.direction==='burden' ? 'minus' : (item.direction==='mixed' ? 'mixed' : 'plus');
+          const sign = item.direction==='burden' ? '−' : (item.direction==='mixed' ? '±' : '+');
+          return `<div class="bodymap-effect"><button type="button" class="item-row" data-bodymap-open="${esc(item.slug)}"><span class="badge ${cls}">${sign}</span><span>${esc(item.name_ru || item.slug)} →</span></button>
+            ${(item.notes || []).map((note)=>`<div class="muted">${detailParagraphs(note)}</div>`).join('')}</div>`;
+        }).join('') : '<div class="sheet-empty">Для БАДов в сегодняшнем плане связи с этой системой не указаны.</div>'}</div>
         <div class="row" style="margin-top:10px"><button class="btn" data-bodymap-catalog="${systemKey}">Что добавить</button></div>
       </section>
     </div>`;
@@ -4362,22 +4447,7 @@ function adminField(label, field, value, kind='input') {
       state.bodyMapSheet = el.dataset.system;
       renderActiveTab();
     }));
-    appEl.querySelectorAll('[data-sheet-close]').forEach((el)=>el.addEventListener('click', ()=>{ state.bodyMapSheet = null; renderActiveTab(); }));
-    appEl.querySelectorAll('[data-bodymap-open]').forEach((el)=>el.addEventListener('click', async ()=>{
-      haptic();
-      await openSupplementDetail(el.dataset.bodymapOpen);
-    }));
-    appEl.querySelectorAll('[data-bodymap-catalog]').forEach((el)=>el.addEventListener('click', async ()=>{
-      haptic();
-      state.catalog.q='';
-      state.catalog.page=0;
-      state.catalog.filters.targets=[el.dataset.bodymapCatalog];
-      state.catalog.pickForComplexId = 0;
-      state.catalog.pickForBodymapSystem = String(el.dataset.bodymapCatalog || '');
-      state.activeTab='catalog';
-      renderMainApp();
-      await loadCatalog(true);
-    }));
+
     appEl.querySelectorAll('[data-bodymap-help-toggle]').forEach((el)=>el.addEventListener('click', ()=>{
       state.bodyMapHelpOpen = !state.bodyMapHelpOpen;
       renderActiveTab();
@@ -4385,18 +4455,22 @@ function adminField(label, field, value, kind='input') {
     hydrateOrganIcons(BODYMAP_ORDER).then(()=>{});
   }
 
+  let bodyMapRequestId = 0;
   async function loadBodyMap(force) {
     if (state.loadingBodyMap && !force) return;
+    const requestId = ++bodyMapRequestId;
     state.loadingBodyMap = true;
     renderActiveTab();
     try {
       const map = await api('./api/body_map');
-      state.bodyMap = map;
+      if (requestId === bodyMapRequestId) state.bodyMap = map;
     } catch (e) {
-      if (e.message !== 'PREMIUM_REQUIRED') showToast('Не удалось загрузить BodyMap');
+      if (requestId === bodyMapRequestId && e.message !== 'PREMIUM_REQUIRED') showToast('Не удалось загрузить BodyMap');
     } finally {
-      state.loadingBodyMap = false;
-      renderActiveTab();
+      if (requestId === bodyMapRequestId) {
+        state.loadingBodyMap = false;
+        renderActiveTab();
+      }
     }
   }
 

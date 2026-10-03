@@ -3014,25 +3014,38 @@ async def payments_reconcile_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def reminders_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
+    from telegram.error import Forbidden
     s = context.application.bot_data["settings"]
     conn = await db.connect(s.DB_PATH)
     try:
         due = await db.list_due_reminders(conn)
-        batches: dict[tuple[int, str, str], list[int]] = {}
+        due += await db.list_retryable_reminder_fires(conn)
+        batches: dict[tuple[int,str,str], set[int]] = {}
         for item in due:
-            tg_user_id = int(item["user_id"])
-            supplement_id = int(item["supplement_id"])
-            time_local = str(item["time_local"])
-            day = str(item["day"])
-            today_status = await db.get_day_status(conn, tg_user_id, day, supplement_id)
-            if today_status in {"taken", "skipped"}:
+            tg_user_id, supplement_id = int(item['user_id']), int(item['supplement_id'])
+            day, time_local = str(item['day']), str(item['time_local'])
+            if await db.get_day_status(conn,tg_user_id,day,supplement_id) in {'taken','skipped'}:
                 continue
-            inserted = await db.insert_reminder_fire(conn, tg_user_id, supplement_id, day, time_local)
-            if not inserted:
+            batches.setdefault((tg_user_id,time_local,day),set()).add(supplement_id)
+        for (tg_user_id,time_local,day), supplement_ids in batches.items():
+            claims = {}
+            for sid in sorted(supplement_ids):
+                token = await db.insert_reminder_fire(conn,tg_user_id,sid,day,time_local)
+                if token:
+                    claims[sid] = token
+            if not claims:
                 continue
-            batches.setdefault((tg_user_id, time_local, day), []).append(supplement_id)
-        for (tg_user_id, _time_local, _day), supplement_ids in batches.items():
-            await reminder_fire_batch(context, tg_user_id, supplement_ids)
+            delivered, permanent = False, False
+            try:
+                await reminder_fire_batch(context,tg_user_id,list(claims))
+                delivered = True
+            except Forbidden:
+                permanent = True
+            except Exception as exc:
+                log.warning('Reminder delivery postponed user=%s error=%s',tg_user_id,type(exc).__name__)
+            async with db.transaction(conn) as tx:
+                for sid,token in claims.items():
+                    await db.finish_reminder_fire(tx,tg_user_id,sid,day,time_local,token,delivered=delivered,permanent=permanent)
     finally:
         await conn.close()
 
@@ -3199,12 +3212,6 @@ async def reminder_fire_batch(
             payload_data = {}
 
         previous_reminder_msg_id = int(payload_data.get("reminder_msg_id") or 0)
-        if previous_reminder_msg_id > 0:
-            previous_reminder_chat_id = int(payload_data.get("reminder_chat_id") or 0) or int(user_row["last_chat_id"] or 0) or tg_user_id
-            try:
-                await context.bot.delete_message(chat_id=previous_reminder_chat_id, message_id=previous_reminder_msg_id)
-            except Exception:
-                pass
 
         entries: list[dict] = []
         for supplement_id in supplement_ids:
@@ -3228,7 +3235,7 @@ async def reminder_fire_batch(
         lines = [
             "⏰ <b>Напоминание</b>",
             "Пора принять:",
-            *[f"• <b>{item['name']}</b> — {item['dose']}" for item in entries],
+            *[f"• <b>{html.escape(item['name'])}</b> — {html.escape(item['dose'])}" for item in entries],
         ]
         text = "\n".join(lines)
         target_chat_id = int(user_row["last_chat_id"] or 0) or tg_user_id
@@ -3239,6 +3246,13 @@ async def reminder_fire_batch(
             parse_mode="HTML",
             disable_web_page_preview=True,
         )
+        if previous_reminder_msg_id > 0:
+            previous_reminder_chat_id = int(payload_data.get("reminder_chat_id") or 0) or int(user_row["last_chat_id"] or 0) or tg_user_id
+            try:
+                await context.bot.delete_message(chat_id=previous_reminder_chat_id, message_id=previous_reminder_msg_id)
+            except Exception:
+                pass
+
         payload_data["reminder_msg_id"] = msg.message_id
         payload_data["reminder_chat_id"] = target_chat_id
         payload_data["reminder_batch_ids"] = [item["id"] for item in entries]

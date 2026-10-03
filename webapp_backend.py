@@ -2597,6 +2597,8 @@ async def api_supplement_detail(slug: str, x_telegram_init_data: str = Header(de
     conn = await db.connect(s.DB_PATH)
     try:
         item = await db.get_supplement_detail_for_user(conn, tg_user_id, slug)
+        if item:
+            item["compatibility"] = await engine.build_compatibility(conn, item["id"])
     finally:
         await conn.close()
 

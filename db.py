@@ -604,6 +604,8 @@ async def connect(db_path: str) -> aiosqlite.Connection:
     # "database is locked" failures during short WAL write bursts.
     await conn.execute("PRAGMA foreign_keys=ON")
     await conn.execute("PRAGMA busy_timeout=5000")
+    await conn.create_function("body_system_matches", 2, _body_system_matches, deterministic=True)
+    await conn.create_function("body_effect_matches", 3, _body_effect_matches, deterministic=True)
     return conn
 
 class _TransactionConnection:
@@ -804,6 +806,7 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     await _ensure_reminders(conn)
     await _ensure_ui_state(conn)
     await _ensure_reminder_fires(conn)
+    await _ensure_reminder_delivery_state(conn)
     await _ensure_daily_checkins(conn)
     await _ensure_day_plan_items(conn)
     await _ensure_intake_log_slots(conn)
@@ -3666,103 +3669,118 @@ def _severity_to_strength(severity: int | None) -> int | None:
         return value
     return None
 
-async def _resolve_supplement_id(conn: aiosqlite.Connection, slug: str | None, name: str | None, raw_id) -> int | None:
-    if raw_id is not None:
-        try:
-            return int(raw_id)
-        except (TypeError, ValueError):
-            pass
-    if slug:
-        row = await get_supplement_by_slug(conn, slug)
-        if row:
-            return int(row["id"])
-    if name:
-        row = await find_supplement_by_slug_or_name(conn, None, name)
-        if row:
-            return int(row["id"])
-    return None
-
-async def get_interactions_for_supplement(conn: aiosqlite.Connection, sid: int) -> list[dict]:
-    interactions: list[dict] = []
-    seen: set[tuple[object, str, str, str]] = set()
+async def _interaction_reference_index(conn: aiosqlite.Connection, sid: int) -> dict:
     rows = await fetchall(
         conn,
-        """SELECT * FROM interactions
-           WHERE a_id=? OR b_id=?
-           ORDER BY severity DESC, id DESC""",
+        """SELECT id, slug, name, name_ru, name_en, aliases, aliases_json, payload_json
+           FROM supplements WHERE is_active=1 OR id=?""",
+        (sid,),
+    )
+    by_id = {int(row["id"]): dict(row) for row in rows}
+    by_slug = {str(row["slug"] or "").strip().lower(): int(row["id"]) for row in rows}
+    aliases: dict[str, set[int]] = {}
+    for row in rows:
+        values = [row["slug"], row["name"], row["name_ru"], row["name_en"]]
+        values.extend(_parse_aliases_list(row["aliases_json"]))
+        values.extend(_parse_aliases_list(row["aliases"]))
+        for value in values:
+            key = normalize(value)
+            if key:
+                aliases.setdefault(key, set()).add(int(row["id"]))
+    return {"by_id": by_id, "by_slug": by_slug, "aliases": aliases}
+
+
+def _resolve_interaction_reference(index: dict, slug, name, raw_id=None) -> int | None:
+    slug_key = str(slug or "").strip().lower()
+    if slug_key in index["by_slug"]:
+        return index["by_slug"][slug_key]
+    matches: set[int] = set()
+    for value in (slug, name):
+        matches.update(index["aliases"].get(normalize(str(value or "")), set()))
+    if len(matches) == 1:
+        return next(iter(matches))
+    if matches:
+        return None
+    if not slug_key and not str(name or "").strip():
+        try:
+            candidate = int(raw_id)
+            return candidate if candidate in index["by_id"] else None
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
+async def _resolve_supplement_id(conn: aiosqlite.Connection, slug: str | None, name: str | None, raw_id) -> int | None:
+    index = await _interaction_reference_index(conn, 0)
+    return _resolve_interaction_reference(index, slug, name, raw_id)
+
+async def get_interactions_for_supplement(conn: aiosqlite.Connection, sid: int) -> list[dict]:
+    # Read payloads too: older imports only materialized exact-slug pairs.
+    # Resolving at read time also repairs installed databases without reseeding.
+    index = await _interaction_reference_index(conn, sid)
+    interactions: list[dict] = []
+    seen: set[tuple[object, str, str]] = set()
+
+    def append(other_id, label, relation, reason, severity, evidence="", source=""):
+        kind = _relation_to_kind(relation)
+        if not kind or other_id == sid:
+            return
+        other = index["by_id"].get(other_id)
+        if other_id is not None and not other:
+            return
+        title = str(label or "").strip()
+        reason = str(reason or "").strip()
+        if other:
+            title = str(other["name_ru"] or other["name_en"] or other["name"] or other["slug"])
+        if not other and not title:
+            return
+        key = (other_id if other else normalize(title), kind, reason)
+        if key in seen:
+            return
+        seen.add(key)
+        interactions.append({
+            "other_supplement_id": other_id,
+            "other_label_ru": title if not other else "",
+            "other_slug": str(other["slug"] or "") if other else "",
+            "title": title,
+            "kind": kind,
+            "relation": str(relation or "").strip().lower(),
+            "reason_ru": reason,
+            "strength": _severity_to_strength(severity),
+            "severity": severity,
+            "evidence_grade": evidence or "",
+            "source_url": source or "",
+        })
+
+    rows = await fetchall(
+        conn,
+        "SELECT * FROM interactions WHERE a_id=? OR b_id=? ORDER BY severity DESC, id DESC",
         (sid, sid),
     )
     for row in rows:
-        a_id = int(row["a_id"])
-        b_id = int(row["b_id"])
-        other_id = b_id if a_id == sid else a_id
-        kind = _relation_to_kind(row["relation"])
-        if not kind:
-            continue
-        reason = (row["note"] or "").strip()
-        strength = _severity_to_strength(row["severity"])
-        key = (other_id, kind, reason, "")
-        if key in seen:
-            continue
-        seen.add(key)
-        interactions.append(
-            {
-                "other_supplement_id": other_id,
-                "kind": kind,
-                "reason_ru": reason,
-                "strength": strength,
-            }
-        )
+        other_id = int(row["b_id"]) if int(row["a_id"]) == sid else int(row["a_id"])
+        append(other_id, "", row["relation"], row["note"], row["severity"], row["evidence_grade"], row["source_url"])
 
-    supp_row = await get_supplement_by_id(conn, sid)
-    payload_raw = (supp_row["payload_json"] if supp_row and "payload_json" in supp_row.keys() else None) or ""
-    if payload_raw:
+    for owner_id, row in index["by_id"].items():
         try:
-            payload = json.loads(payload_raw)
-        except json.JSONDecodeError:
-            payload = {}
-        if isinstance(payload, dict):
-            for item in payload.get("explicit_interactions") or []:
-                if not isinstance(item, dict):
-                    continue
-                kind = _relation_to_kind(item.get("relation"))
-                if not kind:
-                    continue
-                other_id = await _resolve_supplement_id(
-                    conn,
-                    item.get("other_slug"),
-                    item.get("other_name") or item.get("other_title"),
-                    item.get("other_id"),
-                )
-                other_name_ru = (item.get("other_name_ru") or "").strip()
-                other_slug = (item.get("other_slug") or "").strip()
-                other_label = other_name_ru or other_slug
-                reason = (item.get("note_ru") or item.get("note") or "").strip()
-                strength = _severity_to_strength(item.get("severity"))
-                key = (other_id, kind, reason, other_label)
-                if key in seen:
-                    continue
-                seen.add(key)
-                if other_id:
-                    interactions.append(
-                        {
-                            "other_supplement_id": int(other_id),
-                            "kind": kind,
-                            "reason_ru": reason,
-                            "strength": strength,
-                        }
-                    )
-                elif other_label:
-                    interactions.append(
-                        {
-                            "other_supplement_id": None,
-                            "other_label_ru": other_label,
-                            "kind": kind,
-                            "reason_ru": reason,
-                            "strength": strength,
-                        }
-                    )
-
+            payload = json.loads(row["payload_json"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        for item in payload.get("explicit_interactions") or []:
+            if not isinstance(item, dict):
+                continue
+            label = item.get("other_name_ru") or item.get("other_name") or item.get("other_title") or item.get("other_slug")
+            other_id = _resolve_interaction_reference(index, item.get("other_slug"), label, item.get("other_id"))
+            if owner_id == sid:
+                target_id, target_label = other_id, label
+            elif other_id == sid:
+                target_id, target_label = owner_id, ""
+            else:
+                continue
+            append(target_id, target_label, item.get("relation"), item.get("note_ru") or item.get("note"),
+                   item.get("severity"), item.get("evidence_grade"), item.get("source_url"))
     return interactions
 
 async def search_supplements(
@@ -5529,28 +5547,13 @@ async def get_interaction_between(conn: aiosqlite.Connection, a_id: int, b_id: i
     return await fetchone(conn, "SELECT * FROM interactions WHERE a_id=? AND b_id=?", (a, b))
 
 async def get_supplement_links(conn: aiosqlite.Connection, supplement_id: int) -> dict:
-    synergy_ids: set[int] = set()
-    antagonist_ids: set[int] = set()
-    rows = await fetchall(
-        conn,
-        """SELECT a_id, b_id, relation
-           FROM interactions
-           WHERE a_id=? OR b_id=?""",
-        (supplement_id, supplement_id),
-    )
-    for row in rows:
-        a_id = int(row["a_id"])
-        b_id = int(row["b_id"])
-        other_id = b_id if a_id == supplement_id else a_id
-        relation = str(row["relation"] or "").strip().lower()
-        if relation in {"synergy"}:
-            synergy_ids.add(other_id)
-        elif relation in {"antagonist", "antagonism", "avoid"}:
-            antagonist_ids.add(other_id)
-    return {
-        "synergy": sorted(synergy_ids),
-        "antagonists": sorted(antagonist_ids),
-    }
+    grouped = {"synergy": set(), "antagonists": set(), "caution": set()}
+    for item in await get_interactions_for_supplement(conn, supplement_id):
+        other_id = item.get("other_supplement_id")
+        if other_id:
+            key = "antagonists" if item["kind"] == "antagonism" else item["kind"]
+            grouped[key].add(int(other_id))
+    return {key: sorted(ids) for key, ids in grouped.items()}
 
 async def list_linked_supplements(conn: aiosqlite.Connection, ids: list[int]) -> list[dict]:
     if not ids:
@@ -5566,6 +5569,46 @@ async def list_linked_supplements(conn: aiosqlite.Connection, ids: list[int]) ->
     )
     by_id = {int(row["id"]): dict(row) for row in rows}
     return [by_id[item] for item in cleaned if item in by_id]
+
+
+def _body_system_matches(raw_json, requested) -> int:
+    try:
+        tokens = json.loads(raw_json or "[]")
+    except (TypeError, ValueError):
+        return 0
+    if not isinstance(tokens, list):
+        return 0
+    key = _body_map_system_key(requested)
+    raw_key = _norm_system(requested)
+    for token in tokens:
+        if not isinstance(token, str):
+            continue
+        if key and _body_map_system_key(token) == key:
+            return 1
+        normalized = _norm_system(token)
+        if raw_key and (normalized == raw_key or normalized.startswith(raw_key + "_")):
+            return 1
+    return 0
+
+
+def _body_effect_matches(raw_json, requested, direction) -> int:
+    try:
+        effects = json.loads(raw_json or "[]")
+    except (TypeError, ValueError):
+        return 0
+    if not isinstance(effects, list):
+        return 0
+    key = _body_map_system_key(requested)
+    if not key:
+        return 0
+    for effect in effects:
+        if not isinstance(effect, dict):
+            continue
+        if str(effect.get("direction") or "").lower() != direction:
+            continue
+        if _body_map_system_key(effect.get("system")) == key:
+            return 1
+    return 0
 
 
 def _catalog_where_clause(
@@ -5589,28 +5632,19 @@ def _catalog_where_clause(
         clauses.append(f"UPPER(COALESCE(s.evidence_grade, '')) IN ({placeholders})")
         params.extend(evidence_clean)
 
-    targets_clean = [normalize_text(item) for item in (targets or []) if str(item or "").strip()]
-    if targets_clean:
-        target_parts: list[str] = []
-        for token in targets_clean:
-            target_parts.append(
-                "(LOWER(COALESCE(s.body_targets_json, '')) LIKE ? OR LOWER(COALESCE(s.body_targets_json, '')) LIKE ? "
-                "OR LOWER(COALESCE(s.tags_json, '')) LIKE ? OR LOWER(COALESCE(s.tags_json, '')) LIKE ?)"
-            )
-            exact = f'%"{token}"%'
-            prefix = f'%"{token}_%'
-            params.extend([exact, prefix, exact, prefix])
-        clauses.append(f"({' AND '.join(target_parts)})")
+    targets_clean = [str(item).strip() for item in (targets or []) if str(item or "").strip()]
+    for token in targets_clean:
+        clauses.append(
+            "(body_system_matches(s.body_targets_json, ?) OR body_system_matches(s.tags_json, ?) "
+            "OR body_effect_matches(s.body_effects_json, ?, 'benefit'))")
+        params.extend([token, token, token])
 
-    burdens_clean = [normalize_text(item) for item in (burdens or []) if str(item or "").strip()]
-    if burdens_clean:
-        burden_parts: list[str] = []
-        for token in burdens_clean:
-            burden_parts.append("(LOWER(COALESCE(s.body_burdens_json, '')) LIKE ? OR LOWER(COALESCE(s.body_burdens_json, '')) LIKE ?)")
-            exact = f'%"{token}"%'
-            prefix = f'%"{token}_%'
-            params.extend([exact, prefix])
-        clauses.append(f"({' AND '.join(burden_parts)})")
+    burdens_clean = [str(item).strip() for item in (burdens or []) if str(item or "").strip()]
+    for token in burdens_clean:
+        clauses.append(
+            "(body_system_matches(s.body_burdens_json, ?) "
+            "OR body_effect_matches(s.body_effects_json, ?, 'burden'))")
+        params.extend([token, token])
 
     return " AND ".join(clauses), params
 
@@ -6780,6 +6814,7 @@ async def list_due_reminders(conn: aiosqlite.Connection):
            LEFT JOIN user_notification_prefs np ON np.user_id=u.id
            WHERE r.enabled=1
              AND COALESCE(np.reminders_enabled, 1)=1
+             AND COALESCE(u.is_banned,0)=0 AND COALESCE(u.deleted_at_utc,'')=''
              AND us.is_active=1
              AND us.enabled=1
              AND COALESCE(us.user_frozen,0)=0""",
@@ -6801,6 +6836,7 @@ async def list_due_reminders(conn: aiosqlite.Connection):
             AND uss.is_enabled=1
            WHERE us.is_active=1
              AND COALESCE(np.reminders_enabled, 1)=1
+             AND COALESCE(u.is_banned,0)=0 AND COALESCE(u.deleted_at_utc,'')=''
              AND us.enabled=1
              AND COALESCE(us.user_frozen,0)=0""",
     )
@@ -6894,21 +6930,53 @@ async def list_due_reminders(conn: aiosqlite.Connection):
         )
     return due
 
-async def insert_reminder_fire(
-    conn: aiosqlite.Connection,
-    user_id: int,
-    supplement_id: int,
-    day: str,
-    time_local: str,
-) -> bool:
-    before = conn.total_changes
-    await conn.execute(
-        """INSERT OR IGNORE INTO reminder_fires(user_id, supplement_id, day, time_local, fired_at)
-           VALUES(?,?,?,?,datetime('now'))""",
-        (user_id, supplement_id, day, time_local),
-    )
+async def _ensure_reminder_delivery_state(conn) -> None:
+    # Existing rows describe old deliveries; do not resend them on migration.
+    await _ensure_column(conn, 'reminder_fires', 'delivery_status', "TEXT NOT NULL DEFAULT 'delivered'")
+    await _ensure_column(conn, 'reminder_fires', 'claim_token', "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, 'reminder_fires', 'retry_at_utc', "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, 'reminder_fires', 'lease_until_utc', "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, 'reminder_fires', 'attempts', 'INTEGER NOT NULL DEFAULT 0')
+
+
+async def list_retryable_reminder_fires(conn) -> list[dict]:
+    rows = await fetchall(conn, """SELECT rf.*,u.tz_name FROM reminder_fires rf
+        JOIN users u ON u.tg_user_id=rf.user_id
+        JOIN user_supplements us ON us.user_id=u.id AND us.supplement_id=rf.supplement_id
+        LEFT JOIN user_notification_prefs np ON np.user_id=u.id
+        WHERE rf.delivery_status IN ('pending','sending') AND COALESCE(np.reminders_enabled,1)=1
+          AND us.enabled=1 AND us.is_active=1 AND COALESCE(us.user_frozen,0)=0
+          AND COALESCE(u.is_banned,0)=0 AND COALESCE(u.deleted_at_utc,'')=''
+          AND rf.retry_at_utc<=? AND rf.lease_until_utc<=?""", (utc_now_iso(),utc_now_iso()))
+    return [dict(row) for row in rows if row['day'] == get_user_local_date(row['tz_name'] or None)]
+
+
+async def finish_reminder_fire(conn, user_id: int, supplement_id: int, day: str, time_local: str,
+                               token: str, *, delivered: bool, permanent: bool = False) -> None:
+    status = 'delivered' if delivered else ('failed' if permanent else 'pending')
+    retry_at = _to_utc_iso(datetime.now(timezone.utc) + timedelta(seconds=60)) if status == 'pending' else ''
+    await conn.execute("""UPDATE reminder_fires SET delivery_status=?,claim_token='',lease_until_utc='',
+        retry_at_utc=?,fired_at=? WHERE user_id=? AND supplement_id=? AND day=? AND time_local=? AND claim_token=?""",
+        (status,retry_at,utc_now_iso() if delivered else '',user_id,supplement_id,day,time_local,token))
     await conn.commit()
-    return conn.total_changes > before
+
+
+async def insert_reminder_fire(
+    conn: aiosqlite.Connection, user_id: int, supplement_id: int, day: str, time_local: str,
+) -> str | None:
+    import uuid
+    token = str(uuid.uuid4())
+    now = utc_now_iso()
+    lease = _to_utc_iso(datetime.now(timezone.utc) + timedelta(minutes=5))
+    async with transaction(conn) as tx:
+        await tx.execute("""INSERT INTO reminder_fires(user_id,supplement_id,day,time_local,fired_at,delivery_status)
+            VALUES(?,?,?,?,'','pending') ON CONFLICT(user_id,supplement_id,day,time_local) DO NOTHING""",
+            (user_id,supplement_id,day,time_local))
+        cur = await tx.execute("""UPDATE reminder_fires SET delivery_status='sending',claim_token=?,lease_until_utc=?,attempts=attempts+1
+            WHERE user_id=? AND supplement_id=? AND day=? AND time_local=?
+              AND delivery_status IN ('pending','sending') AND retry_at_utc<=? AND lease_until_utc<=?""",
+            (token,lease,user_id,supplement_id,day,time_local,now,now))
+        return token if cur.rowcount == 1 else None
 
 async def save_ui_state(
     conn: aiosqlite.Connection,
@@ -8341,7 +8409,10 @@ async def get_today_supplement_ids(conn: aiosqlite.Connection, tg_user_id: int, 
     groups = await get_today_plan_groups(conn, tg_user_id, local_date)
     ids: set[int] = set()
     for group in groups:
-        for item in list(group.get("items") or []):
+        items = list(group.get("items") or [])
+        for complex_item in group.get("complexes") or []:
+            items.extend(complex_item.get("items") or [])
+        for item in items:
             sid = int(item.get("supplement_id") or 0)
             if sid > 0:
                 ids.add(sid)
@@ -8987,99 +9058,67 @@ async def set_user_cosmetics(conn, tg_user_id:int, patch:dict, allowed:dict) -> 
 
 
 async def body_map_aggregate(conn: aiosqlite.Connection, tg_user_id: int, local_date: str) -> dict:
-    await get_or_create_user(conn, tg_user_id)
+    user_id = await get_or_create_user(conn, tg_user_id)
     ids = await get_today_supplement_ids(conn, tg_user_id, local_date)
+    # Several intakes of one supplement are one library profile on this map.
+    split_rows = await fetchall(conn,
+        "SELECT supplement_id, base_supplement_id FROM user_supplement_split_groups WHERE user_id=?",
+        (user_id,))
+    bases = {int(r["supplement_id"]): int(r["base_supplement_id"]) for r in split_rows}
+    ids = sorted({bases.get(sid, sid) for sid in ids})
     systems = {
-        key: {
-            "benefit_count": 0,
-            "burden_count": 0,
-            "mixed_count": 0,
-            "benefit_strength_sum": 0,
-            "burden_strength_sum": 0,
-            "mixed_strength_sum": 0,
-            "top": [],
-        }
+        key: {"benefit_count": 0, "burden_count": 0, "mixed_count": 0,
+              "benefit_strength_sum": 0, "burden_strength_sum": 0, "mixed_strength_sum": 0, "top": []}
         for key in BODY_MAP_SYSTEM_KEYS
     }
     if not ids:
-        return {"day": local_date, "systems": systems, "max_count": 0}
+        return {"day": local_date, "systems": systems, "max_count": 0, "supplements_count": 0}
 
     placeholders = ",".join("?" for _ in ids)
-    rows = await fetchall(
-        conn,
+    rows = await fetchall(conn,
         f"""SELECT id, slug, COALESCE(NULLIF(name_ru,''), NULLIF(name_en,''), name) AS title, body_effects_json
-            FROM supplements
-            WHERE id IN ({placeholders})""",
-        tuple(ids),
-    )
+            FROM supplements WHERE id IN ({placeholders})""", tuple(ids))
     for row in rows:
-        sid = int(row["id"] or 0)
-        slug = str(row["slug"] or "").strip()
-        title = str(row["title"] or "").strip()
-        raw_effects = row["body_effects_json"]
         try:
-            effects = json.loads(raw_effects or "[]")
-            if not isinstance(effects, list):
-                effects = []
-        except Exception:
+            effects = json.loads(row["body_effects_json"] or "[]")
+        except (TypeError, ValueError):
             effects = []
-
+        if not isinstance(effects, list):
+            continue
+        per_supplement: dict[tuple[str, str], dict] = {}
         for effect in effects:
             if not isinstance(effect, dict):
                 continue
             system_key = _body_map_system_key(effect.get("system"))
-            if not system_key:
-                continue
             direction = str(effect.get("direction") or "").strip().lower()
-            try:
-                strength = int(effect.get("strength") or 0)
-            except Exception:
-                strength = 0
-            if strength < 0:
-                strength = 0
-
-            entry = systems[system_key]
-            if direction == "benefit":
-                entry["benefit_count"] += 1
-                entry["benefit_strength_sum"] += strength
-            elif direction == "burden":
-                entry["burden_count"] += 1
-                entry["burden_strength_sum"] += strength
-            elif direction == "mixed":
-                entry["mixed_count"] += 1
-                entry["mixed_strength_sum"] += strength
-            else:
+            if not system_key or direction not in {"benefit", "burden", "mixed"}:
                 continue
-            entry["top"].append(
-                {
-                    "supplement_id": sid,
-                    "slug": slug,
-                    "name_ru": title,
-                    "direction": direction,
-                    "strength": strength,
-                }
-            )
+            try:
+                strength = max(0, int(effect.get("strength") or 0))
+            except (TypeError, ValueError):
+                strength = 0
+            item = per_supplement.setdefault((system_key, direction), {
+                "supplement_id": int(row["id"]), "slug": str(row["slug"] or ""),
+                "name_ru": str(row["title"] or ""), "direction": direction,
+                "strength": 0, "notes": [],
+            })
+            item["strength"] = max(item["strength"], strength)
+            note = str(effect.get("note_ru") or "").strip()
+            if note and note not in item["notes"]:
+                item["notes"].append(note)
+        for (system_key, direction), item in per_supplement.items():
+            entry = systems[system_key]
+            entry[f"{direction}_count"] += 1
+            entry[f"{direction}_strength_sum"] += item["strength"]
+            entry["top"].append(item)
 
     max_count = 0
-    for key in BODY_MAP_SYSTEM_KEYS:
-        top = systems[key]["top"]
-        top.sort(
-            key=lambda item: (
-                0 if item.get("direction") == "burden" else 1,
-                -(int(item.get("strength") or 0)),
-                str(item.get("name_ru") or ""),
-            )
-        )
-        systems[key]["top"] = top[:12]
-        total = (
-            int(systems[key]["benefit_count"] or 0)
-            + int(systems[key]["burden_count"] or 0)
-            + int(systems[key]["mixed_count"] or 0)
-        )
-        if total > max_count:
-            max_count = total
-
-    return {"day": local_date, "systems": systems, "max_count": max_count}
+    for entry in systems.values():
+        entry["top"].sort(key=lambda item: (
+            0 if item["direction"] == "burden" else 1, -item["strength"], item["name_ru"]))
+        total = sum(entry[f"{direction}_count"] for direction in ("benefit", "burden", "mixed"))
+        max_count = max(max_count, total)
+    return {"day": local_date, "systems": systems, "max_count": max_count, "supplements_count": len(rows)}
 
 async def get_user_slots(conn: aiosqlite.Connection, user_id: int) -> list[dict]:
     rows = await fetchall(

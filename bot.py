@@ -7994,7 +7994,7 @@ async def purge_me_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     deleted = bool(out.get("deleted"))
     if deleted:
         await (update.effective_message or update.message).reply_text(
-            "🧹 Ваши данные в боте очищены. Теперь вы как новый пользователь.\nНажмите /start, чтобы пройти начальный подбор заново."
+            "🧹 Ваши записи и профиль очищены. Оплаченный доступ сохранён.\nНажмите /start, чтобы пройти начальный подбор заново."
         )
     else:
         await (update.effective_message or update.message).reply_text(

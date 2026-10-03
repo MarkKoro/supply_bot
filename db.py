@@ -1,5 +1,6 @@
 from __future__ import annotations
 import calendar
+from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -605,17 +606,52 @@ async def connect(db_path: str) -> aiosqlite.Connection:
     await conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
+class _TransactionConnection:
+    """Let existing helpers participate in one caller-owned transaction."""
+    def __init__(self, conn):
+        self._conn = conn
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+    async def commit(self):
+        # Only the transaction context may commit its whole unit of work.
+        return None
+
+    async def rollback(self):
+        raise RuntimeError("transaction_aborted")
+
+
+@asynccontextmanager
+async def transaction(conn):
+    if isinstance(conn, _TransactionConnection):
+        yield conn
+        return
+    nested = conn.in_transaction
+    await conn.execute("SAVEPOINT supply_atomic" if nested else "BEGIN IMMEDIATE")
+    try:
+        yield _TransactionConnection(conn)
+        if nested:
+            await conn.execute("RELEASE SAVEPOINT supply_atomic")
+        else:
+            await conn.commit()
+    except BaseException:
+        if nested:
+            await conn.execute("ROLLBACK TO SAVEPOINT supply_atomic")
+            await conn.execute("RELEASE SAVEPOINT supply_atomic")
+        else:
+            await conn.rollback()
+        raise
+
+
 async def init_db(db_path: str) -> None:
     conn = await connect(db_path)
     try:
         await conn.executescript(SCHEMA_SQL)
-        await _apply_migrations(conn)
-        try:
+        async with transaction(conn) as tx:
+            await _apply_migrations(tx)
             from settings import get_settings
-            await bootstrap_roles_from_settings(conn, get_settings())
-        except Exception:
-            pass
-        await conn.commit()
+            await bootstrap_roles_from_settings(tx, get_settings())
     finally:
         await conn.close()
 
@@ -776,6 +812,7 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     await _ensure_curated_stack_items(conn)
     await _ensure_payments_table(conn)
     await _ensure_achievements_tables(conn)
+    await _ensure_profile_foundation_tables(conn)
     await _ensure_integrity_unique_indexes(conn)
     await conn.execute(
         "UPDATE supplements SET interaction_classes='[]' WHERE interaction_classes IS NULL OR interaction_classes=''"
@@ -873,9 +910,6 @@ async def _ensure_profile_foundation_tables(conn: aiosqlite.Connection) -> None:
           updated_at_utc TEXT
         )"""
     )
-    await conn.execute("CREATE INDEX IF NOT EXISTS idx_lab_results_user_analyte ON lab_results(user_id, analyte_code)")
-    await conn.execute("CREATE INDEX IF NOT EXISTS idx_lab_results_user_measured ON lab_results(user_id, measured_at)")
-    await conn.execute("CREATE INDEX IF NOT EXISTS idx_lab_results_report ON lab_results(report_id)")
     await conn.execute(
         """CREATE TABLE IF NOT EXISTS nutrient_plan_runs (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -988,7 +1022,6 @@ async def _ensure_profile_foundation_tables(conn: aiosqlite.Connection) -> None:
           applied_at TEXT NOT NULL DEFAULT ''
         )"""
     )
-    await conn.execute("CREATE INDEX IF NOT EXISTS idx_llm_assistant_runs_user_created ON llm_assistant_runs(user_id, id DESC)")
     await conn.execute(
         """CREATE TABLE IF NOT EXISTS nutrient_assistant_drafts (
           user_id INTEGER PRIMARY KEY,
@@ -1052,18 +1085,6 @@ async def _ensure_profile_foundation_tables(conn: aiosqlite.Connection) -> None:
           created_at_utc TEXT NOT NULL
         )"""
     )
-    await conn.execute("CREATE INDEX IF NOT EXISTS idx_llm_assistant_plan_actions_run ON llm_assistant_plan_actions(run_id, id ASC)")
-    await conn.execute("CREATE INDEX IF NOT EXISTS idx_nutrient_plan_runs_user_code_active ON nutrient_plan_runs(user_id, nutrient_code, is_active)")
-    await conn.execute("CREATE INDEX IF NOT EXISTS idx_nutrient_followup_plan ON nutrient_followup_items(plan_run_id)")
-    await conn.execute("CREATE INDEX IF NOT EXISTS idx_nutrient_reminder_plan ON nutrient_reminder_candidates(plan_run_id)")
-    await conn.execute("CREATE INDEX IF NOT EXISTS idx_nutrient_expl_plan_prompt_active ON nutrient_plan_explanations(plan_run_id, prompt_version, is_active)")
-    await conn.execute("CREATE INDEX IF NOT EXISTS idx_nutrient_followup_rem_due ON nutrient_followup_reminders(status, scheduled_for_utc)")
-    await conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_nutrient_followup_rem_dedupe ON nutrient_followup_reminders(user_id, plan_run_id, reminder_type, scheduled_for_utc)")
-    await conn.execute("CREATE INDEX IF NOT EXISTS idx_nutrient_rebuild_jobs_status_priority ON nutrient_plan_rebuild_jobs(status, priority, created_at_utc)")
-    await conn.execute("CREATE INDEX IF NOT EXISTS idx_nutrient_rebuild_jobs_user_code ON nutrient_plan_rebuild_jobs(user_id, nutrient_code)")
-    await conn.execute("CREATE INDEX IF NOT EXISTS idx_assistant_jobs_status_created ON assistant_jobs(status, created_at_utc, id)")
-    await conn.execute("CREATE INDEX IF NOT EXISTS idx_assistant_jobs_user_created ON assistant_jobs(tg_user_id, id DESC)")
-    await conn.execute("CREATE INDEX IF NOT EXISTS idx_assistant_job_events_job_id ON assistant_job_events(job_id, id ASC)")
     await _ensure_column(conn, "lab_reports", "source_filename", "TEXT")
     await _ensure_column(conn, "lab_reports", "mime_type", "TEXT")
     await _ensure_column(conn, "lab_reports", "parse_status", "TEXT NOT NULL DEFAULT 'manual'")
@@ -1112,6 +1133,22 @@ async def _ensure_profile_foundation_tables(conn: aiosqlite.Connection) -> None:
     await _ensure_column(conn, "llm_assistant_plan_actions", "retest_after_days", "INTEGER")
     await _ensure_column(conn, "llm_assistant_plan_actions", "followup_kind", "TEXT")
     await _ensure_column(conn, "llm_assistant_plan_actions", "followup_message", "TEXT")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_lab_results_user_analyte ON lab_results(user_id, analyte_code)")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_lab_results_user_measured ON lab_results(user_id, measured_at)")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_lab_results_report ON lab_results(report_id)")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_llm_assistant_runs_user_created ON llm_assistant_runs(user_id, id DESC)")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_llm_assistant_plan_actions_run ON llm_assistant_plan_actions(run_id, id ASC)")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_nutrient_plan_runs_user_code_active ON nutrient_plan_runs(user_id, nutrient_code, is_active)")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_nutrient_followup_plan ON nutrient_followup_items(plan_run_id)")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_nutrient_reminder_plan ON nutrient_reminder_candidates(plan_run_id)")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_nutrient_expl_plan_prompt_active ON nutrient_plan_explanations(plan_run_id, prompt_version, is_active)")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_nutrient_followup_rem_due ON nutrient_followup_reminders(status, scheduled_for_utc)")
+    await conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_nutrient_followup_rem_dedupe ON nutrient_followup_reminders(user_id, plan_run_id, reminder_type, scheduled_for_utc)")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_nutrient_rebuild_jobs_status_priority ON nutrient_plan_rebuild_jobs(status, priority, created_at_utc)")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_nutrient_rebuild_jobs_user_code ON nutrient_plan_rebuild_jobs(user_id, nutrient_code)")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_assistant_jobs_status_created ON assistant_jobs(status, created_at_utc, id)")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_assistant_jobs_user_created ON assistant_jobs(tg_user_id, id DESC)")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_assistant_job_events_job_id ON assistant_job_events(job_id, id ASC)")
 
 async def _ensure_achievements_tables(conn: aiosqlite.Connection) -> None:
     await conn.execute(
@@ -2529,56 +2566,15 @@ async def admin_set_ban(
 
 
 async def admin_delete_user(conn: aiosqlite.Connection, admin_tg_id: int, tg_user_id: int) -> None:
-    row = await fetchone(conn, "SELECT id, deleted_at_utc FROM users WHERE tg_user_id=?", (int(tg_user_id),))
-    if not row:
-        raise ValueError("USER_NOT_FOUND")
-    user_id = int(row["id"])
-    now = utc_now_iso()
-    await conn.execute(
-        "UPDATE users SET deleted_at_utc=?, is_banned=1, banned_reason=COALESCE(NULLIF(banned_reason,''),'deleted'), banned_at_utc=COALESCE(NULLIF(banned_at_utc,''),?) WHERE tg_user_id=?",
-        (now, now, int(tg_user_id)),
-    )
-    for table in (
-        "supplement_day_state",
-        "day_plan_items",
-        "daily_checkins",
-        "user_schedules",
-        "user_supplements",
-        "user_schedule_slots",
-        "user_intake_log",
-        "user_supp_settings",
-        "intake_log",
-        "lab_results",
-        "lab_reports",
-        "nutrient_plan_runs",
-        "nutrient_followup_reminders",
-        "llm_assistant_runs",
-        "llm_assistant_plan_actions",
-    ):
-        await conn.execute(f"DELETE FROM {table} WHERE user_id=?", (user_id,))
-    # NOTE: reminders/ui_state/reminder_fires store Telegram user id, not internal users.id.
-    for table in ("reminders", "reminder_fires", "ui_state"):
-        await conn.execute(f"DELETE FROM {table} WHERE user_id=?", (int(tg_user_id),))
-    # Complex items don't have user_id, so delete via owned complexes first.
-    owned_complex_rows = await fetchall(conn, "SELECT id FROM user_complexes WHERE user_id=?", (user_id,))
-    owned_complex_ids = [int(r["id"] or 0) for r in owned_complex_rows if int(r["id"] or 0) > 0]
-    if owned_complex_ids:
-        ph = ",".join("?" for _ in owned_complex_ids)
-        await conn.execute(
-            f"DELETE FROM user_complex_items WHERE complex_id IN ({ph})",
-            tuple(owned_complex_ids),
-        )
-        await conn.execute(
-            f"DELETE FROM user_complex_schedules WHERE user_id=? AND complex_id IN ({ph})",
-            (user_id, *owned_complex_ids),
-        )
-    await conn.execute("DELETE FROM user_complexes WHERE user_id=?", (user_id,))
-    await conn.execute(
-        """INSERT INTO admin_audit(admin_tg_id, entity_type, entity_id, field, old_value, new_value, action, created_at_utc)
-           VALUES(?,?,?,?,?,?,?,?)""",
-        (int(admin_tg_id), "user", int(tg_user_id), "deleted_at_utc", str(row["deleted_at_utc"] or ""), now, "delete", now),
-    )
-    await conn.commit()
+    async with transaction(conn) as tx:
+        row = await fetchone(tx, "SELECT id, deleted_at_utc FROM users WHERE tg_user_id=?", (int(tg_user_id),))
+        if not row:
+            raise ValueError("USER_NOT_FOUND")
+        await _purge_user_content(tx, int(row["id"]), int(tg_user_id))
+        now = utc_now_iso()
+        await tx.execute("UPDATE users SET deleted_at_utc=?, is_banned=1, banned_reason='deleted', banned_at_utc=? WHERE id=?", (now, now, int(row["id"])))
+        await tx.execute("""INSERT INTO admin_audit(admin_tg_id, entity_type, entity_id, field, old_value, new_value, action, created_at_utc)
+            VALUES(?,?,?,?,?,?,?,?)""", (int(admin_tg_id), "user", int(tg_user_id), "deleted_at_utc", str(row["deleted_at_utc"] or ""), now, "delete", now))
 
 
 async def get_user_tz(conn: aiosqlite.Connection, tg_user_id: int) -> str | None:
@@ -2911,31 +2907,47 @@ async def mark_access_expired_notice_sent(
     )
     await conn.commit()
 
-async def purge_user_data(conn: aiosqlite.Connection, tg_user_id: int) -> dict:
-    row = await fetchone(conn, "SELECT id FROM users WHERE tg_user_id=?", (int(tg_user_id),))
-    if not row:
-        return {"ok": True, "deleted": False, "tables_touched": 0}
-
-    user_id = int(row["id"])
-    tables = await fetchall(
-        conn,
-        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+async def _purge_user_content(conn, user_id: int, tg_user_id: int) -> int:
+    # Explicit key domains. Never infer ownership from a column's name.
+    await conn.execute("DELETE FROM assistant_job_events WHERE job_id IN (SELECT id FROM assistant_jobs WHERE tg_user_id=?)", (tg_user_id,))
+    await conn.execute("DELETE FROM assistant_jobs WHERE tg_user_id=?", (tg_user_id,))
+    await conn.execute("DELETE FROM user_complex_items WHERE complex_id IN (SELECT id FROM user_complexes WHERE user_id=?)", (user_id,))
+    internal_tables = (
+        "llm_assistant_plan_actions", "llm_assistant_runs", "nutrient_assistant_drafts",
+        "nutrient_followup_reminders", "nutrient_plan_explanations",
+        "nutrient_reminder_candidates", "nutrient_followup_items",
+        "nutrient_plan_rebuild_jobs", "nutrient_plan_runs", "lab_results", "lab_reports",
+        "user_health_profile", "user_complex_schedules", "user_complexes",
+        "supplement_day_state", "day_plan_items", "daily_checkins", "intake_log",
+        "user_intake_log", "user_supp_settings", "user_supplement_split_groups",
+        "user_schedules", "user_schedule_slots", "user_supplements",
+        "user_notification_prefs", "user_achievements", "user_cosmetics",
     )
-    touched = 0
-    for item in tables:
-        table = str(item["name"])
-        if table == "users":
-            continue
-        cols = await _table_columns(conn, table)
-        if "tg_user_id" in cols:
-            await conn.execute(f"DELETE FROM {table} WHERE tg_user_id=?", (int(tg_user_id),))
-            touched += 1
-        if "user_id" in cols:
-            await conn.execute(f"DELETE FROM {table} WHERE user_id=?", (user_id,))
-            touched += 1
+    for table in internal_tables:
+        await conn.execute(f"DELETE FROM {table} WHERE user_id=?", (user_id,))
+    for table in ("reminders", "reminder_fires", "ui_state"):
+        await conn.execute(f"DELETE FROM {table} WHERE user_id=?", (tg_user_id,))
+    # Retain the account ID, entitlement, trial-use flags, roles and payment
+    # ledger so cleanup cannot erase paid access or replay an old payment.
+    await conn.execute("""UPDATE users SET
+        tg_username='', tg_first_name='', tg_last_name='', last_view='menu',
+        last_view_payload='', last_chat_id=0, last_message_id=0, initial_stack_json='[]',
+        onboarding_status='', onboarding_goal_text='', onboarding_raw_json='',
+        onboarding_prefix_line='', onboarding_started_at_utc='', onboarding_completed_at_utc='',
+        assistant_onboarding_seen=0, assistant_onboarding_completed_at_utc='',
+        assistant_onboarding_dismissed_at_utc='', assistant_last_home_state='',
+        assistant_last_opened_at_utc='', receipt_email='', receipt_email_status='missing',
+        receipt_email_collected_at='', wants_receipt=0
+        WHERE id=?""", (user_id,))
+    return len(internal_tables) + 6
 
-    await conn.execute("DELETE FROM users WHERE tg_user_id=?", (int(tg_user_id),))
-    await conn.commit()
+
+async def purge_user_data(conn: aiosqlite.Connection, tg_user_id: int) -> dict:
+    async with transaction(conn) as tx:
+        row = await fetchone(tx, "SELECT id FROM users WHERE tg_user_id=?", (int(tg_user_id),))
+        if not row:
+            return {"ok": True, "deleted": False, "tables_touched": 0}
+        touched = await _purge_user_content(tx, int(row["id"]), int(tg_user_id))
     return {"ok": True, "deleted": True, "tables_touched": touched}
 
 

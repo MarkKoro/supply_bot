@@ -2747,13 +2747,15 @@
       return;
     }
     const focusSnapshot = getFocusableSnapshot(target);
-    const keepToolbar = previousTabKey === tabKey && tabKey === 'catalog' && document.activeElement?.id === 'catalogSearch';
+    const searchId = tabKey === 'admin' ? 'adminSearch' : 'catalogSearch';
+    const toolbarSelector = tabKey === 'admin' ? '.admin-toolbar' : '.catalog-toolbar';
+    const keepToolbar = previousTabKey === tabKey && ['catalog','admin'].includes(tabKey) && document.activeElement?.id === searchId;
     let keptToolbar = false;
     if (keepToolbar) {
-      const toolbar = target.querySelector('.catalog-toolbar');
+      const toolbar = target.querySelector(toolbarSelector);
       const template = document.createElement('template');
       template.innerHTML = nextHtml;
-      const nextToolbar = template.content.querySelector('.catalog-toolbar');
+      const nextToolbar = template.content.querySelector(toolbarSelector);
       if (toolbar && nextToolbar) {
         for (const child of [...target.childNodes]) if (child !== toolbar) child.remove();
         let afterToolbar = false;
@@ -2763,6 +2765,8 @@
         }
         const count = toolbar.querySelector('#catalogResultCount');
         if (count) count.textContent = `Найдено: ${state.catalog.total}`;
+        const adminCount = toolbar.querySelector('#adminResultCount');
+        if (adminCount) adminCount.textContent = `${state.admin.total} найдено`;
         keptToolbar = true;
       }
     }
@@ -2788,7 +2792,7 @@
 
 
   function esc(text) {
-    return String(text || "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+    return String(text ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
   }
 
 
@@ -3902,8 +3906,8 @@
     const selected = selectedAdminIds();
     return `
       ${perms.content_edit ? `<div class="ios-group"><details open><summary><span>🧬 Проверка дубликатов</span><span class="ios-arrow">${a.duplicatesLoading ? 'Сканируем…' : '▾'}</span></summary><div class="ios-content"><div class="muted">Запускается вручную по кнопке. Можно выполнять после seed import, когда бот снова включён.</div><div><button class="btn" id="adminDupRefresh" ${a.duplicatesLoading ? 'disabled' : ''}>${a.duplicatesLoading ? 'Проверяем…' : 'Проверить дубликаты'}</button></div>${renderAdminDuplicateAlert()}</div></details></div>` : ''}
-      ${perms.content_edit ? `<div class="card fade">
-        <div class="row"><strong>Редактор добавок</strong><span class="muted">${a.total} найдено</span></div>
+      ${perms.content_edit ? `<div class="card fade admin-toolbar">
+        <div class="row"><strong>Редактор добавок</strong><span class="muted" id="adminResultCount">${a.total} найдено</span></div>
         <div style="display:flex; gap:8px; margin-top:8px;">
           <input id="adminSearch" class="input" placeholder="Поиск по slug / названию" value="${esc(a.q)}" />
           ${perms.content_bulk ? `<button class="btn secondary" id="adminSelectionToggle">${a.selectionMode ? 'Готово' : 'Выбор'}</button>` : ''}
@@ -3921,11 +3925,11 @@
       ${perms.roles_manage ? `<div class="card fade">
         <div class="row"><strong>Роли доступа</strong></div>
         <div style="display:flex; gap:8px; margin-top:8px;">
-          <input id="roleTgId" class="input" placeholder="tg_user_id" value="" />
+          <input id="roleTgId" class="input" placeholder="tg_user_id" value="${esc(a.roleInput || '')}" />
           <button class="btn" id="roleLoadBtn">Загрузить</button>
         </div>
         <div style="display:flex; gap:8px; margin-top:8px;">
-          <select id="roleSelect" class="select">${['owner','admin','editor','support','none'].map((r)=>`<option value="${r}">${r}</option>`).join('')}</select>
+          <select id="roleSelect" class="select">${['owner','admin','editor','support','none'].map((r)=>`<option value="${r}" ${r === (a.roleValue || 'none') ? 'selected' : ''}>${r}</option>`).join('')}</select>
           <button class="btn" id="roleSaveBtn">Сохранить</button>
         </div>
       </div>` : ''}
@@ -4009,7 +4013,7 @@ function adminField(label, field, value, kind='input') {
     const input = kind === 'textarea'
       ? `<textarea class="textarea" data-admin-field="${field}">${esc(value || '')}</textarea>`
       : `<input class="input" data-admin-field="${field}" value="${esc(value || '')}" />`;
-    return `<div class="card" style="margin-bottom:8px"><div class="row"><strong>${label}</strong><button class="btn" data-admin-save="${field}">Сохранить</button></div>${input}${err ? `<div class="error-text">${esc(err)}</div>` : ''}</div>`;
+    return `<div class="card" style="margin-bottom:8px"><div class="row"><strong>${label}</strong><button class="btn" data-admin-save="${field}" ${adminFieldSaves.has(`${state.admin.detail?.item?.id}:${field}`) ? 'disabled' : ''}>Сохранить</button></div>${input}${err ? `<div class="error-text">${esc(err)}</div>` : ''}</div>`;
   }
 
   function renderAdminModal(item, audit) {
@@ -4037,24 +4041,32 @@ function adminField(label, field, value, kind='input') {
       </aside>`;
   }
 
+  let adminListRequestId = 0;
   async function loadAdminSupplements(force) {
-    if (state.admin.loading && !force) return;
-    state.admin.loading = true;
-    renderActiveTab();
+    const a = state.admin;
+    if (a.loading && !force) return;
+    const requestId = ++adminListRequestId;
+    const page = a.page, query = a.q, filters = JSON.stringify(a.filters);
+    const isCurrent = () => requestId === adminListRequestId && query === a.q && filters === JSON.stringify(a.filters);
+    a.loading = true;
+    if (!a.items.length) renderActiveTab();
     try {
-      const a = state.admin;
-      const qp = new URLSearchParams({ q: a.q || '', page: String(a.page), page_size: String(a.pageSize) });
+      const qp = new URLSearchParams({ q: query || '', page: String(page), page_size: String(a.pageSize) });
       if (a.filters.is_active !== '') qp.set('is_active', a.filters.is_active);
       if (a.filters.evidence) qp.set('evidence', a.filters.evidence);
       const res = await api(`./api/admin/supplements?${qp.toString()}`);
-      a.items = a.page === 0 ? (res.items || []) : a.items.concat(res.items || []);
+      if (!isCurrent()) return;
+      a.items = page === 0 ? (res.items || []) : a.items.concat(res.items || []);
       a.total = res.total || 0;
     } catch (e) {
-      if (e.message === 'PERMISSION_DENIED') showToast('Только для админов');
-      else showToast('Ошибка загрузки admin-списка');
+      if (!isCurrent()) return;
+      if (page > 0) a.page = Math.max(0, page - 1);
+      showToast(e.message === 'PERMISSION_DENIED' ? 'Только для админов' : 'Ошибка загрузки admin-списка');
     } finally {
-      state.admin.loading = false;
-      renderActiveTab();
+      if (requestId === adminListRequestId) {
+        a.loading = false;
+        if (isCurrent()) renderActiveTab();
+      }
     }
   }
 
@@ -4099,29 +4111,50 @@ function adminField(label, field, value, kind='input') {
     }
   }
 
+  let adminDetailRequestId = 0;
+  const adminFieldSaves = new Set();
   async function loadAdminSupplement(id) {
+    const requestId = ++adminDetailRequestId;
     try {
       const res = await api(`./api/admin/supplement/${id}`);
+      if (requestId !== adminDetailRequestId || state.activeTab !== 'admin') return;
       state.admin.detail = res;
       state.admin.errors = {};
       renderActiveTab();
     } catch (e) {
-      showToast('Не удалось открыть запись');
+      if (requestId === adminDetailRequestId) showToast('Не удалось открыть запись');
     }
   }
 
+  async function refreshSavedAdminField(detail, field, submittedValue) {
+    const fresh = await api(`./api/admin/supplement/${detail.item.id}`);
+    if (state.admin.detail !== detail) return;
+    // Other fields, and edits made while this request was running, remain drafts.
+    if (detail.item[field] === submittedValue) detail.item[field] = fresh.item[field];
+    detail.audit = fresh.audit || [];
+  }
+
   async function saveAdminField(field) {
-    const detail = state.admin.detail?.item;
-    if (!detail) return;
-    const value = detail[field] ?? '';
+    const detail = state.admin.detail;
+    if (!detail?.item) return;
+    const key = `${detail.item.id}:${field}`;
+    if (adminFieldSaves.has(key)) return;
+    const value = detail.item[field] ?? '';
+    adminFieldSaves.add(key);
+    const button = document.querySelector(`[data-admin-save="${field}"]`);
+    if (button) button.disabled = true;
     try {
-      await api(`./api/admin/supplement/${detail.id}/set_field`, { method:'POST', body:{ field, value } });
-      state.admin.errors[field] = '';
-      await loadAdminSupplement(detail.id);
+      await api(`./api/admin/supplement/${detail.item.id}/set_field`, { method:'POST', body:{ field, value } });
+      if (state.admin.detail === detail) state.admin.errors[field] = '';
+      // A refresh failure does not turn a successful write into a failed save.
+      await refreshSavedAdminField(detail, field, value).catch(() => {});
       showToast('Сохранено');
     } catch (e) {
-      state.admin.errors[field] = `Ошибка: ${e.message}`;
-      renderActiveTab();
+      if (state.admin.detail === detail) state.admin.errors[field] = `Ошибка: ${e.message}`;
+    } finally {
+      adminFieldSaves.delete(key);
+      if (button) button.disabled = false;
+      if (state.admin.detail === detail) renderActiveTab();
     }
   }
 
@@ -4197,26 +4230,28 @@ function adminField(label, field, value, kind='input') {
       } catch { showToast('Ошибка удаления'); }
     });
     document.getElementById('adminDupRefresh')?.addEventListener('click', async ()=>{ await loadAdminDuplicates(); });
-    document.getElementById('adminSearch')?.addEventListener('input', (e)=>{
+    const adminSearch = document.getElementById('adminSearch');
+    if (adminSearch) adminSearch.oninput = (e)=>{
       state.admin.q = e.target.value;
       clearTimeout(state.admin.searchDebounce);
       state.admin.searchDebounce = setTimeout(async ()=>{ state.admin.page = 0; await loadAdminSupplements(true); }, 250);
-    });
-    document.getElementById('adminSelectionToggle')?.addEventListener('click', ()=>{
+    };
+    const selectionToggle = document.getElementById('adminSelectionToggle');
+    if (selectionToggle) selectionToggle.onclick = ()=>{
       state.admin.selectionMode = !state.admin.selectionMode;
       state.admin.bulkPrompt = '';
       state.admin.bulkConfirm = null;
       state.admin.bulkMenuOpen = false;
       if (!state.admin.selectionMode) clearAdminSelection();
       renderActiveTab();
-    });
+    };
     document.getElementById('adminActive')?.addEventListener('change', async (e)=>{ state.admin.filters.is_active = e.target.value; state.admin.page=0; await loadAdminSupplements(true); });
     document.getElementById('adminEvidence')?.addEventListener('change', async (e)=>{ state.admin.filters.evidence = e.target.value; state.admin.page=0; await loadAdminSupplements(true); });
     document.getElementById('adminMore')?.addEventListener('click', async ()=>{ state.admin.page += 1; await loadAdminSupplements(true); });
     appEl.querySelectorAll('[data-admin-open]').forEach((el)=>el.addEventListener('click', ()=>loadAdminSupplement(el.dataset.adminOpen)));
     appEl.querySelectorAll('[data-dup-keep]').forEach((el)=>el.addEventListener('click', ()=>resolveAdminDuplicate(el.dataset.dupKeep, el.dataset.dupRemove)));
     appEl.querySelectorAll('[data-admin-select]').forEach((el)=>el.addEventListener('change', (e)=>{ state.admin.selectedIds[Number(e.target.dataset.adminSelect)] = !!e.target.checked; renderActiveTab(); }));
-    appEl.querySelectorAll('[data-admin-close]').forEach((el)=>el.addEventListener('click', ()=>{ state.admin.detail = null; renderActiveTab(); }));
+    appEl.querySelectorAll('[data-admin-close]').forEach((el)=>el.addEventListener('click', ()=>{ adminDetailRequestId++; state.admin.detail = null; renderActiveTab(); }));
     appEl.querySelectorAll('[data-admin-field]').forEach((el)=>el.addEventListener('input', (e)=>{
       if (!state.admin.detail?.item) return;
       state.admin.detail.item[e.target.dataset.adminField] = e.target.value;
@@ -4224,12 +4259,14 @@ function adminField(label, field, value, kind='input') {
     appEl.querySelectorAll('[data-admin-save]').forEach((el)=>el.addEventListener('click', ()=>saveAdminField(el.dataset.adminSave)));
     appEl.querySelector('[data-admin-open-link]')?.addEventListener('click', ()=>{ const u=state.admin.detail?.item?.purchase_url; if (u) tg?.openLink?.(u); });
     appEl.querySelector('[data-admin-toggle]')?.addEventListener('click', async (e)=>{
-      const detail = state.admin.detail?.item;
+      const holder = state.admin.detail;
+      const detail = holder?.item;
       if (!detail) return;
+      const previous = detail.is_active;
       const to = Number(e.currentTarget.dataset.adminToggle || 0);
       try {
         await api(`./api/admin/supplement/${detail.id}/toggle_active`, { method:'POST', body:{ is_active: to } });
-        await loadAdminSupplement(detail.id);
+        await refreshSavedAdminField(holder, 'is_active', previous).catch(() => {});
         state.admin.page = 0;
         await loadAdminSupplements(true);
       } catch {
@@ -4283,12 +4320,16 @@ function adminField(label, field, value, kind='input') {
       }
     });
 
+    document.getElementById('roleTgId')?.addEventListener('input', (e) => { state.admin.roleInput = e.target.value; state.admin.roleTargetId = ''; state.admin.roleValue = 'none'; document.getElementById('roleSelect').value = 'none'; });
+    document.getElementById('roleSelect')?.addEventListener('change', (e) => { state.admin.roleValue = e.target.value; });
     document.getElementById('roleLoadBtn')?.addEventListener('click', async ()=>{
       const tgId = Number(document.getElementById('roleTgId')?.value || 0);
       if (!tgId) return showToast('Введите tg_id');
       try {
         const res = await api(`./api/admin/roles/get?tg_user_id=${tgId}`);
-        document.getElementById('roleSelect').value = res.role || 'none';
+        if (Number(state.admin.roleInput) !== tgId || state.activeTab !== 'admin') return;
+        state.admin.roleValue = res.role || 'none';
+        document.getElementById('roleSelect').value = state.admin.roleValue;
         state.admin.roleTargetId = tgId;
       } catch {
         showToast('Не удалось загрузить роль');
@@ -4302,7 +4343,7 @@ function adminField(label, field, value, kind='input') {
       await runDiagnostics(true);
     });
     document.getElementById('roleSaveBtn')?.addEventListener('click', async ()=>{
-      const tgId = Number(state.admin.roleTargetId || document.getElementById('roleTgId')?.value || 0);
+      const tgId = Number(document.getElementById('roleTgId')?.value || 0);
       const role = document.getElementById('roleSelect')?.value || 'none';
       if (!tgId) return showToast('Введите tg_id');
       try {
@@ -4682,7 +4723,7 @@ function adminField(label, field, value, kind='input') {
     try { return await profileLoadPromise; }
     finally {
       profileLoadPromise = null;
-      if (state.activeTab === 'profile' && !state.profileUi.editOpen) renderActiveTab();
+      if (state.activeTab === 'profile' && !hasOpenModal()) renderActiveTab();
     }
   }
   async function loadProfileLabs(force) { if (state.profileLabs.loading && !force) return; state.profileLabs.loading = true; try { const res = await api('./api/profile/labs'); state.profileLabs.reports = Array.isArray(res.reports) ? res.reports : []; } catch {} state.profileLabs.loading = false; }
@@ -4885,13 +4926,47 @@ function adminField(label, field, value, kind='input') {
   function unitOptions(code, unit){ const item=ANALYTE_PRESETS.find((a)=>a.code===code)||ANALYTE_PRESETS[0]; return (item.units||[]).map((u)=>`<option value="${esc(u)}" ${u===unit?'selected':''}>${esc(u)}</option>`).join(''); }
   function renderLabRow(idx,row={}){ const code=row.analyte_code||ANALYTE_PRESETS[0].code; return `<div class="lab-result-row" data-lab-row="${idx}"><label class="muted">Показатель<select class="select" data-lab-field="analyte_code" data-idx="${idx}">${analyteOptions(code)}</select></label><div class="field-grid two"><label class="muted">Значение<input class="input" inputmode="decimal" data-lab-field="value_num" data-idx="${idx}" value="${esc(row.value_num??row.value_text??'')}"/></label><label class="muted">Единица<select class="select" data-lab-field="unit" data-idx="${idx}">${unitOptions(code,row.unit||'')}</select></label></div><div class="field-grid two"><label class="muted">Референс от<input class="input" inputmode="decimal" data-lab-field="ref_low" data-idx="${idx}" value="${esc(row.ref_low??'')}"/></label><label class="muted">Референс до<input class="input" inputmode="decimal" data-lab-field="ref_high" data-idx="${idx}" value="${esc(row.ref_high??'')}"/></label></div></div>`; }
 
+  function captureLabDraft(type) {
+    const wrap = document.getElementById(`${type}Rows`);
+    if (!wrap) return;
+    const original = type === 'review' ? (state.profileLabs.reports || []).find(x => Number(x.id) === Number(state.profileUi.selectedReportId)) : {};
+    const draft = {
+      ...(original || {}),
+      report_date: document.getElementById(`${type}ReportDate`)?.value || '',
+      lab_name: document.getElementById(`${type}LabName`)?.value || '',
+      notes: document.getElementById(`${type}Notes`)?.value || '',
+      results: [...wrap.querySelectorAll('[data-lab-row]')].map(row => Object.fromEntries(
+        [...row.querySelectorAll('[data-lab-field]')].map(field => [field.dataset.labField, field.value])
+      ))
+    };
+    state.profileUi[`${type}Draft`] = draft;
+  }
+
+  function bindLabDraftEvents() {
+    for (const type of ['manual','review']) {
+      const modal = document.getElementById(`${type}Rows`)?.closest('.modal-card');
+      if (!modal) continue;
+      modal.querySelectorAll('input,textarea,select').forEach(field => {
+        field.oninput = () => captureLabDraft(type);
+        field.onchange = () => {
+          if (field.dataset.labField === 'analyte_code') {
+            const unit = field.closest('[data-lab-row]')?.querySelector('[data-lab-field="unit"]');
+            if (unit) unit.innerHTML = unitOptions(field.value, '');
+          }
+          captureLabDraft(type);
+        };
+      });
+    }
+  }
+
   function labsEmptyState(){ return `<div class="muted">Пока нет добавленных анализов</div>`; }
   function renderLabsModal(type){
     if (type === 'upload') return '';
     if (!(type==='manual'?state.profileUi.manualOpen:state.profileUi.uploadOpen)) return '';
-    return `<div class="modal-overlay" data-close-${type}><section class="card modal-card" onclick="event.stopPropagation()"><div class="row"><strong>${type==='manual'?'Ручной ввод анализа':'Загрузка документа'}</strong><button class="btn secondary" data-close-${type}>Закрыть</button></div>${type==='manual'?`<div class="field-grid" style="margin-top:10px"><label class="muted">Дата анализа<input type="date" class="input" id="manualReportDate"/></label><label class="muted">Лаборатория (необязательно)<input class="input" id="manualLabName"/></label><label class="muted">Комментарий (необязательно)<textarea class="textarea" id="manualNotes"></textarea></label><div id="manualRows">${renderLabRow(0)}</div><button class="btn secondary" data-add-manual-row>+ Добавить показатель</button><button class="btn" data-save-manual>${state.profileUi.savingManual?'Сохраняем…':'Сохранить анализ'}</button></div>`:`<div class="field-grid" style="margin-top:10px"><label class="muted">Дата анализа<input type="date" class="input" id="uploadReportDate"/></label><label class="muted">Лаборатория (необязательно)<input class="input" id="uploadLabName"/></label><label class="muted">Комментарий (необязательно)<textarea class="textarea" id="uploadNotes"></textarea></label><input type="file" class="input" id="labsFile" accept=".pdf,.jpg,.jpeg,.png,.webp"/><button class="btn" data-upload-labs>${state.profileUi.uploading?'Загружаем…':'Загрузить документ'}</button></div>`}</section></div>`;
+    const draft = state.profileUi.manualDraft || {results:[{}]};
+    return `<div class="modal-overlay" data-close-${type}><section class="card modal-card" onclick="event.stopPropagation()"><div class="row"><strong>${type==='manual'?'Ручной ввод анализа':'Загрузка документа'}</strong><button class="btn secondary" data-close-${type}>Закрыть</button></div>${type==='manual'?`<div class="field-grid" style="margin-top:10px"><label class="muted">Дата анализа<input type="date" class="input" id="manualReportDate" value="${esc(draft.report_date || '')}"/></label><label class="muted">Лаборатория (необязательно)<input class="input" id="manualLabName" value="${esc(draft.lab_name || '')}"/></label><label class="muted">Комментарий (необязательно)<textarea class="textarea" id="manualNotes">${esc(draft.notes || '')}</textarea></label><div id="manualRows">${(draft.results || [{}]).map((row,idx)=>renderLabRow(idx,row)).join('')}</div><button class="btn secondary" data-add-manual-row>+ Добавить показатель</button><button class="btn" data-save-manual>${state.profileUi.savingManual?'Сохраняем…':'Сохранить анализ'}</button></div>`:`<div class="field-grid" style="margin-top:10px"><label class="muted">Дата анализа<input type="date" class="input" id="uploadReportDate"/></label><label class="muted">Лаборатория (необязательно)<input class="input" id="uploadLabName"/></label><label class="muted">Комментарий (необязательно)<textarea class="textarea" id="uploadNotes"></textarea></label><input type="file" class="input" id="labsFile" accept=".pdf,.jpg,.jpeg,.png,.webp"/><button class="btn" data-upload-labs>${state.profileUi.uploading?'Загружаем…':'Загрузить документ'}</button></div>`}</section></div>`;
   }
-  function renderReviewModal(){ if(!state.profileUi.reviewOpen) return ''; const r=(state.profileLabs.reports||[]).find((x)=>String(x.id)===String(state.profileUi.selectedReportId)); if(!r) return ''; return `<div class="modal-overlay" data-close-review><section class="card modal-card" onclick="event.stopPropagation()"><div class="row"><strong>Проверка распознанных данных</strong><button class="btn secondary" data-close-review>Закрыть</button></div><div class="muted" style="margin-top:8px">${r.parse_status==='needs_manual_review'?'Документ загружен, но данные нужно проверить вручную':'Проверьте распознанные значения'}</div><div class="field-grid" style="margin-top:8px"><label class="muted">Дата анализа<input type="date" class="input" id="reviewReportDate" value="${esc(r.report_date||'')}"/></label><label class="muted">Лаборатория<input class="input" id="reviewLabName" value="${esc(r.lab_name||'')}"/></label><label class="muted">Комментарий<textarea class="textarea" id="reviewNotes">${esc(r.notes||'')}</textarea></label><div id="reviewRows">${(r.results||[]).map((row,idx)=>renderLabRow(idx,row)).join('') || renderLabRow(0)}</div><button class="btn" data-save-review>${state.profileUi.savingReview?'Сохраняем…':'Сохранить результат'}</button></div></section></div>`; }
+  function renderReviewModal(){ if(!state.profileUi.reviewOpen) return ''; const r=state.profileUi.reviewDraft || (state.profileLabs.reports||[]).find((x)=>String(x.id)===String(state.profileUi.selectedReportId)); if(!r) return ''; return `<div class="modal-overlay" data-close-review><section class="card modal-card" onclick="event.stopPropagation()"><div class="row"><strong>Проверка распознанных данных</strong><button class="btn secondary" data-close-review>Закрыть</button></div><div class="muted" style="margin-top:8px">${r.parse_status==='needs_manual_review'?'Документ загружен, но данные нужно проверить вручную':'Проверьте распознанные значения'}</div><div class="field-grid" style="margin-top:8px"><label class="muted">Дата анализа<input type="date" class="input" id="reviewReportDate" value="${esc(r.report_date||'')}"/></label><label class="muted">Лаборатория<input class="input" id="reviewLabName" value="${esc(r.lab_name||'')}"/></label><label class="muted">Комментарий<textarea class="textarea" id="reviewNotes">${esc(r.notes||'')}</textarea></label><div id="reviewRows">${(r.results||[]).map((row,idx)=>renderLabRow(idx,row)).join('') || renderLabRow(0)}</div><button class="btn" data-save-review>${state.profileUi.savingReview?'Сохраняем…':'Сохранить результат'}</button></div></section></div>`; }
 
   function renderProfileModulesGrid() {
     const hasPaidPremium = Boolean(state.me?.premium);
@@ -5450,12 +5525,12 @@ function adminField(label, field, value, kind='input') {
       } finally { state.profileUi.openingEditor = false; }
     }; });
     document.querySelectorAll('[data-close-edit]').forEach((el)=>el.addEventListener('click', ()=>{ state.profileUi.editOpen=false; state.profileUi.editDraft=null; renderActiveTab(); }));
-    document.querySelectorAll('[data-open-manual]').forEach((el)=>el.addEventListener('click', ()=>{ state.profileUi.manualOpen=true; renderActiveTab(); }));
-    document.querySelectorAll('[data-close-manual]').forEach((el)=>el.addEventListener('click', ()=>{ state.profileUi.manualOpen=false; renderActiveTab(); }));
+    document.querySelectorAll('[data-open-manual]').forEach((el)=>el.addEventListener('click', ()=>{ state.profileUi.manualDraft={results:[{}]}; state.profileUi.manualOpen=true; renderActiveTab(); }));
+    document.querySelectorAll('[data-close-manual]').forEach((el)=>el.addEventListener('click', ()=>{ state.profileUi.manualOpen=false; state.profileUi.manualDraft=null; renderActiveTab(); }));
     document.querySelectorAll('[data-open-upload]').forEach((el)=>el.addEventListener('click', ()=>{ state.profileUi.uploadOpen=true; renderActiveTab(); }));
     document.querySelectorAll('[data-close-upload]').forEach((el)=>el.addEventListener('click', ()=>{ state.profileUi.uploadOpen=false; renderActiveTab(); }));
-    document.querySelectorAll('[data-close-review]').forEach((el)=>el.addEventListener('click', ()=>{ state.profileUi.reviewOpen=false; renderActiveTab(); }));
-    document.querySelectorAll('[data-open-review]').forEach((el)=>el.addEventListener('click', ()=>{ state.profileUi.selectedReportId=Number(el.dataset.openReview); state.profileUi.reviewOpen=true; renderActiveTab(); }));
+    document.querySelectorAll('[data-close-review]').forEach((el)=>el.addEventListener('click', ()=>{ state.profileUi.reviewOpen=false; state.profileUi.reviewDraft=null; renderActiveTab(); }));
+    document.querySelectorAll('[data-open-review]').forEach((el)=>el.addEventListener('click', ()=>{ state.profileUi.selectedReportId=Number(el.dataset.openReview); state.profileUi.reviewDraft=null; state.profileUi.reviewOpen=true; renderActiveTab(); }));
     document.querySelector('[data-assistant-open-premium]')?.addEventListener('click', () => {
       haptic();
       state.activeTab = "settings";
@@ -5773,7 +5848,14 @@ function adminField(label, field, value, kind='input') {
       renderActiveTab();
     });
 
-    document.querySelector('[data-add-manual-row]')?.addEventListener('click', ()=>{ const wrap=document.getElementById('manualRows'); const idx=wrap.querySelectorAll('[data-lab-row]').length; wrap.insertAdjacentHTML('beforeend', renderLabRow(idx)); bindProfileEvents(); });
+    bindLabDraftEvents();
+    document.querySelector('[data-add-manual-row]')?.addEventListener('click', ()=>{
+      const wrap=document.getElementById('manualRows');
+      const idx=wrap.querySelectorAll('[data-lab-row]').length;
+      wrap.insertAdjacentHTML('beforeend', renderLabRow(idx));
+      captureLabDraft('manual');
+      bindLabDraftEvents();
+    });
     document.querySelector('[data-save-manual]')?.addEventListener('click', async ()=>{
       if(state.profileUi.savingManual) return; state.profileUi.savingManual=true;
       try {
@@ -5880,7 +5962,7 @@ function adminField(label, field, value, kind='input') {
       }
     });
 
-    document.querySelectorAll('[data-lab-field="analyte_code"]').forEach((el)=>el.addEventListener('change',(e)=>{ const idx=e.target.dataset.idx; const unitEl=document.querySelector(`[data-lab-field="unit"][data-idx="${idx}"]`); if(unitEl){ unitEl.innerHTML=unitOptions(e.target.value,''); } }));
+
 
     if (String(state.profileUi.activeModule || 'assistant') === 'organs') bindBodyMapEvents();
   }
@@ -6470,20 +6552,27 @@ function adminField(label, field, value, kind='input') {
 
   function timezoneOptionsHtml(selected) {
     const options = [];
+    const current = String(selected || 'UTC');
+    let hasCurrent = false;
     for (let h = -12; h <= 14; h += 1) {
       const sign = h >= 0 ? '+' : '-';
       const abs = String(Math.abs(h)).padStart(2, '0');
       const val = `UTC${sign}${abs}:00`;
-      options.push(`<option value="${val}" ${val === selected ? 'selected' : ''}>${val}</option>`);
+      if (val === current) hasCurrent = true;
+      options.push(`<option value="${val}" ${val === current ? 'selected' : ''}>${val}</option>`);
     }
+    if (!hasCurrent) options.unshift(`<option value="${esc(current)}" selected>${esc(current)}</option>`);
     return options.join('');
   }
 
+  let settingsDataVersion = 0;
   async function loadSettingsData(force = false) {
     if (state.settingsData.loading && !force) return;
     state.settingsData.loading = true;
+    const version = settingsDataVersion;
     try {
       const res = await api('./api/settings');
+      if (version !== settingsDataVersion || state.settingsUi.savingNotifications || state.settingsUi.savingTimezone) return;
       state.settingsData.tz_name = String(res.tz_name || 'UTC');
       state.settingsData.reminders_enabled = res.reminders_enabled !== false;
       state.settingsData.offer_url = String(res.offer_url || '');
@@ -6491,12 +6580,7 @@ function adminField(label, field, value, kind='input') {
       state.settingsData.offer_version = String(res.offer_version || '');
       state.settingsData.privacy_version = String(res.privacy_version || '');
     } catch {
-      state.settingsData.tz_name = 'UTC';
-      state.settingsData.reminders_enabled = true;
-      state.settingsData.offer_url = '';
-      state.settingsData.privacy_url = '';
-      state.settingsData.offer_version = '';
-      state.settingsData.privacy_version = '';
+      // A failed refresh must not replace saved preferences with defaults.
     } finally {
       state.settingsData.loading = false;
     }
@@ -6509,7 +6593,7 @@ function adminField(label, field, value, kind='input') {
       const res = await api('./api/schedule');
       state.settingsSchedule.slots = Array.isArray(res.slots) ? res.slots : [];
     } catch {
-      state.settingsSchedule.slots = [];
+      // Keep the last successfully loaded schedule.
     } finally {
       state.settingsUi.loadingSchedule = false;
     }
@@ -6774,34 +6858,39 @@ function adminField(label, field, value, kind='input') {
     });
 
     document.getElementById('settingsTimezone')?.addEventListener('change', async (e) => {
-      const tzName = String(e.target.value || '').trim();
-      if (!tzName) return;
+      const input = e.target;
+      const tzName = String(input.value || '').trim();
+      const previous = state.settingsData.tz_name;
+      if (!tzName || state.settingsUi.savingTimezone) return;
+      state.settingsUi.savingTimezone = true;
+      settingsDataVersion++;
+      input.disabled = true;
       try {
         await api('./api/settings/timezone', { method:'POST', body:{ tz_name: tzName } });
         state.settingsData.tz_name = tzName;
         showToast('Часовой пояс сохранён');
       } catch {
+        input.value = previous;
         showToast('Не удалось сохранить часовой пояс');
+      } finally {
+        settingsDataVersion++;
+        state.settingsUi.savingTimezone = false;
+        input.disabled = false;
       }
     });
+
     document.getElementById('settingsNotificationsEnabled')?.addEventListener('change', async (e) => {
       const enabled = !!e?.target?.checked;
       if (state.settingsUi.savingNotifications) return;
       state.settingsUi.savingNotifications = true;
+      e.target.disabled = true;
+      settingsDataVersion++;
       try {
         await api('./api/settings/notifications', { method: 'POST', body: { reminders_enabled: enabled } });
         state.settingsData.reminders_enabled = enabled;
-        if (!enabled) {
-          const slots = state.settingsSchedule.slots || [];
-          for (const slot of slots) {
-            if (!slot?.slot_id) continue;
-            await api('./api/schedule/slot_enabled', { method: 'POST', body: { slot_id: slot.slot_id, is_enabled: false } });
-            slot.is_enabled = false;
-          }
-        }
         document.querySelectorAll('[data-slot-enabled]').forEach((slotEl) => {
           slotEl.disabled = !enabled;
-          if (!enabled) slotEl.checked = false;
+          // Global pause preserves each slot's own preference.
         });
         showToast(enabled ? 'Уведомления включены' : 'Уведомления выключены');
       } catch {
@@ -6809,6 +6898,8 @@ function adminField(label, field, value, kind='input') {
         showToast('Не удалось изменить уведомления');
       } finally {
         state.settingsUi.savingNotifications = false;
+        settingsDataVersion++;
+        e.target.disabled = false;
       }
     });
     document.querySelectorAll('[data-slot-enabled]').forEach((el) => {
@@ -6845,6 +6936,7 @@ function adminField(label, field, value, kind='input') {
         renderActiveTab();
       });
     });
+    document.getElementById('settingsSlotTimeInput')?.addEventListener('input', (e) => { state.settingsUi.slotEdit.time = e.target.value; });
     document.getElementById('settingsSlotTimeSave')?.addEventListener('click', async () => {
       const slotId = String(state.settingsUi?.slotEdit?.slotId || '');
       const input = document.getElementById('settingsSlotTimeInput');

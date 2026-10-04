@@ -148,7 +148,7 @@ def get_settings() -> Settings:
             "SEED_INTERACTIONS_PATH",
             "data/seed_rich/interactions_rich.jsonl",
         ).strip(),
-        AUTO_SEED_ON_START=bool(int(os.getenv("AUTO_SEED_ON_START", "1").strip() or "1")),
+        AUTO_SEED_ON_START=_parse_bool(os.getenv("AUTO_SEED_ON_START", "1").strip() or "1"),
         OPENAI_API_KEY=os.getenv("OPENAI_API_KEY", "").strip() or None,
         OPENAI_MODEL=os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip(),
         OPENAI_NUTRIENT_ASSISTANT_MODEL=os.getenv("OPENAI_NUTRIENT_ASSISTANT_MODEL", "gpt-5-mini").strip(),

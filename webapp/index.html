@@ -1890,7 +1890,7 @@
     const selectors = String(step.selector || "").split(',').map((x) => x.trim()).filter(Boolean);
     for (const selector of selectors) {
       const el = document.querySelector(selector);
-      if (el) return el;
+      if (el && el.getClientRects().length && getComputedStyle(el).visibility !== "hidden") return el;
     }
     return null;
   }
@@ -1932,6 +1932,7 @@
   }
 
   function renderGuideOverlay() {
+    if (hasOpenModal()) return "";
     const g = state.guide;
     if (!g.active || !g.steps?.length) return "";
     const step = g.steps[g.step];
@@ -1986,14 +1987,14 @@
     const activeName = String(state.guide.active || "");
     if (activeName) markGuideSeen(activeName);
     state.guide = { active: null, step: 0, steps: [], rect: null, card: null, arrow: null };
-    renderMainApp();
+    syncGuideOverlay();
   }
 
   function startGuide(name, steps) {
     if (!Array.isArray(steps) || !steps.length) return;
     if (state.guide.active) return;
     state.guide = { active: name, step: 0, steps, rect: null, card: null, arrow: null };
-    renderMainApp();
+    syncGuideOverlay();
   }
 
   function availableGuideSteps(name) {
@@ -2002,7 +2003,9 @@
   }
 
   function maybeStartGuide(name) {
-    if (state.guide.active || hasSeenGuide(name)) return;
+    if (hasOpenModal()) return;
+    if (state.guide.active) { syncGuideOverlay(); return; }
+    if (hasSeenGuide(name)) return;
     const steps = availableGuideSteps(name);
     if (!steps.length) return;
     startGuide(name, steps);
@@ -2014,7 +2017,7 @@
       haptic();
       if (state.guide.step <= 0) return;
       state.guide.step -= 1;
-      renderMainApp();
+      syncGuideOverlay();
     });
     document.querySelector('[data-guide-next]')?.addEventListener('click', () => {
       haptic();
@@ -2024,7 +2027,7 @@
         return;
       }
       state.guide.step += 1;
-      renderMainApp();
+      syncGuideOverlay();
     });
   }
 
@@ -2474,8 +2477,8 @@
     if (!showProfileDot && dot) dot.remove();
   }
 
-  function syncModalScrollLock() {
-    const locked = Boolean(
+  function hasOpenModal() {
+    return Boolean(
       state.catalog?.detail ||
       state.bodyMapSheet ||
       state.catalog?.addToComplexModal?.open ||
@@ -2493,7 +2496,18 @@
       state.nutrientAssistant?.pendingOverwriteRuns?.length ||
       state.nutrientAssistant?.blocked
     );
-    appEl?.classList?.toggle('modal-scroll-lock', locked);
+  }
+
+  function syncModalScrollLock() {
+    appEl?.classList?.toggle('modal-scroll-lock', hasOpenModal());
+    syncGuideOverlay();
+  }
+
+  function syncGuideOverlay() {
+    const root = document.getElementById('guideRoot');
+    if (!root) return;
+    root.innerHTML = renderGuideOverlay();
+    bindGuideEvents();
   }
 
   function renderGlobalModals() {
@@ -2532,7 +2546,7 @@
       ${renderTabs(false)}
       ${renderUnlockToastCard()}
       ${renderPaymentSuccessModal()}
-      ${renderGuideOverlay()}
+      <div id="guideRoot"></div>
       <div id="globalModalRoot">${renderGlobalModals()}</div>
     `;
 
@@ -4650,7 +4664,27 @@ function adminField(label, field, value, kind='input') {
   async function loadProfileShell(force) {
     await Promise.all([loadBodyMap(force),loadStatsOnly().catch(()=>null),loadAchievements(force).catch(()=>null),loadProfileData(force),loadProfileLabs(force),loadNutrientPlans(force).catch(()=>null)]);
   }
-  async function loadProfileData(force) { if (state.profile.loading && !force) return; state.profile.loading = true; try { const res = await api('./api/profile'); state.profile.data = res.profile || {}; } catch {} state.profile.loading = false; }
+  let profileLoadPromise = null;
+  let profileDataVersion = 0;
+  async function loadProfileData(force) {
+    if (profileLoadPromise) return profileLoadPromise;
+    if (state.profile.data && !force) return state.profile.data;
+    const version = profileDataVersion;
+    state.profile.loading = true;
+    profileLoadPromise = (async () => {
+      try {
+        const res = await api('./api/profile');
+        if (version === profileDataVersion) state.profile.data = res.profile || {};
+      } catch { /* Preserve the saved snapshot when refreshing fails. */ }
+      finally { state.profile.loading = false; }
+      return state.profile.data;
+    })();
+    try { return await profileLoadPromise; }
+    finally {
+      profileLoadPromise = null;
+      if (state.activeTab === 'profile' && !state.profileUi.editOpen) renderActiveTab();
+    }
+  }
   async function loadProfileLabs(force) { if (state.profileLabs.loading && !force) return; state.profileLabs.loading = true; try { const res = await api('./api/profile/labs'); state.profileLabs.reports = Array.isArray(res.reports) ? res.reports : []; } catch {} state.profileLabs.loading = false; }
   async function loadProfileNutrients(force) { return; }
   async function loadNutrientOverview(force) { return; }
@@ -4828,7 +4862,7 @@ function adminField(label, field, value, kind='input') {
 
   function renderProfileEditorModal() {
     if (!state.profileUi.editOpen) return '';
-    const p=state.profile.data||{};
+    const p=state.profileUi.editDraft || state.profile.data || {};
     const isMale = String(p.sex_at_birth || '').toLowerCase() === 'm';
     return `<div class="modal-overlay" data-close-edit><section class="card modal-card" onclick="event.stopPropagation()"><div class="row"><strong>Редактирование профиля</strong><button class="btn secondary" data-close-edit>Закрыть</button></div>
       <div class="field-grid" style="margin-top:8px">
@@ -5318,7 +5352,26 @@ function adminField(label, field, value, kind='input') {
     return `${renderProfileModulesGrid()}${moduleHtml}${renderProfileEditorModal()}${renderLabsModal('manual')}${renderLabsModal('upload')}${renderReviewModal()}${renderMyNutrientsModal()}`;
   }
 
-  function collectLabRows(containerId){ const rows=[]; document.querySelectorAll(`#${containerId} [data-lab-row]`).forEach((rowEl)=>{ const idx=rowEl.dataset.labRow; const analyte_code=document.querySelector(`[data-lab-field="analyte_code"][data-idx="${idx}"]`)?.value||''; const preset=ANALYTE_PRESETS.find((x)=>x.code===analyte_code); const value=document.querySelector(`[data-lab-field="value_num"][data-idx="${idx}"]`)?.value||''; rows.push({ analyte_code, analyte_name:preset?.title||analyte_code, value_text:String(value), value_num:Number(String(value).replace(',','.'))||null, unit:document.querySelector(`[data-lab-field="unit"][data-idx="${idx}"]`)?.value||'', ref_low:Number(document.querySelector(`[data-lab-field="ref_low"][data-idx="${idx}"]`)?.value||'')||null, ref_high:Number(document.querySelector(`[data-lab-field="ref_high"][data-idx="${idx}"]`)?.value||'')||null }); }); return rows.filter((x)=>x.analyte_code); }
+  function collectLabRows(containerId) {
+    const rows = [];
+    document.querySelectorAll(`#${containerId} [data-lab-row]`).forEach((rowEl) => {
+      const value = key => rowEl.querySelector(`[data-lab-field="${key}"]`)?.value || '';
+      const number = key => {
+        const raw = value(key).trim();
+        if (!raw) return null;
+        const parsed = Number(raw.replace(',', '.'));
+        if (!Number.isFinite(parsed)) throw new Error('Проверьте числовые значения анализа');
+        return parsed;
+      };
+      const analyte_code = value('analyte_code');
+      if (!analyte_code) return;
+      const preset = ANALYTE_PRESETS.find(x => x.code === analyte_code);
+      rows.push({ analyte_code, analyte_name:preset?.title || analyte_code,
+        value_text:value('value_num'), value_num:number('value_num'), unit:value('unit'),
+        ref_low:number('ref_low'), ref_high:number('ref_high') });
+    });
+    return rows;
+  }
   function collectAssistantLabs(){
     syncExpandedAssistantLabRow();
     return normalizeAssistantLabs(state.nutrientAssistant.manualLabs || []).filter((item)=>String(item.analyte_code || '').trim()).map((item)=>({
@@ -5384,8 +5437,19 @@ function adminField(label, field, value, kind='input') {
         renderActiveTab();
       }
     }));
-    document.querySelectorAll('[data-open-edit]').forEach((el)=>el.addEventListener('click', ()=>{ state.profileUi.editOpen=true; renderActiveTab(); }));
-    document.querySelectorAll('[data-close-edit]').forEach((el)=>el.addEventListener('click', ()=>{ state.profileUi.editOpen=false; renderActiveTab(); }));
+    document.querySelectorAll('[data-open-edit]').forEach((el) => { el.onclick = async () => {
+      if (state.profileUi.openingEditor) return;
+      state.profileUi.openingEditor = true;
+      try {
+        const profile = await loadProfileData(true);
+        if (!profile) return showToast('Не удалось загрузить профиль. Попробуйте ещё раз.');
+        if (state.activeTab !== 'profile') return;
+        state.profileUi.editDraft = { ...profile };
+        state.profileUi.editOpen = true;
+        renderActiveTab();
+      } finally { state.profileUi.openingEditor = false; }
+    }; });
+    document.querySelectorAll('[data-close-edit]').forEach((el)=>el.addEventListener('click', ()=>{ state.profileUi.editOpen=false; state.profileUi.editDraft=null; renderActiveTab(); }));
     document.querySelectorAll('[data-open-manual]').forEach((el)=>el.addEventListener('click', ()=>{ state.profileUi.manualOpen=true; renderActiveTab(); }));
     document.querySelectorAll('[data-close-manual]').forEach((el)=>el.addEventListener('click', ()=>{ state.profileUi.manualOpen=false; renderActiveTab(); }));
     document.querySelectorAll('[data-open-upload]').forEach((el)=>el.addEventListener('click', ()=>{ state.profileUi.uploadOpen=true; renderActiveTab(); }));
@@ -5659,14 +5723,28 @@ function adminField(label, field, value, kind='input') {
       renderActiveTab();
     });
 
-    document.querySelector('[data-profile-field="sex_at_birth"]')?.addEventListener('change', (e) => {
-      const sex = String(e.target?.value || '').toLowerCase();
-      if (sex === 'm') {
-        state.profile.data = normalizeProfileSexDependentFields({ ...(state.profile.data || {}), sex_at_birth: 'm' });
-      } else {
-        state.profile.data = { ...(state.profile.data || {}), sex_at_birth: e.target?.value || '' };
-      }
-      renderActiveTab();
+    document.querySelectorAll('[data-profile-field], [data-profile-lines]').forEach((el) => {
+      const saveDraft = () => {
+        const key = el.dataset.profileField || el.dataset.profileLines;
+        state.profileUi.editDraft = { ...(state.profileUi.editDraft || state.profile.data || {}),
+          [key]: el.dataset.profileLines ? parseLinesToJson(el.value) : el.value };
+      };
+      el.oninput = saveDraft;
+      el.onchange = () => {
+        saveDraft();
+        if (el.dataset.profileField === 'sex_at_birth') {
+          state.profileUi.editDraft = normalizeProfileSexDependentFields(state.profileUi.editDraft);
+          // Update only dependent controls so the editor does not jump.
+          const isMale = el.value === 'm';
+          ['pregnancy_status', 'lactation_status'].forEach((key) => {
+            const field = document.querySelector(`[data-profile-field="${key}"]`);
+            if (!field) return;
+            field.disabled = isMale;
+            field.value = state.profileUi.editDraft[key] || '';
+            field.closest('label').style.opacity = isMale ? '.65' : '';
+          });
+        }
+      };
     });
 
     document.querySelector('[data-profile-save]')?.addEventListener('click', async () => {
@@ -5677,11 +5755,17 @@ function adminField(label, field, value, kind='input') {
       payload = normalizeProfileSexDependentFields(payload);
       document.querySelectorAll('[data-profile-lines]').forEach((el)=>payload[el.dataset.profileLines]=parseLinesToJson(el.value));
       try {
+        ['birth_year','height_cm','weight_kg','training_sessions_per_week','training_minutes_per_week','work_hours_per_week'].forEach((key) => {
+          payload[key] = String(payload[key] ?? '').trim() ? Number(String(payload[key]).replace(',', '.')) : null;
+          if (payload[key] !== null && !Number.isFinite(payload[key])) throw new Error('Проверьте числовые поля');
+        });
         const by = Number(payload.birth_year||0); if (by && (by<1900 || by>new Date().getFullYear()-10)) throw new Error('Год рождения вне диапазона');
         const h = Number(payload.height_cm||0); if (h && (h<100 || h>250)) throw new Error('Рост должен быть в диапазоне 100–250 см');
         const w = Number(payload.weight_kg||0); if (w && (w<30 || w>300)) throw new Error('Вес должен быть в диапазоне 30–300 кг');
         const res = await api('./api/profile', { method:'POST', body: payload });
+        profileDataVersion++;
         state.profile.data = res.profile || payload;
+        state.profileUi.editDraft = null;
         state.profileUi.editOpen = false;
         showToast('Профиль сохранён');
       } catch (e) { showToast(e.message || 'Ошибка сохранения профиля'); }

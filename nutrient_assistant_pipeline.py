@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json
+import math
 import logging
 import re
 from datetime import datetime, timedelta, timezone
@@ -110,14 +111,12 @@ def _canonical_analyte_code(raw_code: str) -> str:
 
 
 def _safe_float(value: str | float | int | None) -> float | None:
-    if value is None:
-        return None
-    txt = str(value).strip().replace(",", ".")
-    if not txt:
+    if value is None or isinstance(value, bool):
         return None
     try:
-        return float(txt)
-    except ValueError:
+        number = float(str(value).strip().replace(",", "."))
+        return number if math.isfinite(number) else None
+    except (ValueError, TypeError, OverflowError):
         return None
 
 
@@ -460,9 +459,10 @@ def _parse_json_list_field(raw: str | None, *, max_items: int = 8, max_len: int 
 
 def _to_iso_date(raw: str | None) -> str:
     txt = str(raw or "").strip()
-    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", txt):
-        return txt
-    return ""
+    try:
+        return datetime.strptime(txt, "%Y-%m-%d").date().isoformat() if re.fullmatch(r"\d{4}-\d{2}-\d{2}", txt) else ""
+    except ValueError:
+        return ""
 
 
 def _compact_labs_for_llm(
@@ -552,6 +552,13 @@ def _normalize_assistant_lab_item(item: dict, sex_key: str = "any") -> dict:
         ref_low = registry_ref_low
         ref_high = registry_ref_high
         ref_source = "registry"
+    invalid_reference = any(
+        item.get(key) is not None and str(item.get(key)).strip() and _safe_float(item.get(key)) is None
+        for key in ("ref_low", "ref_high")
+    ) or (ref_low is not None and ref_high is not None and ref_low > ref_high)
+    if invalid_reference:
+        ref_low = ref_high = None
+        ref_source = "unknown"
     reference_known = ref_low is not None or ref_high is not None
     below_ref = bool(value_num is not None and ref_low is not None and value_num < ref_low)
     above_ref = bool(value_num is not None and ref_high is not None and value_num > ref_high)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 import asyncio
+import traceback
 import calendar
 import html
 import json
@@ -919,8 +920,15 @@ async def _safe_answer_callback(update: Update) -> None:
 
 async def _download_voice_bytes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> tuple[bytes, str]:
     voice = update.message.voice
+    if ((voice.duration and voice.duration > CHECKIN_VOICE_MAX_SECONDS)
+            or (voice.file_size and voice.file_size > CHECKIN_VOICE_MAX_BYTES)):
+        raise ValueError("voice_too_large")
     file = await context.bot.get_file(voice.file_id)
+    if file.file_size and file.file_size > CHECKIN_VOICE_MAX_BYTES:
+        raise ValueError("voice_too_large")
     data = await file.download_as_bytearray()
+    if len(data) > CHECKIN_VOICE_MAX_BYTES:
+        raise ValueError("voice_too_large")
     filename = f"voice_{update.message.message_id}.ogg"
     return bytes(data), filename
 
@@ -7451,7 +7459,7 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await show(
                 update,
                 context,
-                "Слишком длинно. Запиши до 60 секунд, пожалуйста.",
+                f"Слишком длинно. Запиши до {CHECKIN_VOICE_MAX_SECONDS} секунд, пожалуйста.",
                 ai_checkin_voice_kb(),
                 route=AI_CHECKIN_VOICE_ROUTE,
                 payload=payload_data or _ai_checkin_voice_payload(),
@@ -7609,6 +7617,11 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     waiting = context.user_data.get(WAITING_KEY)
     if waiting != "initial_pick_goal":
+        return
+    voice = update.message.voice
+    if ((voice.duration and voice.duration > CHECKIN_VOICE_MAX_SECONDS)
+            or (voice.file_size and voice.file_size > CHECKIN_VOICE_MAX_BYTES)):
+        await show(update, context, f"Слишком длинно. Запиши до {CHECKIN_VOICE_MAX_SECONDS} секунд, пожалуйста.", back(), route="onboard:goal")
         return
 
     try:
@@ -8026,7 +8039,11 @@ async def purge_me_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    log.exception("Unhandled error while processing update: %s", update, exc_info=context.error)
+    error = context.error
+    frames = traceback.extract_tb(error.__traceback__) if isinstance(error, BaseException) else []
+    trace = " > ".join(f"{Path(frame.filename).name}:{frame.lineno}:{frame.name}" for frame in frames)
+    log.error("Unhandled update error update_id=%s type=%s trace=%s",
+              getattr(update, "update_id", None), type(error).__name__, trace)
 
 async def _supplements_count(db_path: str) -> int:
     conn = await db.connect(db_path)

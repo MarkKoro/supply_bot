@@ -6,6 +6,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 import json
+import math
 import time
 import re
 import sqlite3
@@ -8680,14 +8681,19 @@ async def get_user_metrics(conn: aiosqlite.Connection, tg_user_id: int, local_da
     metrics["checkin_streak_days"] = streak
 
     stack_ids = await get_user_stack_supplement_ids(conn, tg_user_id)
-    metrics["stack_size"] = len(stack_ids)
-    row = await fetchone(conn, "SELECT COUNT(*) AS c FROM user_complexes WHERE user_id=?", (user_id,))
+    split_rows = await fetchall(conn, "SELECT supplement_id,base_supplement_id FROM user_supplement_split_groups WHERE user_id=?", (user_id,))
+    bases = {int(row["supplement_id"]): int(row["base_supplement_id"]) for row in split_rows}
+    unique_stack_ids = {bases.get(sid, sid) for sid in stack_ids}
+    metrics["stack_size"] = len(unique_stack_ids)
+    row = await fetchone(conn, "SELECT COUNT(*) AS c FROM (SELECT c.id FROM user_complexes c JOIN user_complex_items ci ON ci.complex_id=c.id WHERE c.user_id=? GROUP BY c.id HAVING COUNT(DISTINCT ci.supplement_id)>=2)", (user_id,))
     metrics["complex_count"] = int((row["c"] if row else 0) or 0)
 
     row = await fetchone(conn, "SELECT COUNT(*) AS c FROM user_supplements WHERE user_id=? AND is_active=1 AND enabled=0", (user_id,))
     metrics["frozen_count"] = int((row["c"] if row else 0) or 0)
 
-    row = await fetchone(conn, "SELECT COUNT(*) AS c FROM user_supp_settings WHERE user_id=? AND reminder_enabled=1", (user_id,))
+    row = await fetchone(conn, """SELECT COUNT(DISTINCT COALESCE(sg.base_supplement_id,r.supplement_id)) AS c FROM reminders r
+        LEFT JOIN user_supplement_split_groups sg ON sg.user_id=? AND sg.supplement_id=r.supplement_id
+        WHERE r.user_id=? AND r.enabled=1""", (user_id,tg_user_id))
     metrics["reminders_enabled_count"] = int((row["c"] if row else 0) or 0)
 
     rows = await fetchall(conn, "SELECT slot_id, time_local FROM user_schedule_slots WHERE user_id=?", (user_id,))
@@ -8713,9 +8719,9 @@ async def get_user_metrics(conn: aiosqlite.Connection, tg_user_id: int, local_da
     burden_strength_sum_core = 0
     evidence_ab_count = 0
 
-    if stack_ids:
-        placeholders = ",".join("?" for _ in stack_ids)
-        supp_rows = await fetchall(conn, f"SELECT id, evidence_grade, body_effects_json FROM supplements WHERE id IN ({placeholders})", tuple(sorted(stack_ids)))
+    if unique_stack_ids:
+        placeholders = ",".join("?" for _ in unique_stack_ids)
+        supp_rows = await fetchall(conn, f"SELECT id, evidence_grade, body_effects_json FROM supplements WHERE id IN ({placeholders})", tuple(sorted(unique_stack_ids)))
         for r in supp_rows:
             if str(r["evidence_grade"] or "").strip().upper() in {"A", "B"}:
                 evidence_ab_count += 1
@@ -8725,6 +8731,7 @@ async def get_user_metrics(conn: aiosqlite.Connection, tg_user_id: int, local_da
                     effects = []
             except Exception:
                 effects = []
+            unique_effects = {}
             for effect in effects:
                 if not isinstance(effect, dict):
                     continue
@@ -8738,6 +8745,9 @@ async def get_user_metrics(conn: aiosqlite.Connection, tg_user_id: int, local_da
                     strength = 0
                 if strength < 0:
                     strength = 0
+                key = (system_key, direction)
+                unique_effects[key] = max(unique_effects.get(key, 0), strength)
+            for (system_key, direction), strength in unique_effects.items():
                 if direction in {"benefit", "mixed"}:
                     benefit_count_by_system[system_key] += 1
                     benefit_strength_sum_all += strength
@@ -8772,7 +8782,7 @@ async def get_user_metrics(conn: aiosqlite.Connection, tg_user_id: int, local_da
     row = await fetchone(conn, "SELECT 1 AS x FROM supplement_day_state WHERE user_id=? AND status='taken' LIMIT 1", (user_id,))
     metrics["has_any_taken"] = 1 if row else 0
 
-    complex_taken_days_7 = 0
+    complex_days: dict[int, int] = {}
     day_cursor = date.fromisoformat(local_date)
     for _ in range(7):
         day_value = day_cursor.isoformat()
@@ -8783,17 +8793,18 @@ async def get_user_metrics(conn: aiosqlite.Connection, tg_user_id: int, local_da
                       SUM(CASE WHEN sds.status='taken' THEN 1 ELSE 0 END) AS taken_cnt
                FROM user_complexes c
                JOIN user_complex_items ci ON ci.complex_id=c.id
-               LEFT JOIN users u ON u.id=c.user_id
                LEFT JOIN supplement_day_state sds
-                 ON sds.user_id=u.tg_user_id AND sds.day=? AND sds.supplement_id=ci.supplement_id
+                 ON sds.user_id=c.user_id AND sds.day=? AND sds.supplement_id=ci.supplement_id
                WHERE c.user_id=?
                GROUP BY c.id""",
             (day_value, user_id),
         )
-        if any(int(r["total_cnt"] or 0) > 0 and int(r["taken_cnt"] or 0) >= int(r["total_cnt"] or 0) for r in rows):
-            complex_taken_days_7 += 1
+        for r in rows:
+            if int(r["total_cnt"] or 0) >= 2 and int(r["taken_cnt"] or 0) >= int(r["total_cnt"] or 0):
+                complex_id = int(r["id"])
+                complex_days[complex_id] = complex_days.get(complex_id, 0) + 1
         day_cursor -= timedelta(days=1)
-    metrics["complex_taken_days_7"] = int(complex_taken_days_7)
+    metrics["complex_taken_days_7"] = max(complex_days.values(), default=0)
 
     streaks = await get_streaks(conn, tg_user_id, local_date, stack_ids, max_back=90)
     metrics["max_single_supp_streak"] = max([int(item.get("streak_days") or 0) for item in streaks], default=0)
@@ -9905,6 +9916,70 @@ PROFILE_FIELDS = [
 ]
 
 
+def validate_health_profile(payload: dict) -> dict:
+    clean = dict(payload)
+    ranges = {"birth_year": (1900,datetime.now(timezone.utc).year-10), "height_cm": (100,250),
+              "weight_kg": (30,300), "training_sessions_per_week": (0,168),
+              "training_minutes_per_week": (0,10080), "work_hours_per_week": (0,168)}
+    for field, (minimum, maximum) in ranges.items():
+        if field not in clean:
+            continue
+        raw = clean[field]
+        if raw is None or str(raw).strip() == "":
+            clean[field] = None
+            continue
+        try:
+            value = float(str(raw).strip().replace(",", "."))
+        except (TypeError,ValueError,OverflowError):
+            raise ValueError(f"{field}: введите число") from None
+        if isinstance(raw, bool) or not math.isfinite(value) or not minimum <= value <= maximum:
+            raise ValueError(f"{field}: допустимый диапазон {minimum}–{maximum}")
+        if field not in {"height_cm","weight_kg"}:
+            if not value.is_integer():
+                raise ValueError(f"{field}: требуется целое число")
+            value = int(value)
+        clean[field] = value
+    return clean
+
+
+def validate_lab_date(raw) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    try:
+        parsed = date.fromisoformat(text)
+        if parsed > datetime.now(timezone.utc).date() + timedelta(days=1):
+            raise ValueError("future date")
+    except ValueError:
+        raise ValueError("Укажите корректную дату анализа в формате ГГГГ-ММ-ДД") from None
+    return parsed.isoformat()
+
+
+def validate_lab_result(item: dict) -> dict:
+    if not isinstance(item, dict):
+        raise ValueError("Некорректная запись анализа")
+    clean = dict(item)
+    for key in ("value_num","ref_low","ref_high","value","value_text"):
+        if key not in clean:
+            continue
+        raw = clean[key]
+        if raw is None or str(raw).strip() == "":
+            if key in {"value_num","ref_low","ref_high"}:clean[key] = None
+            continue
+        try:
+            value = float(str(raw).strip().replace(",", "."))
+        except (ValueError,TypeError,OverflowError):
+            if key in {"value","value_text"}:continue
+            raise ValueError(f"{key}: введите число") from None
+        if isinstance(raw, bool) or not math.isfinite(value):
+            raise ValueError(f"{key}: некорректное число")
+        if key in {"value_num","ref_low","ref_high"}:clean[key] = value
+    if clean.get("ref_low") is not None and clean.get("ref_high") is not None and clean["ref_low"] > clean["ref_high"]:
+        raise ValueError("Нижняя граница референса должна быть не больше верхней")
+    if "measured_at" in clean:clean["measured_at"] = validate_lab_date(clean["measured_at"])
+    return clean
+
+
 async def get_user_health_profile(conn: aiosqlite.Connection, tg_user_id: int) -> dict:
     user_id = await get_or_create_user(conn, int(tg_user_id))
     row = await fetchone(conn, "SELECT * FROM user_health_profile WHERE user_id=?", (user_id,))
@@ -9922,9 +9997,11 @@ async def get_user_health_profile(conn: aiosqlite.Connection, tg_user_id: int) -
 
 
 async def upsert_user_health_profile(conn: aiosqlite.Connection, tg_user_id: int, payload: dict) -> dict:
+    payload = validate_health_profile(payload)
+    existing = await get_user_health_profile(conn, tg_user_id)
     user_id = await get_or_create_user(conn, int(tg_user_id))
     now = utc_now_iso()
-    clean = {k: payload.get(k) for k in PROFILE_FIELDS}
+    clean = {k: payload[k] if k in payload else existing.get(k) for k in PROFILE_FIELDS}
     await conn.execute(
         """INSERT INTO user_health_profile(
             user_id, sex_at_birth, birth_year, height_cm, weight_kg, country_code, city,
@@ -9989,7 +10066,10 @@ async def create_lab_report(conn: aiosqlite.Connection, tg_user_id: int, report:
 
 
 async def add_lab_results_batch(conn: aiosqlite.Connection, tg_user_id: int, report_id: int, results: list[dict]) -> int:
+    results = [validate_lab_result(item) for item in list(results or [])]
     user_id = await get_or_create_user(conn, int(tg_user_id))
+    if not await fetchone(conn,"SELECT id FROM lab_reports WHERE id=? AND user_id=?",(int(report_id),user_id)):
+        raise ValueError("lab_report_not_found")
     now = utc_now_iso()
     count = 0
     for item in list(results or []):
@@ -10051,9 +10131,11 @@ async def get_lab_report_by_id(conn: aiosqlite.Connection, tg_user_id: int, repo
 
 
 async def replace_lab_results(conn: aiosqlite.Connection, tg_user_id: int, report_id: int, results: list[dict]) -> int:
-    user_id = await get_or_create_user(conn, int(tg_user_id))
-    await conn.execute("DELETE FROM lab_results WHERE user_id=? AND report_id=?", (user_id, int(report_id)))
-    return await add_lab_results_batch(conn, tg_user_id, int(report_id), results)
+    results = [validate_lab_result(item) for item in list(results or [])]
+    async with transaction(conn) as conn:
+        user_id = await get_or_create_user(conn, int(tg_user_id))
+        await conn.execute("DELETE FROM lab_results WHERE user_id=? AND report_id=?", (user_id, int(report_id)))
+        return await add_lab_results_batch(conn, tg_user_id, int(report_id), results)
 
 
 async def update_lab_report_meta(conn: aiosqlite.Connection, tg_user_id: int, report_id: int, payload: dict) -> dict | None:

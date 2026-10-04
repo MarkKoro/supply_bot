@@ -1,5 +1,6 @@
 import hashlib
 import json
+import math
 import logging
 import re
 import uuid
@@ -13,7 +14,7 @@ from fastapi import Body, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.exception_handlers import http_exception_handler as fastapi_http_exception_handler
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 from telegram_webapp_auth import verify_init_data
 import db
@@ -217,6 +218,11 @@ class SlotEnabledBody(BaseModel):
 
 
 class ProfileUpsertBody(BaseModel):
+    @model_validator(mode="before")
+    @classmethod
+    def validate_values(cls, values):
+        return db.validate_health_profile(values) if isinstance(values, dict) else values
+
     sex_at_birth: str | None = ""
     birth_year: int | None = None
     height_cm: float | None = None
@@ -237,6 +243,15 @@ class ProfileUpsertBody(BaseModel):
 
 
 class LabsCreateBody(BaseModel):
+    @model_validator(mode="before")
+    @classmethod
+    def validate_values(cls, values):
+        if not isinstance(values, dict):return values
+        clean = dict(values)
+        clean["results"] = [db.validate_lab_result(item) for item in (clean.get("results") or [])]
+        if "report_date" in clean:clean["report_date"] = db.validate_lab_date(clean["report_date"])
+        return clean
+
     source: str = "manual"
     lab_name: str | None = ""
     report_date: str | None = ""
@@ -245,6 +260,15 @@ class LabsCreateBody(BaseModel):
 
 
 class LabReportUpdateBody(BaseModel):
+    @model_validator(mode="before")
+    @classmethod
+    def validate_values(cls, values):
+        if not isinstance(values, dict):return values
+        clean = dict(values)
+        clean["results"] = [db.validate_lab_result(item) for item in (clean.get("results") or [])]
+        if "report_date" in clean:clean["report_date"] = db.validate_lab_date(clean["report_date"])
+        return clean
+
     lab_name: str | None = ""
     report_date: str | None = ""
     notes: str | None = ""
@@ -254,6 +278,15 @@ class LabReportUpdateBody(BaseModel):
 
 
 class NutrientAssistantComputeBody(BaseModel):
+    @model_validator(mode="before")
+    @classmethod
+    def validate_values(cls, values):
+        if not isinstance(values, dict):return values
+        clean = dict(values)
+        clean["labs"] = [db.validate_lab_result(item) for item in (clean.get("labs") or [])]
+        if "report_date" in clean:clean["report_date"] = db.validate_lab_date(clean["report_date"])
+        return clean
+
     assistant_profile: dict = {}
     labs: list[dict] = []
     assistant_context: dict = {}
@@ -265,6 +298,15 @@ class NutrientAssistantApplyBody(BaseModel):
 
 
 class NutrientAssistantDraftBody(BaseModel):
+    @model_validator(mode="before")
+    @classmethod
+    def validate_values(cls, values):
+        if not isinstance(values, dict):return values
+        clean = dict(values)
+        clean["labs"] = [db.validate_lab_result(item) for item in (clean.get("labs") or [])]
+        if "report_date" in clean:clean["report_date"] = db.validate_lab_date(clean["report_date"])
+        return clean
+
     assistant_profile: dict = {}
     labs: list[dict] = []
     compute_scope: dict = {}
@@ -328,14 +370,12 @@ def _normalize_analyte_code(value: str) -> str:
 
 
 def _safe_float(value: str | float | int | None) -> float | None:
-    if value is None:
-        return None
-    txt = str(value).strip().replace(",", ".")
-    if not txt:
+    if value is None or isinstance(value, bool):
         return None
     try:
-        return float(txt)
-    except ValueError:
+        number = float(str(value).strip().replace(",", "."))
+        return number if math.isfinite(number) else None
+    except (ValueError, TypeError, OverflowError):
         return None
 
 
@@ -1753,10 +1793,11 @@ async def api_profile_post(body: ProfileUpsertBody, x_telegram_init_data: str = 
         return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
     conn = await db.connect(s.DB_PATH)
     try:
-        profile = await db.upsert_user_health_profile(conn, tg_user_id, body.model_dump())
-        await db.mark_all_active_plans_stale(conn, tg_user_id, "profile:updated")
-        await conn.commit()
-        return JSONResponse({"ok": True, "profile": profile})
+        async with db.transaction(conn) as conn:
+            profile = await db.upsert_user_health_profile(conn, tg_user_id, body.model_dump(exclude_unset=True))
+            await db.mark_all_active_plans_stale(conn, tg_user_id, "profile:updated")
+            await conn.commit()
+            return JSONResponse({"ok": True, "profile": profile})
     finally:
         await conn.close()
 
@@ -1786,14 +1827,15 @@ async def api_profile_labs_post(body: LabsCreateBody, x_telegram_init_data: str 
         raise HTTPException(status_code=400, detail="Unsupported source")
     conn = await db.connect(s.DB_PATH)
     try:
-        payload = body.model_dump()
-        payload["parse_status"] = "manual" if source == "manual" else "needs_manual_review"
-        report_id = await db.create_lab_report(conn, tg_user_id, payload)
-        inserted = await db.add_lab_results_batch(conn, tg_user_id, report_id, body.results)
-        await db.mark_all_active_plans_stale(conn, tg_user_id, "lab:updated")
-        report = await db.get_lab_report_by_id(conn, tg_user_id, report_id)
-        await conn.commit()
-        return JSONResponse({"ok": True, "report_id": report_id, "inserted_results": inserted, "report": report})
+        async with db.transaction(conn) as conn:
+            payload = body.model_dump()
+            payload["parse_status"] = "manual" if source == "manual" else "needs_manual_review"
+            report_id = await db.create_lab_report(conn, tg_user_id, payload)
+            inserted = await db.add_lab_results_batch(conn, tg_user_id, report_id, body.results)
+            await db.mark_all_active_plans_stale(conn, tg_user_id, "lab:updated")
+            report = await db.get_lab_report_by_id(conn, tg_user_id, report_id)
+            await conn.commit()
+            return JSONResponse({"ok": True, "report_id": report_id, "inserted_results": inserted, "report": report})
     finally:
         await conn.close()
 
@@ -1821,14 +1863,15 @@ async def api_profile_labs_report_put(report_id: int, body: LabReportUpdateBody,
         return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
     conn = await db.connect(s.DB_PATH)
     try:
-        report = await db.update_lab_report_meta(conn, tg_user_id, int(report_id), body.model_dump())
-        if not report:
-            raise HTTPException(status_code=404, detail="Report not found")
-        inserted = await db.replace_lab_results(conn, tg_user_id, int(report_id), body.results)
-        await db.mark_all_active_plans_stale(conn, tg_user_id, "lab:updated")
-        report["results"] = await db.get_lab_results_by_report_id(conn, tg_user_id, int(report_id))
-        await conn.commit()
-        return JSONResponse({"ok": True, "report": report, "inserted_results": inserted})
+        async with db.transaction(conn) as conn:
+            report = await db.update_lab_report_meta(conn, tg_user_id, int(report_id), body.model_dump())
+            if not report:
+                raise HTTPException(status_code=404, detail="Report not found")
+            inserted = await db.replace_lab_results(conn, tg_user_id, int(report_id), body.results)
+            await db.mark_all_active_plans_stale(conn, tg_user_id, "lab:updated")
+            report["results"] = await db.get_lab_results_by_report_id(conn, tg_user_id, int(report_id))
+            await conn.commit()
+            return JSONResponse({"ok": True, "report": report, "inserted_results": inserted})
     finally:
         await conn.close()
 
@@ -2113,9 +2156,9 @@ async def api_profile_nutrient_coverage_report(x_telegram_init_data: str = Heade
         )
         db_rows = await db.fetchall(conn, "SELECT slug FROM supplements")
         supplement_slugs = {
-            str(x.get("slug") or "").strip().lower()
+            str(x["slug"] or "").strip().lower()
             for x in db_rows
-            if str(x.get("slug") or "").strip()
+            if str(x["slug"] or "").strip()
         }
         missing_supplement_slugs = sorted([code for code in mapped_codes if code not in supplement_slugs])
     finally:
@@ -2830,6 +2873,10 @@ async def api_my_supplements_split(
     conn = await db.connect(s.DB_PATH)
     try:
         created = await db.split_user_supplement_intake(conn, tg_user_id, int(body.supplement_id))
+    except ValueError as exc:
+        if str(exc) == "supplement_not_found":
+            return JSONResponse({"ok": False, "code": "SUPPLEMENT_NOT_FOUND", "message": "Приём недоступен. Обновите список."}, status_code=404)
+        raise
     finally:
         await conn.close()
     return JSONResponse({"ok": True, "created": created})

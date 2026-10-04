@@ -3763,10 +3763,27 @@ async def _interaction_reference_index(conn: aiosqlite.Connection, sid: int) -> 
                 canonical.setdefault(key, set()).add(int(row["id"]))
         values.extend(_parse_aliases_list(row["aliases_json"]))
         values.extend(_parse_aliases_list(row["aliases"]))
+        # An explicit short name in the card title outranks a broad alias on
+        # another card (e.g. Alpha-GPC versus the general choline card).
+        own_aliases = {normalize(value) for value in values}
+        for title in (row["name_ru"], row["name_en"]):
+            for short_name in re.findall(r"\(([^()]*)\)", str(title or "")):
+                if (re.fullmatch(r"[\w-]{2,30}", short_name)
+                        and re.search(r"[A-ZА-Я]{2}", short_name)
+                        and normalize(short_name) in own_aliases):
+                    canonical.setdefault(normalize(short_name), set()).add(int(row["id"]))
         for value in values:
             key = normalize(value)
             if key:
                 aliases.setdefault(key, set()).add(int(row["id"]))
+    # Historical/reference slugs whose catalog coverage was verified from the
+    # original names. Actual cards with those slugs always retain priority.
+    for old_slug, current_slug in {
+        "omega_3_fish_oil": "omega_3_fatty_acids",
+        "nitrate_beetroot": "nitrate_beetroot_extract",
+    }.items():
+        if old_slug not in by_slug and current_slug in by_slug:
+            aliases.setdefault(normalize(old_slug), set()).add(by_slug[current_slug])
     # Admin-added aliases can live only in the normalized alias table.
     for alias in await fetchall(conn, "SELECT supplement_id, alias_norm FROM supplement_aliases"):
         sid = int(alias["supplement_id"])

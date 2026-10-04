@@ -74,6 +74,7 @@ class VerifyBody(BaseModel):
 class TodayToggleBody(BaseModel):
     supplement_id: int
     status: str
+    day: str | None = None
 
 
 class SlotTimeBody(BaseModel):
@@ -159,6 +160,7 @@ class CheckinApplyBody(BaseModel):
 class TodayToggleComplexBody(BaseModel):
     complex_id: int
     status: str
+    day: str | None = None
 
 
 class ComplexCreateBody(BaseModel):
@@ -1568,6 +1570,10 @@ async def api_today_toggle(body: TodayToggleBody, x_telegram_init_data: str = He
     try:
         tz_name = await db.get_user_tz(conn, tg_user_id)
         day = db.get_user_local_date(tz_name or None)
+        if body.day is not None and body.day != day:
+            raise HTTPException(status_code=409, detail="TODAY_CHANGED")
+        if int(body.supplement_id) not in await db.get_today_supplement_ids(conn, tg_user_id, day):
+            raise HTTPException(status_code=404, detail="INTAKE_NOT_IN_PLAN")
         await db.set_day_status(conn, tg_user_id, day, int(body.supplement_id), body.status)
         newly = await db.evaluate_and_unlock_achievements(conn, tg_user_id, day)
         newly_unlocked_details = await _build_newly_unlocked_details(conn, newly)
@@ -1590,6 +1596,12 @@ async def api_today_toggle_complex(body: TodayToggleComplexBody, x_telegram_init
     try:
         tz_name = await db.get_user_tz(conn, tg_user_id)
         day = db.get_user_local_date(tz_name or None)
+        if body.day is not None and body.day != day:
+            raise HTTPException(status_code=409, detail="TODAY_CHANGED")
+        groups = await db.get_today_plan_groups(conn, tg_user_id, day)
+        if not any(int(c.get("complex_id") or 0) == int(body.complex_id)
+                   for group in groups for c in group.get("complexes") or []):
+            raise HTTPException(status_code=404, detail="COMPLEX_NOT_IN_PLAN")
         await db.toggle_complex_for_day(conn, tg_user_id, day, int(body.complex_id), body.status)
         newly = await db.evaluate_and_unlock_achievements(conn, tg_user_id, day)
         newly_unlocked_details = await _build_newly_unlocked_details(conn, newly)

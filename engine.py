@@ -395,7 +395,7 @@ async def _build_rule_compatibility(conn: aiosqlite.Connection, sid: int) -> dic
         "SELECT id,slug,name,name_ru,name_en,interaction_classes,interaction_classes_json FROM supplements WHERE is_active=1",
     )
     grouped: dict[str, list[dict]] = {"synergy": [], "antagonism": [], "caution": []}
-    best: dict[tuple[int, str], dict] = {}
+    best: dict[tuple[int, str, str], dict] = {}
 
     for other in rows:
         if int(other["id"]) == sid:
@@ -411,7 +411,7 @@ async def _build_rule_compatibility(conn: aiosqlite.Connection, sid: int) -> dic
             other_id = int(other["id"])
             reason = (hit.get("note") or "").strip()
             strength = _strength_from_severity(hit.get("severity"))
-            key = (other_id, kind)
+            key = (other_id, kind, reason)
             existing = best.get(key)
             if existing and (existing.get("strength") or 0) >= (strength or 0):
                 continue
@@ -422,7 +422,7 @@ async def _build_rule_compatibility(conn: aiosqlite.Connection, sid: int) -> dic
                 "origin": "rule",
             }
 
-    for (other_id, kind), payload in best.items():
+    for (other_id, kind, _reason), payload in best.items():
         grouped[kind].append(payload)
     for kind in grouped:
         grouped[kind].sort(key=_compat_sort_key)

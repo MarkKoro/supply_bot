@@ -4476,9 +4476,7 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if not row:
                 await show(update, context, "Не нашёл в каталоге.", back(), route="menu:compat")
                 return
-            groups = await engine.describe_interactions(conn, row, limit_each=8)
-            text = engine.format_interactions(row["name"], groups)
-            await show(update, context, text, back(), route=f"compat_pick:{slug}")
+            await _show_supplement_compat(update, context, conn, int(row['id']), 'synergy', 0, back_data='menu:compat')
             return
 
         if data.startswith("add_pick:"):
@@ -6630,15 +6628,9 @@ async def _render_route(
                 target_message_id=target_message_id,
             )
             return
-        groups = await engine.describe_interactions(conn, row, limit_each=8)
-        text = engine.format_interactions(row["name"], groups)
-        await show(
-            update,
-            context,
-            text,
-            back(),
-            route=route,
-            target_chat_id=target_chat_id,
+        await _show_supplement_compat(
+            update, context, conn, int(row['id']), 'synergy', 0,
+            back_data='menu:compat', target_chat_id=target_chat_id,
             target_message_id=target_message_id,
         )
         return
@@ -9676,6 +9668,39 @@ async def _show_supplement_page(
         target_message_id=target_message_id,
     )
 
+def _escaped_text_chunks(text: str, limit: int) -> list[str]:
+    # Count conservatively after escaping, including UTF-16 surrogate pairs.
+    chunks, part, size = [], [], 0
+    for char in text:
+        escaped = html.escape(char)
+        width = len(escaped.encode("utf-16-le")) // 2
+        if part and size + width > limit:
+            chunks.append("".join(part))
+            part, size = [], 0
+        part.append(escaped)
+        size += width
+    if part:
+        chunks.append("".join(part))
+    return chunks or [""]
+
+
+def _compatibility_pages(items: list[dict]) -> list[list[dict]]:
+    pages, current, size = [], [], 0
+    for item in items:
+        reason = str(item.get("reason_ru") or "").strip()
+        text = f"• {item.get('title') or 'Неизвестно'}" + (f" — {reason}" if reason else "")
+        for chunk in _escaped_text_chunks(text, 2600):
+            width = len(chunk.encode("utf-16-le")) // 2
+            if current and (size + width + 1 > 2800 or len(current) >= 8):
+                pages.append(current)
+                current, size = [], 0
+            current.append({"item": item, "text": chunk})
+            size += width + 1
+    if current:
+        pages.append(current)
+    return pages or [[]]
+
+
 async def _show_supplement_compat(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -9694,57 +9719,37 @@ async def _show_supplement_compat(
     if not row:
         await home(update, context, target_chat_id=target_chat_id, target_message_id=target_message_id)
         return
-    title = engine._supp_title(row)
     compat = await engine.build_compatibility(conn, supplement_id)
     items = compat.get(kind) or []
-    resolved_items = [item for item in items if item.get("other_id") is not None]
-    unresolved_items = [item for item in items if item.get("other_id") is None]
-    page = max(page, 0)
-    page_size = 8
-    start = page * page_size
-    end = start + page_size
-    page_items = resolved_items[start:end]
-    has_prev = page > 0
-    has_next = end < len(resolved_items)
-    icon = {"synergy": "✅", "antagonism": "⛔", "caution": "⚠️"}.get(kind, "✅")
-    header = f"{icon} {('Совместимо' if kind == 'synergy' else 'Несовместимо' if kind == 'antagonism' else 'Осторожно')} с {title}"
-    lines = [f"<b>{header}</b>"]
-    if not page_items and not unresolved_items:
-        lines.append("")
+    pages = _compatibility_pages(items)
+    page = min(max(page, 0), len(pages) - 1)
+    page_entries = pages[page]
+    page_items = []
+    seen_ids = set()
+    for entry in page_entries:
+        item = entry['item']
+        sid = item.get('other_id')
+        if sid is not None and sid not in seen_ids:
+            page_items.append(item)
+            seen_ids.add(sid)
+    label = {"synergy": "✅ Совместимо", "antagonism": "⛔ Несовместимо", "caution": "⚠️ Осторожно"}[kind]
+    title = _escaped_text_chunks(engine._supp_title(row), 500)[0]
+    lines = [f"<b>{label} с {title}</b>", ""]
+    if not items:
         lines.append("Нет надёжных данных о взаимодействиях с другими БАДами из базы.")
     else:
-        lines.append("")
-        for item in page_items:
-            reason = (item.get("reason_ru") or "").strip()
-            reason_text = f" — {reason}" if reason else ""
-            lines.append(f"• {item['title']}{reason_text}")
-        if unresolved_items:
-            if page_items:
-                lines.append("")
-            for item in unresolved_items:
-                reason = (item.get("reason_ru") or "").strip()
-                reason_text = f" — {reason}" if reason else ""
-                lines.append(f"• {item.get('title') or 'Неизвестно'}{reason_text}")
+        lines.extend(entry['text'] for entry in page_entries)
     source_map = {"db": "DB", "rules": "Правила", "mixed": "Смешано"}
-    lines.append("")
-    lines.append(f"Источник: {source_map.get(compat.get('source'), 'DB')}")
+    lines.extend(["", f"Источник: {source_map.get(compat.get('source'), 'DB')}", f"Страница {page + 1}/{len(pages)} · Связей: {len(items)}"])
     await show(
-        update,
-        context,
-        "\n".join(lines),
+        update, context, "\n".join(lines),
         supplement_compat_list(
-            supplement_id,
-            page_items,
-            kind=kind,
-            page=page,
-            has_prev=has_prev,
-            has_next=has_next,
-            back_data=back_data,
-            nav_prefix=route_prefix,
+            supplement_id, page_items, kind=kind, page=page,
+            has_prev=page > 0, has_next=page + 1 < len(pages),
+            back_data=back_data, nav_prefix=route_prefix,
         ),
         route=f"{route_prefix}:{kind}:{page}" if route_prefix else f"supp:compat:{supplement_id}:{kind}:{page}",
-        target_chat_id=target_chat_id,
-        target_message_id=target_message_id,
+        target_chat_id=target_chat_id, target_message_id=target_message_id,
     )
 
 def _ensure_event_loop() -> None:

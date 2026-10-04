@@ -2746,6 +2746,7 @@
       syncGlobalModals();
       return;
     }
+    const openComplexes = previousTabKey === tabKey ? [...target.querySelectorAll('[data-complex] details[open]')].map(el => el.closest('[data-complex]').dataset.complex) : [];
     const focusSnapshot = getFocusableSnapshot(target);
     const searchId = tabKey === 'admin' ? 'adminSearch' : 'catalogSearch';
     const toolbarSelector = tabKey === 'admin' ? '.admin-toolbar' : '.catalog-toolbar';
@@ -2771,6 +2772,10 @@
       }
     }
     if (!keptToolbar) target.innerHTML = nextHtml;
+    for (const id of openComplexes) {
+      const details = target.querySelector(`[data-complex="${escSelector(id)}"] details`);
+      if (details) details.open = true;
+    }
     syncModalScrollLock();
     syncGlobalModals();
     lastRenderedTabKey = tabKey;
@@ -6088,67 +6093,41 @@ function adminField(label, field, value, kind='input') {
     showToast(`Идеальный день. +${Math.max(0, Number(pointsGain || 0))} очков.`);
   }
 
+  function todayItems(slot) {
+    return [...(slot?.items || []), ...(slot?.complexes || []).flatMap(c => c.items || [])];
+  }
+
+  const todayPendingIds = new Set();
+  let todayRevision = 0;
+  let todayLoadVersion = 0;
+  function todayActionBusy(items) {
+    return (items || []).some(i => todayPendingIds.has(Number(i.supplement_id)));
+  }
+
   function recalcTodaySnapshot() {
-    const slots = state.today?.slots || [];
-    let expected = 0;
-    let taken = 0;
-    for (const slot of slots) {
-      for (const item of (slot.items || [])) {
-        expected += 1;
-        if (item.status === 'taken') taken += 1;
-      }
-      for (const complex of (slot.complexes || [])) {
-        for (const item of (complex.items || [])) {
-          expected += 1;
-          if (item.status === 'taken') taken += 1;
-        }
+    if (!state.today) return;
+    const uniqueItems = new Map();
+    for (const slot of state.today.slots || []) {
+      for (const item of todayItems(slot)) uniqueItems.set(Number(item.supplement_id), item);
+      for (const complex of slot.complexes || []) {
+        complex.total_count = (complex.items || []).length;
+        complex.taken_count = (complex.items || []).filter(i => i.status === 'taken').length;
+        complex.status = !complex.taken_count ? 'none' : complex.taken_count === complex.total_count ? 'taken' : 'partial';
       }
     }
+    const expected = uniqueItems.size;
+    const taken = [...uniqueItems.values()].filter(i => i.status === 'taken').length;
     state.today.expected = expected;
     state.today.taken = taken;
     state.today.adherence = expected > 0 ? Math.round((taken / expected) * 100) : 0;
-    if (state.stats?.today) {
-      state.stats.today.expected = expected;
-      state.stats.today.taken = taken;
-      state.stats.today.adherence = state.today.adherence;
-    }
+    if (state.stats?.today) Object.assign(state.stats.today, {expected, taken, adherence: state.today.adherence});
   }
 
   function digestTodaySnapshot(today, statsSummary) {
-    const slots = Array.isArray(today?.slots) ? today.slots : [];
-    const slotDigest = slots.map((slot) => ({
-      slot_id: String(slot.slot_id || ''),
-      time_local: String(slot.time_local || ''),
-      items: (Array.isArray(slot.items) ? slot.items : []).map((item) => ({
-        supplement_id: Number(item.supplement_id || 0),
-        status: String(item.status || 'none'),
-      })),
-      complexes: (Array.isArray(slot.complexes) ? slot.complexes : []).map((complex) => ({
-        complex_id: Number(complex.complex_id || 0),
-        status: String(complex.status || 'none'),
-        taken_count: Number(complex.taken_count || 0),
-        total_count: Number(complex.total_count || 0),
-        items: (Array.isArray(complex.items) ? complex.items : []).map((item) => ({
-          supplement_id: Number(item.supplement_id || 0),
-          status: String(item.status || 'none'),
-        })),
-      })),
-    }));
-    const stToday = statsSummary?.today || {};
-    const st7 = statsSummary?.last7 || {};
-    const statsDigest = {
-      today: {
-        expected: Number(stToday.expected || 0),
-        taken: Number(stToday.taken || 0),
-        adherence: stToday.adherence == null ? null : Number(stToday.adherence),
-      },
-      last7: {
-        expected: Number(st7.expected || 0),
-        taken: Number(st7.taken || 0),
-        adherence: st7.adherence == null ? null : Number(st7.adherence),
-      },
-    };
-    return JSON.stringify({ slotDigest, statsDigest });
+    // Include the day, labels, blocked states and other visible fields, too.
+    if (!today) return JSON.stringify({today, statsSummary});
+    const {expected, taken, adherence, ...serverToday} = today;
+    return JSON.stringify({today: serverToday, statsSummary});
   }
 
   async function loadToday(forceOrOptions = false) {
@@ -6157,7 +6136,9 @@ function adminField(label, field, value, kind='input') {
       : { force: !!forceOrOptions };
     const force = !!opts.force;
     const silent = !!opts.silent;
-    if (state.loadingToday && !force) return;
+    if (todayPendingIds.size || (state.loadingToday && !force)) return;
+    const version = ++todayLoadVersion;
+    const revision = todayRevision;
     const showLoading = !silent && !state.today;
     if (showLoading) {
       state.loadingToday = true;
@@ -6170,20 +6151,24 @@ function adminField(label, field, value, kind='input') {
         api("./api/today"),
         api("./api/stats/summary").catch(()=>null),
       ]);
-      const nextStats = statsRes?.summary || null;
+      if (version !== todayLoadVersion || revision !== todayRevision || todayPendingIds.size) return;
+      const nextStats = statsRes ? (statsRes.summary || null) : state.stats;
       const prevDigest = digestTodaySnapshot(state.today, state.stats);
       const nextDigest = digestTodaySnapshot(today, nextStats);
       if (force || prevDigest !== nextDigest || !state.today) {
         state.today = today;
         state.stats = nextStats;
+        recalcTodaySnapshot();
         shouldRender = true;
       }
     } catch (e) {
-      if (e.message !== "PREMIUM_REQUIRED") showToast("Не удалось загрузить план");
+      if (version === todayLoadVersion && e.message !== "PREMIUM_REQUIRED") showToast("Не удалось загрузить план");
     } finally {
-      state.loadingToday = false;
-      state.loadingStats = false;
-      if (showLoading || shouldRender) renderActiveTab();
+      if (version === todayLoadVersion) {
+        state.loadingToday = false;
+        state.loadingStats = false;
+        if (showLoading || shouldRender) renderActiveTab();
+      }
     }
   }
 
@@ -6514,8 +6499,8 @@ function adminField(label, field, value, kind='input') {
           <div class="row">
             <div><strong>${esc(slot.title || "Слот")} · ${esc(slot.time_local || "--:--")}</strong></div>
             <div class="row" style="gap:8px">
-              <button type="button" class="btn secondary" data-slot-action="all-taken" data-slot-id="${esc(slot.slot_id)}" title="Отметить всё как принято">✅ Всё</button>
-              <button type="button" class="btn secondary" data-slot-action="reset" data-slot-id="${esc(slot.slot_id)}" title="Сбросить статусы">↺ Сброс</button>
+              <button type="button" class="btn secondary" data-slot-action="all-taken" data-slot-id="${esc(slot.slot_id)}" title="Отметить всё как принято" ${todayActionBusy(todayItems(slot)) ? 'disabled' : ''}>✅ Всё</button>
+              <button type="button" class="btn secondary" data-slot-action="reset" data-slot-id="${esc(slot.slot_id)}" title="Сбросить статусы" ${todayActionBusy(todayItems(slot)) ? 'disabled' : ''}>↺ Сброс</button>
               <span class="chip green">✅ ${totalTaken} / ${totalAll}</span>
             </div>
           </div>
@@ -6524,10 +6509,10 @@ function adminField(label, field, value, kind='input') {
               <div class="item-row" style="display:block" data-complex="${esc(c.complex_id)}">
                 <div class="row">
                   <span><strong>🧩 ${esc(c.name || 'Комплекс')}</strong> <span class="muted">✅ ${Number(c.taken_count || 0)}/${Number(c.total_count || 0)}</span></span>
-                  <button type="button" class="btn secondary" data-complex-toggle="${esc(c.complex_id)}" data-next="${c.status==='taken'?'none':'taken'}">${c.status==='taken'?'Снять':'Выпил комплекс'}</button>
+                  <button type="button" class="btn secondary" data-complex-toggle="${esc(c.complex_id)}" ${todayActionBusy(c.items) ? 'disabled' : ''} data-next="${c.status==='taken'?'none':'taken'}">${c.status==='taken'?'Снять':'Выпил комплекс'}</button>
                 </div>
                 <details><summary>Состав</summary>
-                  ${(c.items||[]).map((item)=>`<button type="button" class="item-row today-item-row" data-item="${esc(item.supplement_id)}" data-next="${item.status === "taken" ? "none" : "taken"}"><span class="status-pill ${statusClass(item.status)}">${statusText(item.status)}</span><span class="today-item-name">${esc(item.name || '')}</span></button>`).join('')}
+                  ${(c.items||[]).map((item)=>`<button type="button" class="item-row today-item-row" data-item="${esc(item.supplement_id)}" data-next="${item.status === "taken" ? "none" : "taken"}" ${todayActionBusy([item]) ? 'disabled' : ''}><span class="status-pill ${statusClass(item.status)}">${statusText(item.status)}</span><span class="today-item-name">${esc(item.name || '')}</span></button>`).join('')}
                 </details>
               </div>
             `).join('')}
@@ -6535,7 +6520,7 @@ function adminField(label, field, value, kind='input') {
               const isBlocked = !!item.blocked;
               const aiAdd = item.source === 'ai' && item.action === 'add';
               const next = item.status === "taken" ? "none" : "taken";
-              return `<button type="button" class="item-row today-item-row ${isBlocked ? 'blocked' : ''}" data-item="${esc(item.supplement_id)}" data-next="${next}" ${isBlocked ? 'disabled' : ''}>
+              return `<button type="button" class="item-row today-item-row ${isBlocked ? 'blocked' : ''}" data-item="${esc(item.supplement_id)}" data-next="${next}" ${isBlocked || todayActionBusy([item]) ? 'disabled' : ''}>
                 <span class="status-pill ${statusClass(isBlocked ? 'skipped' : item.status)}">${isBlocked ? 'Не пить' : statusText(item.status)}</span>
                 <span class="today-item-name">${esc(item.name || '')}${aiAdd ? '<span class="today-ai-pill">AI</span>' : ''}${isBlocked ? '<span class="today-ai-pill">AI: пауза</span>' : ''}</span>
               </button>${isBlocked ? `<div class="muted" style="margin:4px 0 8px 12px">На сегодня предложено не пить от ИИ${item.blocked_reason ? `: ${esc(item.blocked_reason)}` : ''}</div>` : ''}`;
@@ -7280,54 +7265,18 @@ function adminField(label, field, value, kind='input') {
       });
     });
 
-    appEl.querySelectorAll("[data-complex-toggle]").forEach((btn)=>{
-      btn.addEventListener("click", async (e)=>{
+    appEl.querySelectorAll("[data-complex-toggle]").forEach(btn => {
+      btn.addEventListener('click', async e => {
         e.preventDefault();
         e.stopPropagation();
         const complexId = Number(btn.dataset.complexToggle);
-        const next = btn.dataset.next;
-        const prevSlot = findSlotByComplexId(complexId);
-        const wasClosedBefore = slotProgress(prevSlot).closed;
-        const complex = (prevSlot?.complexes || []).find((c) => Number(c.complex_id) === complexId);
-        const snapshot = complex ? {
-          status: complex.status,
-          takenCount: complex.taken_count,
-          items: (complex.items || []).map((it) => ({ id: it.supplement_id, status: it.status })),
-        } : null;
-        if (complex) {
-          complex.status = next;
-          complex.taken_count = next === 'taken' ? Number(complex.total_count || 0) : 0;
-          (complex.items || []).forEach((it) => { it.status = next; });
-          recalcTodaySnapshot();
-          renderActiveTab();
-        }
-        haptic();
-        try {
-          const out = await api("./api/today/toggle_complex", { method:"POST", body:{ complex_id: complexId, status: next } });
-          recalcTodaySnapshot();
-          renderActiveTab();
-          if (next === "taken") {
-            const afterSlot = findSlotByComplexId(complexId);
-            const isClosedAfter = slotProgress(afterSlot).closed;
-            const perfectDay = Number(state.today?.expected || 0) >= 3 && Number(state.today?.adherence || 0) === 100;
-            const gain = extractUnlockedPoints([out]);
-            if (perfectDay) maybeCelebratePerfectDay(gain);
-            else if (!wasClosedBefore && isClosedAfter) maybeCelebrateSlotClosed();
-          }
-          await showUnlockToastFromPayload(out);
-        } catch {
-          if (complex && snapshot) {
-            complex.status = snapshot.status;
-            complex.taken_count = snapshot.takenCount;
-            (complex.items || []).forEach((it) => {
-              const prevItem = snapshot.items.find((x) => String(x.id) === String(it.supplement_id));
-              if (prevItem) it.status = prevItem.status;
-            });
-            recalcTodaySnapshot();
-            renderActiveTab();
-          }
-          showToast("Не удалось отметить комплекс");
-        }
+        const complex = (findSlotByComplexId(complexId)?.complexes || []).find(c => Number(c.complex_id) === complexId);
+        if (!complex) return;
+        await updateTodayIntakes([{
+          ids: (complex.items || []).map(i => Number(i.supplement_id)),
+          status: btn.dataset.next,
+          path: './api/today/toggle_complex', body: {complex_id: complexId, status: btn.dataset.next}
+        }]);
       });
     });
 
@@ -7808,142 +7757,79 @@ function adminField(label, field, value, kind='input') {
   }
 
   function findItemById(id) {
-    for (const slot of state.today?.slots || []) {
-      const item = (slot.items || []).find(i => String(i.supplement_id) === String(id));
-      if (item) return item;
-    }
-    return null;
+    return (state.today?.slots || []).flatMap(todayItems).find(i => String(i.supplement_id) === String(id)) || null;
   }
 
   async function toggleOne(supplementId, nextStatus) {
-    haptic();
     const item = findItemById(supplementId);
-    if (!item) return;
-
-    const prevSlot = findSlotBySupplementId(supplementId);
-    const wasClosedBefore = slotProgress(prevSlot).closed;
-    const prev = item.status;
-    item.status = nextStatus;
-    recalcTodaySnapshot();
-    renderActiveTab();
-
-    try {
-      const out = await api("./api/today/toggle", {
-        method: "POST",
-        body: { supplement_id: Number(supplementId), status: nextStatus }
-      });
-      recalcTodaySnapshot();
-      if (nextStatus === "taken") {
-        const afterSlot = findSlotBySupplementId(supplementId);
-        const isClosedAfter = slotProgress(afterSlot).closed;
-        const perfectDay = Number(state.today?.expected || 0) >= 3 && Number(state.today?.adherence || 0) === 100;
-        const gain = extractUnlockedPoints([out]);
-        if (perfectDay) maybeCelebratePerfectDay(gain);
-        else if (!wasClosedBefore && isClosedAfter) maybeCelebrateSlotClosed();
-      }
-      await showUnlockToastFromPayload(out);
-    } catch (e) {
-      item.status = prev;
-      recalcTodaySnapshot();
-      renderActiveTab();
-      showToast("Ошибка синхронизации, откат");
-    }
+    if (!item || item.blocked) return;
+    await updateTodayIntakes([{
+      ids: [Number(supplementId)], status: nextStatus,
+      path: './api/today/toggle', body: {supplement_id: Number(supplementId), status: nextStatus}
+    }]);
   }
 
   async function setSlotStatus(slotId, status) {
-    haptic();
     const slot = (state.today?.slots || []).find(s => String(s.slot_id) === String(slotId));
     if (!slot) return;
-
-    const items = slot.items || [];
     const complexes = slot.complexes || [];
-    if (!items.length && !complexes.length) return;
-
-    const snapshot = {
-      items: items.map((i) => ({ id: i.supplement_id, status: i.status })),
-      complexes: complexes.map((c) => ({
-        id: c.complex_id,
-        status: c.status,
-        takenCount: c.taken_count,
-        itemStatuses: (c.items || []).map((item) => ({ id: item.supplement_id, status: item.status })),
-      })),
-    };
-
-    items.forEach((i) => { i.status = status; });
-    complexes.forEach((complex) => {
-      complex.status = status;
-      complex.taken_count = status === "taken" ? (complex.total_count || 0) : 0;
-      (complex.items || []).forEach((item) => { item.status = status; });
-    });
-    recalcTodaySnapshot();
-    renderActiveTab();
-
-    try {
-      const unlockPayloads = [];
-      const complexPending = complexes.map((complex) => async () => {
-        const out = await api("./api/today/toggle_complex", {
-          method: "POST",
-          body: { complex_id: Number(complex.complex_id), status }
-        });
-        unlockPayloads.push(out);
-      });
-      await runBatched(complexPending, 3);
-
-      const complexItemIds = new Set(
-        complexes.flatMap((complex) => (complex.items || []).map((item) => String(item.supplement_id)))
-      );
-      const singlePending = items
-        .filter((item) => !complexItemIds.has(String(item.supplement_id)))
-        .map((item) => async () => {
-          const out = await api("./api/today/toggle", {
-            method: "POST",
-            body: { supplement_id: Number(item.supplement_id), status }
-          });
-          unlockPayloads.push(out);
-        });
-
-      await runBatched(singlePending, 3);
-      showToast(status === "taken" ? "Отметил всё как принято" : "Слот сброшен");
-      if (status === "taken") {
-        const afterSlot = (state.today?.slots || []).find((s) => String(s.slot_id) === String(slotId));
-        const wasClosedBefore = (snapshot.items.every((x) => x.status === "taken") && snapshot.complexes.every((c) => (c.itemStatuses || []).every((x) => x.status === "taken")));
-        const isClosedAfter = slotProgress(afterSlot).closed;
-        const perfectDay = Number(state.today?.expected || 0) >= 3 && Number(state.today?.adherence || 0) === 100;
-        const gain = extractUnlockedPoints(unlockPayloads);
-        if (perfectDay) maybeCelebratePerfectDay(gain);
-        else if (!wasClosedBefore && isClosedAfter) maybeCelebrateSlotClosed();
-      }
-      const mergedDetails = unlockPayloads.flatMap((x) => Array.isArray(x?.newly_unlocked_details) ? x.newly_unlocked_details : []);
-      if (mergedDetails.length) {
-        await showUnlockToastFromPayload({ newly_unlocked_details: mergedDetails });
-      }
-    } catch (e) {
-      items.forEach((item) => {
-        const old = snapshot.items.find(s => String(s.id) === String(item.supplement_id));
-        if (old) item.status = old.status;
-      });
-      complexes.forEach((complex) => {
-        const oldComplex = snapshot.complexes.find((c) => String(c.id) === String(complex.complex_id));
-        if (!oldComplex) return;
-        complex.status = oldComplex.status;
-        complex.taken_count = oldComplex.takenCount;
-        (complex.items || []).forEach((item) => {
-          const oldItem = oldComplex.itemStatuses.find((x) => String(x.id) === String(item.supplement_id));
-          if (oldItem) item.status = oldItem.status;
-        });
-      });
-      recalcTodaySnapshot();
-      renderActiveTab();
-      showToast("Не удалось применить к слоту");
+    const operations = complexes.map(c => ({
+      ids: (c.items || []).map(i => Number(i.supplement_id)), status,
+      path: './api/today/toggle_complex', body: {complex_id: Number(c.complex_id), status}
+    }));
+    const complexIds = new Set(operations.flatMap(op => op.ids));
+    for (const item of slot.items || []) {
+      const sid = Number(item.supplement_id);
+      if (complexIds.has(sid) || item.blocked) continue;
+      complexIds.add(sid);
+      operations.push({ids: [sid], status, path: './api/today/toggle', body: {supplement_id: sid, status}});
     }
+    await updateTodayIntakes(operations, status === 'taken' ? 'Отметил всё как принято' : 'Слот сброшен');
   }
 
-  async function runBatched(tasks, batchSize) {
-    for (let i = 0; i < tasks.length; i += batchSize) {
-      const chunk = tasks.slice(i, i + batchSize).map((fn) => fn());
-      await Promise.all(chunk);
-      await new Promise((resolve) => setTimeout(resolve, 80));
+  async function updateTodayIntakes(operations, successMessage = '') {
+    operations = operations.filter(op => op.ids.length);
+    const ids = new Set(operations.flatMap(op => op.ids));
+    if (!ids.size || [...ids].some(id => todayPendingIds.has(id))) return;
+    const rows = (state.today?.slots || []).flatMap(todayItems).filter(i => ids.has(Number(i.supplement_id)));
+    const snapshot = rows.map(item => ({item, status: item.status}));
+    const closedBefore = new Set((state.today?.slots || []).filter(s => slotProgress(s).closed).map(s => s.slot_id));
+    ids.forEach(id => todayPendingIds.add(id));
+    todayRevision += 1;
+    for (const op of operations) for (const item of rows) if (op.ids.includes(Number(item.supplement_id))) item.status = op.status;
+    recalcTodaySnapshot();
+    renderActiveTab();
+    haptic();
+    const outcomes = [];
+    const day = state.today?.day;
+    try {
+      // Wait for all requests, including peers of a failed request, before reconciling.
+      for (let n = 0; n < operations.length; n += 3) {
+        outcomes.push(...await Promise.allSettled(operations.slice(n, n + 3).map(op => api(op.path, {method:'POST', body:{...op.body, day}}))));
+      }
+      const succeededIds = new Set();
+      outcomes.forEach((out, n) => { if (out.status === 'fulfilled') operations[n].ids.forEach(id => succeededIds.add(id)); });
+      for (const previous of snapshot) if (!succeededIds.has(Number(previous.item.supplement_id))) previous.item.status = previous.status;
+      recalcTodaySnapshot();
+    } finally {
+      ids.forEach(id => todayPendingIds.delete(id));
+      todayRevision += 1;
+      renderActiveTab();
+      // Also reconciles ambiguous network failures and overlapping displayed entries.
+      await loadToday({force:true, silent:true});
     }
+    if (outcomes.some(out => out.status === 'rejected')) {
+      showToast('Часть отметок не подтверждена. Проверьте план и повторите нужные отметки.');
+    } else {
+      if (successMessage) showToast(successMessage);
+      if (operations.some(op => op.status === 'taken')) {
+        const payloads = outcomes.map(out => out.value);
+        if (Number(state.today?.expected || 0) >= 3 && Number(state.today?.adherence || 0) === 100) maybeCelebratePerfectDay(extractUnlockedPoints(payloads));
+        else if ((state.today?.slots || []).some(s => !closedBefore.has(s.slot_id) && slotProgress(s).closed)) maybeCelebrateSlotClosed();
+      }
+    }
+    const details = outcomes.flatMap(out => out.status === 'fulfilled' && Array.isArray(out.value?.newly_unlocked_details) ? out.value.newly_unlocked_details : []);
+    if (details.length) await showUnlockToastFromPayload({newly_unlocked_details:details}).catch(() => {});
   }
 
   function renderSuppHistory(history) {

@@ -646,6 +646,11 @@ def supplement_compat_list(
         btns.append([InlineKeyboardButton(item["title"], callback_data=f"supp:open:{item['other_id']}")])
     nav: list[InlineKeyboardButton] = []
     nav_prefix = nav_prefix or f"supp:compat:{supplement_id}"
+    btns.insert(0, [
+        InlineKeyboardButton(label, callback_data=f"{nav_prefix}:{tab}:0")
+        for tab, label in (("synergy", "✅ Совместимо"), ("antagonism", "⛔ Несовместимо"), ("caution", "⚠️ Осторожно"))
+        if tab != kind
+    ])
     if has_prev:
         nav.append(InlineKeyboardButton("◀️", callback_data=f"{nav_prefix}:{kind}:{page - 1}"))
     if has_next:

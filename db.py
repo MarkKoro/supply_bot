@@ -1,5 +1,6 @@
 from __future__ import annotations
 import calendar
+import hashlib
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -1153,6 +1154,76 @@ async def _ensure_profile_foundation_tables(conn: aiosqlite.Connection) -> None:
     await conn.execute("CREATE INDEX IF NOT EXISTS idx_assistant_jobs_status_created ON assistant_jobs(status, created_at_utc, id)")
     await conn.execute("CREATE INDEX IF NOT EXISTS idx_assistant_jobs_user_created ON assistant_jobs(tg_user_id, id DESC)")
     await conn.execute("CREATE INDEX IF NOT EXISTS idx_assistant_job_events_job_id ON assistant_job_events(job_id, id ASC)")
+    await _ensure_assistant_job_integrity(conn)
+
+async def _ensure_assistant_job_integrity(conn) -> None:
+    await _ensure_column(conn, "assistant_jobs", "quota_month", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "assistant_jobs", "quota_reserved", "INTEGER NOT NULL DEFAULT 0")
+    # Keep one active request from old installations before adding the constraint.
+    await conn.execute("""UPDATE assistant_jobs SET status='cancelled', error_code='DUPLICATE_ACTIVE_JOB',
+        finished_at_utc=?, updated_at_utc=? WHERE status IN ('queued','processing') AND id NOT IN
+        (SELECT MIN(id) FROM assistant_jobs WHERE status IN ('queued','processing') GROUP BY tg_user_id,kind)""",
+        (utc_now_iso(), utc_now_iso()))
+    await conn.execute("""CREATE UNIQUE INDEX IF NOT EXISTS idx_assistant_one_active
+        ON assistant_jobs(tg_user_id,kind) WHERE status IN ('queued','processing')""")
+    await conn.execute("""UPDATE nutrient_plan_runs SET is_active=0 WHERE id IN
+        (SELECT nutrient_plan_run_id FROM llm_assistant_plan_actions WHERE status IN ('prepared','cancelled'))""")
+    await conn.execute("""UPDATE nutrient_followup_reminders SET status='obsolete',updated_at_utc=? WHERE plan_run_id IN
+        (SELECT nutrient_plan_run_id FROM llm_assistant_plan_actions WHERE status IN ('prepared','cancelled'))
+        AND status IN ('scheduled','sent','snoozed')""", (utc_now_iso(),))
+    exists = await _table_exists(conn, "assistant_monthly_usage")
+    await conn.execute("""CREATE TABLE IF NOT EXISTS assistant_monthly_usage(
+        tg_user_id INTEGER NOT NULL, month_utc TEXT NOT NULL, used INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(tg_user_id,month_utc))""")
+    if not exists:
+        await conn.execute("""INSERT INTO assistant_monthly_usage(tg_user_id,month_utc,used)
+            SELECT tg_user_id,month_utc,COUNT(*) FROM (
+              SELECT u.tg_user_id,substr(r.created_at,1,7) AS month_utc FROM llm_assistant_runs r
+              JOIN users u ON u.id=r.user_id
+              UNION ALL
+              SELECT tg_user_id,substr(created_at_utc,1,7) FROM assistant_jobs
+              WHERE kind='nutrient_compute' AND status IN ('queued','processing') AND result_run_id=0
+            ) GROUP BY tg_user_id,month_utc""")
+        await conn.execute("""UPDATE assistant_jobs SET quota_reserved=1,quota_month=substr(created_at_utc,1,7)
+            WHERE kind='nutrient_compute' AND status IN ('queued','processing') AND result_run_id=0""")
+
+
+class AssistantQuotaExceeded(ValueError):
+    pass
+
+
+async def assistant_usage_current_month(conn, tg_user_id: int) -> int:
+    row = await fetchone(conn, "SELECT used FROM assistant_monthly_usage WHERE tg_user_id=? AND month_utc=?",
+                         (int(tg_user_id), utc_now_iso()[:7]))
+    return int(row["used"]) if row else 0
+
+
+async def _release_assistant_quota(conn, job: dict) -> None:
+    if not job.get("quota_reserved"):
+        return
+    await conn.execute("UPDATE assistant_monthly_usage SET used=MAX(0,used-1) WHERE tg_user_id=? AND month_utc=?",
+                       (int(job["tg_user_id"]), job["quota_month"]))
+    await conn.execute("UPDATE assistant_jobs SET quota_reserved=0 WHERE id=?", (int(job["id"]),))
+
+
+async def assistant_lease_valid(conn, job: dict) -> bool:
+    row = await fetchone(conn, """SELECT 1 FROM assistant_jobs WHERE id=? AND tg_user_id=?
+        AND status='processing' AND locked_by=? AND attempts=?""",
+        (int(job["id"]), int(job["tg_user_id"]), str(job.get("locked_by") or ""), int(job.get("attempts") or 0)))
+    return row is not None
+
+
+async def assistant_input_version(conn, tg_user_id: int) -> str:
+    user = await fetchone(conn, "SELECT id FROM users WHERE tg_user_id=?", (int(tg_user_id),))
+    if not user:
+        return ""
+    snapshot = {}
+    for table, order in (("user_health_profile","user_id"), ("lab_results","id"),
+                         ("user_supplements","supplement_id"), ("user_supp_settings","supplement_id")):
+        rows = await fetchall(conn, f"SELECT * FROM {table} WHERE user_id=? ORDER BY {order}", (int(user["id"]),))
+        snapshot[table] = [dict(row) for row in rows]
+    return hashlib.sha256(json.dumps(snapshot, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
 
 async def _ensure_achievements_tables(conn: aiosqlite.Connection) -> None:
     await conn.execute(
@@ -2915,6 +2986,9 @@ async def mark_access_expired_notice_sent(
     await conn.commit()
 
 async def _purge_user_content(conn, user_id: int, tg_user_id: int) -> int:
+    # Pending work has not spent its reservation; running work may have called AI.
+    for job in await fetchall(conn, "SELECT * FROM assistant_jobs WHERE tg_user_id=? AND status='queued' AND attempts=0", (tg_user_id,)):
+        await _release_assistant_quota(conn, dict(job))
     # Explicit key domains. Never infer ownership from a column's name.
     await conn.execute("DELETE FROM assistant_job_events WHERE job_id IN (SELECT id FROM assistant_jobs WHERE tg_user_id=?)", (tg_user_id,))
     await conn.execute("DELETE FROM assistant_jobs WHERE tg_user_id=?", (tg_user_id,))
@@ -10072,31 +10146,28 @@ async def _append_assistant_job_event(
 
 
 async def create_assistant_job(
-    conn: aiosqlite.Connection,
-    tg_user_id: int,
-    request_json: str,
-    debug_id: str,
-    kind: str = "nutrient_compute",
+    conn: aiosqlite.Connection, tg_user_id: int, request_json: str, debug_id: str,
+    kind: str = "nutrient_compute", *, monthly_limit: int | None = 5,
 ) -> int:
-    now = utc_now_iso()
-    cur = await conn.execute(
-        """INSERT INTO assistant_jobs(
-            tg_user_id, status, kind, request_json, debug_id, created_at_utc, updated_at_utc
-           ) VALUES(?,?,?,?,?,?,?)""",
-        (
-            int(tg_user_id),
-            "queued",
-            str(kind or "nutrient_compute").strip() or "nutrient_compute",
-            str(request_json or "{}"),
-            str(debug_id or "").strip(),
-            now,
-            now,
-        ),
-    )
-    job_id = int(cur.lastrowid or 0)
-    await _append_assistant_job_event(conn, job_id, "created", {"status": "queued"})
-    await conn.commit()
-    return job_id
+    async with transaction(conn) as tx:
+        existing = await find_active_assistant_job(tx, tg_user_id, kind)
+        if existing:
+            return int(existing["id"])
+        now = utc_now_iso()
+        reserved = int(kind == "nutrient_compute")
+        if reserved:
+            used = await assistant_usage_current_month(tx, tg_user_id)
+            if monthly_limit is not None and used >= monthly_limit:
+                raise AssistantQuotaExceeded("ASSISTANT_MONTHLY_LIMIT_REACHED")
+            await tx.execute("""INSERT INTO assistant_monthly_usage(tg_user_id,month_utc,used) VALUES(?,?,1)
+                ON CONFLICT(tg_user_id,month_utc) DO UPDATE SET used=used+1""", (int(tg_user_id), now[:7]))
+        cur = await tx.execute("""INSERT INTO assistant_jobs(
+            tg_user_id,status,kind,request_json,debug_id,created_at_utc,updated_at_utc,quota_month,quota_reserved)
+            VALUES(?,'queued',?,?,?,?,?,?,?)""",
+            (int(tg_user_id),kind,str(request_json or "{}"),str(debug_id or ""),now,now,now[:7],reserved))
+        job_id = int(cur.lastrowid)
+        await _append_assistant_job_event(tx,job_id,"created",{"status":"queued"})
+        return job_id
 
 
 async def find_active_assistant_job(conn: aiosqlite.Connection, tg_user_id: int, kind: str = "nutrient_compute") -> dict | None:
@@ -10117,43 +10188,44 @@ async def recover_stale_assistant_jobs(
     stale_after_seconds: int = 600,
     kind: str = "nutrient_compute",
 ) -> list[int]:
-    now = utc_now_iso()
-    threshold = max(60, int(stale_after_seconds))
-    rows = await fetchall(
-        conn,
-        """SELECT id
-           FROM assistant_jobs
-           WHERE kind=?
-             AND status='processing'
-             AND (
-               CASE
-                 WHEN COALESCE(updated_at_utc,'')='' THEN 1
-                 ELSE (strftime('%s','now') - strftime('%s', replace(replace(updated_at_utc,'T',' '),'Z',''))) >= ?
-               END
-             )
-           ORDER BY id ASC""",
-        (str(kind or "nutrient_compute"), threshold),
-    )
-    recovered_ids: list[int] = []
-    for row in rows:
-        job_id = int(row["id"])
-        await conn.execute(
-            """UPDATE assistant_jobs
-               SET status='queued',
-                   locked_by='',
-                   locked_at_utc='',
-                   updated_at_utc=?
-               WHERE id=? AND status='processing'""",
-            (now, job_id),
+    async with transaction(conn) as conn:
+        now = utc_now_iso()
+        threshold = max(60, int(stale_after_seconds))
+        rows = await fetchall(
+            conn,
+            """SELECT id
+               FROM assistant_jobs
+               WHERE kind=?
+                 AND status='processing'
+                 AND (
+                   CASE
+                     WHEN COALESCE(updated_at_utc,'')='' THEN 1
+                     ELSE (strftime('%s','now') - strftime('%s', replace(replace(updated_at_utc,'T',' '),'Z',''))) >= ?
+                   END
+                 )
+               ORDER BY id ASC""",
+            (str(kind or "nutrient_compute"), threshold),
         )
-        changed = await fetchone(conn, "SELECT changes() AS c")
-        if int(changed["c"] if changed else 0) <= 0:
-            continue
-        recovered_ids.append(job_id)
-        await _append_assistant_job_event(conn, job_id, "stale_recovered", {"status": "queued", "reason": "STALE_PROCESSING_RECOVERED"})
-    if recovered_ids:
-        await conn.commit()
-    return recovered_ids
+        recovered_ids: list[int] = []
+        for row in rows:
+            job_id = int(row["id"])
+            await conn.execute(
+                """UPDATE assistant_jobs
+                   SET status='queued',
+                       locked_by='',
+                       locked_at_utc='',
+                       updated_at_utc=?
+                   WHERE id=? AND status='processing'""",
+                (now, job_id),
+            )
+            changed = await fetchone(conn, "SELECT changes() AS c")
+            if int(changed["c"] if changed else 0) <= 0:
+                continue
+            recovered_ids.append(job_id)
+            await _append_assistant_job_event(conn, job_id, "stale_recovered", {"status": "queued", "reason": "STALE_PROCESSING_RECOVERED"})
+        if recovered_ids:
+            await conn.commit()
+        return recovered_ids
 
 
 async def get_assistant_job(conn: aiosqlite.Connection, tg_user_id: int, job_id: int) -> dict | None:
@@ -10222,84 +10294,83 @@ async def claim_next_assistant_job(conn: aiosqlite.Connection, worker_name: str)
         raise
 
 
-async def mark_assistant_job_processing(conn: aiosqlite.Connection, job_id: int, worker_name: str) -> None:
-    now = utc_now_iso()
-    worker = str(worker_name or "").strip() or "assistant_worker"
-    await conn.execute(
-        """UPDATE assistant_jobs
-           SET status='processing',
-               locked_by=?,
-               locked_at_utc=?,
-               started_at_utc=CASE WHEN started_at_utc='' THEN ? ELSE started_at_utc END,
-               updated_at_utc=?
-           WHERE id=?""",
-        (worker, now, now, now, int(job_id)),
-    )
-    await _append_assistant_job_event(conn, int(job_id), "processing", {"worker_name": worker, "status": "processing"})
-    await conn.commit()
+async def mark_assistant_job_processing(conn, job_id: int, worker_name: str) -> bool:
+    # Compatibility entry point: a cancelled/done request cannot be reclaimed.
+    async with transaction(conn) as tx:
+        now = utc_now_iso()
+        cur = await tx.execute("""UPDATE assistant_jobs SET status='processing', attempts=attempts+1,
+            locked_by=?,locked_at_utc=?,started_at_utc=CASE WHEN started_at_utc='' THEN ? ELSE started_at_utc END,
+            updated_at_utc=? WHERE id=? AND status='queued'""", (worker_name,now,now,now,int(job_id)))
+        if cur.rowcount:
+            await _append_assistant_job_event(tx,job_id,"processing",{"worker_name":worker_name})
+        return bool(cur.rowcount)
 
 
-async def mark_assistant_job_done(conn: aiosqlite.Connection, job_id: int, result_run_id: int, result_json: str = "") -> None:
-    now = utc_now_iso()
-    await conn.execute(
-        """UPDATE assistant_jobs
-           SET status='done',
-               result_run_id=?,
-               result_json=?,
-               error_code='',
-               error_message='',
-               finished_at_utc=?,
-               updated_at_utc=?
-           WHERE id=?""",
-        (int(result_run_id), str(result_json or ""), now, now, int(job_id)),
-    )
-    await _append_assistant_job_event(conn, int(job_id), "done", {"status": "done", "result_run_id": int(result_run_id)})
-    await conn.commit()
+async def mark_assistant_job_done(conn: aiosqlite.Connection, job_id: int, result_run_id: int, result_json: str = "", *, lease: dict | None = None) -> bool:
+    async with transaction(conn) as conn:
+        job = await get_assistant_job_by_id(conn, job_id)
+        if not job or job["status"] != "processing" or (lease and not await assistant_lease_valid(conn, lease)):
+            return False
+        now = utc_now_iso()
+        await conn.execute(
+            """UPDATE assistant_jobs
+               SET status='done',
+                   result_run_id=?,
+                   result_json=?,
+                   error_code='',
+                   error_message='',
+                   finished_at_utc=?,
+                   updated_at_utc=?
+               WHERE id=?""",
+            (int(result_run_id), str(result_json or ""), now, now, int(job_id)),
+        )
+        await _append_assistant_job_event(conn, int(job_id), "done", {"status": "done", "result_run_id": int(result_run_id)})
+        return True
 
 
-async def mark_assistant_job_failed(conn: aiosqlite.Connection, job_id: int, error_code: str, error_message: str) -> None:
-    now = utc_now_iso()
-    safe_code = str(error_code or "UNKNOWN_ERROR").strip() or "UNKNOWN_ERROR"
-    safe_message = str(error_message or "").strip()
-    await conn.execute(
-        """UPDATE assistant_jobs
-           SET status='failed',
-               error_code=?,
-               error_message=?,
-               finished_at_utc=?,
-               updated_at_utc=?
-           WHERE id=?""",
-        (safe_code[:80], safe_message[:1000], now, now, int(job_id)),
-    )
-    await _append_assistant_job_event(conn, int(job_id), "failed", {"status": "failed", "error_code": safe_code[:80]})
-    await conn.commit()
+async def mark_assistant_job_failed(conn: aiosqlite.Connection, job_id: int, error_code: str, error_message: str, *, lease: dict | None = None) -> bool:
+    async with transaction(conn) as conn:
+        job = await get_assistant_job_by_id(conn, job_id)
+        if not job or job["status"] != "processing" or (lease and not await assistant_lease_valid(conn, lease)):
+            return False
+        now = utc_now_iso()
+        safe_code = str(error_code or "UNKNOWN_ERROR").strip() or "UNKNOWN_ERROR"
+        safe_message = str(error_message or "").strip()
+        await conn.execute(
+            """UPDATE assistant_jobs
+               SET status='failed',
+                   error_code=?,
+                   error_message=?,
+                   finished_at_utc=?,
+                   updated_at_utc=?
+               WHERE id=?""",
+            (safe_code[:80], safe_message[:1000], now, now, int(job_id)),
+        )
+        await _append_assistant_job_event(conn, int(job_id), "failed", {"status": "failed", "error_code": safe_code[:80]})
+        await _release_assistant_quota(conn, job)
+        return True
 
 
-async def cancel_assistant_job(conn: aiosqlite.Connection, tg_user_id: int, job_id: int) -> bool:
-    now = utc_now_iso()
-    cur = await conn.execute(
-        """UPDATE assistant_jobs
-           SET status='cancelled',
-               finished_at_utc=CASE WHEN finished_at_utc='' THEN ? ELSE finished_at_utc END,
-               updated_at_utc=?,
-               error_code=CASE WHEN error_code='' THEN 'CANCELLED_BY_USER' ELSE error_code END,
-               error_message=CASE WHEN error_message='' THEN 'Cancelled by user' ELSE error_message END
-           WHERE id=? AND tg_user_id=? AND status IN ('queued','processing')""",
-        (now, now, int(job_id), int(tg_user_id)),
-    )
-    ok = int(cur.rowcount or 0) > 0
-    if ok:
-        await _append_assistant_job_event(conn, int(job_id), "cancelled", {"status": "cancelled"})
-    await conn.commit()
-    return ok
+async def cancel_assistant_job(conn, tg_user_id: int, job_id: int) -> bool:
+    async with transaction(conn) as tx:
+        job = await get_assistant_job(tx, tg_user_id, job_id)
+        if not job or job["status"] not in {"queued", "processing"}:
+            return False
+        now = utc_now_iso()
+        await tx.execute("""UPDATE assistant_jobs SET status='cancelled', finished_at_utc=?,updated_at_utc=?,
+            error_code='CANCELLED_BY_USER',error_message='' WHERE id=?""", (now,now,int(job_id)))
+        if job["status"] == "queued" and not job["attempts"]:
+            await _release_assistant_quota(tx, job)
+        await _append_assistant_job_event(tx,job_id,"cancelled",{"status":"cancelled"})
+        return True
 
 
-async def touch_assistant_job(conn: aiosqlite.Connection, job_id: int) -> None:
-    await conn.execute(
-        "UPDATE assistant_jobs SET updated_at_utc=? WHERE id=?",
-        (utc_now_iso(), int(job_id)),
-    )
-    await conn.commit()
+async def touch_assistant_job(conn, job_id: int, *, lease: dict | None = None) -> bool:
+    async with transaction(conn) as tx:
+        if lease and not await assistant_lease_valid(tx, lease):
+            return False
+        cur = await tx.execute("UPDATE assistant_jobs SET updated_at_utc=? WHERE id=? AND status='processing'", (utc_now_iso(),int(job_id)))
+        return bool(cur.rowcount)
 
 
 async def get_nutrient_assistant_draft(conn: aiosqlite.Connection, tg_user_id: int) -> dict | None:
@@ -10426,6 +10497,13 @@ async def mark_llm_assistant_run_status(conn: aiosqlite.Connection, tg_user_id: 
         "UPDATE llm_assistant_runs SET status=?, updated_at=? WHERE user_id=? AND id=?",
         (str(status or ""), now, user_id, int(run_id)),
     )
+    if cur.rowcount and status == "cancelled":
+        await conn.execute("UPDATE llm_assistant_runs SET is_active=0 WHERE user_id=? AND id=?", (user_id,int(run_id)))
+        await conn.execute("UPDATE llm_assistant_plan_actions SET status='cancelled',updated_at=? WHERE user_id=? AND run_id=?", (now,user_id,int(run_id)))
+        await conn.execute("""UPDATE nutrient_plan_runs SET is_active=0,lifecycle_status='cancelled',cancelled_at_utc=?,updated_at_utc=?
+            WHERE user_id=? AND id IN (SELECT nutrient_plan_run_id FROM llm_assistant_plan_actions WHERE user_id=? AND run_id=?)""", (now,now,user_id,user_id,int(run_id)))
+        await conn.execute("""UPDATE nutrient_followup_reminders SET status='obsolete',updated_at_utc=? WHERE user_id=?
+            AND plan_run_id IN (SELECT nutrient_plan_run_id FROM llm_assistant_plan_actions WHERE user_id=? AND run_id=?)""", (now,user_id,user_id,int(run_id)))
     return int(cur.rowcount or 0) > 0
 
 
@@ -10613,6 +10691,29 @@ async def deactivate_other_assistant_runs(conn: aiosqlite.Connection, tg_user_id
     )
 
 
+async def activate_assistant_action_plan(conn, tg_user_id: int, item: dict) -> None:
+    plan_id = int(item.get("nutrient_plan_run_id") or 0)
+    if not plan_id:
+        return
+    user_id = await get_or_create_user(conn, tg_user_id)
+    row = await fetchone(conn, "SELECT nutrient_code FROM nutrient_plan_runs WHERE id=? AND user_id=?", (plan_id,user_id))
+    if not row:
+        return
+    await deactivate_active_nutrient_plans(conn, tg_user_id, row["nutrient_code"])
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    def due(key):
+        days = int(item.get(key) or 0)
+        return (now + timedelta(days=days)).isoformat() if days > 0 else ""
+    review, retest = due("reevaluate_after_days"), due("retest_after_days")
+    await conn.execute("""UPDATE nutrient_plan_runs SET is_active=1,lifecycle_status='active',freshness_status='fresh',
+        course_started_at_utc=?,course_ends_at_utc=?,review_due_at_utc=?,retest_due_at_utc=?,updated_at_utc=?
+        WHERE id=? AND user_id=?""", (now.isoformat(),due("course_days"),review,retest,now.isoformat(),plan_id,user_id))
+    for kind, when in (("followup_review",review),("retest",retest)):
+        await conn.execute("UPDATE nutrient_reminder_candidates SET trigger_date_utc=? WHERE user_id=? AND plan_run_id=? AND candidate_type=?", (when,user_id,plan_id,kind))
+        await conn.execute("UPDATE nutrient_followup_items SET due_date_utc=? WHERE user_id=? AND plan_run_id=? AND item_type=?", (when,user_id,plan_id,kind))
+    await activate_nutrient_reminders_for_plan(conn, tg_user_id, plan_id)
+
+
 async def activate_assistant_run(conn: aiosqlite.Connection, tg_user_id: int, run_id: int) -> None:
     user_id = await get_or_create_user(conn, int(tg_user_id))
     now = utc_now_iso()
@@ -10745,10 +10846,12 @@ async def create_nutrient_plan_run(
     source_report_id: int | None,
     preview_snapshot: dict,
     plan_snapshot: dict,
+    *, activate: bool = True,
 ) -> int:
     user_id = await get_or_create_user(conn, int(tg_user_id))
     now = utc_now_iso()
-    await deactivate_active_nutrient_plans(conn, tg_user_id, nutrient_code)
+    if activate:
+        await deactivate_active_nutrient_plans(conn, tg_user_id, nutrient_code)
     cur = await conn.execute(
         """INSERT INTO nutrient_plan_runs(
             user_id, nutrient_code, source_report_id, preview_snapshot_json, plan_snapshot_json,
@@ -10758,7 +10861,7 @@ async def create_nutrient_plan_run(
             last_rebuild_at_utc, lifecycle_status, recommend_action, supplement_id,
             course_started_at_utc, course_ends_at_utc, pause_days, review_due_at_utc, retest_due_at_utc, cancelled_at_utc,
             created_at_utc, updated_at_utc, is_active
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)""",
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             user_id,
             str(nutrient_code or "").lower(),
@@ -10785,6 +10888,7 @@ async def create_nutrient_plan_run(
             str(plan_snapshot.get("cancelled_at_utc") or ""),
             now,
             now,
+            int(activate),
         ),
     )
     return int(cur.lastrowid)
@@ -11032,7 +11136,7 @@ async def activate_nutrient_reminders_for_plan(conn: aiosqlite.Connection, tg_us
     user_id = await get_or_create_user(conn, int(tg_user_id))
     plan = await fetchone(
         conn,
-        "SELECT id, nutrient_code FROM nutrient_plan_runs WHERE user_id=? AND id=? LIMIT 1",
+        "SELECT id, nutrient_code FROM nutrient_plan_runs WHERE user_id=? AND id=? AND is_active=1 LIMIT 1",
         (user_id, int(plan_run_id)),
     )
     if not plan:

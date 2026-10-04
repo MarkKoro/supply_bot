@@ -1856,7 +1856,8 @@ async def api_profile_nutrients_get(x_telegram_init_data: str = Header(default="
     conn = await db.connect(s.DB_PATH)
     try:
         runs = await db.list_llm_assistant_runs(conn, tg_user_id, limit=20)
-        return JSONResponse({"ok": True, "runs": runs})
+        usage = await db.assistant_usage_current_month(conn, tg_user_id)
+        return JSONResponse({"ok": True, "usage_current_month": usage, "usage_limit": NUTRIENT_ASSISTANT_MONTHLY_LIMIT, "runs": runs})
     finally:
         await conn.close()
 
@@ -1877,7 +1878,8 @@ async def api_profile_nutrient_dashboard_get(x_telegram_init_data: str = Header(
         runs = await db.list_llm_assistant_runs(conn, tg_user_id, limit=20)
         profile = await db.get_user_health_profile(conn, tg_user_id)
         labs = await db.list_latest_lab_results(conn, tg_user_id, limit=100)
-        return JSONResponse({"ok": True, "history": runs, "profile": profile, "labs_count": len(labs)})
+        usage = await db.assistant_usage_current_month(conn, tg_user_id)
+        return JSONResponse({"ok": True, "usage_current_month": usage, "usage_limit": NUTRIENT_ASSISTANT_MONTHLY_LIMIT, "history": runs, "profile": profile, "labs_count": len(labs)})
     finally:
         await conn.close()
 
@@ -1999,58 +2001,59 @@ async def api_profile_nutrient_assistant_compute(
         return JSONResponse({"ok": False, "code": "OPENAI_DISABLED"}, status_code=503)
     conn = await db.connect(s.DB_PATH)
     try:
-        stage = "check_daily_limit"
-        if (not is_admin_unlimited) and await db.has_llm_assistant_cancel_today(conn, tg_user_id):
-            return JSONResponse({"ok": False, "code": "DAILY_LIMIT_ONE_REQUEST"}, status_code=429)
-        stage = "load_history"
-        history = await db.list_llm_assistant_runs_meta(conn, tg_user_id, limit=30)
-        active_history = [h for h in history if str(h.get("status") or "") in {"ok", "applied", "cancelled"}]
-        if not is_admin_unlimited and len(active_history) >= 3:
-            if (replace_run_id or 0) <= 0:
-                # Autoreplace oldest run to keep UX "always computable" without manual conflict flow.
-                replace_run_id = int(active_history[-1].get("id") or 0) or None
-            target = next((r for r in active_history if int(r.get("id") or 0) == replace_run_id), None)
-            if not target:
-                return JSONResponse({"ok": False, "code": "INVALID_REPLACE_RUN"}, status_code=400)
+        async with db.transaction(conn) as conn:
+            existing = await db.find_active_assistant_job(conn, tg_user_id, kind="nutrient_compute")
+            if existing:
+                existing_id = int(existing.get("id") or 0)
+                existing_status = str(existing.get("status") or "queued")
+                log.info("nutrient assistant deduplicated enqueue tg_user_id=%s job_id=%s status=%s", tg_user_id, existing_id, existing_status)
+                return JSONResponse({"ok": True, "mode": "queued", "job_id": existing_id, "status": existing_status, "deduplicated": True})
+            stage = "check_daily_limit"
+            if (not is_admin_unlimited) and await db.has_llm_assistant_cancel_today(conn, tg_user_id):
+                return JSONResponse({"ok": False, "code": "DAILY_LIMIT_ONE_REQUEST"}, status_code=429)
+            stage = "load_history"
+            history = await db.list_llm_assistant_runs_meta(conn, tg_user_id, limit=30)
+            active_history = [h for h in history if str(h.get("status") or "") in {"ok", "applied", "cancelled"}]
+            if not is_admin_unlimited and len(active_history) >= 3:
+                if (replace_run_id or 0) <= 0:
+                    # Autoreplace oldest run to keep UX "always computable" without manual conflict flow.
+                    replace_run_id = int(active_history[-1].get("id") or 0) or None
+                target = next((r for r in active_history if int(r.get("id") or 0) == replace_run_id), None)
+                if not target:
+                    return JSONResponse({"ok": False, "code": "INVALID_REPLACE_RUN"}, status_code=400)
 
-        stage = "load_profile_for_draft"
-        profile = await db.get_user_health_profile(conn, tg_user_id)
-        sex_key = {"m": "male", "f": "female"}.get(str(profile.get("sex_at_birth") or "").lower(), "any")
-        labs = [nutrient_pipeline._normalize_assistant_lab_item(dict(x or {}), sex_key=sex_key) for x in list(body.labs or [])]
-        assistant_profile = dict(body.assistant_profile or {})
-        stage = "save_draft_before_compute"
-        await db.upsert_nutrient_assistant_draft(
-            conn,
-            tg_user_id,
-            assistant_profile=assistant_profile,
-            labs=labs,
-            compute_scope={"mode": "current_draft"},
-            source_run_id=None,
-        )
-        stage = "enqueue_job"
-        request_json = json.dumps(
-            {
-                "assistant_profile": assistant_profile,
-                "labs": labs,
-                "assistant_context": dict(body.assistant_context or {}),
-                "replace_run_id": replace_run_id,
-            },
-            ensure_ascii=False,
-        )
-        existing = await db.find_active_assistant_job(conn, tg_user_id, kind="nutrient_compute")
-        if existing:
-            existing_id = int(existing.get("id") or 0)
-            existing_status = str(existing.get("status") or "queued")
-            log.info("nutrient assistant deduplicated enqueue tg_user_id=%s job_id=%s status=%s", tg_user_id, existing_id, existing_status)
-            return JSONResponse({"ok": True, "mode": "queued", "job_id": existing_id, "status": existing_status, "deduplicated": True})
-        job_id = await db.create_assistant_job(conn, tg_user_id, request_json=request_json, debug_id=debug_id, kind="nutrient_compute")
-        log.info("nutrient assistant queued tg_user_id=%s job_id=%s debug_id=%s", tg_user_id, job_id, debug_id)
-        return JSONResponse({"ok": True, "mode": "queued", "job_id": job_id, "status": "queued", "deduplicated": False})
+            stage = "load_profile_for_draft"
+            profile = await db.get_user_health_profile(conn, tg_user_id)
+            sex_key = {"m": "male", "f": "female"}.get(str(profile.get("sex_at_birth") or "").lower(), "any")
+            labs = [nutrient_pipeline._normalize_assistant_lab_item(dict(x or {}), sex_key=sex_key) for x in list(body.labs or [])]
+            assistant_profile = dict(body.assistant_profile or {})
+            stage = "save_draft_before_compute"
+            await db.upsert_nutrient_assistant_draft(
+                conn,
+                tg_user_id,
+                assistant_profile=assistant_profile,
+                labs=labs,
+                compute_scope={"mode": "current_draft"},
+                source_run_id=None,
+            )
+            stage = "enqueue_job"
+            request_json = json.dumps(
+                {
+                    "assistant_profile": assistant_profile,
+                    "labs": labs,
+                    "assistant_context": dict(body.assistant_context or {}),
+                    "replace_run_id": replace_run_id,
+                },
+                ensure_ascii=False,
+            )
+            job_id = await db.create_assistant_job(conn, tg_user_id, request_json=request_json, debug_id=debug_id, kind="nutrient_compute", monthly_limit=None if is_admin_unlimited else NUTRIENT_ASSISTANT_MONTHLY_LIMIT)
+            log.info("nutrient assistant queued tg_user_id=%s job_id=%s debug_id=%s", tg_user_id, job_id, debug_id)
+            return JSONResponse({"ok": True, "mode": "queued", "job_id": job_id, "status": "queued", "deduplicated": False})
+    except db.AssistantQuotaExceeded:
+        return JSONResponse({"ok": False, "code": "ASSISTANT_MONTHLY_LIMIT_REACHED"}, status_code=429)
     except PipelineError as exc:
-        await conn.rollback()
         return JSONResponse({"ok": False, "code": exc.code, "stage": exc.stage, "debug_id": debug_id, "message": exc.message}, status_code=503)
     except Exception as exc:
-        await conn.rollback()
         exc_type = type(exc).__name__
         log.exception(
             "nutrient assistant enqueue failed debug_id=%s stage=%s tg_user_id=%s replace_run_id=%s exc_type=%s exc_msg=%s",
@@ -2242,82 +2245,83 @@ async def api_profile_nutrient_assistant_apply(
         return JSONResponse({"ok": False, "code": "PAID_PREMIUM_REQUIRED"}, status_code=403)
     conn = await db.connect(s.DB_PATH)
     try:
-        user_id = await db.get_or_create_user(conn, tg_user_id)
-        slots = await db.get_user_slots(conn, user_id)
-        enabled_slots = [slot for slot in slots if bool(slot.get("is_enabled", True))]
-        target_slot_id = str((enabled_slots[0] if enabled_slots else (slots[0] if slots else {"slot_id": "morning"})).get("slot_id") or "morning").strip() or "morning"
+        async with db.transaction(conn) as conn:
+            user_id = await db.get_or_create_user(conn, tg_user_id)
+            slots = await db.get_user_slots(conn, user_id)
+            enabled_slots = [slot for slot in slots if bool(slot.get("is_enabled", True))]
+            target_slot_id = str((enabled_slots[0] if enabled_slots else (slots[0] if slots else {"slot_id": "morning"})).get("slot_id") or "morning").strip() or "morning"
 
-        run = await db.get_llm_assistant_run(conn, tg_user_id, int(body.run_id))
-        if not run:
-            raise HTTPException(status_code=404, detail="Assistant run not found")
-        actions = await db.list_llm_assistant_plan_actions(conn, tg_user_id, int(body.run_id))
-        applied: list[dict] = []
-        skipped: list[dict] = []
-        processed_supplements: set[int] = set()
-        applied_nutrient_codes: set[str] = set()
-        for item in actions:
-            action = str(item.get("recommend_action") or "")
-            nutrient_code = str(item.get("nutrient_code") or "").strip().lower()
-            nutrient_name = str(item.get("nutrient_name_ru") or "").strip()
-            supp = await db.get_supplement_by_slug(conn, nutrient_code) if nutrient_code else None
-            if not supp:
-                supp = await db.find_supplement_by_slug_or_name(conn, nutrient_code or None, nutrient_name or None)
-            if not supp:
-                skipped.append({"action_id": int(item["id"]), "reason": "supplement_not_found", "nutrient_code": nutrient_code, "nutrient_name_ru": nutrient_name})
-                continue
-            supp_name_ru = str(supp["name_ru"] or supp["name"] or "")
-            supplement_id = int(supp["id"])
-            if supplement_id in processed_supplements:
-                continue
-            processed_supplements.add(supplement_id)
-            if action in {"start", "continue"}:
-                await db.add_user_supplement(conn, tg_user_id, supplement_id)
-                await db.set_user_supp_fields(
-                    conn,
-                    tg_user_id,
-                    supplement_id,
-                    str(item.get("dose_text") or ""),
-                    f"AI assistant: {str(item.get('duration_text') or '')}. Стоп/пауза: {str(item.get('stop_or_pause_rule_ru') or '')}".strip(),
-                )
-                await db.set_schedule_slot(conn, user_id, supplement_id, target_slot_id)
-                reminders = list(item.get("reminders") or [])
-                if reminders:
-                    await db.set_reminders_for_supplement(conn, tg_user_id, supplement_id, "custom", reminders)
-                await db.mark_llm_assistant_plan_action_status(conn, tg_user_id, int(body.run_id), int(item["id"]), "applied", supplement_id=supplement_id)
-                if int(item.get("nutrient_plan_run_id") or 0) > 0:
-                    now_iso = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-                    await conn.execute(
-                        """UPDATE nutrient_plan_runs
-                           SET lifecycle_status='active', recommend_action=?, supplement_id=?,
-                               course_started_at_utc=COALESCE(NULLIF(course_started_at_utc,''),?),
-                               updated_at_utc=?
-                           WHERE id=?""",
-                        (action, supplement_id, now_iso, now_iso, int(item.get("nutrient_plan_run_id"))),
+            run = await db.get_llm_assistant_run(conn, tg_user_id, int(body.run_id))
+            if not run:
+                raise HTTPException(status_code=404, detail="Assistant run not found")
+            if run["status"] == "applied":
+                return JSONResponse({"ok": True, "run_id": int(body.run_id), "applied": [], "skipped": [], "already_applied": True})
+            if run["status"] not in {"ok", "ok_timeout_fallback"}:
+                return JSONResponse({"ok": False, "code": "ASSISTANT_RUN_NOT_APPLICABLE"}, status_code=409)
+            version = (run.get("input_snapshot_json") or {}).get("_source_version")
+            if version and version != await db.assistant_input_version(conn, tg_user_id):
+                return JSONResponse({"ok": False, "code": "ASSISTANT_INPUT_CHANGED"}, status_code=409)
+            actions = await db.list_llm_assistant_plan_actions(conn, tg_user_id, int(body.run_id))
+            applied: list[dict] = []
+            skipped: list[dict] = []
+            processed_supplements: set[int] = set()
+            applied_nutrient_codes: set[str] = set()
+            for item in actions:
+                if item.get("status") != "prepared":
+                    continue
+                action = str(item.get("recommend_action") or "")
+                nutrient_code = str(item.get("nutrient_code") or "").strip().lower()
+                nutrient_name = str(item.get("nutrient_name_ru") or "").strip()
+                supp = await db.get_supplement_by_slug(conn, nutrient_code) if nutrient_code else None
+                if not supp:
+                    supp = await db.find_supplement_by_slug_or_name(conn, nutrient_code or None, nutrient_name or None)
+                if not supp:
+                    skipped.append({"action_id": int(item["id"]), "reason": "supplement_not_found", "nutrient_code": nutrient_code, "nutrient_name_ru": nutrient_name})
+                    continue
+                supp_name_ru = str(supp["name_ru"] or supp["name"] or "")
+                supplement_id = int(supp["id"])
+                if supplement_id in processed_supplements:
+                    continue
+                processed_supplements.add(supplement_id)
+                if action in {"start", "continue"}:
+                    await db.add_user_supplement(conn, tg_user_id, supplement_id)
+                    await db.set_user_supp_fields(
+                        conn,
+                        tg_user_id,
+                        supplement_id,
+                        str(item.get("dose_text") or ""),
+                        f"AI assistant: {str(item.get('duration_text') or '')}. Стоп/пауза: {str(item.get('stop_or_pause_rule_ru') or '')}".strip(),
                     )
-                if nutrient_code:
-                    applied_nutrient_codes.add(nutrient_code)
-                applied.append({"action_id": int(item["id"]), "supplement_id": supplement_id, "name_ru": supp_name_ru, "action": action, "reminders": reminders, "slot_id": target_slot_id})
-            elif action == "stop":
-                await db.remove_user_supplement(conn, tg_user_id, supplement_id)
-                await db.mark_llm_assistant_plan_action_status(conn, tg_user_id, int(body.run_id), int(item["id"]), "applied", supplement_id=supplement_id)
-                if int(item.get("nutrient_plan_run_id") or 0) > 0:
-                    now_iso = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-                    await conn.execute(
-                        """UPDATE nutrient_plan_runs
-                           SET lifecycle_status='cancelled', recommend_action='stop', supplement_id=?,
-                               cancelled_at_utc=?, updated_at_utc=?, is_active=0
-                           WHERE id=?""",
-                        (supplement_id, now_iso, now_iso, int(item.get("nutrient_plan_run_id"))),
-                    )
-                if nutrient_code:
-                    applied_nutrient_codes.add(nutrient_code)
-                applied.append({"action_id": int(item["id"]), "supplement_id": supplement_id, "name_ru": supp_name_ru, "action": action})
+                    await db.set_schedule_slot(conn, user_id, supplement_id, target_slot_id)
+                    reminders = list(item.get("reminders") or [])
+                    if reminders:
+                        await db.set_reminders_for_supplement(conn, tg_user_id, supplement_id, "custom", reminders)
+                    await db.mark_llm_assistant_plan_action_status(conn, tg_user_id, int(body.run_id), int(item["id"]), "applied", supplement_id=supplement_id)
+                    await db.activate_assistant_action_plan(conn, tg_user_id, item)
+                    if nutrient_code:
+                        applied_nutrient_codes.add(nutrient_code)
+                    applied.append({"action_id": int(item["id"]), "supplement_id": supplement_id, "name_ru": supp_name_ru, "action": action, "reminders": reminders, "slot_id": target_slot_id})
+                elif action == "stop":
+                    await db.remove_user_supplement(conn, tg_user_id, supplement_id)
+                    await db.mark_llm_assistant_plan_action_status(conn, tg_user_id, int(body.run_id), int(item["id"]), "applied", supplement_id=supplement_id)
+                    if int(item.get("nutrient_plan_run_id") or 0) > 0:
+                        now_iso = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+                        await conn.execute(
+                            """UPDATE nutrient_plan_runs
+                               SET lifecycle_status='cancelled', recommend_action='stop', supplement_id=?,
+                                   cancelled_at_utc=?, updated_at_utc=?, is_active=0
+                               WHERE id=?""",
+                            (supplement_id, now_iso, now_iso, int(item.get("nutrient_plan_run_id"))),
+                        )
+                    if nutrient_code:
+                        applied_nutrient_codes.add(nutrient_code)
+                    applied.append({"action_id": int(item["id"]), "supplement_id": supplement_id, "name_ru": supp_name_ru, "action": action})
 
-        lifecycle_result = await db.process_due_nutrient_lifecycle(conn, limit=500)
-        await db.supersede_applied_actions_for_nutrients(conn, tg_user_id, int(body.run_id), sorted(applied_nutrient_codes))
-        await db.activate_assistant_run(conn, tg_user_id, int(body.run_id))
-        await conn.commit()
-        return JSONResponse({"ok": True, "run_id": int(body.run_id), "applied": applied, "skipped": skipped, "lifecycle": lifecycle_result})
+            lifecycle_result = await db.process_due_nutrient_lifecycle(conn, limit=500)
+            await db.supersede_applied_actions_for_nutrients(conn, tg_user_id, int(body.run_id), sorted(applied_nutrient_codes))
+            await db.activate_assistant_run(conn, tg_user_id, int(body.run_id))
+            await conn.commit()
+            return JSONResponse({"ok": True, "run_id": int(body.run_id), "applied": applied, "skipped": skipped, "lifecycle": lifecycle_result})
     finally:
         await conn.close()
 
@@ -2332,12 +2336,13 @@ async def api_profile_nutrient_assistant_cancel(
         return JSONResponse({"ok": False, "code": "PAID_PREMIUM_REQUIRED"}, status_code=403)
     conn = await db.connect(s.DB_PATH)
     try:
-        run = await db.get_llm_assistant_run(conn, tg_user_id, int(run_id))
-        if not run:
-            raise HTTPException(status_code=404, detail="Assistant run not found")
-        await db.mark_llm_assistant_run_status(conn, tg_user_id, int(run_id), "cancelled")
-        await conn.commit()
-        return JSONResponse({"ok": True, "run_id": int(run_id), "status": "cancelled", "daily_limit": "one_request_until_next_day"})
+        async with db.transaction(conn) as conn:
+            run = await db.get_llm_assistant_run(conn, tg_user_id, int(run_id))
+            if not run:
+                raise HTTPException(status_code=404, detail="Assistant run not found")
+            await db.mark_llm_assistant_run_status(conn, tg_user_id, int(run_id), "cancelled")
+            await conn.commit()
+            return JSONResponse({"ok": True, "run_id": int(run_id), "status": "cancelled", "daily_limit": "one_request_until_next_day"})
     finally:
         await conn.close()
 

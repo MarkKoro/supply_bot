@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 import json
 import logging
 import socket
@@ -13,6 +14,17 @@ from settings import get_settings
 log = logging.getLogger("assistant_worker")
 
 
+async def _keep_assistant_lease(db_path: str, job: dict, interval_seconds: float = 20) -> None:
+    while True:
+        await asyncio.sleep(interval_seconds)
+        heartbeat_conn = await db.connect(db_path)
+        try:
+            if not await db.touch_assistant_job(heartbeat_conn, int(job["id"]), lease=job):
+                return
+        finally:
+            await heartbeat_conn.close()
+
+
 async def process_assistant_job(conn, job: dict, worker_name: str) -> None:
     started_ts = time.monotonic()
     job_id = int(job.get("id") or 0)
@@ -20,23 +32,24 @@ async def process_assistant_job(conn, job: dict, worker_name: str) -> None:
     kind = str(job.get("kind") or "")
     debug_id = str(job.get("debug_id") or "")
     stage = "claim"
+    heartbeat = None
     log.info("assistant worker claimed job_id=%s tg_user_id=%s kind=%s debug_id=%s", job_id, tg_user_id, kind, debug_id)
     try:
         stage = "mark_processing"
-        await db.mark_assistant_job_processing(conn, job_id, worker_name)
-        if kind != "nutrient_compute":
-            await db.mark_assistant_job_failed(conn, job_id, "UNSUPPORTED_JOB_KIND", f"Unsupported kind: {kind}")
+        if not await db.assistant_lease_valid(conn, job):
             return
+        if kind != "nutrient_compute":
+            await db.mark_assistant_job_failed(conn, job_id, "UNSUPPORTED_JOB_KIND", f"Unsupported kind: {kind}", lease=job)
+            return
+        database = await db.fetchone(conn, "PRAGMA database_list")
+        if database and database["file"]:
+            heartbeat = asyncio.create_task(_keep_assistant_lease(str(database["file"]), job))
         stage = "parse_request_json"
         request_json_raw = str(job.get("request_json") or "{}")
         request_payload = json.loads(request_json_raw)
         replace_run_id = int(request_payload.get("replace_run_id") or 0) or None
 
         stage = "run_compute_pipeline"
-        if replace_run_id:
-            ok = await db.replace_llm_assistant_run(conn, tg_user_id, replace_run_id)
-            if not ok:
-                raise NutrientAssistantPipelineError("INVALID_REPLACE_RUN", "replace_run", f"replace_run_id={replace_run_id}")
         result = await run_nutrient_assistant_compute_pipeline(
             conn,
             tg_user_id=tg_user_id,
@@ -44,26 +57,8 @@ async def process_assistant_job(conn, job: dict, worker_name: str) -> None:
             labs=list(request_payload.get("labs") or []),
             assistant_context=dict(request_payload.get("assistant_context") or {}),
             debug_id=debug_id,
-        )
-        stage = "mark_done"
-        result_run_id = int(result.get("run_id") or 0)
-        await conn.commit()
-        await db.mark_assistant_job_done(
-            conn,
-            job_id,
-            result_run_id=result_run_id,
-            result_json=json.dumps(
-                {
-                    "run_id": result_run_id,
-                    "fallback_used": bool(result.get("fallback_used")),
-                    "fallback_reason": str(result.get("fallback_reason") or ""),
-                    "invalid_reason": str(result.get("invalid_reason") or ""),
-                    "raw_preview": str(result.get("raw_preview") or ""),
-                    "model_name": str(result.get("model_name") or ""),
-                    "labs_count": int(result.get("labs_count") or 0),
-                },
-                ensure_ascii=False,
-            ),
+            job_lease=job,
+            replace_run_id=replace_run_id,
         )
         elapsed_ms = int((time.monotonic() - started_ts) * 1000)
         log.info(
@@ -76,7 +71,7 @@ async def process_assistant_job(conn, job: dict, worker_name: str) -> None:
         )
     except NutrientAssistantPipelineError as exc:
         await conn.rollback()
-        await db.mark_assistant_job_failed(conn, job_id, exc.code, f"{exc.stage}: {exc.message}".strip(": "))
+        await db.mark_assistant_job_failed(conn, job_id, exc.code, f"{exc.stage}: {exc.message}".strip(": "), lease=job)
         elapsed_ms = int((time.monotonic() - started_ts) * 1000)
         log.warning(
             "assistant worker failed job_id=%s tg_user_id=%s debug_id=%s stage=%s elapsed_ms=%s code=%s",
@@ -89,7 +84,7 @@ async def process_assistant_job(conn, job: dict, worker_name: str) -> None:
         )
     except Exception as exc:
         await conn.rollback()
-        await db.mark_assistant_job_failed(conn, job_id, "ASSISTANT_COMPUTE_ERROR", f"{stage}: {type(exc).__name__}: {exc}")
+        await db.mark_assistant_job_failed(conn, job_id, "ASSISTANT_COMPUTE_ERROR", f"{stage}: {type(exc).__name__}", lease=job)
         elapsed_ms = int((time.monotonic() - started_ts) * 1000)
         log.exception(
             "assistant worker failed job_id=%s tg_user_id=%s debug_id=%s stage=%s elapsed_ms=%s",
@@ -99,6 +94,11 @@ async def process_assistant_job(conn, job: dict, worker_name: str) -> None:
             stage,
             elapsed_ms,
         )
+    finally:
+        if heartbeat:
+            heartbeat.cancel()
+            with suppress(asyncio.CancelledError):
+                await heartbeat
 
 
 async def run_worker() -> None:

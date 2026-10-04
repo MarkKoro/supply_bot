@@ -4662,7 +4662,7 @@ function adminField(label, field, value, kind='input') {
     try {
       const res = await api('./api/profile/nutrient-assistant/dashboard');
       state.nutrientAssistant.history = Array.isArray(res.history) ? res.history : [];
-      state.nutrientAssistant.usageCurrentMonth = assistantUsageInCurrentMonth(state.nutrientAssistant.history);
+      state.nutrientAssistant.usageCurrentMonth = Number(res.usage_current_month ?? assistantUsageInCurrentMonth(state.nutrientAssistant.history));
     } catch {}
     state.nutrientAssistant.loadingHistory = false;
   }
@@ -4672,7 +4672,7 @@ function adminField(label, field, value, kind='input') {
     try {
       const res = await api('./api/profile/nutrient-assistant/plans');
       state.nutrientAssistant.history = Array.isArray(res.runs) ? res.runs : [];
-      state.nutrientAssistant.usageCurrentMonth = assistantUsageInCurrentMonth(state.nutrientAssistant.history);
+      state.nutrientAssistant.usageCurrentMonth = Number(res.usage_current_month ?? assistantUsageInCurrentMonth(state.nutrientAssistant.history));
     } catch {}
     state.nutrientAssistant.loadingHistory = false;
   }
@@ -5205,7 +5205,7 @@ function adminField(label, field, value, kind='input') {
     const basisInput = selectedRun?.input_snapshot_json || {};
     const basisLabs = Array.isArray(basisInput?.labs) ? basisInput.labs : [];
     const usageLimit = Number(a.usageLimit || 5);
-    const usedThisMonth = assistantUsageInCurrentMonth(history);
+    const usedThisMonth = Number(a.usageCurrentMonth ?? assistantUsageInCurrentMonth(history));
     const isAssistantAdminUnlimited = ['owner', 'admin'].includes(String(state.me?.role || '').toLowerCase());
     const usageLeft = Math.max(0, usageLimit - usedThisMonth);
     const shouldUseStepFlow = !hasHistory;

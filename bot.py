@@ -8041,9 +8041,6 @@ async def _maybe_seed_catalog(s) -> None:
         return
 
     existing = await _supplements_count(s.DB_PATH)
-    if existing > 0:
-        return
-
     supp_path = s.SEED_SUPPLEMENTS_PATH
     inter_path = s.SEED_INTERACTIONS_PATH
     if not supp_path or not os.path.exists(supp_path):
@@ -8054,7 +8051,7 @@ async def _maybe_seed_catalog(s) -> None:
         log.warning("Interactions seed file missing, seeding supplements only: %s", inter_path)
         inter_path = None
 
-    await seed_import._import(supp_path, inter_path)
+    await seed_import._import(supp_path, inter_path, only_missing=existing > 0)
     seeded = await _supplements_count(s.DB_PATH)
     log.info("Seeded OK: %s supplements", seeded)
 

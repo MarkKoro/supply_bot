@@ -3679,28 +3679,42 @@ async def _interaction_reference_index(conn: aiosqlite.Connection, sid: int) -> 
     by_id = {int(row["id"]): dict(row) for row in rows}
     by_slug = {str(row["slug"] or "").strip().lower(): int(row["id"]) for row in rows}
     aliases: dict[str, set[int]] = {}
+    canonical: dict[str, set[int]] = {}
     for row in rows:
         values = [row["slug"], row["name"], row["name_ru"], row["name_en"]]
+        for value in values:
+            key = normalize(value)
+            if key:
+                canonical.setdefault(key, set()).add(int(row["id"]))
         values.extend(_parse_aliases_list(row["aliases_json"]))
         values.extend(_parse_aliases_list(row["aliases"]))
         for value in values:
             key = normalize(value)
             if key:
                 aliases.setdefault(key, set()).add(int(row["id"]))
-    return {"by_id": by_id, "by_slug": by_slug, "aliases": aliases}
+    # Admin-added aliases can live only in the normalized alias table.
+    for alias in await fetchall(conn, "SELECT supplement_id, alias_norm FROM supplement_aliases"):
+        sid = int(alias["supplement_id"])
+        key = normalize(alias["alias_norm"])
+        if sid in by_id and key:
+            aliases.setdefault(key, set()).add(sid)
+    return {"by_id": by_id, "by_slug": by_slug, "aliases": aliases, "canonical": canonical}
 
 
 def _resolve_interaction_reference(index: dict, slug, name, raw_id=None) -> int | None:
     slug_key = str(slug or "").strip().lower()
     if slug_key in index["by_slug"]:
         return index["by_slug"][slug_key]
-    matches: set[int] = set()
-    for value in (slug, name):
-        matches.update(index["aliases"].get(normalize(str(value or "")), set()))
-    if len(matches) == 1:
-        return next(iter(matches))
-    if matches:
-        return None
+    keys = [normalize(str(value or "")) for value in (slug, name)]
+    # A card's own name takes precedence over broad aliases on other cards.
+    canonical = set().union(*(index.get("canonical", {}).get(key, set()) for key in keys))
+    if canonical:
+        return next(iter(canonical)) if len(canonical) == 1 else None
+    candidates = [index["aliases"].get(key, set()) for key in keys]
+    candidates = [matches for matches in candidates if matches]
+    if candidates:
+        matches = set.intersection(*candidates)
+        return next(iter(matches)) if len(matches) == 1 else None
     if not slug_key and not str(name or "").strip():
         try:
             candidate = int(raw_id)
@@ -5366,69 +5380,9 @@ async def find_supplement_by_slug_or_name(
     slug: str | None,
     name: str | None,
 ):
-    if slug:
-        slug_raw = str(slug).strip()
-        slug_variants: list[str] = []
-        if slug_raw:
-            base_lower = slug_raw.lower()
-            for variant in (
-                slug_raw,
-                base_lower,
-                base_lower.replace("-", "_"),
-                base_lower.replace(" ", "_"),
-                base_lower.replace(" ", "-"),
-                base_lower.replace("_", "-"),
-                re.sub(r"[^a-z0-9_]+", "_", base_lower),
-            ):
-                v = str(variant).strip().lower().strip("_")
-                if v and v not in slug_variants:
-                    slug_variants.append(v)
-            compact = normalize_text(base_lower)
-            if compact and compact not in slug_variants:
-                slug_variants.append(compact)
-        for candidate_slug in slug_variants:
-            row = await get_supplement_by_slug(conn, candidate_slug)
-            if row:
-                return row
-        slug_norm = normalize(slug_raw)
-        if slug_norm:
-            row = await fetchone(
-                conn,
-                """SELECT s.* FROM supplements s
-                   JOIN supplement_aliases a ON a.supplement_id=s.id
-                   WHERE a.alias_norm=?
-                   LIMIT 1""",
-                (slug_norm,),
-            )
-            if row:
-                return row
-    if not name:
-        return None
-    name = str(name).strip()
-    if not name:
-        return None
-    norm = normalize(name)
-    row = await fetchone(
-        conn,
-        """SELECT s.* FROM supplements s
-           JOIN supplement_aliases a ON a.supplement_id=s.id
-           WHERE a.alias_norm=?
-           LIMIT 1""",
-        (norm,),
-    )
-    if row:
-        return row
-    row = await fetchone(
-        conn,
-        """SELECT * FROM supplements
-           WHERE lower(name)=lower(?) OR lower(name_ru)=lower(?) OR lower(name_en)=lower(?)
-           LIMIT 1""",
-        (name, name, name),
-    )
-    if row:
-        return row
-    rows, _ = await search_supplements(conn, name, page=0, page_size=1)
-    return rows[0] if rows else None
+    # Search suggestions are not identity: never silently add the first fuzzy hit.
+    sid = await _resolve_supplement_id(conn, slug, name, None)
+    return await get_supplement_by_id(conn, sid) if sid is not None else None
 
 async def add_stack_items_to_user(conn: aiosqlite.Connection, user_id: int, items: list[dict]) -> dict:
     added = 0

@@ -9,58 +9,53 @@ from settings import get_settings
 import db
 
 def _iter_slug_chunks(path: str):
-    start_line = 0
-    buffer: list[str] = []
-
-    last_line = 0
-    with open(path, "r", encoding="utf-8") as f:
-        for line_no, raw_line in enumerate(f, 1):
-            last_line = line_no
-            line = raw_line.strip()
-            if not line:
-                continue
-
-            if line.startswith('{"slug"'):
-                if buffer:
-                    yield "\n".join(buffer), start_line, line_no - 1
-                buffer = [line]
-                start_line = line_no
-            else:
-                if not buffer:
-                    raise ValueError(
-                        f"Invalid JSONL format in {path}: line {line_no} does not start with a slug object"
-                    )
-                buffer.append(line)
-
-    if buffer:
-        yield "\n".join(buffer), start_line, last_line
+    # Compatibility iterator; records may span lines and need not start with slug.
+    text = Path(path).read_text(encoding="utf-8-sig")
+    decoder = json.JSONDecoder()
+    position = 0
+    while position < len(text):
+        while position < len(text) and text[position].isspace():
+            position += 1
+        if position == len(text):
+            break
+        start = position
+        try:
+            _, position = decoder.raw_decode(text, position)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Invalid JSON in {path} at line {exc.lineno}, column {exc.colno}: {exc.msg}") from exc
+        yield text[start:position], text.count("\n", 0, start) + 1, text.count("\n", 0, position) + 1
 
 
-def _read_jsonl(path: str):
+def _read_jsonl(path: str, required_fields: tuple[str, ...] = ("slug",)):
+    def unique_keys(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"Duplicate JSON key: {key}")
+            result[key] = value
+        return result
+
+    seen: set[str] = set()
     for chunk, start_line, end_line in _iter_slug_chunks(path):
         try:
-            item = json.loads(chunk)
-        except json.JSONDecodeError as exc:
-            slug_match = re.search(r'"slug"\s*:\s*"([^"\n]+)"', chunk)
-            slug_hint = slug_match.group(1) if slug_match else "unknown"
-            raise ValueError(
-                f"Invalid JSON object for slug '{slug_hint}' in {path} (lines {start_line}-{end_line}): {exc}"
-            ) from exc
-
+            item = json.loads(chunk, object_pairs_hook=unique_keys)
+        except ValueError as exc:
+            raise ValueError(f"Invalid JSON in {path} (lines {start_line}-{end_line}): {exc}") from exc
         if not isinstance(item, dict):
-            raise ValueError(
-                f"Invalid JSON object in {path} (lines {start_line}-{end_line}): top-level JSON must be an object"
-            )
-        if not item.get("slug"):
-            raise ValueError(
-                f"Invalid JSON object in {path} (lines {start_line}-{end_line}): missing slug"
-            )
-
+            raise ValueError(f"Invalid record in {path} at line {start_line}: expected object")
+        missing = [field for field in required_fields if not isinstance(item.get(field), str) or not item[field].strip()]
+        if missing:
+            raise ValueError(f"Invalid record in {path} at line {start_line}: missing {', '.join(missing)}")
+        if "slug" in required_fields:
+            slug = item["slug"].strip()
+            if slug in seen:
+                raise ValueError(f"Duplicate slug '{slug}' in {path} at line {start_line}")
+            seen.add(slug)
         yield item
 
 
 def _normalize_jsonl(path: str) -> None:
-    objects = list(_read_jsonl(path))
+    objects = list(_read_jsonl(path, ()))
     normalized = "\n".join(json.dumps(obj, ensure_ascii=False, separators=(",", ":")) for obj in objects)
     Path(path).write_text(normalized + "\n", encoding="utf-8")
 
@@ -74,7 +69,7 @@ def _ensure_omega_aliases(name_en: str | None, aliases: list[str]) -> list[str]:
     if not name_en:
         return aliases
     lower = str(name_en).lower()
-    if re.search(r"omega\\s*-?\\s*3", lower):
+    if re.search(r"omega\s*-?\s*3", lower):
         aliases.extend(["omega3", "omega-3", "omega 3"])
     return aliases
 
@@ -91,9 +86,12 @@ def _extract_evidence_fields(item: dict) -> dict[str, str]:
         "confidence": _string(evidence.get("confidence")),
     }
 
-async def _import_rich(conn, supp_path: str, slug_to_id: dict[str, int]) -> None:
+async def _import_rich(conn, supp_path: str, slug_to_id: dict[str, int], *, only_missing: bool = False) -> None:
+    existing_slugs = {str(row["slug"]) for row in await db.fetchall(conn, "SELECT slug FROM supplements")} if only_missing else set()
     pending_interactions: list[tuple[str, dict]] = []
     for item in _read_jsonl(supp_path):
+        if item["slug"] in existing_slugs:
+            continue
         name_ru = item.get("name_ru")
         name_en = item.get("name_en")
         interaction_classes = item.get("interaction_classes") or []
@@ -238,6 +236,8 @@ async def _import(
     rich_supp_path: str | None = None,
     curated_stacks_path: str | None = None,
     curated_items_path: str | None = None,
+    *,
+    only_missing: bool = False,
 ) -> None:
     if rich_supp_path is None and supp_path:
         if "rich" in Path(supp_path).name:
@@ -261,122 +261,126 @@ async def _import(
     s = get_settings()
     conn = await db.connect(s.DB_PATH)
     try:
-        slug_to_id: dict[str, int] = {}
+        async with db.transaction(conn) as tx:
+            conn = tx
+            slug_to_id: dict[str, int] = {}
 
-        if rich_supp_path:
-            await _import_rich(conn, rich_supp_path, slug_to_id)
-        elif supp_path:
-            for item in _read_jsonl(supp_path):
-                name_ru = item.get("name_ru")
-                name_en = item.get("name_en")
-                aliases = _ensure_omega_aliases(name_en, _build_aliases(item))
-                search_blob = db.build_search_blob(name_ru, name_en, aliases)
-                payload = {
-                    "slug": item["slug"],
-                    "name": item.get("name") or name_ru or name_en or item["slug"],
-                    "name_ru": name_ru,
-                    "name_en": name_en,
-                    "aliases": aliases,
-                    "aliases_json": aliases,
-                    "search_blob": search_blob,
-                    "summary_ru": item.get("summary_ru") or "",
-                    "purchase_url": item.get("purchase_url") or "",
-                    "tags_json": json.dumps(item.get("tags") or [], ensure_ascii=False),
-                    "tags": item.get("tags") or [],
-                    "mechanisms": item.get("mechanisms_ru") or item.get("mechanisms") or "",
-                    "evidence_grade": item.get("evidence_grade") or item.get("evidence") or "",
-                    "safety_notes": item.get("safety_ru") or item.get("safety_notes") or "",
-                    "interaction_classes": json.dumps(item.get("interaction_classes") or [], ensure_ascii=False),
-                }
-                sid = await db.upsert_supplement(conn, payload)
-                slug_to_id[item["slug"]] = sid
-                await db.upsert_aliases(conn, sid, aliases)
+            if rich_supp_path:
+                await _import_rich(conn, rich_supp_path, slug_to_id, only_missing=only_missing)
+            elif supp_path:
+                for item in _read_jsonl(supp_path):
+                    if only_missing and await db.get_supplement_by_slug(conn, item["slug"]):
+                        continue
+                    name_ru = item.get("name_ru")
+                    name_en = item.get("name_en")
+                    aliases = _ensure_omega_aliases(name_en, _build_aliases(item))
+                    search_blob = db.build_search_blob(name_ru, name_en, aliases)
+                    payload = {
+                        "slug": item["slug"],
+                        "name": item.get("name") or name_ru or name_en or item["slug"],
+                        "name_ru": name_ru,
+                        "name_en": name_en,
+                        "aliases": aliases,
+                        "aliases_json": aliases,
+                        "search_blob": search_blob,
+                        "summary_ru": item.get("summary_ru") or "",
+                        "purchase_url": item.get("purchase_url") or "",
+                        "tags_json": json.dumps(item.get("tags") or [], ensure_ascii=False),
+                        "tags": item.get("tags") or [],
+                        "mechanisms": item.get("mechanisms_ru") or item.get("mechanisms") or "",
+                        "evidence_grade": item.get("evidence_grade") or item.get("evidence") or "",
+                        "safety_notes": item.get("safety_ru") or item.get("safety_notes") or "",
+                        "interaction_classes": json.dumps(item.get("interaction_classes") or [], ensure_ascii=False),
+                    }
+                    sid = await db.upsert_supplement(conn, payload)
+                    slug_to_id[item["slug"]] = sid
+                    await db.upsert_aliases(conn, sid, aliases)
 
-        if inter_path:
-            for item in _read_jsonl(inter_path):
-                a = item["a"]
-                b = item["b"]
-                if a not in slug_to_id:
-                    ra = await db.get_supplement_by_slug(conn, a)
-                    if not ra:
-                        raise RuntimeError(f"Unknown supplement slug in interactions: {a}")
-                    slug_to_id[a] = int(ra["id"])
-                if b not in slug_to_id:
-                    rb = await db.get_supplement_by_slug(conn, b)
-                    if not rb:
-                        raise RuntimeError(f"Unknown supplement slug in interactions: {b}")
-                    slug_to_id[b] = int(rb["id"])
+            if inter_path:
+                for item in _read_jsonl(inter_path, ("a", "b")):
+                    a = item["a"]
+                    b = item["b"]
+                    if a not in slug_to_id:
+                        ra = await db.get_supplement_by_slug(conn, a)
+                        if not ra:
+                            raise RuntimeError(f"Unknown supplement slug in interactions: {a}")
+                        slug_to_id[a] = int(ra["id"])
+                    if b not in slug_to_id:
+                        rb = await db.get_supplement_by_slug(conn, b)
+                        if not rb:
+                            raise RuntimeError(f"Unknown supplement slug in interactions: {b}")
+                        slug_to_id[b] = int(rb["id"])
 
-                await db.upsert_interaction(conn, slug_to_id[a], slug_to_id[b], {
-                    "relation": item.get("relation", "neutral"),
-                    "severity": int(item.get("severity", 0)),
-                    "evidence_grade": item.get("evidence_grade") or item.get("evidence", ""),
-                    "note": item.get("note_ru") or item.get("note", ""),
-                    "source_url": item.get("source") or item.get("source_url", ""),
-                })
+                    await db.upsert_interaction(conn, slug_to_id[a], slug_to_id[b], {
+                        "relation": item.get("relation", "neutral"),
+                        "severity": int(item.get("severity", 0)),
+                        "evidence_grade": item.get("evidence_grade") or item.get("evidence", ""),
+                        "note": item.get("note_ru") or item.get("note", ""),
+                        "source_url": item.get("source") or item.get("source_url", ""),
+                    })
 
-        if curated_stacks_path:
-            for item in _read_jsonl(curated_stacks_path):
-                tags_json = json.dumps(item.get("tags_json") or item.get("tags") or [], ensure_ascii=False)
-                await conn.execute(
-                    """INSERT INTO curated_stacks(
-                      slug,title_ru,author_ru,description_ru,source_url,tags_json,is_active,created_at,updated_at
-                    )
-                    VALUES(?,?,?,?,?,?,?,?,?)
-                    ON CONFLICT(slug) DO UPDATE SET
-                      title_ru=excluded.title_ru,
-                      author_ru=excluded.author_ru,
-                      description_ru=excluded.description_ru,
-                      source_url=excluded.source_url,
-                      tags_json=excluded.tags_json,
-                      is_active=excluded.is_active,
-                      updated_at=excluded.updated_at""",
-                    (
-                        item["slug"],
-                        item.get("title_ru") or item.get("title") or item["slug"],
-                        item.get("author_ru") or "",
-                        item.get("description_ru") or "",
-                        item.get("source_url"),
-                        tags_json,
-                        int(item.get("is_active", 1)),
-                        db.utc_now_iso(),
-                        db.utc_now_iso(),
-                    ),
-                )
-            await conn.commit()
-
-        if curated_items_path:
-            items_by_stack: dict[str, list[dict]] = {}
-            for item in _read_jsonl(curated_items_path):
-                stack_slug = item.get("stack_slug")
-                if not stack_slug:
-                    continue
-                items_by_stack.setdefault(stack_slug, []).append(item)
-
-            for stack_slug, items in items_by_stack.items():
-                stack_row = await db.fetchone(conn, "SELECT id FROM curated_stacks WHERE slug=?", (stack_slug,))
-                if not stack_row:
-                    print(f"Warning: unknown curated stack slug for items: {stack_slug}", file=sys.stderr)
-                    continue
-                stack_id = int(stack_row["id"])
-                await conn.execute("DELETE FROM curated_stack_items WHERE stack_id=?", (stack_id,))
-                for item in items:
+            if curated_stacks_path:
+                for item in _read_jsonl(curated_stacks_path):
+                    tags_json = json.dumps(item.get("tags_json") or item.get("tags") or [], ensure_ascii=False)
                     await conn.execute(
-                        """INSERT INTO curated_stack_items(
-                          stack_id,supplement_slug,supplement_name,dose_ru,timing_ru,notes_ru,sort_order
+                        """INSERT INTO curated_stacks(
+                          slug,title_ru,author_ru,description_ru,source_url,tags_json,is_active,created_at,updated_at
                         )
-                        VALUES(?,?,?,?,?,?,?)""",
+                        VALUES(?,?,?,?,?,?,?,?,?)
+                        ON CONFLICT(slug) DO UPDATE SET
+                          title_ru=excluded.title_ru,
+                          author_ru=excluded.author_ru,
+                          description_ru=excluded.description_ru,
+                          source_url=excluded.source_url,
+                          tags_json=excluded.tags_json,
+                          is_active=excluded.is_active,
+                          updated_at=excluded.updated_at""",
                         (
-                            stack_id,
-                            item.get("supplement_slug"),
-                            item.get("supplement_name"),
-                            item.get("dose_ru"),
-                            item.get("timing_ru"),
-                            item.get("notes_ru"),
-                            int(item.get("sort_order", 0)),
+                            item["slug"],
+                            item.get("title_ru") or item.get("title") or item["slug"],
+                            item.get("author_ru") or "",
+                            item.get("description_ru") or "",
+                            item.get("source_url"),
+                            tags_json,
+                            int(item.get("is_active", 1)),
+                            db.utc_now_iso(),
+                            db.utc_now_iso(),
                         ),
                     )
-            await conn.commit()
+                await conn.commit()
+
+            if curated_items_path:
+                items_by_stack: dict[str, list[dict]] = {}
+                for item in _read_jsonl(curated_items_path, ("stack_slug",)):
+                    stack_slug = item.get("stack_slug")
+                    if not stack_slug:
+                        continue
+                    items_by_stack.setdefault(stack_slug, []).append(item)
+
+                for stack_slug, items in items_by_stack.items():
+                    stack_row = await db.fetchone(conn, "SELECT id FROM curated_stacks WHERE slug=?", (stack_slug,))
+                    if not stack_row:
+                        print(f"Warning: unknown curated stack slug for items: {stack_slug}", file=sys.stderr)
+                        continue
+                    stack_id = int(stack_row["id"])
+                    await conn.execute("DELETE FROM curated_stack_items WHERE stack_id=?", (stack_id,))
+                    for item in items:
+                        await conn.execute(
+                            """INSERT INTO curated_stack_items(
+                              stack_id,supplement_slug,supplement_name,dose_ru,timing_ru,notes_ru,sort_order
+                            )
+                            VALUES(?,?,?,?,?,?,?)""",
+                            (
+                                stack_id,
+                                item.get("supplement_slug"),
+                                item.get("supplement_name"),
+                                item.get("dose_ru"),
+                                item.get("timing_ru"),
+                                item.get("notes_ru"),
+                                int(item.get("sort_order", 0)),
+                            ),
+                        )
+                await conn.commit()
     finally:
         await conn.close()
 
@@ -407,7 +411,7 @@ def main():
             )
         )
         print("Import done.")
-    if not args.normalize_jsonl:
+    if not args.normalize_jsonl and not any((args.supplements, args.interactions, args.rich_supplements, args.curated_stacks, args.curated_items)):
         ap.error("Provide import paths and/or --normalize-jsonl")
 
 if __name__ == "__main__":

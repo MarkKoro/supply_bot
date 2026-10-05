@@ -352,7 +352,7 @@ def my_supplements_list(rows, page: int, has_prev: bool, has_next: bool, *, show
 
 
 
-def my_supplements_overview_kb(base_rows, page: int, has_prev: bool, has_next: bool) -> InlineKeyboardMarkup:
+def my_supplements_overview_kb(base_rows, page: int, has_prev: bool, has_next: bool, *, part: int = 0, part_count: int = 1) -> InlineKeyboardMarkup:
     btns = []
     def _row_val(row, key, default=None):
         if isinstance(row, dict):
@@ -369,12 +369,16 @@ def my_supplements_overview_kb(base_rows, page: int, has_prev: bool, has_next: b
         btns.append([InlineKeyboardButton(label, callback_data=f"mysupp:open:{sid}")])
 
     btns.append([InlineKeyboardButton("➕ Добавить", callback_data="mysupp:add")])
-    btns.append([InlineKeyboardButton("🧩 Комплексы", callback_data=f"mysupp:complexes:{page}")])
+    btns.append([InlineKeyboardButton("🧩 Комплексы", callback_data=f"mysupp:complexes:{page}" + (f":{part}" if part else ""))])
     nav = []
-    if has_prev:
-        nav.append(InlineKeyboardButton("⬅️ Назад", callback_data=f"mysupp:list:{page - 1}"))
+    if part > 0:
+        nav.append(InlineKeyboardButton("⬅️ Назад", callback_data=f"mysupp:list:{page}:{part - 1}"))
+    elif has_prev:
+        nav.append(InlineKeyboardButton("⬅️ Назад", callback_data=f"mysupp:list:{page - 1}:-1"))
     nav.append(InlineKeyboardButton("⬅️ Назад", callback_data="menu:home"))
-    if has_next:
+    if part + 1 < part_count:
+        nav.append(InlineKeyboardButton("➡️ Далее", callback_data=f"mysupp:list:{page}:{part + 1}"))
+    elif has_next:
         nav.append(InlineKeyboardButton("➡️ Далее", callback_data=f"mysupp:list:{page + 1}"))
     btns.append(nav)
     return InlineKeyboardMarkup(btns)
@@ -766,6 +770,7 @@ def supp_tabs_kb(
 
 def my_supplement_hub(
     supplement_id: int,
+    *, part: int = 0, part_count: int = 1,
 ) -> InlineKeyboardMarkup:
     btns = [
         [InlineKeyboardButton("🧾 Доза", callback_data=f"mysupp:set_dose:{supplement_id}")],
@@ -775,6 +780,13 @@ def my_supplement_hub(
         [InlineKeyboardButton("🗑 Удалить из моих", callback_data=f"mysupp:remove:{supplement_id}")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="mysupp:list:0")],
     ]
+    nav = []
+    if part > 0:
+        nav.append(InlineKeyboardButton("⬅️", callback_data=f"mysupp:hub:{supplement_id}:{part - 1}"))
+    if part + 1 < part_count:
+        nav.append(InlineKeyboardButton("➡️", callback_data=f"mysupp:hub:{supplement_id}:{part + 1}"))
+    if nav:
+        btns.insert(0, nav)
     return InlineKeyboardMarkup(btns)
 
 

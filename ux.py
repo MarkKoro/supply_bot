@@ -38,9 +38,11 @@ def _payload_from_route(route: str) -> dict | None:
     if route.startswith("my:open:"):
         return {"supplement_id": int(route.split(":")[-1])}
     if route.startswith("mysupp:list:"):
-        return {"page": int(route.split(":")[-1])}
+        parts = route.split(":")
+        return {"page": int(parts[2]), "part": int(parts[3]) if len(parts) > 3 else 0}
     if route.startswith("mysupp:open:") or route.startswith("mysupp:hub:"):
-        return {"supplement_id": int(route.split(":")[-1])}
+        parts = route.split(":")
+        return {"supplement_id": int(parts[2]), "part": int(parts[3]) if len(parts) > 3 else 0}
     if route.startswith("mysupp:rem:"):
         return {"supplement_id": int(route.split(":")[-1])}
     if route.startswith("supp:view:"):
@@ -114,9 +116,9 @@ def _view_payload_from_route(route: str, payload: dict | None) -> tuple[str, dic
     if route.startswith("mine:hub:") or route.startswith("mine:open:"):
         return ("mine_hub", {"supp_id": int(route.split(":")[-1])})
     if route.startswith("mysupp:list:"):
-        return ("mysupp_list", {"page": int(route.split(":")[-1])})
+        return ("mysupp_list", _payload_from_route(route) or {})
     if route.startswith("mysupp:hub:") or route.startswith("mysupp:open:"):
-        return ("mysupp_hub", {"supp_id": int(route.split(":")[-1])})
+        return ("mysupp_hub", _payload_from_route(route) or {})
     return None
 
 async def _persist_last_state(

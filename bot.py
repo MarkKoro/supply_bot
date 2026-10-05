@@ -3568,7 +3568,8 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     page = max(0, int(parts[2]))
                 except ValueError:
                     page = 0
-            context.user_data[COMPLEXES_BACK_ROUTE_KEY] = f"mysupp:list:{page}"
+            part = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
+            context.user_data[COMPLEXES_BACK_ROUTE_KEY] = f"mysupp:list:{page}" + (f":{part}" if part else "")
             await _show_complexes_hub(update, context, conn, tg_uid)
             return
         if data == "cx:list" or data.startswith("cx:list:"):
@@ -5134,8 +5135,10 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
 
         if data.startswith("mysupp:list:"):
-            page = int(data.split(":")[-1])
-            await _show_my_list(update, context, conn, tg_uid, page)
+            parts = data.split(":")
+            page = int(parts[2])
+            part = int(parts[3]) if len(parts) > 3 else 0
+            await _show_my_list(update, context, conn, tg_uid, page, part=part)
             return
 
         if data.startswith("mysupp:add:") and ":retcat:" in data:
@@ -5360,8 +5363,10 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
 
         if data.startswith("mysupp:open:") or data.startswith("mysupp:hub:"):
-            supplement_id = int(data.split(":")[-1])
-            await show_my_supp_hub(update, context, tg_uid, supplement_id, conn=conn)
+            parts = data.split(":")
+            supplement_id = int(parts[2])
+            part = int(parts[3]) if len(parts) > 3 else 0
+            await show_my_supp_hub(update, context, tg_uid, supplement_id, conn=conn, part=part)
             return
 
         if data.startswith("mysupp:quick:") or data.startswith("mysupp:aiquick:"):
@@ -6257,12 +6262,12 @@ async def render_view(
                 return
         if view == "mysupp_list":
             page = int(payload_data.get("page") or 0)
-            await _show_my_list(update, context, conn, tg_user_id, page)
+            await _show_my_list(update, context, conn, tg_user_id, page, part=int(payload_data.get("part") or 0))
             return
         if view == "mysupp_hub":
-            supplement_id = payload_data.get("supp_id")
+            supplement_id = payload_data.get("supp_id") or payload_data.get("supplement_id")
             if supplement_id is not None:
-                await show_my_supp_hub(update, context, tg_user_id, int(supplement_id), conn=conn)
+                await show_my_supp_hub(update, context, tg_user_id, int(supplement_id), conn=conn, part=int(payload_data.get("part") or 0))
                 return
         await home(update, context)
     finally:
@@ -6626,25 +6631,31 @@ async def _render_route(
         )
         return
     if route.startswith("mysupp:list:"):
-        page = int(route.split(":")[-1])
+        parts = route.split(":")
+        page = int(parts[2])
+        part = int(parts[3]) if len(parts) > 3 else 0
         await _show_my_list(
             update,
             context,
             conn,
             tg_uid,
             page,
+            part=part,
             target_chat_id=target_chat_id,
             target_message_id=target_message_id,
         )
         return
     if route.startswith("mysupp:open:") or route.startswith("mysupp:hub:"):
-        supplement_id = int(route.split(":")[-1])
+        parts = route.split(":")
+        supplement_id = int(parts[2])
+        part = int(parts[3]) if len(parts) > 3 else 0
         await show_my_supp_hub(
             update,
             context,
             tg_uid,
             supplement_id,
             conn=conn,
+            part=part,
             target_chat_id=target_chat_id,
             target_message_id=target_message_id,
         )
@@ -9535,11 +9546,13 @@ async def _show_my_list(
     tg_uid: int,
     page: int,
     *,
+    part: int = 0,
     target_chat_id: int | None = None,
     target_message_id: int | None = None,
 ) -> None:
     await db.get_or_create_user(conn, tg_uid)
     local_date = await db.ensure_daily_rollover(conn, tg_uid)
+    page = max(int(page), 0)
     rows, total = await db.list_user_supplements_page(
         conn,
         tg_uid,
@@ -9548,6 +9561,11 @@ async def _show_my_list(
         page_size=MY_PAGE_SIZE,
         local_date=local_date,
     )
+    if total and page > (total - 1) // MY_PAGE_SIZE:
+        page = (total - 1) // MY_PAGE_SIZE
+        rows, total = await db.list_user_supplements_page(
+            conn, tg_uid, q=None, page=page, page_size=MY_PAGE_SIZE, local_date=local_date,
+        )
     has_next = (page + 1) * MY_PAGE_SIZE < total
     if not rows:
         await show(
@@ -9560,22 +9578,34 @@ async def _show_my_list(
             target_message_id=target_message_id,
         )
         return
+    entries = []
+    for idx, row in enumerate(rows, start=1):
+        dose = str(row["dose_text"] or "").strip() or "—"
+        entries.append({"row": row, "text": f"{idx}) {row['name']} — доза: {dose}"})
+    pages = _compatibility_pages(entries, max_entries=MY_PAGE_SIZE)
+    # -1 means the last part when moving back from the next database page.
+    part = len(pages) - 1 if int(part) < 0 else min(int(part), len(pages) - 1)
     suffix = f" (стр. {page + 1})" if total > MY_PAGE_SIZE else ""
+    if len(pages) > 1:
+        suffix += f" · Часть {part + 1}/{len(pages)}"
     lines = [
         f"💊 <b>Мои БАДы</b>{suffix}",
         "",
         "<b>Текущий стек</b>",
     ]
-    for idx, row in enumerate(rows, start=1):
-        dose = str(row["dose_text"] or "").strip() or "—"
-        lines.append(f"{idx}) {html.escape(str(row['name']))} — доза: {html.escape(dose)}")
+    for idx, entry in enumerate(pages[part]):
+        if idx and entry['item'] is pages[part][idx - 1]['item']:
+            lines[-1] += entry['text']
+        else:
+            lines.append(entry['text'])
+    page_rows = {int(entry['item']['row']['supplement_id']): entry['item']['row'] for entry in pages[part]}
 
     await show(
         update,
         context,
         "\n".join(lines),
-        my_supplements_overview_kb(rows, page, has_prev=page > 0, has_next=has_next),
-        route=f"mysupp:list:{page}",
+        my_supplements_overview_kb(list(page_rows.values()), page, has_prev=page > 0, has_next=has_next, part=part, part_count=len(pages)),
+        route=f"mysupp:list:{page}" + (f":{part}" if part else ""),
         target_chat_id=target_chat_id,
         target_message_id=target_message_id,
     )
@@ -9587,6 +9617,7 @@ async def show_my_supp_hub(
     supplement_id: int,
     *,
     conn=None,
+    part: int = 0,
     target_chat_id: int | None = None,
     target_message_id: int | None = None,
 ) -> None:
@@ -9614,10 +9645,12 @@ async def show_my_supp_hub(
 
         name_ru = (row["name_ru"] or row["name"] or "").strip()
         name_en = (row["name_en"] or "").strip()
-        name_line = f"💊 <b>{html.escape(name_ru)}</b>"
+        name_line = f"💊 <b>{_escaped_text_chunks(name_ru, 500)[0]}</b>"
         if name_en and name_en != name_ru:
-            name_line = f"{name_line} ({html.escape(name_en)})"
+            name_line = f"{name_line} ({_escaped_text_chunks(name_en, 500)[0]})"
         dose_text = (row["dose_text"] or "").strip() or "—"
+        dose_parts = _escaped_text_chunks(dose_text, 2600)
+        part = min(max(int(part), 0), len(dose_parts) - 1)
         start_date, duration = _format_start_date_and_duration(row["created_at"])
         taken_count = int(row["taken_count"] or 0)
         status_text = "не отмечено"
@@ -9629,19 +9662,21 @@ async def show_my_supp_hub(
         text = (
             "⚙️ <b>Управление добавкой</b>\n\n"
             f"{name_line}\n\n"
-            f"Доза: {html.escape(dose_text)}\n"
+            f"Доза: {dose_parts[part]}\n"
             f"Дата начала: {start_date}\n"
             f"Уже принимается: {duration}\n"
             f"Всего принял: {taken_count} раз\n"
             f"Статус на сегодня: {status_text}\n"
             "Напоминание: автоматически по времени приёма\n"
         )
+        if len(dose_parts) > 1:
+            text += f"\nДоза · Часть {part + 1}/{len(dose_parts)}"
         await show(
             update,
             context,
             text,
-            my_supplement_hub(supplement_id),
-            route=f"mysupp:hub:{supplement_id}",
+            my_supplement_hub(supplement_id, part=part, part_count=len(dose_parts)),
+            route=f"mysupp:hub:{supplement_id}" + (f":{part}" if part else ""),
             target_chat_id=target_chat_id,
             target_message_id=target_message_id,
         )
@@ -9897,14 +9932,14 @@ def _escaped_text_chunks(text: str, limit: int) -> list[str]:
     return chunks or [""]
 
 
-def _compatibility_pages(items: list[dict]) -> list[list[dict]]:
+def _compatibility_pages(items: list[dict], *, max_entries: int = 8) -> list[list[dict]]:
     pages, current, size = [], [], 0
     for item in items:
         reason = str(item.get("reason_ru") or "").strip()
         text = str(item['text']) if 'text' in item else f"• {item.get('title') or 'Неизвестно'}" + (f" — {reason}" if reason else "")
         for chunk in _escaped_text_chunks(text, 2600):
             width = len(chunk.encode("utf-16-le")) // 2
-            if current and (size + width + 1 > 2800 or len(current) >= 8):
+            if current and (size + width + 1 > 2800 or len(current) >= max_entries):
                 pages.append(current)
                 current, size = [], 0
             current.append({"item": item, "text": chunk})

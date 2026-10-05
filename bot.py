@@ -112,6 +112,19 @@ CATALOG_CLASS_PAGE_SIZE = 8
 MY_PAGE_SIZE = 10
 CURATED_PAGE_SIZE = 10
 
+def _waiting_from_saved_form(route: str | None) -> str | None:
+    route = str(route or "")
+    literal = {"menu:add": "add_query", "menu:compat": "compat_query", "mysupp:add": "mysupp_add_query", "schedule:add_custom": "schedule:add_custom", "cx:create": "cx:create"}
+    if route in literal:
+        return literal[route]
+    if re.fullmatch(r"mysupp:rem:add:\d+", route):
+        return f"mysupp:rem_add:{route.split(':')[-1]}"
+    if re.fullmatch(r"cx:add:catalog:\d+", route):
+        return f"cx:add_query:{route.split(':')[-1]}"
+    if re.fullmatch(r"mysupp:set_dose:\d+|supplement:set_override:\d+|mysupp:addslot:newtime:\d+|cx:rename:\d+|cx:item:dose:\d+:\d+|(?:schedule:slot_time_set|rem:set):[^:]+", route):
+        return route
+    return None
+
 AI_CHECKIN_ROUTE = "menu:checkin_ai"
 AI_CHECKIN_STATE = "ai_checkin_state"
 AI_CHECKIN_NOTE_WAIT = "ai_checkin_note"
@@ -924,12 +937,12 @@ CATALOG_GROUP_TITLES = {
     "recovery_muscle": "Восстановление",
 }
 
-async def _safe_answer_callback(update: Update) -> None:
+async def _safe_answer_callback(update: Update, text: str | None = None) -> None:
     q = update.callback_query
     if not q:
         return
     try:
-        await q.answer()
+        await q.answer(**({"text": text} if text else {}))
     except Exception as exc:
         log.warning("Failed to answer callback query: %s", exc)
 
@@ -3071,7 +3084,12 @@ async def reminders_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
             if await db.get_day_status(conn,tg_user_id,day,supplement_id) in {'taken','skipped'}:
                 continue
             batches.setdefault((tg_user_id,time_local,day),set()).add(supplement_id)
-        for (tg_user_id,time_local,day), supplement_ids in batches.items():
+        delivery_batches = (
+            (key, [item['id'] for item in group])
+            for key, ids in batches.items()
+            for group in _reminder_groups([{'id': sid} for sid in sorted(ids)], key[2])
+        )
+        for (tg_user_id,time_local,day), supplement_ids in delivery_batches:
             claims = {}
             for sid in sorted(supplement_ids):
                 token = await db.insert_reminder_fire(conn,tg_user_id,sid,day,time_local)
@@ -3192,22 +3210,25 @@ def _parse_callback_batch_ids(raw: str | None) -> list[int]:
     return out
 
 
-def _reminder_batch_actions(supplement_ids: list[int]) -> InlineKeyboardMarkup:
+def _reminder_batch_actions(supplement_ids: list[int], *, day: str | None = None, records: list[dict] | None = None) -> InlineKeyboardMarkup:
     batch_ids = [int(sid) for sid in supplement_ids if int(sid) > 0]
     encoded_batch = ",".join(str(sid) for sid in batch_ids)
+    if day:
+        encoded_batch = f"d{day.replace('-', '')}:{encoded_batch}"
     done_cb = f"rem:done_all:{encoded_batch}" if encoded_batch else "rem:done_all"
     skip_cb = f"rem:skip_all:{encoded_batch}" if encoded_batch else "rem:skip_all"
     snooze15_cb = f"rem:snooze_all:15:{encoded_batch}" if encoded_batch else "rem:snooze_all:15"
     snooze30_cb = f"rem:snooze_all:30:{encoded_batch}" if encoded_batch else "rem:snooze_all:30"
     snooze60_cb = f"rem:snooze_all:60:{encoded_batch}" if encoded_batch else "rem:snooze_all:60"
     if max(len(done_cb), len(skip_cb), len(snooze15_cb), len(snooze30_cb), len(snooze60_cb)) > 64:
+        if day:
+            raise ValueError("reminder_batch_too_large")
         done_cb = "rem:done_all"
         skip_cb = "rem:skip_all"
         snooze15_cb = "rem:snooze_all:15"
         snooze30_cb = "rem:snooze_all:30"
         snooze60_cb = "rem:snooze_all:60"
-    return InlineKeyboardMarkup(
-        [
+    rows = [
             [
                 InlineKeyboardButton("✅ Выпил", callback_data=done_cb),
                 InlineKeyboardButton("❌ Не выпил", callback_data=skip_cb),
@@ -3218,7 +3239,26 @@ def _reminder_batch_actions(supplement_ids: list[int]) -> InlineKeyboardMarkup:
                 InlineKeyboardButton("⏱ 60 мин", callback_data=snooze60_cb),
             ],
         ]
-    )
+    for item in records or []:
+        rows.append([InlineKeyboardButton(f"💊 {str(item['name'])[:60]}", callback_data=f"mysupp:open:{int(item['id'])}")])
+    return InlineKeyboardMarkup(rows)
+
+def _reminder_groups(entries: list[dict], day: str) -> list[list[dict]]:
+    groups, current = [], []
+    for item in entries:
+        candidate = current + [item]
+        encoded = ','.join(str(entry['id']) for entry in candidate)
+        if current and (len(candidate) > 8 or len(f"rem:snooze_all:60:d{day.replace('-', '')}:{encoded}") > 64):
+            groups.append(current)
+            current = []
+        current.append(item)
+    if current:
+        groups.append(current)
+    return groups
+
+def _reminder_preview(text: str, limit: int) -> str:
+    chunks = _escaped_text_chunks(text, limit)
+    return chunks[0] + ('…' if len(chunks) > 1 else '')
 
 async def reminder_fire(
     context: ContextTypes.DEFAULT_TYPE,
@@ -3258,7 +3298,13 @@ async def reminder_fire_batch(
         previous_reminder_msg_id = int(payload_data.get("reminder_msg_id") or 0)
 
         entries: list[dict] = []
-        for supplement_id in supplement_ids:
+        day = db.get_user_local_date(user_row['tz_name'] or 'UTC')
+        for supplement_id in dict.fromkeys(supplement_ids):
+            user_supp = await db.get_user_supplement(conn, tg_user_id, supplement_id)
+            if not user_supp:
+                continue
+            if await db.get_day_status(conn, tg_user_id, day, supplement_id) in {'taken', 'skipped'}:
+                continue
             supplement = await db.get_supplement_by_id(conn, supplement_id)
             if not supplement:
                 continue
@@ -3268,7 +3314,6 @@ async def reminder_fire_batch(
             if name_en and name_en != name_ru:
                 name_line = f"{name_line} ({name_en})"
             dose_text = "—"
-            user_supp = await db.get_user_supplement(conn, tg_user_id, supplement_id)
             if user_supp and str(user_supp["dose_text"] or "").strip():
                 dose_text = str(user_supp["dose_text"]).strip()
             entries.append({"id": supplement_id, "name": name_line, "dose": dose_text})
@@ -3276,35 +3321,46 @@ async def reminder_fire_batch(
         if not entries:
             return
 
-        lines = [
-            "⏰ <b>Напоминание</b>",
-            "Пора принять:",
-            *[f"• <b>{html.escape(item['name'])}</b> — {html.escape(item['dose'])}" for item in entries],
-        ]
-        text = "\n".join(lines)
         target_chat_id = int(user_row["last_chat_id"] or 0) or tg_user_id
-        msg = await context.bot.send_message(
-            chat_id=target_chat_id,
-            text=text,
-            reply_markup=_reminder_batch_actions([item["id"] for item in entries]),
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-        )
-        if previous_reminder_msg_id > 0:
-            previous_reminder_chat_id = int(payload_data.get("reminder_chat_id") or 0) or int(user_row["last_chat_id"] or 0) or tg_user_id
+        groups = _reminder_groups(entries, day)
+        new_messages = []
+        for index, group in enumerate(groups):
+            lines = ["⏰ <b>Напоминание</b>" + (f" · Часть {index + 1}/{len(groups)}" if len(groups) > 1 else ""), "Пора принять:"]
+            lines.extend(f"• <b>{_reminder_preview(item['name'], 200)}</b> — {_reminder_preview(item['dose'], 220)}" for item in group)
+            if any(len(_escaped_text_chunks(item['dose'], 220)) > 1 for item in group):
+                lines.append("\nПолная запись — по кнопке с названием добавки.")
+            msg = await context.bot.send_message(chat_id=target_chat_id, text='\n'.join(lines), reply_markup=_reminder_batch_actions([item['id'] for item in group], day=day, records=group), parse_mode="HTML", disable_web_page_preview=True)
+            new_messages.append({'message_id': int(msg.message_id), 'chat_id': target_chat_id})
+        previous_messages = payload_data.get('reminder_messages')
+        if not isinstance(previous_messages, list):
+            previous_messages = []
+        if not previous_messages and previous_reminder_msg_id > 0:
+            previous_messages = [{'message_id': previous_reminder_msg_id, 'chat_id': int(payload_data.get('reminder_chat_id') or 0) or target_chat_id}]
+        same_day = payload_data.get('reminder_day') == day
+        for previous in ([] if same_day else previous_messages):
+            if not isinstance(previous, dict) or not str(previous.get('message_id') or '').isdigit() or not str(previous.get('chat_id') or '').lstrip('-').isdigit():
+                continue
             try:
-                await context.bot.delete_message(chat_id=previous_reminder_chat_id, message_id=previous_reminder_msg_id)
+                await context.bot.delete_message(chat_id=int(previous['chat_id']), message_id=int(previous['message_id']))
             except Exception:
                 pass
 
-        payload_data["reminder_msg_id"] = msg.message_id
-        payload_data["reminder_chat_id"] = target_chat_id
-        payload_data["reminder_batch_ids"] = [item["id"] for item in entries]
-        payload_json = json.dumps(payload_data, ensure_ascii=False)
-        if ui_screen:
-            await db.update_ui_state_payload(conn, tg_user_id, payload_json)
-        else:
-            await db.save_ui_state(conn, tg_user_id, ui_message_id, "", payload_json)
+        # Sending can overlap navigation; merge into the current screen, not the old snapshot.
+        async with db.transaction(conn) as tx:
+            current_message, current_screen, current_json = await db.get_ui_state(tx, tg_user_id)
+            try:
+                current_payload = json.loads(current_json) if current_json else {}
+            except json.JSONDecodeError:
+                current_payload = {}
+            if not isinstance(current_payload, dict):
+                current_payload = {}
+            current_payload['reminder_msg_id'] = int(msg.message_id)
+            current_payload['reminder_chat_id'] = target_chat_id
+            current_payload['reminder_batch_ids'] = [item['id'] for item in groups[-1]]
+            current_messages = current_payload.get('reminder_messages') if current_payload.get('reminder_day') == day else []
+            current_payload['reminder_messages'] = (current_messages if isinstance(current_messages, list) else []) + new_messages
+            current_payload['reminder_day'] = day
+            await db.save_ui_state(tx, tg_user_id, current_message, current_screen, json.dumps(current_payload, ensure_ascii=False))
     finally:
         await conn.close()
 
@@ -3649,7 +3705,7 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 context,
                 "Введи название БАДа для добавления из каталога.",
                 InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"cx:add:{complex_id}")]]),
-                route=f"cx:add:{complex_id}",
+                route=f"cx:add:catalog:{complex_id}",
             )
             return
         if data.startswith("cx:add:"):
@@ -6077,6 +6133,7 @@ async def on_reminder_action(update: Update, context: ContextTypes.DEFAULT_TYPE)
     supplement_id: int | None = None
     snooze_minutes = 15
     callback_batch_ids: list[int] = []
+    callback_day: str | None = None
     if action in ("done", "skip"):
         if len(parts) >= 3 and str(parts[2]).isdigit():
             supplement_id = int(parts[2])
@@ -6090,7 +6147,14 @@ async def on_reminder_action(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 snooze_minutes = 15
     elif action in ("done_all", "skip_all"):
         if len(parts) >= 3:
-            callback_batch_ids = _parse_callback_batch_ids(parts[2])
+            index = 2
+            if parts[index].startswith('d'):
+                try:
+                    callback_day = datetime.strptime(parts[index][1:], '%Y%m%d').date().isoformat()
+                except ValueError:
+                    return
+                index += 1
+            callback_batch_ids = _parse_callback_batch_ids(parts[index] if len(parts) > index else '')
         supplement_id = None
     elif action == "snooze_all":
         if len(parts) >= 3:
@@ -6099,7 +6163,14 @@ async def on_reminder_action(update: Update, context: ContextTypes.DEFAULT_TYPE)
             except Exception:
                 snooze_minutes = 15
         if len(parts) >= 4:
-            callback_batch_ids = _parse_callback_batch_ids(parts[3])
+            index = 3
+            if parts[index].startswith('d'):
+                try:
+                    callback_day = datetime.strptime(parts[index][1:], '%Y%m%d').date().isoformat()
+                except ValueError:
+                    return
+                index += 1
+            callback_batch_ids = _parse_callback_batch_ids(parts[index] if len(parts) > index else '')
         supplement_id = None
     else:
         return
@@ -6119,30 +6190,42 @@ async def on_reminder_action(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if not isinstance(payload_data, dict):
             payload_data = {}
 
-        payload_batch_ids = [int(item_id) for item_id in payload_data.get("reminder_batch_ids", []) if str(item_id).isdigit()]
-        effective_batch_ids = callback_batch_ids or payload_batch_ids
-
-        if action == "done" and supplement_id is not None:
-            await db.set_today_status(conn, tg_uid, supplement_id, "taken")
-        elif action == "skip" and supplement_id is not None:
-            await db.set_today_status(conn, tg_uid, supplement_id, "skipped")
-        elif action == "done_all":
-            for item_id in effective_batch_ids:
-                await db.set_today_status(conn, tg_uid, int(item_id), "taken")
-        elif action == "skip_all":
-            for item_id in effective_batch_ids:
-                await db.set_today_status(conn, tg_uid, int(item_id), "skipped")
-        elif action in {"snooze", "snooze_all"}:
-            minutes = snooze_minutes or 15
+        message_id = int(q.message.message_id) if q.message else 0
+        message_chat_id = int(q.message.chat_id) if q.message else 0
+        current_reminder = message_id > 0 and message_id == int(payload_data.get('reminder_msg_id') or 0) and message_chat_id == int(payload_data.get('reminder_chat_id') or tg_uid)
+        payload_batch_ids = _parse_callback_batch_ids(','.join(str(v) for v in (payload_data.get('reminder_batch_ids') or []) if str(v).isdigit())) if isinstance(payload_data.get('reminder_batch_ids'), list) else []
+        if action.endswith('_all') and not callback_batch_ids and (callback_day or not current_reminder):
+            await _safe_answer_callback(update, "Это напоминание устарело. Открой актуальный план дня.")
+            return
+        effective_batch_ids = callback_batch_ids or (payload_batch_ids if current_reminder else [])
+        requested_ids = effective_batch_ids if action.endswith('_all') else ([supplement_id] if supplement_id else [])
+        async with db.transaction(conn) as tx:
+            day = await db.ensure_daily_rollover(tx, tg_uid)
+            if callback_day and callback_day != day:
+                await _safe_answer_callback(update, "Это напоминание за другой день. Открой актуальный план дня.")
+                return
+            valid_ids = [int(sid) for sid in dict.fromkeys(requested_ids) if await db.get_user_supplement(tx, tg_uid, int(sid))]
+            if not valid_ids:
+                await _safe_answer_callback(update, "Эти позиции больше не активны в твоём списке.")
+                return
+            effective_batch_ids = valid_ids
+            if action in {'done', 'skip', 'done_all', 'skip_all'}:
+                status = 'taken' if action in {'done', 'done_all'} else 'skipped'
+                for item_id in valid_ids:
+                    await db.set_day_status(tx, tg_uid, day, item_id, status)
+        if action in {"snooze", "snooze_all"}:
+            minutes = snooze_minutes
+            if minutes not in {15, 30, 60}:
+                return
             guard = context.application.bot_data.setdefault("snooze_guard", {})
-            key = f"{tg_uid}:{supplement_id or 'batch'}"
+            batch_key = ','.join(str(sid) for sid in sorted(effective_batch_ids))
+            key = f"{tg_uid}:{batch_key}"
             now = datetime.utcnow()
             next_allowed = guard.get(key)
             if next_allowed and now < next_allowed:
                 pass
             else:
-                guard[key] = now + timedelta(minutes=minutes)
-                snooze_name = f"snooze:{tg_uid}:{supplement_id or 'batch'}"
+                snooze_name = f"snooze:{tg_uid}:{batch_key}"
                 for job in context.application.job_queue.get_jobs_by_name(snooze_name):
                     job.schedule_removal()
                 if action == "snooze_all":
@@ -6169,12 +6252,24 @@ async def on_reminder_action(update: Update, context: ContextTypes.DEFAULT_TYPE)
                             "supplement_id": supplement_id,
                         },
                     )
+                guard[key] = now + timedelta(minutes=minutes)
 
-        if isinstance(payload_data, dict) and "reminder_msg_id" in payload_data:
-            payload_data.pop("reminder_msg_id", None)
-            payload_data.pop("reminder_chat_id", None)
-            payload_data.pop("reminder_batch_ids", None)
-            await db.update_ui_state_payload(conn, tg_uid, json.dumps(payload_data, ensure_ascii=False))
+        async with db.transaction(conn) as tx:
+            ui_message_id, ui_screen, latest_json = await db.get_ui_state(tx, tg_uid)
+            try:
+                payload_data = json.loads(latest_json) if latest_json else {}
+            except json.JSONDecodeError:
+                payload_data = {}
+            if not isinstance(payload_data, dict):
+                payload_data = {}
+            is_latest = message_id > 0 and message_id == int(payload_data.get('reminder_msg_id') or 0) and message_chat_id == int(payload_data.get('reminder_chat_id') or tg_uid)
+            if is_latest:
+                for key in ('reminder_msg_id', 'reminder_chat_id', 'reminder_batch_ids'):
+                    payload_data.pop(key, None)
+            pending_messages = payload_data.get('reminder_messages')
+            if isinstance(pending_messages, list):
+                payload_data['reminder_messages'] = [item for item in pending_messages if not (isinstance(item, dict) and item.get('message_id') == message_id and item.get('chat_id') == message_chat_id)]
+            await db.update_ui_state_payload(tx, tg_uid, json.dumps(payload_data, ensure_ascii=False))
     finally:
         await conn.close()
 
@@ -6287,6 +6382,29 @@ async def _render_route(
     if route == "menu:home":
         await home(update, context, target_chat_id=target_chat_id, target_message_id=target_message_id)
         return
+    saved_waiting = _waiting_from_saved_form(route)
+    if saved_waiting:
+        context.user_data[WAITING_KEY] = saved_waiting
+        prompt, back_cb = None, None
+        if route.startswith(("schedule:slot_time_set:", "schedule:add_custom")):
+            prompt, back_cb = "Введи время в формате HH:MM", "settings:notifications"
+        elif route.startswith("rem:set:"):
+            prompt, back_cb = "Напиши новое время в формате HH:MM.", "rem:home"
+        elif route.startswith("supplement:set_override:"):
+            prompt, back_cb = "Введи время в формате HH:MM", f"mysupp:open:{route.split(':')[-1]}"
+        elif route.startswith("mysupp:addslot:newtime:"):
+            prompt, back_cb = "Введите время нового слота в формате HH:MM.", f"mysupp:addslot:{route.split(':')[-1]}"
+        elif route == "cx:create":
+            prompt, back_cb = "Введи название нового комплекса.", "cx:list"
+        elif route.startswith("cx:rename:"):
+            prompt, back_cb = "Введи новое название комплекса.", f"cx:open:{route.split(':')[-1]}"
+        elif route.startswith("cx:item:dose:"):
+            prompt, back_cb = "Введи дозировку для этой добавки в комплексе.", route.replace('dose', 'open', 1)
+        elif route.startswith("cx:add:catalog:"):
+            prompt, back_cb = "Введи название БАДа для добавления из каталога.", f"cx:add:{route.split(':')[-1]}"
+        if prompt:
+            await show(update, context, prompt, InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=back_cb)]]), route=route, target_chat_id=target_chat_id, target_message_id=target_message_id)
+            return
     compact_curated = re.fullmatch(r"curated:(open_id|detail_id):(\d+)(?::(-?\d+))?", route)
     if compact_curated:
         _, stack_id, page = compact_curated.groups()
@@ -7285,9 +7403,18 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     finally:
         await conn.close()
     waiting = context.user_data.get(WAITING_KEY)
-    if not waiting and (ui_screen == "cx:create" or re.fullmatch(r"cx:rename:\d+|cx:item:dose:\d+:\d+", ui_screen or "")):
-        waiting = ui_screen
-        context.user_data[WAITING_KEY] = waiting
+    managed_waiting = bool(waiting and (
+        _waiting_from_saved_form(waiting)
+        or waiting in {"add_query", "compat_query", "mysupp_add_query"}
+        or waiting.startswith(("mysupp:rem_add:", "cx:add_query:"))
+    ))
+    legacy_complex_query = bool(waiting and waiting.startswith("cx:add_query:") and ui_screen == f"cx:add:{waiting.split(':')[-1]}")
+    if not waiting or (ui_screen and managed_waiting and not legacy_complex_query):
+        waiting = _waiting_from_saved_form(ui_screen)
+        if waiting:
+            context.user_data[WAITING_KEY] = waiting
+        else:
+            context.user_data.pop(WAITING_KEY, None)
     if waiting and waiting.startswith(("mysupp:set_dose:", "mysupp:rem_add:", "rem:set:", "schedule:add_custom", "schedule:slot_time_set:", "supplement:set_override:", "mysupp:addslot:newtime:")):
         supplement_id = None
         if waiting.startswith(("mysupp:set_dose:", "mysupp:rem_add:", "supplement:set_override:")):
@@ -7354,7 +7481,12 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 if not parsed_time:
                     await show(update, context, "Не понял время. Пример: 08:30", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="settings:notifications")]]), route=f"schedule:slot_time_set:{slot_id}")
                 else:
-                    await db.set_user_slot_time(conn, user_id, slot_id, parsed_time)
+                    try:
+                        await db.set_user_slot_time(conn, user_id, slot_id, parsed_time)
+                    except ValueError:
+                        context.user_data.pop(WAITING_KEY, None)
+                        await show(update, context, "Этот слот уже удалён. Выбери другой.", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="settings:notifications")]]), route="settings:notifications")
+                        return
                     context.user_data.pop(WAITING_KEY, None)
                     await _show_schedule_home(update, context, conn, tg_uid)
             elif waiting.startswith("mysupp:addslot:newtime:"):
@@ -7400,7 +7532,6 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 parsed_time = _parse_user_time_input(txt)
                 slot_id = waiting.split(":", 2)[2]
                 user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
-                slots = await db.get_user_slots(conn, user_id)
                 if not parsed_time:
                     await show(
                         update,
@@ -7410,10 +7541,12 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         route=f"rem:set:{slot_id}",
                     )
                 else:
-                    for slot in slots:
-                        if str(slot.get("slot_id") or "") == slot_id:
-                            slot["time_local"] = parsed_time
-                    await db.set_user_slots(conn, user_id, slots)
+                    try:
+                        await db.set_user_slot_time(conn, user_id, slot_id, parsed_time)
+                    except ValueError:
+                        context.user_data.pop(WAITING_KEY, None)
+                        await show(update, context, "Этот слот уже удалён. Выбери другой.", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="rem:home")]]), route="rem:home")
+                        return
                     context.user_data.pop(WAITING_KEY, None)
                     await show(update, context, "Время обновлено.", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="rem:home")]]), route="rem:home")
         finally:
@@ -7474,7 +7607,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             complex_id = int(waiting.split(":", 2)[2])
             rows, _ = await db.search_supplements(conn, txt, page=0, page_size=15)
             if not rows:
-                await show(update, context, "Не нашёл в каталоге.", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"cx:add:{complex_id}")]]), route=f"cx:add:{complex_id}")
+                await show(update, context, "Не нашёл в каталоге. Введи другое название.", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"cx:add:{complex_id}")]]), route=f"cx:add:catalog:{complex_id}")
             else:
                 await show(update, context, "Выбери добавку для комплекса:", complex_add_results_kb(complex_id, rows), route=f"cx:add:{complex_id}")
             context.user_data.pop(WAITING_KEY, None)

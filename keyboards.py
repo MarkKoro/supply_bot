@@ -983,7 +983,7 @@ def complex_add_results_kb(complex_id: int, rows: list[dict]) -> InlineKeyboardM
         sid = int(item.get("id") or 0)
         title = item.get("name_ru") or item.get("name_en") or item.get("name") or f"ID {sid}"
         btns.append([InlineKeyboardButton(f"• {title}", callback_data=f"cx:add_pick:{cid}:{sid}")])
-    btns.append([InlineKeyboardButton("🔎 Новый поиск", callback_data=f"cx:add:{cid}")])
+    btns.append([InlineKeyboardButton("🔎 Новый поиск", callback_data=f"cx:add:catalog:{cid}")])
     btns.append([InlineKeyboardButton("⬅️ К комплексу", callback_data=f"cx:open:{cid}")])
     return InlineKeyboardMarkup(btns)
 

@@ -9329,13 +9329,12 @@ async def set_user_slot_time(conn: aiosqlite.Connection, user_id: int, slot_id: 
     normalized = _normalize_hhmm(time_local)
     if not normalized:
         raise ValueError("invalid HH:MM")
-    slots = await get_user_slots(conn, user_id)
-    existing = next((s for s in slots if str(s.get("slot_id") or "") == slot_id), None)
-    if existing:
-        title = str(existing.get("title_ru") or "Слот")
-    else:
-        title = normalized if slot_id.startswith("t_") else "Слот"
-    await upsert_user_slot(conn, user_id, slot_id, title, normalized, is_enabled=1)
+    async with transaction(conn) as tx:
+        slots = await get_user_slots(tx, user_id)
+        existing = next((s for s in slots if str(s.get("slot_id") or "") == slot_id), None)
+        if not existing:
+            raise ValueError("slot_not_found")
+        await upsert_user_slot(tx, user_id, slot_id, str(existing.get("title_ru") or "Слот"), normalized, is_enabled=1 if existing.get("is_enabled", True) else 0)
 
 
 async def add_custom_slot(conn: aiosqlite.Connection, user_id: int, time_local: str, title_ru: str | None = None) -> str:

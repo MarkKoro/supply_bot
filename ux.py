@@ -138,16 +138,27 @@ async def _persist_last_state(
         return
     conn = await db.connect(s.DB_PATH)
     try:
-        view_payload = _view_payload_from_route(route, payload) if route else None
-        if view_payload:
-            view, payload_data = view_payload
-            payload_json = json.dumps(payload_data, ensure_ascii=False)
-            await db.set_user_last_view(conn, tg_user.id, view, payload_json)
-        await db.set_user_last_msg(conn, tg_user.id, chat_id, message_id)
-        if route:
-            payload_data = payload if payload is not None else _payload_from_route(route) or {}
-            payload_json = json.dumps(payload_data, ensure_ascii=False)
-            await db.save_ui_state(conn, tg_user.id, message_id, route, payload_json)
+        async with db.transaction(conn) as tx:
+            view_payload = _view_payload_from_route(route, payload) if route else None
+            if view_payload:
+                view, payload_data = view_payload
+                payload_json = json.dumps(payload_data, ensure_ascii=False)
+                await db.set_user_last_view(tx, tg_user.id, view, payload_json)
+            await db.set_user_last_msg(tx, tg_user.id, chat_id, message_id)
+            if route:
+                payload_data = dict(payload if payload is not None else _payload_from_route(route) or {})
+                _, _, previous_json = await db.get_ui_state(tx, tg_user.id)
+                try:
+                    previous = json.loads(previous_json) if previous_json else {}
+                except json.JSONDecodeError:
+                    previous = {}
+                if isinstance(previous, dict):
+                    for key in ('reminder_msg_id', 'reminder_chat_id', 'reminder_batch_ids', 'reminder_messages', 'reminder_day'):
+                        if key in previous:
+                            payload_data[key] = previous[key]
+                        else:
+                            payload_data.pop(key, None)
+                await db.save_ui_state(tx, tg_user.id, message_id, route, json.dumps(payload_data, ensure_ascii=False))
     finally:
         await conn.close()
 

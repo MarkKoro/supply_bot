@@ -43,6 +43,9 @@ def _payload_from_route(route: str) -> dict | None:
     if route.startswith("mysupp:open:") or route.startswith("mysupp:hub:"):
         parts = route.split(":")
         return {"supplement_id": int(parts[2]), "part": int(parts[3]) if len(parts) > 3 else 0}
+    if route.startswith("mysupp:rem:page:"):
+        parts = route.split(":")
+        return {"supplement_id": int(parts[3]), "page": int(parts[4])}
     if route.startswith("mysupp:rem:"):
         return {"supplement_id": int(route.split(":")[-1])}
     if route.startswith("supp:view:"):
@@ -94,6 +97,8 @@ def _set_last_menu(
     }
 
 def _view_payload_from_route(route: str, payload: dict | None) -> tuple[str, dict] | None:
+    if route.startswith("mysupp:rem:page:") or (route.startswith("mysupp:rem:") and len(route.split(":")) == 3):
+        return ("mysupp_reminders", payload if isinstance(payload, dict) else _payload_from_route(route) or {})
     if payload is not None and isinstance(payload, dict):
         if route.startswith("cat:"):
             return ("catalog", payload)

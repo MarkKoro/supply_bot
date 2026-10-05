@@ -810,11 +810,19 @@ def my_supplement_reminders(
     per_page: int = 8,
 ) -> InlineKeyboardMarkup:
     btns: list[list[InlineKeyboardButton]] = []
-    page = max(page, 0)
+    per_page = max(1, per_page)
+    page = min(max(page, 0), max(0, (len(reminders) - 1) // per_page))
     btns.append([InlineKeyboardButton("➕ Добавить своё время", callback_data=f"mysupp:rem:add:{supplement_id}")])
-    for time_local in reminders:
+    for time_local in reminders[page * per_page:(page + 1) * per_page]:
         key = time_local.replace(":", "-")
-        btns.append([InlineKeyboardButton(f"🗑 {time_local}", callback_data=f"mysupp:rem:del:{supplement_id}:{key}")])
+        btns.append([InlineKeyboardButton(f"🗑 {time_local}", callback_data=f"mysupp:rem:del:{supplement_id}:{key}:{page}")])
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️ Назад", callback_data=f"mysupp:rem:page:{supplement_id}:{page - 1}"))
+    if (page + 1) * per_page < len(reminders):
+        nav.append(InlineKeyboardButton("➡️ Далее", callback_data=f"mysupp:rem:page:{supplement_id}:{page + 1}"))
+    if nav:
+        btns.append(nav)
     btns.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"mysupp:open:{supplement_id}")])
     return InlineKeyboardMarkup(btns)
 

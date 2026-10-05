@@ -6862,7 +6862,13 @@ async def add_reminder_for_supplement(conn: aiosqlite.Connection, tg_user_id: in
             raise ValueError("supplement_not_found")
         await upsert_reminder(tx, int(tg_user_id), int(supplement_id), normalized, enabled=1)
 
-async def list_reminders_for_user(conn: aiosqlite.Connection, user_id: int):
+async def list_reminders_for_user(conn: aiosqlite.Connection, user_id: int, supplement_id: int | None = None):
+    if supplement_id is not None:
+        return await fetchall(
+            conn,
+            "SELECT * FROM reminders WHERE user_id=? AND supplement_id=? ORDER BY time_local",
+            (user_id, supplement_id),
+        )
     return await fetchall(
         conn,
         """SELECT * FROM reminders

@@ -5607,10 +5607,12 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
 
         if data.startswith("mysupp:rem:del:"):
-            _, _, _, supplement_id, time_key = data.split(":", 4)
+            parts = data.split(":")
+            supplement_id, time_key = parts[3:5]
+            page = int(parts[5]) if len(parts) > 5 else 0
             time_local = time_key.replace("-", ":")
             await db.delete_reminder(conn, tg_uid, int(supplement_id), time_local)
-            await _show_my_supp_reminders(update, context, conn, tg_uid, int(supplement_id))
+            await _show_my_supp_reminders(update, context, conn, tg_uid, int(supplement_id), page=page)
             return
 
         if data.startswith("mysupp:rem:add:"):
@@ -6379,6 +6381,11 @@ async def render_view(
             if supplement_id is not None:
                 await show_my_supp_hub(update, context, tg_user_id, int(supplement_id), conn=conn, part=int(payload_data.get("part") or 0))
                 return
+        if view == "mysupp_reminders":
+            supplement_id = payload_data.get("supplement_id")
+            if supplement_id is not None:
+                await _show_my_supp_reminders(update, context, conn, tg_user_id, int(supplement_id), page=int(payload_data.get("page") or 0))
+                return
         await home(update, context)
     finally:
         await conn.close()
@@ -6862,13 +6869,16 @@ async def _render_route(
         )
         return
     if route.startswith("mysupp:rem:"):
-        supplement_id = int(route.split(":")[-1])
+        parts = route.split(":")
+        supplement_id = int(parts[3]) if parts[2] == "page" else int(parts[-1])
+        page = int(parts[4]) if parts[2] == "page" else 0
         await _show_my_supp_reminders(
             update,
             context,
             conn,
             tg_uid,
             supplement_id,
+            page=page,
             target_chat_id=target_chat_id,
             target_message_id=target_message_id,
         )
@@ -9956,18 +9966,23 @@ async def _show_my_supp_reminders(
     if not supplement:
         await show(update, context, "БАД не найден.", my_list_back(), route="mysupp:list:0")
         return
-    reminders = await db.list_reminders_for_user(conn, tg_uid)
-    reminder_times = [str(r["time_local"]) for r in reminders if int(r["supplement_id"]) == supplement_id]
+    reminders = await db.list_reminders_for_user(conn, tg_uid, supplement_id)
+    reminder_times = [str(r["time_local"]) for r in reminders]
+    per_page = 8
+    pages = max(1, (len(reminder_times) + per_page - 1) // per_page)
+    page = min(max(page, 0), pages - 1)
+    visible_times = reminder_times[page * per_page:(page + 1) * per_page]
     name = (supplement["name_ru"] or supplement["name"] or "").strip()
-    title = f"⏰ <b>Напоминания</b>\n{html.escape(name)}"
+    title = f"⏰ <b>Напоминания</b>\n{_reminder_preview(name, 800)}"
     if reminder_times:
         lines = [
             title,
             "",
             "Добавь новое время или удали существующие напоминания.",
+            f"Всего: {len(reminder_times)} · Страница {page + 1}/{pages}",
             "",
             "Текущие напоминания:",
-            *[f"• {html.escape(t)}" for t in reminder_times],
+            *[f"• {html.escape(t)}" for t in visible_times],
         ]
     else:
         lines = [
@@ -9986,8 +10001,9 @@ async def _show_my_supp_reminders(
             reminder_times,
             [],
             page,
+            per_page=per_page,
         ),
-        route=f"mysupp:rem:{supplement_id}",
+        route=f"mysupp:rem:page:{supplement_id}:{page}",
         target_chat_id=target_chat_id,
         target_message_id=target_message_id,
     )

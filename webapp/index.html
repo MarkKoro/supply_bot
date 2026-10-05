@@ -874,6 +874,7 @@
     .profile-stat-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; margin-top:10px; }
     .profile-stat { border:1px solid rgba(255,255,255,.14); border-radius:12px; padding:8px; background:rgba(255,255,255,.04); }
     .modal-overlay { position:fixed; inset:0; background:rgba(2,6,18,.64); z-index:40; display:flex; align-items:flex-end; padding:0 10px calc(92px + env(safe-area-inset-bottom)); }
+    .catalog-add-overlay { z-index: 72; }
     .modal-card { width:100%; max-height:calc(100vh - 130px - env(safe-area-inset-bottom)); overflow:auto; border-radius:18px; margin:0 auto; max-width:560px; }
     .stack-slot-overlay {
       position: fixed;
@@ -1013,6 +1014,8 @@
     .keyboard-open .sheet { bottom: calc(12px + var(--keyboard-inset, 0px)); max-height: calc(var(--visible-height, 100vh) - 24px) !important; }
     .keyboard-open .modal-overlay { bottom: var(--keyboard-inset, 0px); padding-bottom: 12px; }
     .keyboard-open .modal-card { max-height: calc(var(--visible-height, 100vh) - 24px); }
+    .keyboard-open .stack-slot-overlay { bottom: var(--keyboard-inset, 0px); padding: 12px 10px; }
+    .keyboard-open .stack-slot-panel { max-height: calc(var(--visible-height, 100vh) - 24px); }
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
     }
@@ -1064,6 +1067,7 @@
       stacksLoading: false,
       stacksOpen: false,
       readyStacks: [],
+      readyBusy: {},
       filters: { evidence: [], targets: [], sort: "alpha" },
       detail: null, detailLoading: false, filtersOpen: false,
       detailSection: null,
@@ -2514,15 +2518,26 @@
   }
 
   function renderGlobalModals() {
-    return `${state.bodyMapSheet ? renderBodyMapSheet(state.bodyMapSheet) : ''}${state.catalog?.detail ? renderDetailModal(state.catalog.detail) : ''}`;
+    return `${state.bodyMapSheet ? renderBodyMapSheet(state.bodyMapSheet) : ''}${state.catalog?.detail ? renderDetailModal(state.catalog.detail) : ''}${renderAddToComplexModal()}${renderAddToStackSlotModal()}`;
   }
 
   let lastGlobalModalsHtml = "";
+  const deferredGlobalRenders = new WeakSet();
   function syncGlobalModals() {
     const root = document.getElementById('globalModalRoot');
     if (!root) return;
     const nextHtml = renderGlobalModals();
     if (lastGlobalModalsHtml !== nextHtml) {
+      const field = document.activeElement;
+      const modal = field?.id === 'addComplexNameInput' ? state.catalog.addToComplexModal
+        : field?.id === 'addStackSlotTime' ? state.catalog.addToStackSlotModal : null;
+      if (modal?.open && Number(field.closest('[data-catalog-modal-supplement]')?.dataset.catalogModalSupplement) === Number(modal.supplementId)) {
+        if (!deferredGlobalRenders.has(field)) {
+          deferredGlobalRenders.add(field);
+          field.addEventListener('blur', () => { deferredGlobalRenders.delete(field); requestAnimationFrame(renderActiveTab); }, {once:true});
+        }
+        return;
+      }
       const sheetScrollTop = root.querySelector('.bodymap-sheet-card')?.scrollTop || 0;
       root.innerHTML = nextHtml;
       lastGlobalModalsHtml = nextHtml;
@@ -2751,15 +2766,23 @@
       return;
     }
     const focused = document.activeElement;
-    if (previousTabKey === tabKey && ['hubDose', 'hubNote', 'hubTime'].includes(focused?.id)
+    const editingSupplement = ['hubDose', 'hubNote', 'hubTime'].includes(focused?.id)
         && state.suppHub.open && !state.suppHub.loading && !state.suppHub.loadError
-        && Number(focused.closest('[data-supp-hub-id]')?.dataset.suppHubId) === Number(state.suppHub.item?.supplement_id)) {
+        && Number(focused.closest('[data-supp-hub-id]')?.dataset.suppHubId) === Number(state.suppHub.item?.supplement_id);
+    const editingSlot = tabKey === 'settings' && focused?.id === 'settingsSlotTimeInput'
+        && state.settingsUi.slotEdit.open
+        && focused.closest('[data-settings-slot-id]')?.dataset.settingsSlotId === state.settingsUi.slotEdit.slotId;
+    if (previousTabKey === tabKey && (editingSupplement || editingSlot)) {
       // Do not remove the focused field during a background refresh: on phones
       // that can close and immediately reopen the software keyboard.
       const saveButton = target.querySelector('[data-supp-hub-save]');
       if (saveButton) {
         saveButton.disabled = !!state.suppHub.saving;
         saveButton.textContent = state.suppHub.saving ? 'Сохраняем...' : 'Сохранить';
+      }
+      if (editingSlot) {
+        const busy = !!state.settingsUi.slotBusy[state.settingsUi.slotEdit.slotId];
+        ['settingsSlotTimeSave', 'settingsSlotDeleteBtn'].forEach(id => { const button = target.querySelector(`#${id}`); if (button) button.disabled = busy; });
       }
       if (!deferredHubRenders.has(focused)) {
         deferredHubRenders.add(focused);
@@ -3185,7 +3208,7 @@
       ? skeletons
       : (itemsHtml || (!c.error ? '<div class="card">Ничего не найдено.</div>' : ''));
     const readyStacks = Array.isArray(c.readyStacks) ? c.readyStacks : [];
-    const readyStacksHtml = c.stacksLoading
+    const readyStacksHtml = c.stacksLoading && !readyStacks.length
       ? '<div class="catalog-skeleton" style="height:120px"></div>'
       : (readyStacks.length
         ? `<div class="ready-stack-list">${readyStacks.map((stack) => {
@@ -3197,7 +3220,7 @@
                 <div style="font-weight:700">${esc(stack.title_ru || 'Готовый стек')}</div>
                 <div class="ready-stack-meta">${esc(stack.author_ru || 'Без автора')} • позиций: ${Number(stack.items_total || items.length || 0)}</div>
               </div>
-              <button class="btn" type="button" data-ready-stack-add="${esc(stack.slug || '')}" ${stack.has_any_new ? '' : 'disabled'}>${stack.has_any_new ? 'Добавить весь стек' : 'Уже добавлено'}</button>
+              <button class="btn" type="button" data-ready-stack-add="${esc(stack.slug || '')}" ${stack.has_any_new && !c.readyBusy[stack.slug] ? '' : 'disabled'}>${c.readyBusy[stack.slug] ? 'Добавляем…' : (stack.has_any_new ? 'Добавить весь стек' : 'Уже добавлено')}</button>
             </div>
             ${stack.description_ru ? `<div class="muted">${esc(stack.description_ru)}</div>` : ''}
             ${tags.length ? `<div>${tags.map((tag) => `<span class="chip">${esc(tag)}</span>`).join(' ')}</div>` : ''}
@@ -3252,8 +3275,6 @@
       <div id="catalogSentinel" style="height:1px"></div>
       ${c.loadingMore ? '<div class="catalog-status">Загружаем ещё...</div>' : (!c.hasMore && c.items.length ? '<div class="catalog-status">Конец списка</div>' : '')}
       ${c.filtersOpen ? renderFilterSheet(filters) : ''}
-      ${renderAddToComplexModal()}
-      ${renderAddToStackSlotModal()}
     `;
   }
 
@@ -3262,15 +3283,15 @@
     if (!modal.open) return '';
     const complexes = Array.isArray(state.complexes) ? state.complexes : [];
     const hasComplexes = complexes.length > 0;
-    return `<div class="modal-overlay" data-add-complex-modal-close>
-      <section class="card modal-card" onclick="event.stopPropagation()">
+    return `<div class="modal-overlay catalog-add-overlay" data-add-complex-modal-close>
+      <section class="card modal-card" data-catalog-modal-supplement="${Number(modal.supplementId || 0)}" onclick="event.stopPropagation()">
         <div class="row"><strong>Добавить в комплекс</strong><button class="btn secondary" type="button" data-add-complex-modal-close>Закрыть</button></div>
         ${!hasComplexes ? `<div class="muted" style="margin-top:8px">У вас пока нет комплексов. Создайте первый:</div>` : `<div class="muted" style="margin-top:8px">Выберите существующий комплекс:</div>`}
-        ${hasComplexes ? `<div style="margin-top:10px; display:grid; gap:8px;">${complexes.map((c) => `<button class="btn secondary" type="button" data-complex-pick-existing="${Number(c.id || 0)}">${esc(c.name || `Комплекс #${c.id}`)}</button>`).join('')}</div>` : ''}
+        ${hasComplexes ? `<div style="margin-top:10px; display:grid; gap:8px;">${complexes.map((c) => `<button class="btn secondary" type="button" data-complex-pick-existing="${Number(c.id || 0)}" ${modal.adding ? 'disabled' : ''}>${esc(c.name || `Комплекс #${c.id}`)}</button>`).join('')}</div>` : ''}
         ${hasComplexes ? `<div class="row" style="margin-top:10px"><button class="btn" type="button" data-complex-create-start>+ Добавить комплекс</button></div>` : ''}
         ${(!hasComplexes || modal.creating) ? `<div style="margin-top:10px; display:grid; gap:8px;">
-          <input class="input" id="addComplexNameInput" maxlength="80" placeholder="Название нового комплекса"/>
-          <button class="btn" type="button" data-complex-create-and-add>Создать и добавить</button>
+          <input class="input" id="addComplexNameInput" maxlength="80" value="${esc(modal.name || '')}" ${modal.createdId ? 'disabled' : ''} placeholder="Название нового комплекса"/>
+          <button class="btn" type="button" data-complex-create-and-add ${modal.adding ? 'disabled' : ''}>${modal.createdId ? 'Повторить добавление' : 'Создать и добавить'}</button>
         </div>` : ''}
       </section>
     </div>`;
@@ -3285,7 +3306,7 @@
       ? (state.catalog.detail.name_ru || state.catalog.detail.name_en || state.catalog.detail.slug || 'добавки')
       : 'добавки';
     return `<div class="stack-slot-overlay" data-add-stack-slot-close>
-      <section class="stack-slot-panel fade" onclick="event.stopPropagation()">
+      <section class="stack-slot-panel fade" data-catalog-modal-supplement="${supplementId}" onclick="event.stopPropagation()">
         <div class="row"><strong>Выберите слот</strong><button class="btn secondary" type="button" data-add-stack-slot-close>Закрыть</button></div>
         <div class="muted" style="margin-top:8px">Куда добавить: <strong>${esc(title)}</strong></div>
         <div class="hub-slot-list" style="margin-top:12px">
@@ -3393,18 +3414,26 @@
   }
 
   let detailRequestId = 0;
+  let catalogStackRevision = 0;
+  const catalogStackActions = new Set();
   async function openSupplementDetail(slug, { silent = false } = {}) {
     const key = String(slug || '').trim();
     if (!key) return;
     const requestId = ++detailRequestId;
+    const stackRevision = catalogStackRevision;
+    state.catalog.addToComplexModal = {open:false};
+    state.catalog.addToStackSlotModal = {open:false};
     state.catalog.detailCache = state.catalog.detailCache || {};
     const cached = state.catalog.detailCache[key];
     state.catalog.detail = cached || { slug: key, name_ru: 'Карточка добавки', _loading: true };
     state.catalog.detailSection = cached ? defaultDetailSection(cached) : null;
     renderActiveTab();
-    if (cached && !silent) return;
     try {
       const d = await api(`./api/supplement/${key}`);
+      if (stackRevision !== catalogStackRevision) {
+        if (requestId === detailRequestId && state.catalog.detail?.slug === key) await openSupplementDetail(key, {silent:true});
+        return;
+      }
       state.catalog.detailCache[key] = d.item;
       if (requestId !== detailRequestId || state.catalog.detail?.slug !== key) return;
       state.catalog.detail = d.item;
@@ -3434,7 +3463,8 @@
     const requestedQuery = c.q;
     const f = c.filters;
     const requestedFilters = JSON.stringify(f);
-    const isCurrent = () => requestId === catalogRequestId && c.q === requestedQuery && JSON.stringify(c.filters) === requestedFilters;
+    const stackRevision = catalogStackRevision;
+    const isCurrent = () => requestId === catalogRequestId && stackRevision === catalogStackRevision && c.q === requestedQuery && JSON.stringify(c.filters) === requestedFilters;
     const qp = new URLSearchParams({ q: c.q || '', page: String(c.page), page_size: '20', sort: f.sort || 'alpha' });
     if (f.evidence.length) qp.set('evidence', f.evidence.join(','));
     if (f.targets.length) qp.set('targets', f.targets.join(','));
@@ -3487,18 +3517,21 @@
     await loadCatalog(true);
   }
 
+  let readyStacksRequestId = 0;
   async function loadReadyStacks(force = false) {
-    if (state.catalog.stacksLoading) return;
-    if (!force && Array.isArray(state.catalog.readyStacks) && state.catalog.readyStacks.length) return;
-    state.catalog.stacksLoading = true;
+    const c = state.catalog;
+    if (c.stacksLoading && !force) return;
+    if (!force && Array.isArray(c.readyStacks) && c.readyStacks.length) return;
+    const requestId = ++readyStacksRequestId;
+    const revision = catalogStackRevision;
+    c.stacksLoading = true;
     try {
       const out = await api('./api/curated_stacks');
-      state.catalog.readyStacks = Array.isArray(out.items) ? out.items : [];
+      if (requestId === readyStacksRequestId && revision === catalogStackRevision) c.readyStacks = Array.isArray(out.items) ? out.items : [];
     } catch {
-      state.catalog.readyStacks = [];
-      showToast('Не удалось загрузить готовые стеки');
+      if (requestId === readyStacksRequestId) showToast('Не удалось загрузить готовые стеки');
     } finally {
-      state.catalog.stacksLoading = false;
+      if (requestId === readyStacksRequestId) c.stacksLoading = false;
     }
   }
 
@@ -3525,10 +3558,39 @@
     }
     const detail = state.catalog.detail || null;
     if (detail && Number(detail.id || 0) === sid) detail.in_stack = next;
-    const slug = String(detail?.slug || '');
-    if (slug && state.catalog.detailCache?.[slug]) {
-      state.catalog.detailCache[slug].in_stack = next;
+    for (const cached of Object.values(state.catalog.detailCache || {})) {
+      if (Number(cached?.id || 0) === sid) cached.in_stack = next;
     }
+    for (const stack of state.catalog.readyStacks || []) {
+      const items = stack.items || [];
+      for (const item of items) if (Number(item.supplement_id) === sid) item.already_in_stack = next;
+      stack.already_in_stack_count = items.filter(item => item.already_in_stack).length;
+      stack.addable_count = items.filter(item => !item.not_found && !item.already_in_stack).length;
+      stack.has_any_new = stack.addable_count > 0;
+    }
+  }
+
+  async function addPickedComplexItem(complexId, supplementId) {
+    if (state.catalog.pickBusy || state.complexHub.actionBusy[complexId]) return;
+    const back = state.catalog.returnAfterComplexPick;
+    state.catalog.pickBusy = true;
+    state.complexHub.actionBusy[complexId] = true;
+    try {
+      await api(`./api/complexes/${complexId}/items/add`, {method:'POST', body:{supplement_id:supplementId}});
+      invalidateComplexReads(complexId);
+      await Promise.all([loadComplexHubMeta(true), loadComplexItems(complexId, true), loadToday(true)]);
+      if (state.catalog.pickForComplexId === complexId && state.catalog.returnAfterComplexPick === back) {
+        state.catalog.pickForComplexId = 0;
+        state.catalog.returnAfterComplexPick = null;
+        if (Number(state.catalog.detail?.id) === supplementId) { detailRequestId++; state.catalog.detail = null; }
+        if (back && state.activeTab === 'catalog') {
+          state.activeTab = String(back.tab || 'today');
+          if (state.activeTab === 'today') { state.complexHub.open = true; state.complexHub.expanded[complexId] = true; }
+          renderMainApp();
+        }
+      }
+      showToast('БАД добавлен в комплекс');
+    } finally { state.catalog.pickBusy = false; delete state.complexHub.actionBusy[complexId]; renderActiveTab(); }
   }
 
   const boundDetailControls = new WeakMap();
@@ -3551,11 +3613,12 @@
       state.catalog.addToComplexModal = { open: true, supplementId: Number(supplementId || 0), creating: !(state.complexes || []).length };
       renderActiveTab();
     };
-    const addSupplementToComplex = async (complexId, supplementId, successToast = 'БАД добавлен в комплекс') => {
+    const addSupplementToComplex = async (complexId, supplementId, successToast = 'БАД добавлен в комплекс', modal = state.catalog.addToComplexModal) => {
       await api(`./api/complexes/${Number(complexId)}/items/add`, { method: 'POST', body: { supplement_id: Number(supplementId) } });
+      invalidateComplexReads(complexId);
       showToast(successToast);
-      closeAddToComplexModal();
-      await Promise.all([loadComplexHubMeta(true), loadToday(true)]);
+      if (state.catalog.addToComplexModal === modal) closeAddToComplexModal();
+      await Promise.all([loadComplexHubMeta(true), loadComplexItems(complexId, true), loadToday(true)]);
     };
     const openAddToStackSlotModal = async (supplementId) => {
       state.catalog.addToStackSlotModal = {
@@ -3603,24 +3666,12 @@
       const id=Number(e.currentTarget.dataset.id);
       try {
         if (preselectedComplexId) {
-          await api(`./api/complexes/${preselectedComplexId}/items/add`,{method:'POST',body:{supplement_id:id}});
-          state.catalog.pickForComplexId = 0;
-          showToast('БАД добавлен в выбранный комплекс');
-          await Promise.all([loadComplexHubMeta(true), loadToday(true), loadComplexItems(preselectedComplexId, true)]);
-          const back = state.catalog.returnAfterComplexPick || null;
-          state.catalog.returnAfterComplexPick = null;
-          if (back) {
-            state.activeTab = String(back.tab || "today");
-            if (back.tab === "today") {
-              state.complexHub.open = true;
-              if (back.complexId) state.complexHub.expanded[back.complexId] = true;
-            }
-            renderMainApp();
-          }
+          await addPickedComplexItem(preselectedComplexId, id);
           return;
         }
+        const detail = state.catalog.detail;
         await loadComplexes(true);
-        openAddToComplexModal(id);
+        if (state.catalog.detail === detail && Number(detail?.id) === id) openAddToComplexModal(id);
       } catch { showToast('Не удалось добавить в комплекс'); }
     });
     unboundDetailControls('[data-add-complex-modal-close]').forEach((el)=>el.addEventListener('click', closeAddToComplexModal));
@@ -3628,40 +3679,48 @@
       haptic();
       const complexId = Number(el.dataset.complexPickExisting || 0);
       const supplementId = Number(state.catalog?.addToComplexModal?.supplementId || 0);
-      if (!complexId || !supplementId) return;
+      const modal = state.catalog.addToComplexModal;
+      if (!complexId || !supplementId || modal.adding || state.complexHub.actionBusy[complexId]) return;
+      modal.adding = true;
+      state.complexHub.actionBusy[complexId] = true;
+      renderActiveTab();
       try {
         const target = (state.complexes || []).find((c) => Number(c.id || 0) === complexId);
-        await addSupplementToComplex(complexId, supplementId, `Добавлено в комплекс ${target?.name || ''}`.trim());
+        await addSupplementToComplex(complexId, supplementId, `Добавлено в комплекс ${target?.name || ''}`.trim(), modal);
       } catch {
         showToast('Не удалось добавить в комплекс');
-      }
+      } finally { modal.adding = false; delete state.complexHub.actionBusy[complexId]; renderActiveTab(); }
     }));
     unboundDetailControls('[data-complex-create-start]').forEach((el)=>el.addEventListener('click', () => {
       haptic();
       state.catalog.addToComplexModal.creating = true;
       renderActiveTab();
     }));
+    unboundDetailControls('#addComplexNameInput').forEach(el => el.addEventListener('input', () => { state.catalog.addToComplexModal.name = el.value; }));
     unboundDetailControls('[data-complex-create-and-add]').forEach((el)=>el.addEventListener('click', async () => {
-      haptic();
-      const input = document.getElementById('addComplexNameInput');
-      const name = String(input?.value || '').trim();
-      const supplementId = Number(state.catalog?.addToComplexModal?.supplementId || 0);
-      if (!name || !supplementId) return;
+      const modal = state.catalog.addToComplexModal;
+      const name = String(document.getElementById('addComplexNameInput')?.value || modal.name || '').trim();
+      const supplementId = Number(modal.supplementId || 0);
+      if (!name || !supplementId || modal.adding) return;
+      modal.name = name; modal.adding = true;
+      haptic(); renderActiveTab();
       try {
-        const created = await api('./api/complexes/create', { method:'POST', body:{ name } });
-        await loadComplexes(true);
-        const createdId = Number(created?.item?.id || 0);
-        if (!createdId) throw new Error('COMPLEX_CREATE_FAILED');
-        await addSupplementToComplex(createdId, supplementId, `Создан комплекс ${name} и добавлен БАД`);
+        if (!modal.createdId) {
+          const created = await api('./api/complexes/create', { method:'POST', body:{ name } });
+          modal.createdId = Number(created?.item?.id || 0);
+          if (!modal.createdId) throw new Error('COMPLEX_CREATE_FAILED');
+          await loadComplexes(true);
+        }
+        await addSupplementToComplex(modal.createdId, supplementId, `Добавлено в комплекс ${name}`, modal);
       } catch {
-        showToast('Не удалось создать комплекс');
-      }
+        showToast(modal.createdId ? 'Комплекс создан. Добавку пока не удалось добавить — можно повторить.' : 'Не удалось создать комплекс');
+      } finally { modal.adding = false; renderActiveTab(); }
     }));
     const bindStackAction = (selector, action) => {
       unboundDetailControls(selector)[0]?.addEventListener('click', async (e) => {
         const b = e.currentTarget;
         const id = Number(b.dataset.id || 0);
-        if (!id) return;
+        if (!id || catalogStackActions.has(id)) return;
         haptic();
         if (action === 'add') {
           await openAddToStackSlotModal(id);
@@ -3669,6 +3728,8 @@
         }
         const detail = state.catalog.detail || {};
         const prev = !!detail.in_stack;
+        catalogStackActions.add(id);
+        catalogStackRevision++;
         const optimistic = action === 'add';
         applyCatalogInStackState(id, optimistic);
         renderActiveTab();
@@ -3677,7 +3738,7 @@
           applyCatalogInStackState(id, !!r.in_stack);
           await Promise.all([loadToday(true), loadBodyMap(true)]);
           showToast((!!r.in_stack) ? 'Добавлено в стек' : 'Убрано из стека');
-          if (action === 'remove' && !r.in_stack) {
+          if (action === 'remove' && !r.in_stack && state.catalog.detail === detail) {
             state.catalog.detail = null;
             state.catalog.detailSection = null;
             state.catalog.addToComplexModal = { open: false, supplementId: 0, creating: false };
@@ -3688,11 +3749,12 @@
           applyCatalogInStackState(id, prev);
           renderActiveTab();
           showToast('Не удалось обновить стек');
-        }
+        } finally { catalogStackActions.delete(id); catalogStackRevision++; renderActiveTab(); }
       });
     };
     bindStackAction('[data-stack-add]', 'add');
     bindStackAction('[data-stack-remove]', 'remove');
+    bindStackSlotEvents();
   }
 
   function bindCatalogEvents(preserveToolbar = false) {
@@ -3705,18 +3767,7 @@
       const element = document.getElementById(id);
       return preserveToolbar && element?.closest('.catalog-toolbar') ? null : element;
     };
-    const returnAfterComplexPick = async () => {
-      const back = state.catalog.returnAfterComplexPick || null;
-      state.catalog.returnAfterComplexPick = null;
-      if (!back) return;
-      state.activeTab = String(back.tab || "today");
-      if (back.tab === "today") {
-        state.complexHub.open = true;
-        if (back.complexId) state.complexHub.expanded[back.complexId] = true;
-      }
-      renderMainApp();
-      renderActiveTab();
-    };
+
 
     if (state.catalog.focusSearchOnOpen) {
       requestAnimationFrame(() => {
@@ -3765,16 +3816,28 @@
     });
 
     appEl.querySelectorAll('[data-ready-stack-add]').forEach((el) => el.addEventListener('click', async () => {
-      haptic();
+      const c = state.catalog;
       const slug = String(el.dataset.readyStackAdd || '').trim();
-      if (!slug) return;
+      if (!slug || c.readyBusy[slug]) return;
+      haptic();
+      c.readyBusy[slug] = true; catalogStackRevision++;
+      renderActiveTab();
       try {
         const out = await api(`./api/curated_stacks/${encodeURIComponent(slug)}/add`, { method: 'POST' });
-        await Promise.all([loadReadyStacks(true), loadCatalog(true), loadToday(true), loadBodyMap(true)]);
+        catalogStackRevision++;
+        const stack = c.readyStacks.find(x => x.slug === slug);
+        for (const item of stack?.items || []) {
+          if (!item.not_found && Number(item.supplement_id)) applyCatalogInStackState(Number(item.supplement_id), true);
+        }
+        c.detailCache = {};
+        markScheduleChanged();
+        await Promise.allSettled([loadReadyStacks(true), loadCatalog(true), loadToday(true), loadBodyMap(true), loadMySupplements(true), loadScheduleData(true)]);
         showToast(`Добавлено: ${Number(out.added || 0)} • уже было: ${Number(out.duplicates_count || 0)}`);
-        renderActiveTab();
       } catch {
+        catalogStackRevision++;
         showToast('Не удалось добавить готовый стек');
+      } finally {
+        delete c.readyBusy[slug]; renderActiveTab();
       }
     }));
 
@@ -3825,11 +3888,7 @@
       if (pickForComplexId) {
         if (!supplementId) return showToast('Не удалось определить БАД');
         try {
-          await api(`./api/complexes/${pickForComplexId}/items/add`, { method:'POST', body:{ supplement_id: supplementId } });
-          state.catalog.pickForComplexId = 0;
-          await Promise.all([loadComplexHubMeta(true), loadToday(true), loadComplexItems(pickForComplexId, true)]);
-          await returnAfterComplexPick();
-          showToast('БАД добавлен в комплекс');
+          await addPickedComplexItem(pickForComplexId, supplementId);
           return;
         } catch {
           showToast('Не удалось добавить БАД в комплекс');
@@ -3838,20 +3897,19 @@
       }
       if (state.catalog.pickForBodymapSystem) {
         if (!supplementId) return showToast('Не удалось определить БАД');
+        if (catalogStackActions.has(supplementId)) return;
+        const system = state.catalog.pickForBodymapSystem;
+        const currentInStack = !!fromList?.in_stack;
+        catalogStackActions.add(supplementId); catalogStackRevision++;
         try {
-          const currentInStack = !!fromList?.in_stack;
-          if (!currentInStack) {
-            await api('./api/my_supplements/toggle', { method:'POST', body:{ supplement_id: supplementId, action:'add' } });
-          }
-          state.catalog.pickForBodymapSystem = '';
-          await Promise.all([loadToday(true), loadBodyMap(true)]);
-          renderActiveTab();
+          if (!currentInStack) await api('./api/my_supplements/toggle', {method:'POST', body:{supplement_id:supplementId, action:'add'}});
+          applyCatalogInStackState(supplementId, true);
+          if (state.catalog.pickForBodymapSystem === system) state.catalog.pickForBodymapSystem = '';
+          await Promise.all([loadToday(true), loadBodyMap(true), loadMySupplements(true)]);
           showToast(currentInStack ? 'БАД уже был в стеке' : 'БАД добавлен в стек');
-          return;
-        } catch {
-          showToast('Не удалось добавить БАД в стек');
-          return;
-        }
+        } catch { showToast('Не удалось добавить БАД в стек'); }
+        finally { catalogStackActions.delete(supplementId); catalogStackRevision++; renderActiveTab(); }
+        return;
       }
       await openSupplementDetail(el.dataset.catalogOpen);
     }));
@@ -3899,65 +3957,75 @@
       await loadCatalog(true);
     });
 
-    appEl.querySelectorAll('[data-add-stack-slot-close],[data-add-stack-slot-back]').forEach((el) => el.addEventListener('click', () => {
-      state.catalog.addToStackSlotModal = { open: false, supplementId: 0, adding: false, creatingSlot: false, newSlotTime: "" };
-      renderActiveTab();
-    }));
-    appEl.querySelector('[data-add-stack-slot-create-open]')?.addEventListener('click', () => {
-      state.catalog.addToStackSlotModal.creatingSlot = true;
-      state.catalog.addToStackSlotModal.newSlotTime = normalizeHHMM(state.catalog.addToStackSlotModal.newSlotTime || '') || '';
-      renderActiveTab();
-    });
-    appEl.querySelector('[data-add-stack-slot-create-cancel]')?.addEventListener('click', () => {
-      state.catalog.addToStackSlotModal.creatingSlot = false;
-      renderActiveTab();
-    });
-    appEl.querySelector('[data-add-stack-slot-create-confirm]')?.addEventListener('click', async () => {
-      const timeInput = catalogElement('addStackSlotTime');
-      const time = normalizeHHMM(timeInput?.value || state.catalog.addToStackSlotModal.newSlotTime || '');
-      if (!time) return showToast('Выберите корректное время');
-      try {
-        state.catalog.addToStackSlotModal.adding = true;
-        renderActiveTab();
-        await createScheduleSlot(time, `Слот ${time}`);
-        state.catalog.addToStackSlotModal.creatingSlot = false;
-        state.catalog.addToStackSlotModal.newSlotTime = time;
-        showToast('Слот добавлен');
-      } catch {
-        showToast('Не удалось добавить слот');
-      } finally {
-        state.catalog.addToStackSlotModal.adding = false;
-        renderActiveTab();
-      }
-    });
-    appEl.querySelectorAll('[data-add-stack-slot-pick]').forEach((el) => el.addEventListener('click', async () => {
-      const sid = Number(state.catalog.addToStackSlotModal?.supplementId || 0);
-      const slotId = String(el.dataset.addStackSlotPick || '').trim();
-      if (!sid || !slotId) return;
-      const detail = state.catalog.detail || {};
-      state.catalog.addToStackSlotModal.adding = true;
-      applyCatalogInStackState(sid, true);
-      renderActiveTab();
-      try {
-        const r = await api('./api/my_supplements/toggle', { method: 'POST', body: { supplement_id: sid, action: 'add' } });
-        await api('./api/schedule/set', { method: 'POST', body: { supplement_id: sid, slot_id: slotId, time_hhmm: null } });
-        applyCatalogInStackState(sid, !!r.in_stack);
-        state.catalog.addToStackSlotModal = { open: false, supplementId: 0, adding: false, creatingSlot: false, newSlotTime: "" };
-        await Promise.all([loadToday(true), loadBodyMap(true), loadScheduleData(true)]);
-        showToast('Добавлено в выбранный слот');
-      } catch {
-        applyCatalogInStackState(sid, !!detail.in_stack);
-        showToast('Не удалось добавить в слот');
-      } finally {
-        state.catalog.addToStackSlotModal.adding = false;
-        renderActiveTab();
-      }
-    }));
-
     hydrateOrganIcons(CATALOG_QUICK_CATEGORIES.map((c)=>c.token));
     setupCatalogInfiniteScroll();
   }
 
+
+  function bindStackSlotEvents() {
+    unboundDetailControls('[data-add-stack-slot-close],[data-add-stack-slot-back]').forEach((el) => el.addEventListener('click', () => {
+      state.catalog.addToStackSlotModal = { open: false, supplementId: 0, adding: false, creatingSlot: false, newSlotTime: "" };
+      renderActiveTab();
+    }));
+    unboundDetailControls('[data-add-stack-slot-create-open]')[0]?.addEventListener('click', () => {
+      state.catalog.addToStackSlotModal.creatingSlot = true;
+      state.catalog.addToStackSlotModal.newSlotTime = normalizeHHMM(state.catalog.addToStackSlotModal.newSlotTime || '') || '';
+      renderActiveTab();
+    });
+    unboundDetailControls('[data-add-stack-slot-create-cancel]')[0]?.addEventListener('click', () => {
+      state.catalog.addToStackSlotModal.creatingSlot = false;
+      renderActiveTab();
+    });
+    unboundDetailControls('[data-add-stack-slot-create-confirm]')[0]?.addEventListener('click', async () => {
+      const modal = state.catalog.addToStackSlotModal;
+      if (modal.adding) return;
+      const timeInput = document.getElementById('addStackSlotTime');
+      const time = normalizeHHMM(timeInput?.value || state.catalog.addToStackSlotModal.newSlotTime || '');
+      if (!time) return showToast('Выберите корректное время');
+      try {
+        modal.adding = true;
+        renderActiveTab();
+        await createScheduleSlot(time, `Слот ${time}`);
+        modal.creatingSlot = false;
+        modal.newSlotTime = time;
+        showToast('Слот добавлен');
+      } catch {
+        showToast('Не удалось добавить слот');
+      } finally {
+        modal.adding = false;
+        renderActiveTab();
+      }
+    });
+    unboundDetailControls('#addStackSlotTime').forEach(el => el.addEventListener('input', () => { state.catalog.addToStackSlotModal.newSlotTime = el.value; }));
+    unboundDetailControls('[data-add-stack-slot-pick]').forEach((el) => el.addEventListener('click', async () => {
+      const modal = state.catalog.addToStackSlotModal;
+      const sid = Number(modal.supplementId || 0);
+      const slotId = String(el.dataset.addStackSlotPick || '').trim();
+      if (!sid || !slotId || modal.adding || catalogStackActions.has(sid)) return;
+      const previous = !!state.catalog.detail?.in_stack;
+      let added = previous;
+      modal.adding = true;
+      catalogStackActions.add(sid); catalogStackRevision++;
+      renderActiveTab();
+      try {
+        if (!added) {
+          const r = await api('./api/my_supplements/toggle', { method:'POST', body:{supplement_id:sid, action:'add'} });
+          added = !!r.in_stack;
+          applyCatalogInStackState(sid, added);
+        }
+        await api('./api/schedule/set', { method:'POST', body:{supplement_id:sid, slot_id:slotId, time_hhmm:null} });
+        if (state.catalog.addToStackSlotModal === modal) state.catalog.addToStackSlotModal = {open:false};
+        showToast('Добавлено в выбранный слот');
+      } catch {
+        applyCatalogInStackState(sid, added);
+        showToast(added ? 'БАД сохранён. Не удалось назначить время — выберите слот ещё раз.' : 'Не удалось добавить в слот');
+      } finally {
+        modal.adding = false; catalogStackActions.delete(sid); catalogStackRevision++;
+        await Promise.allSettled([loadToday(true), loadBodyMap(true), loadScheduleData(true), loadMySupplements(true)]);
+        renderActiveTab();
+      }
+    }));
+  }
 
   function selectedAdminIds() {
     return Object.keys(state.admin.selectedIds || {}).filter((k)=>state.admin.selectedIds[k]).map((k)=>Number(k)).filter((x)=>Number.isFinite(x) && x>0);
@@ -4025,6 +4093,10 @@
         <div style="display:flex; gap:8px; margin-top:8px;">
           <input id="adminSearch" class="input" placeholder="Поиск по slug / названию" value="${esc(a.q)}" />
           ${perms.content_bulk ? `<button class="btn secondary" id="adminSelectionToggle">${a.selectionMode ? 'Готово' : 'Выбор'}</button>` : ''}
+        </div>
+        <div class="row" style="margin-top:8px">
+          <select id="adminActive" class="select" aria-label="Статус записи">${[['','Все записи'],['1','В каталоге'],['0','Скрытые']].map(([v,t])=>`<option value="${v}" ${a.filters.is_active===v?'selected':''}>${t}</option>`).join('')}</select>
+          <select id="adminEvidence" class="select" aria-label="Уровень доказательности">${['','A','B','C','D'].map(v=>`<option value="${v}" ${a.filters.evidence===v?'selected':''}>${v || 'Все уровни'}</option>`).join('')}</select>
         </div>
       </div>` : ''}
 
@@ -6123,6 +6195,7 @@ function adminField(label, field, value, kind='input') {
     if ((hub.loading || hub.schedulesLoading || hub.slotsLoading) && !force) return;
     const version = hub.loadVersion = (hub.loadVersion || 0) + 1;
     const listVersion = ++complexListVersion;
+    const scheduleVersion = scheduleRevision;
     hub.loading = hub.schedulesLoading = hub.slotsLoading = true;
     renderActiveTab();
     const results = await Promise.allSettled([
@@ -6130,8 +6203,10 @@ function adminField(label, field, value, kind='input') {
     ]);
     if (version !== hub.loadVersion) return;
     if (results[0].status === 'fulfilled' && listVersion === complexListVersion) state.complexes = results[0].value.items || [];
-    if (results[1].status === 'fulfilled') hub.schedules = results[1].value.items || [];
-    if (results[2].status === 'fulfilled') hub.slots = results[2].value.slots || [];
+    if (scheduleVersion === scheduleRevision) {
+      if (results[1].status === 'fulfilled') hub.schedules = results[1].value.items || [];
+      if (results[2].status === 'fulfilled') hub.slots = results[2].value.slots || [];
+    }
     if (results.some(r => r.status === 'rejected')) showToast('Не всё удалось обновить. Последние загруженные данные сохранены.');
     hub.loading = hub.schedulesLoading = hub.slotsLoading = false;
     renderActiveTab();
@@ -6715,49 +6790,79 @@ function adminField(label, field, value, kind='input') {
     }
   }
 
+  let scheduleRevision = 0;
+  let scheduleRequestId = 0;
+  function markScheduleChanged() {
+    scheduleRevision++; scheduleRequestId++;
+    state.settingsUi.loadingSchedule = false;
+    state.suppHub.scheduleCacheAt = 0;
+  }
+
+  function applyScheduleSnapshot(slots, schedules) {
+    const nextSlots = [...slots].sort((a,b) => String(a.time_local || '').localeCompare(String(b.time_local || '')) || String(a.slot_id || '').localeCompare(String(b.slot_id || '')));
+    state.settingsSchedule.slots = nextSlots;
+    state.complexHub.slots = nextSlots;
+    state.suppHub.slots = nextSlots;
+    if (Array.isArray(schedules)) {
+      state.suppHub.schedules = schedules;
+      state.suppHub.scheduleCacheAt = Date.now();
+    }
+  }
+
   async function loadScheduleData(force = false) {
     if (state.settingsUi.loadingSchedule && !force) return;
+    const requestId = ++scheduleRequestId;
+    const revision = scheduleRevision;
     state.settingsUi.loadingSchedule = true;
     try {
       const res = await api('./api/schedule');
-      state.settingsSchedule.slots = Array.isArray(res.slots) ? res.slots : [];
+      if (requestId === scheduleRequestId && revision === scheduleRevision && Array.isArray(res.slots)) applyScheduleSnapshot(res.slots, res.schedules);
     } catch {
       // Keep the last successfully loaded schedule.
     } finally {
-      state.settingsUi.loadingSchedule = false;
+      if (requestId === scheduleRequestId) state.settingsUi.loadingSchedule = false;
     }
+  }
+
+  async function refreshScheduleSnapshot() {
+    const revision = scheduleRevision;
+    const res = await api('./api/schedule').catch(() => null);
+    if (revision === scheduleRevision && Array.isArray(res?.slots)) applyScheduleSnapshot(res.slots, res.schedules);
   }
 
   async function createScheduleSlot(timeLocal, titleRu) {
     const time = normalizeHHMM(timeLocal || '');
     if (!time) throw new Error('invalid_time');
     const title = String(titleRu || '').trim() || `Слот ${time}`;
-    const created = await api('./api/schedule/add_slot', { method: 'POST', body: { time_local: time, title_ru: title } });
-    const scheduleRes = await api('./api/schedule');
-    const nextSlots = Array.isArray(scheduleRes.slots) ? scheduleRes.slots : [];
-    state.settingsSchedule.slots = nextSlots;
-    state.complexHub.slots = nextSlots;
-    if (state.suppHub.open || state.suppHub.slots?.length) {
-      state.suppHub.slots = nextSlots;
-      state.suppHub.schedules = Array.isArray(scheduleRes.schedules) ? scheduleRes.schedules : (state.suppHub.schedules || []);
-      state.suppHub.scheduleCacheAt = Date.now();
-    }
-    return { slotId: String(created?.slot_id || ''), time };
+    markScheduleChanged();
+    let created;
+    try { created = await api('./api/schedule/add_slot', { method:'POST', body:{time_local:time, title_ru:title} }); }
+    finally { markScheduleChanged(); }
+    const slotId = String(created?.slot_id || '');
+    const knownSlots = state.settingsSchedule.slots || [];
+    if (slotId && !knownSlots.some(s => s.slot_id === slotId)) applyScheduleSnapshot([...knownSlots, {slot_id:slotId, title_ru:title, time_local:time, is_enabled:true}]);
+    await refreshScheduleSnapshot();
+    return {slotId, time};
   }
 
   async function deleteScheduleSlot(slotId) {
     const normalizedSlotId = String(slotId || '').trim();
     if (!normalizedSlotId) throw new Error('invalid_slot_id');
-    const removed = await api('./api/schedule/delete_slot', { method: 'POST', body: { slot_id: normalizedSlotId } });
-    const scheduleRes = await api('./api/schedule');
-    const nextSlots = Array.isArray(scheduleRes.slots) ? scheduleRes.slots : [];
-    state.settingsSchedule.slots = nextSlots;
-    state.complexHub.slots = nextSlots;
-    if (state.suppHub.open || state.suppHub.slots?.length) {
-      state.suppHub.slots = nextSlots;
-      state.suppHub.schedules = Array.isArray(scheduleRes.schedules) ? scheduleRes.schedules : (state.suppHub.schedules || []);
-      state.suppHub.scheduleCacheAt = Date.now();
+    markScheduleChanged();
+    let removed;
+    try { removed = await api('./api/schedule/delete_slot', {method:'POST', body:{slot_id:normalizedSlotId}}); }
+    finally { markScheduleChanged(); }
+    const movedTo = String(removed?.moved_to_slot_id || '');
+    const remap = items => (items || []).map(item => item.slot_id === normalizedSlotId && movedTo ? {...item, slot_id:movedTo} : item);
+    applyScheduleSnapshot((state.settingsSchedule.slots || []).filter(s => s.slot_id !== normalizedSlotId), remap(state.suppHub.schedules));
+    state.suppHub.scheduleCacheAt = 0;
+    state.complexHub.schedules = (state.complexHub.schedules || []).map(item => item.slot_id === normalizedSlotId && movedTo ? {...item, slot_id:movedTo, time_local:''} : item);
+    if (state.suppHub.slotId === normalizedSlotId && movedTo) {
+      state.suppHub.slotId = movedTo;
+      if (state.suppHub.timeMode !== 'custom') state.suppHub.time = state.suppHub.slots.find(s => s.slot_id === movedTo)?.time_local || '';
     }
+    await refreshScheduleSnapshot();
+    await Promise.allSettled([loadToday(true), loadComplexHubMeta(true)]);
     return removed || {};
   }
 
@@ -6953,17 +7058,17 @@ function adminField(label, field, value, kind='input') {
         </div>
       </section>
       ${slotEdit.open ? `<div class="modal-overlay" data-slot-edit-close>
-        <section class="card modal-card" onclick="event.stopPropagation()">
+        <section class="card modal-card" data-settings-slot-id="${esc(slotEdit.slotId)}" onclick="event.stopPropagation()">
           <div class="row"><strong>Изменить время слота</strong><button class="btn secondary" type="button" data-slot-edit-close>Закрыть</button></div>
           <div class="field-grid" style="margin-top:10px">
             <label class="muted">Новое время (HH:MM)
               <input class="input" id="settingsSlotTimeInput" type="time" value="${esc(slotEdit.time || '')}" />
             </label>
             <div class="row" style="justify-content:space-between;gap:8px">
-              ${slotEditIsCustom ? '<button class="btn secondary" type="button" id="settingsSlotDeleteBtn">Удалить слот</button>' : '<span></span>'}
+              ${slotEditIsCustom ? `<button class="btn secondary" type="button" id="settingsSlotDeleteBtn" ${state.settingsUi.slotBusy[slotEdit.slotId] ? 'disabled' : ''}>Удалить слот</button>` : '<span></span>'}
               <div class="row" style="gap:8px">
               <button class="btn secondary" type="button" data-slot-edit-close>Отмена</button>
-              <button class="btn" type="button" id="settingsSlotTimeSave">Сохранить</button>
+              <button class="btn" type="button" id="settingsSlotTimeSave" ${state.settingsUi.slotBusy[slotEdit.slotId] ? 'disabled' : ''}>Сохранить</button>
               </div>
             </div>
           </div>
@@ -7039,10 +7144,13 @@ function adminField(label, field, value, kind='input') {
         if (!slotId || state.settingsUi.slotBusy[slotId]) return;
         const enabled = !!e?.target?.checked;
         state.settingsUi.slotBusy[slotId] = true;
+        markScheduleChanged();
         try {
           await api('./api/schedule/slot_enabled', { method: 'POST', body: { slot_id: slotId, is_enabled: enabled } });
           const slot = (state.settingsSchedule.slots || []).find((x) => String(x.slot_id || '') === slotId);
+          markScheduleChanged();
           if (slot) slot.is_enabled = enabled;
+          applyScheduleSnapshot(state.settingsSchedule.slots);
           showToast('Слот обновлён');
         } catch {
           e.target.checked = !enabled;
@@ -7078,11 +7186,16 @@ function adminField(label, field, value, kind='input') {
       }
       if (state.settingsUi.slotBusy[slotId]) return;
       state.settingsUi.slotBusy[slotId] = true;
+      const editor = state.settingsUi.slotEdit;
+      markScheduleChanged();
       try {
         await api('./api/schedule/slot_time', { method: 'POST', body: { slot_id: slotId, time_local: time } });
         const slot = (state.settingsSchedule.slots || []).find((x) => String(x.slot_id || '') === slotId);
+        markScheduleChanged();
         if (slot) slot.time_local = time;
-        state.settingsUi.slotEdit = { open: false, slotId: "", time: "" };
+        applyScheduleSnapshot(state.settingsSchedule.slots);
+        if (state.settingsUi.slotEdit === editor) state.settingsUi.slotEdit = { open:false, slotId:"", time:"" };
+        await loadToday({force:true, silent:true});
         showToast('Время слота обновлено');
         renderActiveTab();
       } catch {
@@ -7101,15 +7214,16 @@ function adminField(label, field, value, kind='input') {
       const confirmed = confirm('Удалить этот слот? Добавки автоматически перенесутся в ближайший слот по времени.');
       if (!confirmed) return;
       state.settingsUi.slotBusy[slotId] = true;
+      const editor = state.settingsUi.slotEdit;
       try {
         const result = await deleteScheduleSlot(slotId);
-        state.settingsUi.slotEdit = { open: false, slotId: "", time: "" };
+        if (state.settingsUi.slotEdit === editor) state.settingsUi.slotEdit = { open:false, slotId:"", time:"" };
         const movedTo = String(result?.moved_to_slot_id || '').trim();
         showToast(movedTo ? `Слот удалён, перенос в ${movedTo}` : 'Слот удалён');
         renderActiveTab();
       } catch (err) {
         if (String(err?.code || '') === 'slot_not_found') {
-          state.settingsUi.slotEdit = { open: false, slotId: "", time: "" };
+          if (state.settingsUi.slotEdit === editor) state.settingsUi.slotEdit = { open:false, slotId:"", time:"" };
           await loadScheduleData(true);
           showToast('Слот уже удалён');
           renderActiveTab();
@@ -7246,11 +7360,13 @@ function adminField(label, field, value, kind='input') {
     state.suppHub.splitDraft = null;
     renderActiveTab();
     try {
+      const scheduleVersion = scheduleRevision;
       const cacheAgeMs = Date.now() - Number(state.suppHub.scheduleCacheAt || 0);
       const scheduleRes = (cacheAgeMs < 30000 && state.suppHub.slots?.length)
         ? { slots: state.suppHub.slots, schedules: state.suppHub.schedules || [] }
         : await api('./api/schedule');
       if (!current()) return;
+      if (scheduleVersion !== scheduleRevision) return await openSupplementHub(sid);
       const slots = Array.isArray(scheduleRes.slots) ? scheduleRes.slots : [];
       const schedules = Array.isArray(scheduleRes.schedules) ? scheduleRes.schedules : [];
       state.suppHub.scheduleCacheAt = Date.now();
@@ -8011,7 +8127,7 @@ function adminField(label, field, value, kind='input') {
   function keepFocusedFieldVisible() {
     const field = document.activeElement;
     if (!isEditing() || !field) return;
-    const scroller = field.closest('.sheet, .modal-card, .main-content');
+    const scroller = field.closest('.sheet, .modal-card, .stack-slot-panel, .main-content');
     if (!scroller) return;
     const viewTop = window.visualViewport?.offsetTop || 0;
     const viewBottom = viewTop + (window.visualViewport?.height || window.innerHeight);

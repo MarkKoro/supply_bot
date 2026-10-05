@@ -5944,6 +5944,11 @@ def _with_intake_suffix(label: str, intake_order: int, group_size: int) -> str:
 
 
 async def split_user_supplement_intake(conn: aiosqlite.Connection, tg_user_id: int, supplement_id: int) -> dict:
+    async with transaction(conn) as tx:
+        return await _split_user_supplement_intake(tx, tg_user_id, supplement_id)
+
+
+async def _split_user_supplement_intake(conn: aiosqlite.Connection, tg_user_id: int, supplement_id: int) -> dict:
     user_id = await get_or_create_user(conn, tg_user_id)
     base_row = await fetchone(
         conn,
@@ -8218,10 +8223,18 @@ async def rename_complex(conn: aiosqlite.Connection, tg_user_id: int, complex_id
     title = str(new_name or "").strip()
     if not title:
         raise ValueError("name_required")
-    await conn.execute(
-        "UPDATE user_complexes SET name=?, updated_at_utc=? WHERE id=? AND user_id=?",
-        (title[:120], utc_now_iso(), int(complex_id), user_id),
-    )
+    owner = await fetchone(conn, "SELECT 1 FROM user_complexes WHERE id=? AND user_id=?", (int(complex_id), user_id))
+    if not owner:
+        raise ValueError("complex_not_found")
+    try:
+        await conn.execute(
+            "UPDATE user_complexes SET name=?, updated_at_utc=? WHERE id=? AND user_id=?",
+            (title[:120], utc_now_iso(), int(complex_id), user_id),
+        )
+    except aiosqlite.IntegrityError as exc:
+        if "UNIQUE constraint failed: user_complexes.user_id, user_complexes.name" in str(exc):
+            raise ValueError("name_already_exists") from exc
+        raise
     await conn.commit()
 
 
@@ -8364,13 +8377,19 @@ async def set_complex_schedule(conn: aiosqlite.Connection, tg_user_id: int, comp
     if not owner:
         raise ValueError("complex_not_found")
     normalized_slot = str(slot_id or "morning").strip() or "morning"
+    slots = await get_user_slots(conn, user_id)
+    if not any(str(slot.get("slot_id") or "") == normalized_slot for slot in slots):
+        raise ValueError("slot_not_found")
+    normalized_time = _normalize_hhmm(time_local) or ""
+    if str(time_local or "").strip() and not normalized_time:
+        raise ValueError("invalid HH:MM")
     await conn.execute(
         """INSERT INTO user_complex_schedules(user_id, complex_id, slot_id, time_local, is_enabled, created_at_utc)
            VALUES(?,?,?,?,1,?)
            ON CONFLICT(user_id, complex_id, slot_id) DO UPDATE SET
              time_local=excluded.time_local,
              is_enabled=1""",
-        (user_id, int(complex_id), normalized_slot, _normalize_hhmm(time_local) or "", utc_now_iso()),
+        (user_id, int(complex_id), normalized_slot, normalized_time, utc_now_iso()),
     )
     item_rows = await fetchall(
         conn,
@@ -9290,6 +9309,11 @@ async def add_custom_slot(conn: aiosqlite.Connection, user_id: int, time_local: 
 
 
 async def delete_custom_slot(conn: aiosqlite.Connection, user_id: int, slot_id: str) -> dict[str, object]:
+    async with transaction(conn) as tx:
+        return await _delete_custom_slot(tx, user_id, slot_id)
+
+
+async def _delete_custom_slot(conn: aiosqlite.Connection, user_id: int, slot_id: str) -> dict[str, object]:
     target_slot_id = str(slot_id or "").strip()
     if not target_slot_id:
         raise ValueError("slot_id_required")

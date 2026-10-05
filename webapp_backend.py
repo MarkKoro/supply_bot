@@ -1650,7 +1650,8 @@ async def api_complexes_rename(body: ComplexRenameBody, x_telegram_init_data: st
     try:
         await db.rename_complex(conn, tg_user_id, int(body.complex_id), body.new_name)
     except ValueError as exc:
-        return JSONResponse({"ok": False, "code": str(exc)}, status_code=400)
+        code = str(exc)
+        return JSONResponse({"ok": False, "code": code}, status_code=404 if code == "complex_not_found" else 400)
     finally:
         await conn.close()
     return JSONResponse({"ok": True})
@@ -1737,7 +1738,7 @@ async def api_complex_schedules_set(body: ComplexScheduleSetBody, x_telegram_ini
         await db.set_complex_schedule(conn, tg_user_id, int(body.complex_id), body.slot_id, body.time_local)
     except ValueError as exc:
         code = str(exc)
-        status_code = 404 if code == "complex_not_found" else 400
+        status_code = 404 if code in {"complex_not_found", "slot_not_found"} else 400
         return JSONResponse({"ok": False, "code": code}, status_code=status_code)
     finally:
         await conn.close()
@@ -2594,47 +2595,48 @@ async def api_curated_stack_add(slug: str, x_telegram_init_data: str = Header(de
 
     conn = await db.connect(s.DB_PATH)
     try:
-        user_id = await db.get_or_create_user(conn, tg_user_id, tz_name="")
-        stack = await db.get_curated_stack(conn, slug)
-        if not stack:
-            return JSONResponse({"ok": False, "error": "NOT_FOUND"}, status_code=404)
-        item_rows = await db.list_curated_stack_items(conn, int(stack["id"]))
-        user_stack_ids = await db.get_user_stack_supplement_ids(conn, tg_user_id)
-        not_found: list[str] = []
-        duplicates: list[str] = []
-        to_add: list[dict] = []
-        changed_slugs: set[str] = set()
-        for item in item_rows:
-            supplement = await db.find_supplement_by_slug_or_name(
-                conn,
-                item["supplement_slug"],
-                item["supplement_name"],
-            )
-            name = (
-                str(item["supplement_name"] or "").strip()
-                or str(item["supplement_slug"] or "").strip()
-                or "Без названия"
-            )
-            if not supplement:
-                not_found.append(name)
-                continue
-            supplement_id = int(supplement["id"])
-            if supplement_id in user_stack_ids:
-                duplicates.append(str(supplement["name_ru"] or supplement["name_en"] or supplement["slug"] or name))
-                continue
-            to_add.append(
-                {
-                    "supplement_id": supplement_id,
-                    "dose_ru": item["dose_ru"],
-                    "timing_ru": item["timing_ru"],
-                    "notes_ru": item["notes_ru"],
-                }
-            )
-            changed_slugs.add(str(supplement["slug"] or "").strip())
-            user_stack_ids.add(supplement_id)
-        summary = await db.add_stack_items_to_user(conn, user_id, to_add)
-        if changed_slugs:
-            await db.enqueue_stack_change_rebuilds(conn, tg_user_id, [x for x in sorted(changed_slugs) if x])
+        async with db.transaction(conn) as tx:
+            user_id = await db.get_or_create_user(tx, tg_user_id, tz_name="")
+            stack = await db.get_curated_stack(tx, slug)
+            if not stack:
+                return JSONResponse({"ok": False, "error": "NOT_FOUND"}, status_code=404)
+            item_rows = await db.list_curated_stack_items(tx, int(stack["id"]))
+            user_stack_ids = await db.get_user_stack_supplement_ids(tx, tg_user_id)
+            not_found: list[str] = []
+            duplicates: list[str] = []
+            to_add: list[dict] = []
+            changed_slugs: set[str] = set()
+            for item in item_rows:
+                supplement = await db.find_supplement_by_slug_or_name(
+                    tx,
+                    item["supplement_slug"],
+                    item["supplement_name"],
+                )
+                name = (
+                    str(item["supplement_name"] or "").strip()
+                    or str(item["supplement_slug"] or "").strip()
+                    or "Без названия"
+                )
+                if not supplement:
+                    not_found.append(name)
+                    continue
+                supplement_id = int(supplement["id"])
+                if supplement_id in user_stack_ids:
+                    duplicates.append(str(supplement["name_ru"] or supplement["name_en"] or supplement["slug"] or name))
+                    continue
+                to_add.append(
+                    {
+                        "supplement_id": supplement_id,
+                        "dose_ru": item["dose_ru"],
+                        "timing_ru": item["timing_ru"],
+                        "notes_ru": item["notes_ru"],
+                    }
+                )
+                changed_slugs.add(str(supplement["slug"] or "").strip())
+                user_stack_ids.add(supplement_id)
+            summary = await db.add_stack_items_to_user(tx, user_id, to_add)
+            if changed_slugs:
+                await db.enqueue_stack_change_rebuilds(tx, tg_user_id, [x for x in sorted(changed_slugs) if x])
     finally:
         await conn.close()
     return JSONResponse(
@@ -2994,10 +2996,19 @@ async def api_schedule_set(body: ScheduleSetBody, x_telegram_init_data: str = He
     conn = await db.connect(s.DB_PATH)
     try:
         user_id = await db.get_or_create_user(conn, tg_user_id, tz_name="")
-        await db.set_schedule_slot(conn, user_id, int(body.supplement_id), body.slot_id)
-        await db.set_schedule_time_override(conn, user_id, int(body.supplement_id), body.time_hhmm)
+        async with db.transaction(conn) as tx:
+            member = await db.fetchone(tx, "SELECT 1 FROM user_supplements WHERE user_id=? AND supplement_id=? AND is_active=1", (user_id, int(body.supplement_id)))
+            if not member:
+                raise ValueError("supplement_not_found")
+            slot_id = str(body.slot_id or "").strip()
+            slots = await db.get_user_slots(tx, user_id)
+            if not any(str(slot.get("slot_id") or "") == slot_id for slot in slots):
+                raise ValueError("slot_not_found")
+            await db.set_schedule_slot(tx, user_id, int(body.supplement_id), slot_id)
+            await db.set_schedule_time_override(tx, user_id, int(body.supplement_id), body.time_hhmm)
     except ValueError as exc:
-        return JSONResponse({"ok": False, "code": str(exc)}, status_code=400)
+        code = str(exc)
+        return JSONResponse({"ok": False, "code": code}, status_code=404 if code in {"supplement_not_found", "slot_not_found"} else 400)
     finally:
         await conn.close()
     return JSONResponse({"ok": True})

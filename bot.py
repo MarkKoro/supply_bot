@@ -2518,7 +2518,7 @@ async def _show_complexes_hub(update: Update, context: ContextTypes.DEFAULT_TYPE
     await show(update, context, text, complexes_hub_kb(items, back_cb=back_cb), route="cx:list")
 
 
-async def _show_complex_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, tg_uid: int, complex_id: int) -> None:
+async def _show_complex_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, tg_uid: int, complex_id: int, page: int = 0) -> None:
     items = await db.list_complexes(conn, tg_uid)
     target = next((x for x in items if int(x.get("id") or 0) == int(complex_id)), None)
     if not target:
@@ -2528,7 +2528,7 @@ async def _show_complex_detail(update: Update, context: ContextTypes.DEFAULT_TYP
     schedules = [x for x in await db.list_complex_schedules(conn, tg_uid) if int(x.get("complex_id") or 0) == int(complex_id)]
     created_at, duration = _format_start_date_and_duration(target.get("created_at_utc"))
     lines = [
-        f"🧩 <b>{target.get('name') or 'Комплекс'}</b>",
+        f"🧩 <b>{html.escape(str(target.get('name') or 'Комплекс'))}</b>",
         f"Позиций: {len(c_items)}",
         f"Дата начала: {created_at}",
         f"Уже принимается: {duration}",
@@ -2541,15 +2541,22 @@ async def _show_complex_detail(update: Update, context: ContextTypes.DEFAULT_TYP
     if c_items:
         lines.append("")
         lines.append("Состав:")
-        for idx, item in enumerate(c_items, start=1):
-            dose = str(item.get("dose_override") or "").strip()
-            line = f"{idx}) {item.get('name_ru') or item.get('slug') or item.get('supplement_id')}"
-            if dose:
-                line += f" — доза: {dose}"
-            lines.append(line)
-    kb_rows = [[InlineKeyboardButton(f"⚙️ {str(item.get('name_ru') or item.get('slug') or item.get('supplement_id'))}", callback_data=f"cx:item:open:{int(complex_id)}:{int(item.get('supplement_id') or 0)}")] for item in c_items[:20]]
+    entries = [{"title": f"{idx}) {item.get('name_ru') or item.get('slug') or item.get('supplement_id')}", "reason_ru": f"доза: {item['dose_override']}" if item.get('dose_override') else "", "supplement_id": item['supplement_id'], "label": str(item.get('name_ru') or item.get('slug') or item['supplement_id'])} for idx, item in enumerate(c_items, start=1)]
+    pages = _compatibility_pages(entries)
+    page = min(max(0, int(page)), len(pages) - 1)
+    lines.extend(entry['text'] for entry in pages[page])
+    page_items = {entry['item']['supplement_id']: entry['item'] for entry in pages[page]}
+    kb_rows = [[InlineKeyboardButton(f"⚙️ {item['label'][:100]}", callback_data=f"cx:item:open:{int(complex_id)}:{int(sid)}")] for sid, item in page_items.items()]
+    if len(pages) > 1:
+        lines.extend(["", f"Страница {page + 1}/{len(pages)}"])
+        navigation = []
+        if page > 0:
+            navigation.append(InlineKeyboardButton("⬅️", callback_data=f"cx:open:{int(complex_id)}:{page-1}"))
+        if page + 1 < len(pages):
+            navigation.append(InlineKeyboardButton("➡️", callback_data=f"cx:open:{int(complex_id)}:{page+1}"))
+        kb_rows.append(navigation)
     kb_rows.extend(complex_open_kb(int(complex_id), list_back_cb="cx:list").inline_keyboard)
-    await show(update, context, "\n".join(lines), InlineKeyboardMarkup(kb_rows), route=f"cx:open:{int(complex_id)}")
+    await show(update, context, "\n".join(lines), InlineKeyboardMarkup(kb_rows), route=f"cx:open:{int(complex_id)}:{page}")
 
 
 async def _show_premium_hub(
@@ -3533,8 +3540,10 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await show(update, context, "Введи название нового комплекса.", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="cx:list")]]), route="cx:create")
             return
         if data.startswith("cx:open:"):
-            complex_id = int(data.split(":", 2)[2])
-            await _show_complex_detail(update, context, conn, tg_uid, complex_id)
+            parts = data.split(":")
+            complex_id = int(parts[2])
+            page = int(parts[3]) if len(parts) > 3 and parts[3].lstrip('-').isdigit() else 0
+            await _show_complex_detail(update, context, conn, tg_uid, complex_id, page)
             return
         if data.startswith("cx:rename:"):
             complex_id = int(data.split(":", 2)[2])
@@ -3609,22 +3618,22 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             return
         if data.startswith("cx:item:open:"):
-            _, _, _, _, cx_id, supp_id = data.split(":", 5)
+            _, _, _, cx_id, supp_id = data.split(":", 4)
             items = await db.list_complex_items(conn, tg_uid, int(cx_id))
             target = next((x for x in items if int(x.get("supplement_id") or 0) == int(supp_id)), None)
             if not target:
                 await _show_complex_detail(update, context, conn, tg_uid, int(cx_id))
                 return
             dose = str(target.get("dose_override") or "").strip() or "не задана"
-            await show(update, context, f"БАД: <b>{target.get('name_ru') or target.get('slug') or supp_id}</b>\nДоза: {dose}", complex_item_actions_kb(int(cx_id), int(supp_id)), route=f"cx:item:open:{cx_id}:{supp_id}")
+            await show(update, context, f"БАД: <b>{html.escape(str(target.get('name_ru') or target.get('slug') or supp_id))}</b>\nДоза: {html.escape(dose)}", complex_item_actions_kb(int(cx_id), int(supp_id)), route=f"cx:item:open:{cx_id}:{supp_id}")
             return
         if data.startswith("cx:item:dose:"):
-            _, _, _, _, cx_id, supp_id = data.split(":", 5)
+            _, _, _, cx_id, supp_id = data.split(":", 4)
             context.user_data[WAITING_KEY] = f"cx:item:dose:{cx_id}:{supp_id}"
             await show(update, context, "Введи дозировку для этой добавки в комплексе.", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"cx:item:open:{cx_id}:{supp_id}")]]), route=f"cx:item:dose:{cx_id}:{supp_id}")
             return
         if data.startswith("cx:item:remove:"):
-            _, _, _, _, cx_id, supp_id = data.split(":", 5)
+            _, _, _, cx_id, supp_id = data.split(":", 4)
             await db.remove_item_from_complex(conn, tg_uid, int(cx_id), int(supp_id))
             await _show_complex_detail(update, context, conn, tg_uid, int(cx_id))
             return
@@ -3639,8 +3648,15 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
             slots = await db.get_user_slots(conn, user_id)
             slot = next((x for x in slots if str(x.get("slot_id") or "") == slot_id), None)
+            if not slot:
+                await show(update, context, "Этот слот уже удалён. Выбери другой.", complex_schedule_kb(int(cx_id), slots), route=f"cx:schedule:{cx_id}")
+                return
             time_local = str(slot.get("time_local") or "") if slot else ""
-            await db.set_complex_schedule(conn, tg_uid, int(cx_id), slot_id, time_local)
+            try:
+                await db.set_complex_schedule(conn, tg_uid, int(cx_id), slot_id, time_local)
+            except ValueError:
+                await _show_complexes_hub(update, context, conn, tg_uid)
+                return
             await _show_complex_detail(update, context, conn, tg_uid, int(cx_id))
             return
         if data.startswith("cx:schedule:clear:"):
@@ -4298,7 +4314,7 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
 
         if data.startswith("admin:stack:item:search_page:"):
-            _, _, _, _, _, stack_id, page = data.split(":")
+            _, _, _, _, stack_id, page = data.split(":")
             _, _, ui_payload = await db.get_ui_state(conn, tg_uid)
             try:
                 payload_data = json.loads(ui_payload) if ui_payload else {}
@@ -4885,44 +4901,45 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if not stack:
                 await show(update, context, "Стек не найден.", back(), route="menu:curated")
                 return
-            items = await db.list_curated_stack_items(conn, int(stack["id"]))
-            not_found: list[str] = []
-            already_added: list[str] = []
-            to_add: list[dict] = []
-            changed_slugs: set[str] = set()
-            existing_ids = await db.get_user_stack_supplement_ids(conn, tg_uid)
-            for item in items:
-                supplement = await db.find_supplement_by_slug_or_name(
-                    conn,
-                    item["supplement_slug"],
-                    item["supplement_name"],
-                )
-                if not supplement:
-                    name = (
-                        str(item["supplement_name"] or "").strip()
-                        or str(item["supplement_slug"] or "").strip()
-                        or "Без названия"
+            async with db.transaction(conn) as tx:
+                items = await db.list_curated_stack_items(tx, int(stack["id"]))
+                not_found: list[str] = []
+                already_added: list[str] = []
+                to_add: list[dict] = []
+                changed_slugs: set[str] = set()
+                existing_ids = await db.get_user_stack_supplement_ids(tx, tg_uid)
+                for item in items:
+                    supplement = await db.find_supplement_by_slug_or_name(
+                        tx,
+                        item["supplement_slug"],
+                        item["supplement_name"],
                     )
-                    not_found.append(name)
-                    continue
-                supplement_id = int(supplement["id"])
-                if supplement_id in existing_ids:
-                    already_added.append(str(supplement["name_ru"] or supplement["name_en"] or supplement["slug"] or "Без названия"))
-                    continue
-                to_add.append(
-                    {
-                        "supplement_id": supplement_id,
-                        "dose_ru": item["dose_ru"],
-                        "timing_ru": item["timing_ru"],
-                        "notes_ru": item["notes_ru"],
-                    }
-                )
-                existing_ids.add(supplement_id)
-                changed_slugs.add(str(supplement["slug"] or "").strip())
-            internal_user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
-            summary = await db.add_stack_items_to_user(conn, internal_user_id, to_add)
-            if changed_slugs:
-                await db.enqueue_stack_change_rebuilds(conn, tg_uid, sorted(slug for slug in changed_slugs if slug))
+                    if not supplement:
+                        name = (
+                            str(item["supplement_name"] or "").strip()
+                            or str(item["supplement_slug"] or "").strip()
+                            or "Без названия"
+                        )
+                        not_found.append(name)
+                        continue
+                    supplement_id = int(supplement["id"])
+                    if supplement_id in existing_ids:
+                        already_added.append(str(supplement["name_ru"] or supplement["name_en"] or supplement["slug"] or "Без названия"))
+                        continue
+                    to_add.append(
+                        {
+                            "supplement_id": supplement_id,
+                            "dose_ru": item["dose_ru"],
+                            "timing_ru": item["timing_ru"],
+                            "notes_ru": item["notes_ru"],
+                        }
+                    )
+                    existing_ids.add(supplement_id)
+                    changed_slugs.add(str(supplement["slug"] or "").strip())
+                internal_user_id = await db.get_or_create_user(tx, tg_uid, tz_name="")
+                summary = await db.add_stack_items_to_user(tx, internal_user_id, to_add)
+                if changed_slugs:
+                    await db.enqueue_stack_change_rebuilds(tx, tg_uid, sorted(slug for slug in changed_slugs if slug))
             lines = [f"✅ Добавлено новых: {summary['added']}"]
             lines.append(f"ℹ️ Уже были в ваших БАДах: {len(already_added)}")
             if not_found:
@@ -5395,6 +5412,17 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         if data.startswith("mysupp:split:") and not data.startswith("mysupp:split:cancel:") and not data.startswith("mysupp:split:apply:"):
             supplement_id = int(data.split(":")[-1])
+            if context.user_data.get("split_busy"):
+                return
+            pending = context.user_data.get("split_flow") or {}
+            new_id = int(pending.get("new_id") or 0)
+            if int(pending.get("origin_id") or 0) == supplement_id and new_id:
+                uid = await db.get_or_create_user(conn, tg_uid)
+                exists = await db.fetchone(conn, "SELECT 1 FROM user_supplements WHERE user_id=? AND supplement_id=? AND is_active=1", (uid, new_id))
+                if exists:
+                    await _show_supplement_time_screen(update, context, conn, tg_uid, new_id, split_origin_id=supplement_id)
+                    return
+            context.user_data["split_busy"] = True
             try:
                 result = await db.split_user_supplement_intake(conn, tg_uid, supplement_id)
                 new_id = int(result.get("supplement_id") or 0)
@@ -5412,10 +5440,12 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 )
             except Exception:
                 await q.answer("Не удалось разделить приём", show_alert=False)
+            finally:
+                context.user_data.pop("split_busy", None)
             return
 
         if data.startswith("mysupp:split:cancel:"):
-            _, _, _, _, new_id_raw, origin_id_raw = data.split(":", 5)
+            _, _, _, new_id_raw, origin_id_raw = data.split(":", 4)
             new_id = int(new_id_raw)
             origin_id = int(origin_id_raw)
             await db.remove_user_supp(conn, tg_uid, new_id)
@@ -7270,7 +7300,15 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if not name:
                 await show(update, context, "Название не может быть пустым.", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"cx:open:{complex_id}")]]), route=f"cx:rename:{complex_id}")
             else:
-                await db.rename_complex(conn, tg_uid, complex_id, name)
+                try:
+                    await db.rename_complex(conn, tg_uid, complex_id, name)
+                except ValueError as exc:
+                    if str(exc) == "complex_not_found":
+                        context.user_data.pop(WAITING_KEY, None)
+                        await _show_complexes_hub(update, context, conn, tg_uid)
+                    else:
+                        await show(update, context, "Комплекс с таким названием уже есть. Введи другое название.", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"cx:open:{complex_id}")]]), route=f"cx:rename:{complex_id}")
+                    return
                 context.user_data.pop(WAITING_KEY, None)
                 await _show_complex_detail(update, context, conn, tg_uid, complex_id)
             return

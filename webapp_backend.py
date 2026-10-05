@@ -150,6 +150,7 @@ class CheckinBody(BaseModel):
     target: str | None = None
     target_day: str | None = None
     client_local_iso: str | None = None
+    expected_date: str | None = None
 
 
 class CheckinApplyBody(BaseModel):
@@ -760,6 +761,7 @@ async def api_me(x_telegram_init_data: str = Header(default="", alias="X-Telegra
         status = await db.get_user_status(conn, tg_user_id)
         cosmetics = await db.get_user_cosmetics(conn, tg_user_id)
         receipt_email = await db.get_user_receipt_email(conn, tg_user_id)
+        tz_name = await db.get_user_tz(conn, tg_user_id)
     finally:
         await conn.close()
     return JSONResponse({
@@ -782,6 +784,7 @@ async def api_me(x_telegram_init_data: str = Header(default="", alias="X-Telegra
         "banned_reason": str(status.get("banned_reason") or ""),
         "cosmetics": cosmetics,
         "receipt_email": receipt_email,
+        "tz_name": str(tz_name or "UTC"),
     })
 
 
@@ -3156,6 +3159,8 @@ async def api_checkin(body: CheckinBody, x_telegram_init_data: str = Header(defa
         tz_name = await db.get_user_tz(conn, tg_user_id)
         target_raw = body.target_day if body.target_day is not None else body.target
         target, local_date, now_local = _resolve_target_day(tz_name, target_raw)
+        if body.expected_date is not None and body.expected_date != local_date:
+            return JSONResponse({"ok": False, "code": "DAY_CHANGED", "date_local": local_date}, status_code=409)
         existing = await db.get_today_checkin(conn, tg_user_id, local_date)
         if existing:
             existing_recs = []

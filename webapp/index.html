@@ -197,12 +197,10 @@
       margin-bottom: 12px;
     }
 
-    .main-content > .card,
-    #tabContent > .card,
     .catalog-list > .card,
     .history-list > .history-item {
       content-visibility: auto;
-      contain-intrinsic-size: 1px 220px;
+      contain-intrinsic-size: auto 220px;
     }
 
     .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
@@ -2106,6 +2104,10 @@
       if (state.me.banned) { showBannedScreen(state.me.banned_reason || ''); return; }
       if (!state.me.webapp_access) { renderPaywall(); return; }
       if (!hadAccess) renderMainApp();
+      if (state.activeTab === 'survey' && !state.survey.loading && !state.survey.applying) {
+        await loadSurveyForTarget();
+        renderActiveTab();
+      }
       await Promise.allSettled([loadToday({ force: true, silent: true }), checkPendingPaymentStatus({ silent: true })]);
     } catch (error) {
       if (error.message === 'UNAUTHORIZED') renderStartupFailure(error);
@@ -2850,19 +2852,34 @@
     return `${yyyy}-${mm}-${dd}`;
   }
 
+  function surveyLocalParts() {
+    const now = new Date();
+    const zone = state.me?.tz_name || 'UTC';
+    const offset = /^(?:UTC|GMT)?([+-])(0\d|1[0-4]):([0-5]\d)$/i.exec(zone);
+    if (offset) {
+      const minutes = (Number(offset[2]) * 60 + Number(offset[3])) * (offset[1] === '-' ? -1 : 1);
+      const shifted = new Date(now.getTime() + minutes * 60000);
+      return { date: shifted.toISOString().slice(0,10), hour: shifted.getUTCHours() };
+    }
+    try {
+      const parts = Object.fromEntries(new Intl.DateTimeFormat('en-GB', {timeZone:zone, year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', hourCycle:'h23'}).formatToParts(now).map(p => [p.type,p.value]));
+      return { date:`${parts.year}-${parts.month}-${parts.day}`, hour:Number(parts.hour) };
+    } catch { return {date:now.toISOString().slice(0,10), hour:now.getUTCHours()}; }
+  }
+
   function defaultSurveyTarget() {
-    return new Date().getHours() >= 18 ? 'tomorrow' : 'today';
+    return surveyLocalParts().hour >= 18 ? 'tomorrow' : 'today';
   }
 
   function surveyTargetDateISO(target) {
-    const d = new Date();
-    if (target === 'tomorrow') d.setDate(d.getDate() + 1);
-    return localDateISO(d);
+    const d = new Date(`${surveyLocalParts().date}T12:00:00Z`);
+    if (target === 'tomorrow') d.setUTCDate(d.getUTCDate() + 1);
+    return d.toISOString().slice(0,10);
   }
 
   function surveyTargetKey() {
     const uid = state.userId || tg?.initDataUnsafe?.user?.id || 'anon';
-    return `supply:survey_target:${uid}:${localDateISO()}`;
+    return `supply:survey_target:${uid}:${surveyTargetDateISO("today")}`;
   }
 
   function initSurveyTarget() {
@@ -2873,11 +2890,25 @@
     try { localStorage.setItem(surveyTargetKey(), state.survey.target); } catch {}
   }
 
-  function surveyStorageKey() {
+  function surveyStorageKey(contextKey = state.survey.contextKey) {
     initSurveyTarget();
     const uid = state.userId || tg?.initDataUnsafe?.user?.id || "anon";
-    const target = state.survey.target || 'today';
-    return `survey:${uid}:${surveyTargetDateISO(target)}:${target}`;
+    const [target, day] = String(contextKey || `${state.survey.target}:${surveyTargetDateISO(state.survey.target)}`).split(':');
+    return `survey:${uid}:${day}:${target}`;
+  }
+
+  function saveSurveyDraft() {
+    if (state.survey.checkinId || state.survey.view !== 'wizard') return;
+    try { localStorage.setItem(surveyStorageKey(), JSON.stringify(state.survey.answers)); } catch {}
+  }
+
+  async function ensureSurveyDay() {
+    const key = `${state.survey.target}:${surveyTargetDateISO(state.survey.target)}`;
+    if (!state.survey.contextKey || state.survey.contextKey === key) return true;
+    await loadSurveyForTarget(true);
+    renderActiveTab();
+    showToast('Дата опроса обновилась. Проверьте ответы перед продолжением.');
+    return false;
   }
 
   function readSurveyDraftFromStorage() {
@@ -2923,11 +2954,18 @@
     const version = ++surveyLoadVersion;
     const target = state.survey.target;
     if (state.survey.contextKey !== key) {
+      const previousTarget = String(state.survey.contextKey || '').split(':')[0];
+      const carry = previousTarget === target && !state.survey.checkinId && state.survey.view === 'wizard' ? {...state.survey.answers, goals:[...(state.survey.answers.goals || [])]} : null;
+      saveSurveyDraft();
       resetSurveyDraftForCurrentTarget({ clearStorage: false });
       state.survey.appliedNotice = null;
       state.survey.contextKey = key;
       const savedDraft = readSurveyDraftFromStorage();
-      if (savedDraft) state.survey.answers = {...state.survey.answers, ...savedDraft};
+      if (savedDraft || carry) state.survey.answers = {...state.survey.answers, ...(savedDraft || carry)};
+      if (!savedDraft && carry) {
+        state.survey.dateNotice = 'Наступил новый день. Незавершённые ответы сохранены — проверьте их перед отправкой.';
+        saveSurveyDraft();
+      } else state.survey.dateNotice = '';
     }
     const current = () => version === surveyLoadVersion && key === `${state.survey.target}:${surveyTargetDateISO(state.survey.target)}`;
     try {
@@ -2958,6 +2996,7 @@
   function renderSurvey() {
     initSurveyTarget();
     const sv = state.survey;
+    const dateNotice = sv.dateNotice ? `<div class="card muted" role="status">${esc(sv.dateNotice)}</div>` : '';
     const surveyHelpHtml = `<div class="survey-help muted"><div><strong>Что это за раздел:</strong> здесь мы собираем ваш короткий чек-ин и на его основе корректируем план БАДов: можем предложить добавить новые позиции, изменить дозировки или убрать лишнее.</div><div style="margin-top:8px"><strong>Если выбрать «Сегодня»:</strong> мы посмотрим, что вы уже выпили за текущий день, что пропущено, и подскажем, что добавить или убрать сегодня с учётом ваших целей и запроса.</div><div style="margin-top:8px"><strong>Если выбрать «Завтра»:</strong> мы учтём ваш обычный средний паттерн приёма и цели, чтобы заранее предложить, что добавить или убрать в плане на завтра.</div></div>`;
     if (sv.loading) return `<div class="card">⏳ анализ…</div>`;
     const appliedItems = Array.isArray(sv.appliedNotice?.items) ? sv.appliedNotice.items : [];
@@ -2986,7 +3025,7 @@
         const removeTaken = r.action === 'remove' && already;
         return `<div class="rec-card"><div class="row"><strong>${esc(r.name_ru || r.slug)}</strong><span class="badge ${r.action==='remove'?'minus':(r.action==='adjust'?'':'plus')}">${r.action==='add'?'+':(r.action==='remove'?'−':'≈')}</span></div><div class="muted" style="margin-top:6px">${esc(r.reason || '')}${removeTaken ? ' • уже выпито сегодня — убирать не нужно' : (already ? ' • уже в плане' : '')}</div></div>`;
       }).join('');
-      return `${surveyLimitBanner}<div class="card fade survey-card"><button class="btn secondary survey-help-btn survey-help-corner" type="button" data-survey-help>?</button><div class="row survey-head"><div class="survey-title-wrap"><h3 style="margin:0">Рекомендации</h3></div><div class="survey-target-wrap"><span class="muted" style="font-size:12px">Рекомендация на:</span><div class="segmented" data-survey-target><button class="seg-btn ${sv.target==='today'?'active':''}" data-set-target="today">Сегодня</button><button class="seg-btn ${sv.target==='tomorrow'?'active':''}" data-set-target="tomorrow">Завтра</button></div></div></div>${sv.helpOpen ? surveyHelpHtml : ''}${rows || '<div class="muted">Нет рекомендаций</div>'}<div style="margin-top:10px"><button class="btn" id="applyAll" style="width:100%; font-weight:800" ${sv.applying ? 'disabled' : ''}>✅ Применить всё</button></div><div class="survey-actions"><button class="btn secondary" id="cancelSurvey" ${sv.applying ? 'disabled' : ''}>Отмена</button></div></div>`;
+      return `${dateNotice}${surveyLimitBanner}<div class="card fade survey-card"><button class="btn secondary survey-help-btn survey-help-corner" type="button" data-survey-help>?</button><div class="row survey-head"><div class="survey-title-wrap"><h3 style="margin:0">Рекомендации</h3></div><div class="survey-target-wrap"><span class="muted" style="font-size:12px">Рекомендация на:</span><div class="segmented" data-survey-target><button class="seg-btn ${sv.target==='today'?'active':''}" data-set-target="today">Сегодня</button><button class="seg-btn ${sv.target==='tomorrow'?'active':''}" data-set-target="tomorrow">Завтра</button></div></div></div>${sv.helpOpen ? surveyHelpHtml : ''}${rows || '<div class="muted">Нет рекомендаций</div>'}<div style="margin-top:10px"><button class="btn" id="applyAll" style="width:100%; font-weight:800" ${sv.applying ? 'disabled' : ''}>✅ Применить всё</button></div><div class="survey-actions"><button class="btn secondary" id="cancelSurvey" ${sv.applying ? 'disabled' : ''}>Отмена</button></div></div>`;
     }
     const step = SURVEY_STEPS[sv.step];
     const p = Math.round(((sv.step+1)/SURVEY_STEPS.length)*100);
@@ -2998,7 +3037,7 @@
     } else {
       body = `<textarea id="surveyNote" maxlength="180" class="survey-note" placeholder="Короткая заметка">${esc(sv.answers.note || '')}</textarea><div class="muted" style="margin-top:6px">${(sv.answers.note||'').length}/180</div>`;
     }
-    return `${surveyLimitBanner}<div class="card fade survey-card"><button class="btn secondary survey-help-btn survey-help-corner" type="button" data-survey-help>?</button><div class="row survey-head"><div class="survey-title-wrap"><strong>${step.title}</strong></div><div class="survey-target-wrap"><span class="muted" style="font-size:12px">Рекомендация на:</span><div class="segmented" data-survey-target><button class="seg-btn ${sv.target==='today'?'active':''}" data-set-target="today">Сегодня</button><button class="seg-btn ${sv.target==='tomorrow'?'active':''}" data-set-target="tomorrow">Завтра</button></div><span class="muted">${sv.step+1}/${SURVEY_STEPS.length}</span></div></div>${sv.helpOpen ? surveyHelpHtml : ''}<div class="progress"><i style="width:${p}%"></i></div>${body}<div class="survey-actions" style="margin-top:12px"><button class="btn secondary" id="surveyBack" ${sv.step===0?'disabled':''}>Назад</button><button class="btn" id="surveyNext" ${sv.limitReached ? 'disabled' : ''}>${sv.limitReached ? 'Лимит на день исчерпан' : (sv.step===SURVEY_STEPS.length-1?'Получить рекомендации':'Далее')}</button></div></div>`;
+    return `${dateNotice}${surveyLimitBanner}<div class="card fade survey-card"><button class="btn secondary survey-help-btn survey-help-corner" type="button" data-survey-help>?</button><div class="row survey-head"><div class="survey-title-wrap"><strong>${step.title}</strong></div><div class="survey-target-wrap"><span class="muted" style="font-size:12px">Рекомендация на:</span><div class="segmented" data-survey-target><button class="seg-btn ${sv.target==='today'?'active':''}" data-set-target="today">Сегодня</button><button class="seg-btn ${sv.target==='tomorrow'?'active':''}" data-set-target="tomorrow">Завтра</button></div><span class="muted">${sv.step+1}/${SURVEY_STEPS.length}</span></div></div>${sv.helpOpen ? surveyHelpHtml : ''}<div class="progress"><i style="width:${p}%"></i></div>${body}<div class="survey-actions" style="margin-top:12px"><button class="btn secondary" id="surveyBack" ${sv.step===0?'disabled':''}>Назад</button><button class="btn" id="surveyNext" ${sv.limitReached ? 'disabled' : ''}>${sv.limitReached ? 'Лимит на день исчерпан' : (sv.step===SURVEY_STEPS.length-1?'Получить рекомендации':'Далее')}</button></div></div>`;
   }
 
   function bindSurveyEvents() {
@@ -3006,6 +3045,7 @@
       const next = el.dataset.setTarget;
       if (next === state.survey.target || state.survey.applying || state.survey.loading) return;
       haptic();
+      saveSurveyDraft();
       state.survey.target = next;
       try { localStorage.setItem(surveyTargetKey(), next); } catch {}
       state.survey.loadedKey = '';
@@ -3013,13 +3053,14 @@
       renderActiveTab();
     }));
 
-    appEl.querySelectorAll('[data-survey-pick]').forEach((el)=>el.addEventListener('click', ()=>{ haptic(); const [k,v]=el.dataset.surveyPick.split(':'); state.survey.answers[k]=v; localStorage.setItem(surveyStorageKey(), JSON.stringify(state.survey.answers)); renderActiveTab(); }));
-    appEl.querySelectorAll('[data-goal-toggle]').forEach((el)=>el.addEventListener('click', ()=>{ haptic(); const g=el.dataset.goalToggle; const set=new Set(state.survey.answers.goals||[]); if (set.has(g)) set.delete(g); else set.add(g); state.survey.answers.goals=[...set]; localStorage.setItem(surveyStorageKey(), JSON.stringify(state.survey.answers)); renderActiveTab(); }));
+    appEl.querySelectorAll('[data-survey-pick]').forEach((el)=>el.addEventListener('click', ()=>{ haptic(); const [k,v]=el.dataset.surveyPick.split(':'); state.survey.answers[k]=v; saveSurveyDraft(); renderActiveTab(); }));
+    appEl.querySelectorAll('[data-goal-toggle]').forEach((el)=>el.addEventListener('click', ()=>{ haptic(); const g=el.dataset.goalToggle; const set=new Set(state.survey.answers.goals||[]); if (set.has(g)) set.delete(g); else set.add(g); state.survey.answers.goals=[...set]; saveSurveyDraft(); renderActiveTab(); }));
     appEl.querySelectorAll('[data-survey-help]').forEach((el)=>el.addEventListener('click', ()=>{ state.survey.helpOpen = !state.survey.helpOpen; renderActiveTab(); }));
-    document.getElementById('surveyNote')?.addEventListener('input', (e)=>{ state.survey.answers.note=String(e.target.value||'').slice(0,180); localStorage.setItem(surveyStorageKey(), JSON.stringify(state.survey.answers)); const noteLen = e.target.parentElement?.querySelector('.muted'); if (noteLen) noteLen.textContent = `${state.survey.answers.note.length}/180`; });
+    document.getElementById('surveyNote')?.addEventListener('input', (e)=>{ state.survey.answers.note=String(e.target.value||'').slice(0,180); saveSurveyDraft(); const noteLen = e.target.parentElement?.querySelector('.muted'); if (noteLen) noteLen.textContent = `${state.survey.answers.note.length}/180`; });
     document.getElementById('surveyBack')?.addEventListener('click', ()=>{ haptic(); state.survey.step=Math.max(0,state.survey.step-1); renderActiveTab(); });
 
     document.getElementById('surveyNext')?.addEventListener('click', async ()=>{
+      if (!await ensureSurveyDay() || state.survey.loading || state.survey.applying) return;
       haptic();
       if (state.survey.step < SURVEY_STEPS.length-1) {
         state.survey.step += 1;
@@ -3027,9 +3068,16 @@
         return;
       }
       state.survey.loading=true;
+      const contextKey = state.survey.contextKey || `${state.survey.target}:${surveyTargetDateISO(state.survey.target)}`;
       renderActiveTab();
       try {
-        const res=await api('./api/checkin',{method:'POST', body:{answers: state.survey.answers, target_day: state.survey.target, client_local_iso: new Date().toISOString()}});
+        const res=await api('./api/checkin',{method:'POST', body:{answers: state.survey.answers, target_day: state.survey.target, expected_date: contextKey.split(':')[1], client_local_iso: new Date().toISOString()}});
+        if (contextKey !== `${state.survey.target}:${surveyTargetDateISO(state.survey.target)}`) {
+          state.survey.loading=false;
+          await loadSurveyForTarget(true);
+          renderActiveTab();
+          return;
+        }
         state.survey.loading=false;
         state.survey.checkinId=res.checkin_id;
         state.survey.recommendations=res.recommendations||[];
@@ -3039,6 +3087,17 @@
         renderActiveTab();
       } catch(e){
         state.survey.loading=false;
+        if (contextKey !== `${state.survey.target}:${surveyTargetDateISO(state.survey.target)}`) {
+          await loadSurveyForTarget(true);
+          renderActiveTab();
+          return;
+        }
+        if (e?.code === 'DAY_CHANGED') {
+          await loadSurveyForTarget(true);
+          showToast('Дата изменилась. Ответы сохранены; проверьте день опроса.');
+          renderActiveTab();
+          return;
+        }
         if (e?.code === 'CHECKIN_LIMIT_REACHED') {
           const limitCheckin = normalizeSurveyCheckinPayload(e?.checkin || e?.payload?.checkin || null);
           if (limitCheckin?.applied) {
@@ -3066,17 +3125,18 @@
     });
 
     document.getElementById('applyAll')?.addEventListener('click', async ()=>{
+      if (!await ensureSurveyDay() || state.survey.applying || state.survey.loading) return;
       haptic();
       state.survey.applying = true;
       renderActiveTab();
       try {
         const out = await api('./api/checkin/apply',{method:'POST', body:{checkin_id: state.survey.checkinId, selected_ids:[], mode:'all'}});
-        if (out.date_local === localDateISO()) showToast('✅ Применено к плану: сегодня');
+        if (out.date_local === surveyTargetDateISO('today')) showToast('✅ Применено к плану: сегодня');
         else showToast('✅ Применено на завтра');
         state.survey.appliedNotice = out.applied_notice || null;
         resetSurveyDraftForCurrentTarget();
         state.survey.loadedKey = '';
-        if (out.date_local === localDateISO()) {
+        if (out.date_local === surveyTargetDateISO('today')) {
           await loadToday(true);
           activateTab('today');
         } else {
@@ -3931,8 +3991,24 @@
       <div class="row"><strong>Предпросмотр</strong><button class="btn secondary" data-bulk-close>Отмена</button></div>
       <div class="card" style="margin-top:8px">Изменится: <b>${preview.changed || 0}</b>, без изменений: <b>${preview.skipped || 0}</b></div>
       <div class="card" style="margin-top:8px">${examples.map((x)=>`#${x.id} ${esc(x.slug)} · ${esc(x.field)}<br><span class="muted">${esc(String(x.old||'—'))} → ${esc(String(x.new||'—'))}</span>`).join('<hr style="border-color:rgba(255,255,255,.12)">') || 'Нет примеров'}</div>
-      <div class="row" style="margin-top:10px"><button class="btn" data-bulk-apply-confirm="1">Применить</button></div>
+      <div class="row" style="margin-top:10px"><button class="btn" data-bulk-apply-confirm="1" ${state.admin.bulkApplying ? 'disabled' : ''}>Применить</button></div>
     </aside>`;
+  }
+
+  function renderAdminUser(item, perms) {
+    if (!item || !perms.users_view) return '';
+    const busy = adminUserActions.has(Number(item.tg_user_id));
+    const disabled = busy || Number(state.admin.userLookupId) !== Number(item.tg_user_id);
+    return `<div class="card" style="margin-top:8px" data-admin-user-card>
+      <strong>${esc(item.tg_first_name || 'Пользователь')} · #${Number(item.tg_user_id)}</strong>
+      <div class="muted">${esc(item.tg_username ? '@' + item.tg_username : '')}</div>
+      <div>Статус: ${item.deleted_at_utc ? 'Данные удалены' : (item.is_banned ? 'Заблокирован' : 'Активен')}</div>
+      <div class="muted">Подписка до: ${esc(item.premium_until_utc || '—')} · Оплат: ${Number(item.payments_paid_count || 0)}</div>
+      <div class="muted">Регистрация: ${esc(item.created_at_utc || '—')}<br>Последний вход: ${esc(item.last_seen_utc || '—')}</div>
+      ${perms.users_ban ? `<label style="display:block;margin-top:8px">Причина блокировки<input id="adminUserBanReason" class="input" value="${esc(state.admin.userBanReason || '')}" /></label><button class="btn secondary" data-admin-user-ban="${item.is_banned ? 0 : 1}" ${disabled ? 'disabled' : ''}>${item.is_banned ? 'Разблокировать' : 'Заблокировать'}</button>` : ''}
+      ${perms.users_delete && !item.deleted_at_utc ? `<details style="margin-top:8px"><summary>Удаление данных</summary><input id="adminUserDeleteConfirm" class="input" placeholder="Введите DELETE" value="${esc(state.admin.userDeleteConfirm || '')}" /><button class="btn secondary" id="adminUserDeleteBtn" ${disabled ? 'disabled' : ''}>Удалить пользователя</button></details>` : ''}
+      ${busy ? '<div class="muted">Сохраняем…</div>' : ''}
+    </div>`;
   }
 
   function renderAdmin() {
@@ -3958,6 +4034,7 @@
           <input id="adminUserTgId" class="input" placeholder="tg_id" value="${esc(a.userLookupId || '')}" />
           <button class="btn" id="adminUserFind">Найти</button>
         </div>
+        ${renderAdminUser(a.userDetail, perms)}
       </div>` : ''}
 
       ${perms.roles_manage ? `<div class="card fade">
@@ -3998,10 +4075,11 @@
       ${perms.content_edit ? `<div class="admin-grid">
         ${(a.items || []).map((it)=> a.selectionMode && perms.content_bulk ? `<label class="card admin-card selecting"><input type="checkbox" data-admin-select="${it.id}" ${a.selectedIds[it.id] ? 'checked' : ''}/><div style="flex:1"><div class="row"><strong>${esc(it.name_ru || it.slug)}</strong><span class="muted">${it.is_active ? '🟢' : '⚪'}</span></div></div></label>` : `<button class="card admin-card" data-admin-open="${it.id}"><div class="row"><strong>${esc(it.name_ru || it.slug)}</strong><span class="muted">${it.is_active ? '🟢' : '⚪'}</span></div></button>`).join('') || '<div class="card">Ничего не найдено.</div>'}
       </div>` : ''}
+      ${perms.content_edit && a.items.length < a.total ? `<button class="btn secondary" id="adminMore" ${a.loading ? 'disabled' : ''}>${a.loading ? 'Загрузка…' : 'Показать ещё'}</button>` : ''}
       ${a.detail ? renderAdminModal(a.detail.item || {}, a.detail.audit || []) : ''}
-      ${a.bulkPrompt ? renderBulkPrompt(a.bulkPrompt) : ''}
+      ${a.bulkPrompt && !a.bulkConfirm ? renderBulkPrompt(a.bulkPrompt) : ''}
       ${a.bulkConfirm ? renderBulkConfirm(a.bulkConfirm.preview, a.bulkConfirm.op, a.bulkConfirm.params) : ''}
-      ${(a.selectionMode && perms.content_bulk) ? `<div class="bulk-bar"><button class="btn" data-bulk-quick="hide">Скрыть</button><button class="btn" data-bulk-quick="show">Показать</button></div>` : ''}
+      ${(a.selectionMode && perms.content_bulk) ? `<div class="bulk-bar" style="flex-wrap:wrap"><button class="btn" data-bulk-quick="hide">Скрыть</button><button class="btn" data-bulk-quick="show">Показать</button><button class="btn secondary" id="bulkMoreBtn">Ещё</button>${a.bulkMenuOpen ? ['token','evidence','confidence','purchase'].map((key,i)=>`<button class="btn secondary" data-bulk-modal="${key}">${['Теги и органы','Уровень доказательности','Уверенность','Ссылки на покупку'][i]}</button>`).join('') : ''}</div>` : ''}
       ${perms.content_bulk && a.selectionMode ? `<div class="admin-select-count">Выбрано: ${selected.length}</div>` : ''}
     `;
   }
@@ -4109,6 +4187,7 @@ function adminField(label, field, value, kind='input') {
   }
 
   async function loadAdminDuplicates() {
+    if (state.admin.duplicatesLoading) return;
     state.admin.duplicatesLoading = true;
     try {
       const res = await api('./api/admin/duplicates');
@@ -4124,7 +4203,7 @@ function adminField(label, field, value, kind='input') {
   async function resolveAdminDuplicate(keepId, removeId) {
     const k = Number(keepId || 0);
     const r = Number(removeId || 0);
-    if (!k || !r || k === r) return;
+    if (!k || !r || k === r || state.admin.duplicateResolveBusy) return;
     if (!confirm(`Оставить запись #${k} и удалить #${r}?`)) return;
     state.admin.duplicateResolveBusy = `${Math.min(k, r)}:${Math.max(k, r)}`;
     renderActiveTab();
@@ -4197,6 +4276,7 @@ function adminField(label, field, value, kind='input') {
   }
 
   async function runDiagnostics(applyMode) {
+    if (state.admin.diagLoading) return;
     state.admin.diagLoading = true;
     renderActiveTab();
     try {
@@ -4212,12 +4292,17 @@ function adminField(label, field, value, kind='input') {
     }
   }
 
+  let bulkPreviewVersion = 0;
   async function runBulk(op, params) {
+    if (state.admin.bulkApplying) return;
+    const version = ++bulkPreviewVersion;
+    params = {...params};
     const ids = selectedAdminIds();
     if (!ids.length) { showToast('Выберите элементы'); return; }
     try {
       const preview = await api('./api/admin/bulk/preview', { method:'POST', body:{ ids, op, params } });
-      state.admin.bulkConfirm = { preview, op, params };
+      if (version !== bulkPreviewVersion || state.activeTab !== 'admin') return;
+      state.admin.bulkConfirm = { preview, ids, op, params };
       renderActiveTab();
     } catch (e) {
       if (e.message === 'PERMISSION_DENIED') { state.me.role = "none"; state.me.perms = {}; state.activeTab = 'today'; renderMainApp(); renderActiveTab(); showToast('нет прав'); return; }
@@ -4225,6 +4310,8 @@ function adminField(label, field, value, kind='input') {
     }
   }
 
+  let adminUserLoadVersion = 0;
+  const adminUserActions = new Set();
   function bindAdminEvents() {
     document.getElementById('adminUserTgId')?.addEventListener('input', (e)=>{ state.admin.userLookupId = e.target.value; });
     document.getElementById('adminUserBanReason')?.addEventListener('input', (e)=>{ state.admin.userBanReason = e.target.value; });
@@ -4232,40 +4319,53 @@ function adminField(label, field, value, kind='input') {
     document.getElementById('adminUserFind')?.addEventListener('click', async ()=>{
       const raw = String(state.admin.userLookupId || '').trim();
       if (!/^\d+$/.test(raw)) return showToast('Введите numeric tg_id');
+      const version = ++adminUserLoadVersion;
       try {
         const res = await api(`./api/admin/user/${raw}`);
+        if (version !== adminUserLoadVersion || String(state.admin.userLookupId || '').trim() !== raw || state.activeTab !== 'admin') return;
         state.admin.userDetail = res.item;
         state.admin.userBanReason = res.item?.banned_reason || '';
         state.admin.userDeleteConfirm = '';
         renderActiveTab();
-      } catch { showToast('Пользователь не найден'); }
+      } catch { if (version === adminUserLoadVersion && String(state.admin.userLookupId || '').trim() === raw) { state.admin.userDetail = null; renderActiveTab(); showToast('Не удалось найти пользователя'); } }
     });
     appEl.querySelectorAll('[data-admin-user-ban]').forEach((el)=>el.addEventListener('click', async (e)=>{
       const target = state.admin.userDetail;
-      if (!target) return;
+      if (!target || adminUserActions.has(Number(target.tg_user_id))) return;
+      if (Number(state.admin.userLookupId) !== Number(target.tg_user_id)) return showToast('Сначала откройте карточку выбранного пользователя');
       const to = Number(e.currentTarget.dataset.adminUserBan || 0);
       if (to === 1 && !confirm('Подтвердить бан пользователя?')) return;
       if (to === 0 && !confirm('Подтвердить разбан пользователя?')) return;
+      const reason = state.admin.userBanReason || '';
+      adminUserActions.add(Number(target.tg_user_id));
+      renderActiveTab();
       try {
-        await api(`./api/admin/user/${target.tg_user_id}/ban`, { method:'POST', body:{ is_banned: to, reason: state.admin.userBanReason || '' } });
-        const fresh = await api(`./api/admin/user/${target.tg_user_id}`);
-        state.admin.userDetail = fresh.item;
+        await api(`./api/admin/user/${target.tg_user_id}/ban`, { method:'POST', body:{ is_banned: to, reason } });
+        target.is_banned = to; target.banned_reason = to ? reason : '';
+        const fresh = await api(`./api/admin/user/${target.tg_user_id}`).catch(() => null);
+        if (fresh?.item && state.admin.userDetail === target && Number(state.admin.userLookupId) === Number(target.tg_user_id)) state.admin.userDetail = fresh.item;
         showToast(to ? 'Пользователь забанен' : 'Пользователь разбанен');
         renderActiveTab();
       } catch { showToast('Не удалось выполнить действие'); }
+      finally { adminUserActions.delete(Number(target.tg_user_id)); renderActiveTab(); }
     }));
     document.getElementById('adminUserDeleteBtn')?.addEventListener('click', async ()=>{
       const target = state.admin.userDetail;
-      if (!target) return;
+      if (!target || adminUserActions.has(Number(target.tg_user_id))) return;
+      if (Number(state.admin.userLookupId) !== Number(target.tg_user_id)) return showToast('Сначала откройте карточку выбранного пользователя');
       if (String(state.admin.userDeleteConfirm || '').trim() !== 'DELETE') return showToast('Введите DELETE для подтверждения');
       if (!confirm('Удалить пользователя? Данные будут очищены, доступ заблокирован.')) return;
+      adminUserActions.add(Number(target.tg_user_id));
+      renderActiveTab();
       try {
         await api(`./api/admin/user/${target.tg_user_id}/delete`, { method:'POST' });
-        const fresh = await api(`./api/admin/user/${target.tg_user_id}`);
-        state.admin.userDetail = fresh.item;
+        target.is_banned = 1; target.deleted_at_utc = new Date().toISOString();
+        const fresh = await api(`./api/admin/user/${target.tg_user_id}`).catch(() => null);
+        if (fresh?.item && state.admin.userDetail === target && Number(state.admin.userLookupId) === Number(target.tg_user_id)) state.admin.userDetail = fresh.item;
         showToast('Пользователь удалён');
         renderActiveTab();
       } catch { showToast('Ошибка удаления'); }
+      finally { adminUserActions.delete(Number(target.tg_user_id)); renderActiveTab(); }
     });
     document.getElementById('adminDupRefresh')?.addEventListener('click', async ()=>{ await loadAdminDuplicates(); });
     const adminSearch = document.getElementById('adminSearch');
@@ -4276,6 +4376,7 @@ function adminField(label, field, value, kind='input') {
     };
     const selectionToggle = document.getElementById('adminSelectionToggle');
     if (selectionToggle) selectionToggle.onclick = ()=>{
+      bulkPreviewVersion++;
       state.admin.selectionMode = !state.admin.selectionMode;
       state.admin.bulkPrompt = '';
       state.admin.bulkConfirm = null;
@@ -4285,7 +4386,7 @@ function adminField(label, field, value, kind='input') {
     };
     document.getElementById('adminActive')?.addEventListener('change', async (e)=>{ state.admin.filters.is_active = e.target.value; state.admin.page=0; await loadAdminSupplements(true); });
     document.getElementById('adminEvidence')?.addEventListener('change', async (e)=>{ state.admin.filters.evidence = e.target.value; state.admin.page=0; await loadAdminSupplements(true); });
-    document.getElementById('adminMore')?.addEventListener('click', async ()=>{ state.admin.page += 1; await loadAdminSupplements(true); });
+    document.getElementById('adminMore')?.addEventListener('click', async ()=>{ if (state.admin.loading) return; state.admin.page += 1; await loadAdminSupplements(true); });
     appEl.querySelectorAll('[data-admin-open]').forEach((el)=>el.addEventListener('click', ()=>loadAdminSupplement(el.dataset.adminOpen)));
     appEl.querySelectorAll('[data-dup-keep]').forEach((el)=>el.addEventListener('click', ()=>resolveAdminDuplicate(el.dataset.dupKeep, el.dataset.dupRemove)));
     appEl.querySelectorAll('[data-admin-select]').forEach((el)=>el.addEventListener('change', (e)=>{ state.admin.selectedIds[Number(e.target.dataset.adminSelect)] = !!e.target.checked; renderActiveTab(); }));
@@ -4319,7 +4420,7 @@ function adminField(label, field, value, kind='input') {
       if (kind === 'show') await runBulk('set_active', { is_active: 1 });
     }));
     appEl.querySelectorAll('[data-bulk-modal]').forEach((el)=>el.addEventListener('click', ()=>{ state.admin.bulkPrompt = el.dataset.bulkModal; state.admin.bulkMenuOpen = false; renderActiveTab(); }));
-    appEl.querySelectorAll('[data-bulk-close]').forEach((el)=>el.addEventListener('click', ()=>{ state.admin.bulkPrompt=''; state.admin.bulkConfirm=null; renderActiveTab(); }));
+    appEl.querySelectorAll('[data-bulk-close]').forEach((el)=>el.addEventListener('click', ()=>{ bulkPreviewVersion++; state.admin.bulkPrompt=''; state.admin.bulkConfirm=null; renderActiveTab(); }));
     appEl.querySelectorAll('[data-bulk-action]').forEach((el)=>el.addEventListener('click', async ()=>{
       const action = el.dataset.bulkAction;
       if (action === 'token_add' || action === 'token_remove') {
@@ -4332,6 +4433,7 @@ function adminField(label, field, value, kind='input') {
     }));
     document.getElementById('purchaseImportJson')?.addEventListener('input', (e)=>{ state.admin.purchaseImportText = e.target.value; });
     document.getElementById('purchaseImportRun')?.addEventListener('click', async ()=>{
+      if (state.admin.purchaseImportLoading) return;
       const raw = String(state.admin.purchaseImportText || '').trim();
       if (!raw) return showToast('Вставьте JSON');
       state.admin.purchaseImportLoading = true;
@@ -4394,20 +4496,21 @@ function adminField(label, field, value, kind='input') {
 
     appEl.querySelector('[data-bulk-apply-confirm]')?.addEventListener('click', async ()=>{
       const conf = state.admin.bulkConfirm;
-      if (!conf) return;
+      if (!conf || state.admin.bulkApplying) return;
+      state.admin.bulkApplying = true;
+      renderActiveTab();
       try {
-        const ids = selectedAdminIds();
+        const ids = conf.ids;
         const res = await api('./api/admin/bulk/apply', { method:'POST', body:{ ids, op: conf.op, params: conf.params } });
         haptic();
         showToast(`✅ Готово: ${res.changed || 0} изменений`);
-        state.admin.bulkPrompt='';
-        state.admin.bulkConfirm=null;
+        if (state.admin.bulkConfirm === conf) { state.admin.bulkPrompt=''; state.admin.bulkConfirm=null; }
         state.admin.page = 0;
         await loadAdminSupplements(true);
       } catch (e) {
         if (e.message === 'PERMISSION_DENIED') { state.me.role = "none"; state.me.perms = {}; state.activeTab = 'today'; renderMainApp(); renderActiveTab(); showToast('нет прав'); return; }
         showToast('Не удалось применить');
-      }
+      } finally { state.admin.bulkApplying = false; renderActiveTab(); }
     });
   }
 
@@ -6034,6 +6137,16 @@ function adminField(label, field, value, kind='input') {
     renderActiveTab();
   }
 
+  function invalidateComplexReads(complexId) {
+    const hub = state.complexHub;
+    complexListVersion++;
+    hub.loadVersion = (hub.loadVersion || 0) + 1;
+    hub.loading = hub.schedulesLoading = hub.slotsLoading = false;
+    hub.itemVersions = hub.itemVersions || {};
+    hub.itemVersions[complexId] = (hub.itemVersions[complexId] || 0) + 1;
+    hub.itemsLoading[complexId] = false;
+  }
+
   async function loadComplexItems(complexId, force = false) {
     const cid = Number(complexId || 0);
     if (!cid) return;
@@ -6884,6 +6997,8 @@ function adminField(label, field, value, kind='input') {
       try {
         await api('./api/settings/timezone', { method:'POST', body:{ tz_name: tzName } });
         state.settingsData.tz_name = tzName;
+        if (state.me) state.me.tz_name = tzName;
+        await loadToday({force:true, silent:true});
         showToast('Часовой пояс сохранён');
       } catch {
         input.value = previous;
@@ -7397,21 +7512,24 @@ function adminField(label, field, value, kind='input') {
 
     appEl.querySelectorAll('[data-complex-create]').forEach((el) => {
       el.addEventListener('click', async () => {
+        if (state.complexHub.creating) return;
         const name = prompt('Введите название нового комплекса');
         if (!name || !name.trim()) return;
+        state.complexHub.creating = true;
         try {
           await api('./api/complexes/create', { method: 'POST', body: { name: name.trim() } });
           await loadComplexHubMeta(true);
           showToast('Комплекс создан');
         } catch {
           showToast('Не удалось создать комплекс');
-        }
+        } finally { state.complexHub.creating = false; }
       });
     });
 
     appEl.querySelectorAll('[data-complex-rename]').forEach((el) => {
       el.addEventListener('click', async () => {
         const cid = Number(el.dataset.complexRename || 0);
+        if (!cid || state.complexHub.actionBusy[cid]) return;
         const current = state.complexes.find((c) => Number(c.id) === cid);
         const nextName = prompt('Новое название комплекса', current?.name || '');
         if (!nextName || !nextName.trim()) return;
@@ -7419,7 +7537,9 @@ function adminField(label, field, value, kind='input') {
         renderActiveTab();
         try {
           await api('./api/complexes/rename', { method: 'POST', body: { complex_id: cid, new_name: nextName.trim() } });
-          await loadComplexHubMeta(true);
+          invalidateComplexReads(cid);
+          if (current) current.name = nextName.trim();
+          await Promise.all([loadComplexHubMeta(true), loadToday(true)]);
           showToast('Комплекс переименован');
         } catch {
           showToast('Не удалось переименовать комплекс');
@@ -7433,17 +7553,20 @@ function adminField(label, field, value, kind='input') {
     appEl.querySelectorAll('[data-complex-delete]').forEach((el) => {
       el.addEventListener('click', async () => {
         const cid = Number(el.dataset.complexDelete || 0);
-        if (!cid) return;
+        if (!cid || state.complexHub.actionBusy[cid]) return;
         if (!confirm('Удалить комплекс целиком?')) return;
         state.complexHub.actionBusy[cid] = true;
         renderActiveTab();
         try {
           await api('./api/complexes/delete', { method: 'POST', body: { complex_id: cid } });
+          invalidateComplexReads(cid);
+          if (state.complexHub.schedulePicker.complexId === cid) state.complexHub.schedulePicker = { open: false, complexId: 0 };
           state.complexes = (state.complexes || []).filter((c) => Number(c.id || 0) !== cid);
           state.complexHub.schedules = (state.complexHub.schedules || []).filter((s) => Number(s.complex_id || 0) !== cid);
           delete state.complexHub.itemsById[cid];
           delete state.complexHub.expanded[cid];
           removeComplexFromToday(cid);
+          await Promise.all([loadComplexHubMeta(true), loadToday(true)]);
           showToast('Комплекс удалён');
         } catch {
           showToast('Не удалось удалить комплекс');
@@ -7474,13 +7597,15 @@ function adminField(label, field, value, kind='input') {
       el.addEventListener('click', async () => {
         const cid = Number(el.dataset.complexId || 0);
         const slotId = String(el.dataset.complexScheduleSlot || '').trim();
-        if (!cid || !slotId) return;
+        if (!cid || !slotId || state.complexHub.actionBusy[cid]) return;
+        const picker = state.complexHub.schedulePicker;
         const slot = (state.complexHub.slots || []).find((x) => String(x.slot_id || '') === slotId);
         state.complexHub.actionBusy[cid] = true;
         renderActiveTab();
         try {
           await api('./api/complex_schedules/set', { method: 'POST', body: { complex_id: cid, slot_id: slotId, time_local: normalizeHHMM(slot?.time_local || '') || '' } });
-          state.complexHub.schedulePicker = { open: false, complexId: 0 };
+          invalidateComplexReads(cid);
+          if (state.complexHub.schedulePicker === picker) state.complexHub.schedulePicker = { open: false, complexId: 0 };
           await Promise.all([loadComplexHubMeta(true), loadToday(true)]);
           showToast('Слот для комплекса обновлён');
         } catch {
@@ -7508,12 +7633,14 @@ function adminField(label, field, value, kind='input') {
     appEl.querySelectorAll('[data-complex-schedule-clear]').forEach((el) => {
       el.addEventListener('click', async () => {
         const cid = Number(el.dataset.complexScheduleClear || 0);
+        if (!cid || state.complexHub.actionBusy[cid]) return;
         const schedule = (state.complexHub.schedules || []).find((s) => Number(s.complex_id) === cid);
         if (!schedule) return showToast('У комплекса нет назначенного времени');
         state.complexHub.actionBusy[cid] = true;
         renderActiveTab();
         try {
           await api('./api/complex_schedules/remove', { method: 'POST', body: { complex_id: cid, slot_id: schedule.slot_id } });
+          invalidateComplexReads(cid);
           await Promise.all([loadComplexHubMeta(true), loadToday(true)]);
           showToast('Время комплекса снято');
         } catch {
@@ -7537,15 +7664,17 @@ function adminField(label, field, value, kind='input') {
       el.addEventListener('click', async () => {
         const cid = Number(el.dataset.complexRemoveItem || 0);
         const sid = Number(el.dataset.supplementId || 0);
-        if (!cid || !sid) return;
+        if (!cid || !sid || state.complexHub.actionBusy[cid]) return;
         state.complexHub.actionBusy[cid] = true;
         renderActiveTab();
         try {
           await api(`./api/complexes/${cid}/items/remove`, { method: 'POST', body: { supplement_id: sid } });
+          invalidateComplexReads(cid);
           state.complexHub.itemsById[cid] = (state.complexHub.itemsById[cid] || []).filter((item) => Number(item?.supplement_id || 0) !== sid);
           const complex = (state.complexes || []).find((x) => Number(x.id || 0) === cid);
           if (complex) complex.items_count = Math.max(0, Number(complex.items_count || 0) - 1);
           removeSupplementFromComplexInToday(cid, sid);
+          await Promise.all([loadComplexHubMeta(true), loadComplexItems(cid, true), loadToday(true)]);
           showToast('БАД удалён из комплекса');
         } catch {
           showToast('Не удалось удалить БАД из комплекса');

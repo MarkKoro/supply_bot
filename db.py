@@ -3313,7 +3313,7 @@ def parse_utc_tz(tz_name: str | None):
     value = str(tz_name).strip()
     if value.upper() in {"UTC", "GMT"}:
         return timezone.utc
-    match = re.fullmatch(r"(?:UTC|GMT)?([+-](?:0\d|1[0-4])):([0-5]\d)", value)
+    match = re.fullmatch(r"(?:UTC|GMT)?([+-](?:0\d|1[0-4])):([0-5]\d)", value, flags=re.IGNORECASE)
     if match:
         sign_hours, minutes_str = match.groups()
         sign = 1 if sign_hours[0] == "+" else -1

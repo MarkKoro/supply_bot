@@ -5755,7 +5755,7 @@ async def catalog_search(
                    CASE WHEN COALESCE(TRIM(s.purchase_url), '') <> '' THEN 1 ELSE 0 END AS has_purchase
             FROM supplements s
             LEFT JOIN user_supplements us
-              ON us.user_id=? AND us.supplement_id=s.id
+              ON us.user_id=? AND us.supplement_id=s.id AND us.is_active=1
             WHERE {where_sql}
             ORDER BY {order_sql}
             LIMIT ? OFFSET ?""",
@@ -5799,7 +5799,7 @@ async def get_supplement_detail_for_user(
                   us.is_active AS user_is_active,
                   COALESCE(us.user_frozen,0) AS user_frozen
            FROM supplements s
-           LEFT JOIN user_supplements us ON us.user_id=? AND us.supplement_id=s.id
+           LEFT JOIN user_supplements us ON us.user_id=? AND us.supplement_id=s.id AND us.is_active=1
            WHERE s.slug=? AND s.is_active=1
            LIMIT 1""",
         (user_id, slug),
@@ -5852,8 +5852,23 @@ async def get_supplement_detail_for_user(
     }
 
 # user library
+async def _require_available_supplement(conn: aiosqlite.Connection, user_id: int, supplement_id: int) -> None:
+    row = await fetchone(
+        conn,
+        """SELECT 1 FROM supplements s WHERE s.id=? AND (
+             s.is_active=1
+             OR EXISTS(SELECT 1 FROM user_supplements us WHERE us.user_id=? AND us.supplement_id=s.id)
+             OR EXISTS(SELECT 1 FROM user_supplement_split_groups g WHERE g.user_id=? AND g.supplement_id=s.id)
+           )""",
+        (int(supplement_id), int(user_id), int(user_id)),
+    )
+    if not row:
+        raise ValueError("supplement_not_found")
+
+
 async def add_user_supplement(conn: aiosqlite.Connection, tg_user_id: int, supplement_id: int) -> None:
     user_id = await get_or_create_user(conn, tg_user_id)
+    await _require_available_supplement(conn, user_id, supplement_id)
     await conn.execute(
         """INSERT INTO user_supplements(user_id, supplement_id, is_active, enabled, created_at)
            VALUES(?,?,1,1,?)
@@ -6003,6 +6018,11 @@ async def _split_user_supplement_intake(conn: aiosqlite.Connection, tg_user_id: 
     clone_id = int(cur.lastrowid or 0)
     if clone_id <= 0:
         raise ValueError("split_create_failed")
+    await conn.execute(
+        """INSERT OR REPLACE INTO user_supplement_split_groups(user_id, base_supplement_id, supplement_id, intake_order, created_at)
+           VALUES(?,?,?,?,?)""",
+        (user_id, base_supplement_id, clone_id, next_order, utc_now_iso()),
+    )
     await add_user_supplement(conn, tg_user_id, clone_id)
     schedule_row = await fetchone(
         conn,
@@ -6019,11 +6039,6 @@ async def _split_user_supplement_intake(conn: aiosqlite.Connection, tg_user_id: 
                  is_enabled=1""",
             (user_id, clone_id, schedule_row["time_hhmm"], str(schedule_row["slot_id"] or "morning")),
         )
-    await conn.execute(
-        """INSERT OR REPLACE INTO user_supplement_split_groups(user_id, base_supplement_id, supplement_id, intake_order, created_at)
-           VALUES(?,?,?,?,?)""",
-        (user_id, base_supplement_id, clone_id, next_order, utc_now_iso()),
-    )
     await _refresh_split_titles(conn, user_id, base_supplement_id)
     await conn.commit()
     return {"supplement_id": clone_id, "intake_order": next_order, "base_supplement_id": base_supplement_id}
@@ -8283,6 +8298,7 @@ async def add_item_to_complex(conn: aiosqlite.Connection, tg_user_id: int, compl
     owner = await fetchone(conn, "SELECT id FROM user_complexes WHERE id=? AND user_id=?", (int(complex_id), user_id))
     if not owner:
         raise ValueError("complex_not_found")
+    await _require_available_supplement(conn, user_id, supplement_id)
     row = await fetchone(conn, "SELECT COALESCE(MAX(sort_order), 0) AS mx FROM user_complex_items WHERE complex_id=?", (int(complex_id),))
     nxt = int((row["mx"] if row else 0) or 0) + 1
     await conn.execute(
@@ -8341,6 +8357,17 @@ async def add_item_to_complex(conn: aiosqlite.Connection, tg_user_id: int, compl
             "DELETE FROM reminders WHERE user_id=? AND supplement_id=?",
             (int(tg_user_id), int(supplement_id)),
         )
+    await conn.commit()
+
+
+async def set_complex_item_dose(conn: aiosqlite.Connection, tg_user_id: int, complex_id: int, supplement_id: int, dose_override: str) -> None:
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    item = await fetchone(conn, """SELECT 1 FROM user_complex_items ci
+        JOIN user_complexes c ON c.id=ci.complex_id
+        WHERE c.user_id=? AND ci.complex_id=? AND ci.supplement_id=?""", (user_id, int(complex_id), int(supplement_id)))
+    if not item:
+        raise ValueError("complex_item_not_found")
+    await conn.execute("UPDATE user_complex_items SET dose_override=? WHERE complex_id=? AND supplement_id=?", (str(dose_override or "").strip()[:120], int(complex_id), int(supplement_id)))
     await conn.commit()
 
 

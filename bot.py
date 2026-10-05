@@ -2507,22 +2507,25 @@ def _premium_plans_payload(s) -> list[dict]:
 
 
 
-async def _show_complexes_hub(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, tg_uid: int) -> None:
+async def _show_complexes_hub(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, tg_uid: int, page: int = 0, *, target_chat_id: int | None = None, target_message_id: int | None = None) -> None:
     active = tg_uid in context.application.bot_data["settings"].ADMIN_IDS or await db.has_any_webapp_access(conn, tg_uid)
     if not active:
-        await show(update, context, "Комплексы доступны при активном Premium или Starter.", premium_upsell_kb(), route="menu:premium")
+        await show(update, context, "Комплексы доступны при активном Premium или Starter.", premium_upsell_kb(), route="menu:premium", target_chat_id=target_chat_id, target_message_id=target_message_id)
         return
     back_cb = str(context.user_data.get(COMPLEXES_BACK_ROUTE_KEY) or "menu:settings")
     items = await db.list_complexes(conn, tg_uid)
+    page = min(max(0, int(page)), max(0, (len(items)-1)//10))
     text = "🧩 <b>Комплексы</b>\n\nСоздавай, наполняй и настраивай расписание прямо в боте."
-    await show(update, context, text, complexes_hub_kb(items, back_cb=back_cb), route="cx:list")
+    if len(items) > 10:
+        text += f"\n\nСтраница {page+1}/{(len(items)+9)//10} · Комплексов: {len(items)}"
+    await show(update, context, text, complexes_hub_kb(items, back_cb=back_cb, page=page), route=f"cx:list:{page}", target_chat_id=target_chat_id, target_message_id=target_message_id)
 
 
-async def _show_complex_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, tg_uid: int, complex_id: int, page: int = 0) -> None:
+async def _show_complex_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, tg_uid: int, complex_id: int, page: int = 0, *, target_chat_id: int | None = None, target_message_id: int | None = None) -> None:
     items = await db.list_complexes(conn, tg_uid)
     target = next((x for x in items if int(x.get("id") or 0) == int(complex_id)), None)
     if not target:
-        await _show_complexes_hub(update, context, conn, tg_uid)
+        await _show_complexes_hub(update, context, conn, tg_uid, target_chat_id=target_chat_id, target_message_id=target_message_id)
         return
     c_items = await db.list_complex_items(conn, tg_uid, int(complex_id))
     schedules = [x for x in await db.list_complex_schedules(conn, tg_uid) if int(x.get("complex_id") or 0) == int(complex_id)]
@@ -2556,7 +2559,18 @@ async def _show_complex_detail(update: Update, context: ContextTypes.DEFAULT_TYP
             navigation.append(InlineKeyboardButton("➡️", callback_data=f"cx:open:{int(complex_id)}:{page+1}"))
         kb_rows.append(navigation)
     kb_rows.extend(complex_open_kb(int(complex_id), list_back_cb="cx:list").inline_keyboard)
-    await show(update, context, "\n".join(lines), InlineKeyboardMarkup(kb_rows), route=f"cx:open:{int(complex_id)}:{page}")
+    await show(update, context, "\n".join(lines), InlineKeyboardMarkup(kb_rows), route=f"cx:open:{int(complex_id)}:{page}", target_chat_id=target_chat_id, target_message_id=target_message_id)
+
+
+async def _show_complex_item(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, tg_uid: int, complex_id: int, supplement_id: int, *, target_chat_id: int | None = None, target_message_id: int | None = None) -> None:
+    items = await db.list_complex_items(conn, tg_uid, complex_id)
+    item = next((x for x in items if int(x.get("supplement_id") or 0) == supplement_id), None)
+    if not item:
+        await _show_complex_detail(update, context, conn, tg_uid, complex_id, target_chat_id=target_chat_id, target_message_id=target_message_id)
+        return
+    title = html.escape(str(item.get("name_ru") or item.get("slug") or supplement_id))
+    dose = html.escape(str(item.get("dose_override") or "").strip() or "не задана")
+    await show(update, context, f"БАД: <b>{title}</b>\nДоза: {dose}", complex_item_actions_kb(complex_id, supplement_id), route=f"cx:item:open:{complex_id}:{supplement_id}", target_chat_id=target_chat_id, target_message_id=target_message_id)
 
 
 async def _show_premium_hub(
@@ -3532,8 +3546,9 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             context.user_data[COMPLEXES_BACK_ROUTE_KEY] = f"mysupp:list:{page}"
             await _show_complexes_hub(update, context, conn, tg_uid)
             return
-        if data == "cx:list":
-            await _show_complexes_hub(update, context, conn, tg_uid)
+        if data == "cx:list" or data.startswith("cx:list:"):
+            page = int(data.split(":")[-1]) if data.split(":")[-1].isdigit() else 0
+            await _show_complexes_hub(update, context, conn, tg_uid, page)
             return
         if data == "cx:create":
             context.user_data[WAITING_KEY] = "cx:create"
@@ -3565,7 +3580,11 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 log.warning("Invalid complex pick callback payload: %s", data)
                 return
             _, _, cx_id, supp_id = parts
-            await db.add_item_to_complex(conn, tg_uid, int(cx_id), int(supp_id), dose_override="")
+            try:
+                await db.add_item_to_complex(conn, tg_uid, int(cx_id), int(supp_id), dose_override="")
+            except ValueError:
+                await _show_complex_detail(update, context, conn, tg_uid, int(cx_id))
+                return
             await _show_complex_detail(update, context, conn, tg_uid, int(cx_id))
             return
         if data.startswith("cx:add:mine:"):
@@ -3619,13 +3638,7 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
         if data.startswith("cx:item:open:"):
             _, _, _, cx_id, supp_id = data.split(":", 4)
-            items = await db.list_complex_items(conn, tg_uid, int(cx_id))
-            target = next((x for x in items if int(x.get("supplement_id") or 0) == int(supp_id)), None)
-            if not target:
-                await _show_complex_detail(update, context, conn, tg_uid, int(cx_id))
-                return
-            dose = str(target.get("dose_override") or "").strip() or "не задана"
-            await show(update, context, f"БАД: <b>{html.escape(str(target.get('name_ru') or target.get('slug') or supp_id))}</b>\nДоза: {html.escape(dose)}", complex_item_actions_kb(int(cx_id), int(supp_id)), route=f"cx:item:open:{cx_id}:{supp_id}")
+            await _show_complex_item(update, context, conn, tg_uid, int(cx_id), int(supp_id))
             return
         if data.startswith("cx:item:dose:"):
             _, _, _, cx_id, supp_id = data.split(":", 4)
@@ -4267,8 +4280,10 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
 
         if data.startswith("admin:stack:items:"):
-            stack_id = int(data.split(":")[-1])
-            await _show_admin_stack_items(update, context, conn, stack_id)
+            parts = data.split(":")
+            stack_id = int(parts[3])
+            page = int(parts[4]) if len(parts)>4 and parts[4].isdigit() else 0
+            await _show_admin_stack_items(update, context, conn, stack_id, page)
             return
 
         if data.startswith("admin:stack:item:open:"):
@@ -4890,6 +4905,10 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await _show_curated_page(update, context, conn, page)
             return
 
+        if data.startswith("curated:detail_page:"):
+            _, _, slug, page = data.split(":", 3)
+            await _show_curated_stack(update, context, conn, slug, page=int(page))
+            return
         if data.startswith("curated:open:"):
             slug = data.split(":", 2)[-1]
             await _show_curated_stack(update, context, conn, slug)
@@ -6217,6 +6236,18 @@ async def _render_route(
     if route == "menu:home":
         await home(update, context, target_chat_id=target_chat_id, target_message_id=target_message_id)
         return
+    if route in {"cx:list", "menu:complexes", "settings:complexes"} or re.fullmatch(r"cx:list:\d+", route):
+        page = int(route.split(":")[-1]) if route.startswith('cx:list:') else 0
+        await _show_complexes_hub(update, context, conn, tg_uid, page, target_chat_id=target_chat_id, target_message_id=target_message_id)
+        return
+    if re.fullmatch(r"cx:open:\d+(?::-?\d+)?", route):
+        parts = route.split(":")
+        await _show_complex_detail(update, context, conn, tg_uid, int(parts[2]), int(parts[3]) if len(parts)>3 else 0, target_chat_id=target_chat_id, target_message_id=target_message_id)
+        return
+    if re.fullmatch(r"cx:item:open:\d+:\d+", route):
+        parts = route.split(":")
+        await _show_complex_item(update, context, conn, tg_uid, int(parts[3]), int(parts[4]), target_chat_id=target_chat_id, target_message_id=target_message_id)
+        return
     if route == "catalog":
         page = int(payload.get("page") or 0) if isinstance(payload, dict) else 0
         await render_catalog(
@@ -6490,6 +6521,10 @@ async def _render_route(
             target_chat_id=target_chat_id,
             target_message_id=target_message_id,
         )
+        return
+    if route.startswith("curated:detail_page:"):
+        _, _, slug, page = route.split(":", 3)
+        await _show_curated_stack(update, context, conn, slug, page=int(page), target_chat_id=target_chat_id, target_message_id=target_message_id)
         return
     if route.startswith("curated:open:"):
         slug = route.split(":", 2)[-1]
@@ -7147,6 +7182,9 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     finally:
         await conn.close()
     waiting = context.user_data.get(WAITING_KEY)
+    if not waiting and (ui_screen == "cx:create" or re.fullmatch(r"cx:rename:\d+|cx:item:dose:\d+:\d+", ui_screen or "")):
+        waiting = ui_screen
+        context.user_data[WAITING_KEY] = waiting
     if waiting and waiting.startswith(("mysupp:set_dose:", "mysupp:rem_add:", "rem:set:", "schedule:add_custom", "schedule:slot_time_set:", "supplement:set_override:", "mysupp:addslot:newtime:")):
         supplement_id = None
         if waiting.startswith(("mysupp:set_dose:", "mysupp:rem_add:", "supplement:set_override:")):
@@ -7323,7 +7361,12 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
         if waiting.startswith("cx:item:dose:"):
             _, _, _, cx_id, supp_id = waiting.split(":", 4)
-            await db.add_item_to_complex(conn, tg_uid, int(cx_id), int(supp_id), dose_override=txt.strip()[:120])
+            try:
+                await db.set_complex_item_dose(conn, tg_uid, int(cx_id), int(supp_id), txt)
+            except ValueError:
+                context.user_data.pop(WAITING_KEY, None)
+                await _show_complex_detail(update, context, conn, tg_uid, int(cx_id))
+                return
             context.user_data.pop(WAITING_KEY, None)
             await _show_complex_detail(update, context, conn, tg_uid, int(cx_id))
             return
@@ -8414,24 +8457,23 @@ async def _show_admin_stack_editor(update: Update, context: ContextTypes.DEFAULT
     )
 
 
-async def _show_admin_stack_items(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, stack_id: int) -> None:
+async def _show_admin_stack_items(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, stack_id: int, page: int = 0) -> None:
     items = await db.list_curated_stack_items(conn, int(stack_id))
-    lines = ["📦 <b>Состав стека</b>"]
+    entries = []
+    for idx, item in enumerate(items, start=1):
+        raw = dict(item)
+        raw['display_index'] = idx
+        entries.append({'title': f"{idx}. {item['supplement_name'] or item['supplement_slug'] or 'Без названия'}", 'reason_ru': f"{item['dose_ru'] or '—'} — {item['timing_ru'] or '—'}", 'raw':raw})
+    pages = _compatibility_pages(entries)
+    page = min(max(0,int(page)),len(pages)-1)
+    lines = ['📦 <b>Состав стека</b>']
+    lines.extend(entry['text'] for entry in pages[page])
     if not items:
-        lines.append("Пока пусто. Добавь элементы.")
-    else:
-        for idx, item in enumerate(items[:10], start=1):
-            name = item["supplement_name"] or item["supplement_slug"] or "Без названия"
-            dose = item["dose_ru"] or "—"
-            timing = item["timing_ru"] or "—"
-            lines.append(f"{idx}. {name} — {dose} — {timing}")
-    await show(
-        update,
-        context,
-        "\n".join(lines),
-        admin_stack_items_kb(int(stack_id), [dict(i) for i in items]),
-        route=f"admin:stack:items:{int(stack_id)}",
-    )
+        lines.append('Пока пусто. Добавь элементы.')
+    if len(pages)>1:
+        lines.append(f"Страница {page+1}/{len(pages)}")
+    page_items = {entry['item']['raw']['id']:entry['item']['raw'] for entry in pages[page]}
+    await show(update, context, '\n'.join(lines), admin_stack_items_kb(int(stack_id), list(page_items.values()), page=page, has_prev=page>0, has_next=page+1<len(pages)), route=f"admin:stack:items:{int(stack_id)}:{page}")
 
 
 async def _show_admin_stack_item(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, stack_id: int, item_id: int) -> None:
@@ -9290,6 +9332,7 @@ async def _show_curated_stack(
     conn,
     slug: str,
     *,
+    page: int = 0,
     target_chat_id: int | None = None,
     target_message_id: int | None = None,
 ) -> None:
@@ -9309,61 +9352,46 @@ async def _show_curated_stack(
 
     items = await db.list_curated_stack_items(conn, int(stack["id"]))
     existing_ids = await db.get_user_stack_supplement_ids(conn, tg_uid) if tg_uid else set()
-    item_buttons: list[dict] = []
-    lines = [f"🧠 <b>{stack['title_ru']}</b>"]
-    author = str(stack["author_ru"] or "").strip()
-    description = str(stack["description_ru"] or "").strip()
+    entries = []
+    title_raw = str(stack['title_ru'] or '')
+    title_parts = _escaped_text_chunks(title_raw,700)
+    intro = []
+    if len(title_parts)>1:
+        intro.append(title_raw)
+    author = str(stack['author_ru'] or '').strip()
+    description = str(stack['description_ru'] or '').strip()
     if author:
-        lines.append(f"Автор: {author}")
+        intro.append(f"Автор: {author}")
     if description:
-        lines.extend(["", description])
-
-    if items:
-        lines.append("")
-        lines.append("Состав:")
-        max_items = 15
-        for item in items[:max_items]:
-            name = (
-                str(item["supplement_name"] or "").strip()
-                or str(item["supplement_slug"] or "").strip()
-                or "Без названия"
-            )
-            supplement = await db.find_supplement_by_slug_or_name(conn, item["supplement_slug"], item["supplement_name"])
-            in_stack_mark = ""
-            if supplement and int(supplement["id"]) in existing_ids:
-                in_stack_mark = " ✅ уже в ваших БАДах"
+        intro.append(description)
+    if intro:
+        entries.append({'text':'\n\n'.join(intro)})
+    for item in items:
+        name = str(item['supplement_name'] or item['supplement_slug'] or 'Без названия')
+        details = [str(item[key] or '').strip() for key in ('dose_ru','timing_ru','notes_ru') if str(item[key] or '').strip()]
+        entries.append({'title':name, 'reason_ru':' — '.join(details), 'raw':dict(item)})
+    pages = _compatibility_pages(entries)
+    page = min(max(0,int(page)),len(pages)-1)
+    lines = [f"🧠 <b>{title_parts[0]}</b>", '']
+    item_buttons = {}
+    for entry in pages[page]:
+        raw = entry['item'].get('raw')
+        mark = ''
+        if raw:
+            supplement = await db.find_supplement_by_slug_or_name(conn,raw['supplement_slug'],raw['supplement_name'])
             if supplement:
-                item_buttons.append(
-                    {
-                        "supplement_id": int(supplement["id"]),
-                        "label": f"🔎 {name[:34]}",
-                    }
-                )
-            parts = [name]
-            dose = str(item["dose_ru"] or "").strip()
-            timing = str(item["timing_ru"] or "").strip()
-            if dose:
-                parts.append(dose)
-            if timing:
-                parts.append(timing)
-            lines.append("• " + " — ".join(parts) + in_stack_mark)
-        if len(items) > max_items:
-            lines.append(f"…и ещё {len(items) - max_items} поз.")
-        lines.append("")
-        lines.append("Нажми на кнопку «🔎 …», чтобы открыть карточку БАДа.")
-
-    lines.append("")
-    lines.append("<i>Это не медсовет.</i>")
-    back_page = int(context.user_data.get("curated_page") or 0)
-    await show(
-        update,
-        context,
-        "\n".join(lines),
-        curated_stack_card(slug, source_url=stack["source_url"], back_page=back_page, item_buttons=item_buttons),
-        route=f"curated:open:{slug}",
-        target_chat_id=target_chat_id,
-        target_message_id=target_message_id,
-    )
+                sid = int(supplement['id'])
+                if sid in existing_ids:
+                    mark = ' ✅ уже в ваших БАДах'
+                item_buttons[sid] = {'supplement_id':sid, 'label':f"🔎 {str(raw['supplement_name'] or raw['supplement_slug'] or 'Добавка')[:34]}"}
+        lines.append(entry['text'] + mark)
+    if item_buttons:
+        lines.extend(['', 'Нажми на кнопку «🔎 …», чтобы открыть карточку БАДа.'])
+    if len(pages)>1:
+        lines.extend(['', f"Страница {page+1}/{len(pages)} · Позиций: {len(items)}"])
+    lines.extend(['', '<i>Это не медсовет.</i>'])
+    back_page = int(context.user_data.get('curated_page') or 0)
+    await show(update, context, '\n'.join(lines), curated_stack_card(slug,source_url=stack['source_url'],back_page=back_page,item_buttons=list(item_buttons.values()),page=page,has_prev=page>0,has_next=page+1<len(pages)),route=f"curated:detail_page:{slug}:{page}",target_chat_id=target_chat_id,target_message_id=target_message_id)
 
 async def _show_my_list(
     update: Update,
@@ -9726,7 +9754,7 @@ def _compatibility_pages(items: list[dict]) -> list[list[dict]]:
     pages, current, size = [], [], 0
     for item in items:
         reason = str(item.get("reason_ru") or "").strip()
-        text = f"• {item.get('title') or 'Неизвестно'}" + (f" — {reason}" if reason else "")
+        text = str(item['text']) if 'text' in item else f"• {item.get('title') or 'Неизвестно'}" + (f" — {reason}" if reason else "")
         for chunk in _escaped_text_chunks(text, 2600):
             width = len(chunk.encode("utf-16-le")) // 2
             if current and (size + width + 1 > 2800 or len(current) >= 8):

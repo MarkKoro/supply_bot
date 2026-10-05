@@ -1695,7 +1695,7 @@ async def api_complex_items_add(complex_id: int, body: ComplexItemBody, x_telegr
         await db.add_item_to_complex(conn, tg_user_id, int(complex_id), int(body.supplement_id), body.dose_override or "")
     except ValueError as exc:
         code = str(exc)
-        status_code = 404 if code == "complex_not_found" else 400
+        status_code = 404 if code in {"complex_not_found", "supplement_not_found"} else 400
         return JSONResponse({"ok": False, "code": code}, status_code=status_code)
     finally:
         await conn.close()
@@ -2835,6 +2835,9 @@ async def api_my_supplements_toggle(
             if slug:
                 await db.enqueue_stack_change_rebuilds(conn, tg_user_id, [slug])
             in_stack = False
+    except ValueError as exc:
+        code = str(exc)
+        return JSONResponse({"ok":False, "code":code}, status_code=404 if code == "supplement_not_found" else 400)
     finally:
         await conn.close()
 

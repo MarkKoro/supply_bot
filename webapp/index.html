@@ -3421,8 +3421,10 @@
     if (!key) return;
     const requestId = ++detailRequestId;
     const stackRevision = catalogStackRevision;
-    state.catalog.addToComplexModal = {open:false};
-    state.catalog.addToStackSlotModal = {open:false};
+    if (!silent) {
+      state.catalog.addToComplexModal = {open:false};
+      state.catalog.addToStackSlotModal = {open:false};
+    }
     state.catalog.detailCache = state.catalog.detailCache || {};
     const cached = state.catalog.detailCache[key];
     state.catalog.detail = cached || { slug: key, name_ru: 'Карточка добавки', _loading: true };
@@ -3434,8 +3436,8 @@
         if (requestId === detailRequestId && state.catalog.detail?.slug === key) await openSupplementDetail(key, {silent:true});
         return;
       }
-      state.catalog.detailCache[key] = d.item;
       if (requestId !== detailRequestId || state.catalog.detail?.slug !== key) return;
+      state.catalog.detailCache[key] = d.item;
       state.catalog.detail = d.item;
       state.catalog.detailSection = defaultDetailSection(d.item);
       renderActiveTab();
@@ -3505,7 +3507,8 @@
       if (requestId === catalogRequestId) {
         state.catalog.loading = false;
         state.catalog.loadingMore = false;
-        if (isCurrent()) renderActiveTab();
+        if (!isCurrent() && stackRevision !== catalogStackRevision && c.page === requestedPage && c.q === requestedQuery && JSON.stringify(c.filters) === requestedFilters && requestedPage > 0) c.page = requestedPage - 1;
+        renderActiveTab();
       }
     }
   }
@@ -3575,10 +3578,14 @@
     const back = state.catalog.returnAfterComplexPick;
     state.catalog.pickBusy = true;
     state.complexHub.actionBusy[complexId] = true;
+    catalogStackRevision++;
     try {
       await api(`./api/complexes/${complexId}/items/add`, {method:'POST', body:{supplement_id:supplementId}});
+      catalogStackRevision++;
+      applyCatalogInStackState(supplementId, true);
+      markScheduleChanged();
       invalidateComplexReads(complexId);
-      await Promise.all([loadComplexHubMeta(true), loadComplexItems(complexId, true), loadToday(true)]);
+      await Promise.allSettled([loadComplexHubMeta(true), loadComplexItems(complexId, true), loadToday(true), loadMySupplements(true), loadScheduleData(true)]);
       if (state.catalog.pickForComplexId === complexId && state.catalog.returnAfterComplexPick === back) {
         state.catalog.pickForComplexId = 0;
         state.catalog.returnAfterComplexPick = null;
@@ -3590,7 +3597,7 @@
         }
       }
       showToast('БАД добавлен в комплекс');
-    } finally { state.catalog.pickBusy = false; delete state.complexHub.actionBusy[complexId]; renderActiveTab(); }
+    } finally { catalogStackRevision++; state.catalog.pickBusy = false; delete state.complexHub.actionBusy[complexId]; renderActiveTab(); }
   }
 
   const boundDetailControls = new WeakMap();
@@ -3614,11 +3621,15 @@
       renderActiveTab();
     };
     const addSupplementToComplex = async (complexId, supplementId, successToast = 'БАД добавлен в комплекс', modal = state.catalog.addToComplexModal) => {
-      await api(`./api/complexes/${Number(complexId)}/items/add`, { method: 'POST', body: { supplement_id: Number(supplementId) } });
+      catalogStackRevision++;
+      try { await api(`./api/complexes/${Number(complexId)}/items/add`, { method: 'POST', body: { supplement_id: Number(supplementId) } }); }
+      finally { catalogStackRevision++; }
+      applyCatalogInStackState(supplementId, true);
+      markScheduleChanged();
       invalidateComplexReads(complexId);
       showToast(successToast);
       if (state.catalog.addToComplexModal === modal) closeAddToComplexModal();
-      await Promise.all([loadComplexHubMeta(true), loadComplexItems(complexId, true), loadToday(true)]);
+      await Promise.allSettled([loadComplexHubMeta(true), loadComplexItems(complexId, true), loadToday(true), loadMySupplements(true), loadScheduleData(true)]);
     };
     const openAddToStackSlotModal = async (supplementId) => {
       state.catalog.addToStackSlotModal = {

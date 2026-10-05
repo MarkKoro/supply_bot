@@ -452,11 +452,18 @@ def admin_stack_delete_confirm_kb(stack_id: int) -> InlineKeyboardMarkup:
     )
 
 
-def admin_stack_items_kb(stack_id: int, items) -> InlineKeyboardMarkup:
+def admin_stack_items_kb(stack_id: int, items, *, page: int = 0, has_prev: bool = False, has_next: bool = False) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = [[InlineKeyboardButton("➕ Добавить", callback_data=f"admin:stack:item:add:{stack_id}")]]
-    for idx, item in enumerate(items[:10], start=1):
+    for idx, item in enumerate(items, start=1):
         label = str(item.get("supplement_name") or item.get("supplement_slug") or "Без названия")
-        rows.append([InlineKeyboardButton(f"{idx}. {label}", callback_data=f"admin:stack:item:open:{stack_id}:{int(item['id'])}")])
+        rows.append([InlineKeyboardButton(f"{item.get('display_index') or idx}. {label[:100]}", callback_data=f"admin:stack:item:open:{stack_id}:{int(item['id'])}")])
+    nav = []
+    if has_prev:
+        nav.append(InlineKeyboardButton("⬅️", callback_data=f"admin:stack:items:{stack_id}:{page-1}"))
+    if has_next:
+        nav.append(InlineKeyboardButton("➡️", callback_data=f"admin:stack:items:{stack_id}:{page+1}"))
+    if nav:
+        rows.append(nav)
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"admin:stack:open:{stack_id}")])
     return InlineKeyboardMarkup(rows)
 
@@ -594,15 +601,25 @@ def curated_stack_card(
     source_url: str | None,
     back_page: int,
     item_buttons: list[dict] | None = None,
+    page: int = 0,
+    has_prev: bool = False,
+    has_next: bool = False,
 ) -> InlineKeyboardMarkup:
     btns = []
-    for item in list(item_buttons or [])[:12]:
+    for item in list(item_buttons or []):
         label = str(item.get("label") or "Добавка")
         supp_id = int(item.get("supplement_id") or 0)
         if supp_id > 0:
             btns.append([InlineKeyboardButton(label, callback_data=f"supp:open:{supp_id}")])
     if source_url:
         btns.append([InlineKeyboardButton("🔗 Источник", url=source_url)])
+    nav = []
+    if has_prev:
+        nav.append(InlineKeyboardButton("⬅️", callback_data=f"curated:detail_page:{slug}:{page-1}"))
+    if has_next:
+        nav.append(InlineKeyboardButton("➡️", callback_data=f"curated:detail_page:{slug}:{page+1}"))
+    if nav:
+        btns.append(nav)
     btns.append([InlineKeyboardButton("➕ Добавить себе", callback_data=f"curated:add:{slug}")])
     btns.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"curated:page:{back_page}")])
     return InlineKeyboardMarkup(btns)
@@ -860,13 +877,20 @@ def settings_notifications_kb(*, reminders_enabled: bool, slots: list[dict]) -> 
     return InlineKeyboardMarkup(rows)
 
 
-def complexes_hub_kb(items: list[dict], *, back_cb: str = "menu:settings") -> InlineKeyboardMarkup:
+def complexes_hub_kb(items: list[dict], *, back_cb: str = "menu:settings", page: int = 0) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
-    for item in items[:20]:
+    for item in items[page*10:(page+1)*10]:
         cid = int(item.get("id") or 0)
         name = str(item.get("name") or "Комплекс")
         count = int(item.get("items_count") or 0)
         rows.append([InlineKeyboardButton(f"🧩 {name} ({count})", callback_data=f"cx:open:{cid}")])
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️", callback_data=f"cx:list:{page-1}"))
+    if (page+1)*10 < len(items):
+        nav.append(InlineKeyboardButton("➡️", callback_data=f"cx:list:{page+1}"))
+    if nav:
+        rows.append(nav)
     rows.append([InlineKeyboardButton("➕ Создать комплекс", callback_data="cx:create")])
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=back_cb)])
     return InlineKeyboardMarkup(rows)

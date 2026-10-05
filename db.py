@@ -11332,6 +11332,9 @@ def _parse_iso_utc_or_none(value: str | None) -> datetime | None:
 
 
 async def activate_nutrient_reminders_for_plan(conn: aiosqlite.Connection, tg_user_id: int, plan_run_id: int) -> list[dict]:
+    if not isinstance(conn, _TransactionConnection):
+        async with transaction(conn) as tx:
+            return await activate_nutrient_reminders_for_plan(tx, tg_user_id, plan_run_id)
     user_id = await get_or_create_user(conn, int(tg_user_id))
     plan = await fetchone(
         conn,
@@ -11435,10 +11438,20 @@ async def get_nutrient_followup_reminder_by_id(conn: aiosqlite.Connection, tg_us
 
 
 async def update_nutrient_followup_reminder_status(conn: aiosqlite.Connection, tg_user_id: int, reminder_id: int, status: str) -> bool:
+    if not isinstance(conn, _TransactionConnection):
+        async with transaction(conn) as tx:
+            return await update_nutrient_followup_reminder_status(tx, tg_user_id, reminder_id, status)
     user_id = await get_or_create_user(conn, int(tg_user_id))
     st = str(status or "").strip().lower()
     if st not in {"scheduled", "sent", "done", "dismissed", "snoozed", "obsolete", "skipped"}:
         raise ValueError("invalid_reminder_status")
+    row = await fetchone(conn, "SELECT status FROM nutrient_followup_reminders WHERE user_id=? AND id=?", (user_id, int(reminder_id)))
+    if not row:
+        return False
+    if str(row["status"]) == st:
+        return True
+    if str(row["status"]) not in {"scheduled", "sent", "snoozed"}:
+        return False
     cur = await conn.execute(
         "UPDATE nutrient_followup_reminders SET status=?, updated_at_utc=? WHERE user_id=? AND id=?",
         (st, utc_now_iso(), user_id, int(reminder_id)),
@@ -11448,11 +11461,17 @@ async def update_nutrient_followup_reminder_status(conn: aiosqlite.Connection, t
 
 
 async def snooze_nutrient_followup_reminder(conn: aiosqlite.Connection, tg_user_id: int, reminder_id: int, days: int) -> dict | None:
+    if not isinstance(conn, _TransactionConnection):
+        async with transaction(conn) as tx:
+            return await snooze_nutrient_followup_reminder(tx, tg_user_id, reminder_id, days)
     user_id = await get_or_create_user(conn, int(tg_user_id))
-    row = await fetchone(conn, "SELECT scheduled_for_utc FROM nutrient_followup_reminders WHERE user_id=? AND id=? LIMIT 1", (user_id, int(reminder_id)))
-    if not row:
+    row = await fetchone(conn, "SELECT scheduled_for_utc, status FROM nutrient_followup_reminders WHERE user_id=? AND id=? LIMIT 1", (user_id, int(reminder_id)))
+    if not row or str(row["status"]) not in {"scheduled", "sent", "snoozed"}:
         return None
-    base = _parse_iso_utc_or_none(row["scheduled_for_utc"]) or datetime.now(timezone.utc)
+    if str(row["status"]) == "snoozed":
+        return await get_nutrient_followup_reminder_by_id(conn, tg_user_id, int(reminder_id))
+    now = datetime.now(timezone.utc)
+    base = max(_parse_iso_utc_or_none(row["scheduled_for_utc"]) or now, now)
     next_dt = (base + timedelta(days=max(1, int(days)))).replace(microsecond=0)
     await conn.execute(
         "UPDATE nutrient_followup_reminders SET status='snoozed', scheduled_for_utc=?, updated_at_utc=? WHERE user_id=? AND id=?",
@@ -11468,8 +11487,13 @@ async def list_due_nutrient_followup_reminders(conn: aiosqlite.Connection) -> li
         """SELECT nfr.*, u.tz_name
            FROM nutrient_followup_reminders nfr
            JOIN users u ON u.id=nfr.user_id
+           LEFT JOIN user_notification_prefs np ON np.user_id=u.id
            JOIN nutrient_plan_runs npr ON npr.id=nfr.plan_run_id
            WHERE nfr.status IN ('scheduled','snoozed')
+             AND npr.user_id=nfr.user_id AND npr.is_active=1
+             AND COALESCE(np.reminders_enabled,1)=1
+             AND COALESCE(u.is_banned,0)=0
+             AND COALESCE(u.deleted_at_utc,'')=''
              AND COALESCE(npr.frozen_by_user,0)=0
              AND COALESCE(npr.lifecycle_status,'')!='frozen_by_user'
            ORDER BY nfr.scheduled_for_utc ASC, nfr.id ASC""",

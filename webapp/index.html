@@ -4955,34 +4955,43 @@ function adminField(label, field, value, kind='input') {
   async function loadNutrientOverview(force) { return; }
   async function loadNutrientReminders(force) { return; }
   async function loadNutrientOnboarding(force) { return; }
+  let assistantHistoryLoadSeq = 0;
+  let assistantMyPlansLoadSeq = 0;
+  let assistantRunDetailLoadSeq = 0;
   async function loadNutrientDashboard(force) {
     if (state.nutrientAssistant.loadingHistory && !force) return;
+    const seq = ++assistantHistoryLoadSeq;
     state.nutrientAssistant.loadingHistory = true;
     try {
       const res = await api('./api/profile/nutrient-assistant/dashboard');
+      if (seq !== assistantHistoryLoadSeq) return;
       state.nutrientAssistant.history = Array.isArray(res.history) ? res.history : [];
       state.nutrientAssistant.usageCurrentMonth = Number(res.usage_current_month ?? assistantUsageInCurrentMonth(state.nutrientAssistant.history));
     } catch {}
-    state.nutrientAssistant.loadingHistory = false;
+    finally { if (seq === assistantHistoryLoadSeq) state.nutrientAssistant.loadingHistory = false; }
   }
   async function loadNutrientPlans(force) {
     if (state.nutrientAssistant.loadingHistory && !force) return;
+    const seq = ++assistantHistoryLoadSeq;
     state.nutrientAssistant.loadingHistory = true;
     try {
       const res = await api('./api/profile/nutrient-assistant/plans');
+      if (seq !== assistantHistoryLoadSeq) return;
       state.nutrientAssistant.history = Array.isArray(res.runs) ? res.runs : [];
       state.nutrientAssistant.usageCurrentMonth = Number(res.usage_current_month ?? assistantUsageInCurrentMonth(state.nutrientAssistant.history));
     } catch {}
-    state.nutrientAssistant.loadingHistory = false;
+    finally { if (seq === assistantHistoryLoadSeq) state.nutrientAssistant.loadingHistory = false; }
   }
   async function loadMyNutrientPlans(force) {
     if (state.nutrientAssistant.myPlansLoading && !force) return;
+    const seq = ++assistantMyPlansLoadSeq;
     state.nutrientAssistant.myPlansLoading = true;
     try {
       const res = await api('./api/profile/nutrient-assistant/my-plans');
+      if (seq !== assistantMyPlansLoadSeq) return;
       state.nutrientAssistant.myPlans = Array.isArray(res.runs) ? res.runs : [];
     } catch {}
-    state.nutrientAssistant.myPlansLoading = false;
+    finally { if (seq === assistantMyPlansLoadSeq) state.nutrientAssistant.myPlansLoading = false; }
   }
   let assistantDraftLoadSeq = 0;
   let assistantDraftVersion = 0;
@@ -5026,9 +5035,11 @@ function adminField(label, field, value, kind='input') {
   async function loadAssistantRunDetail(runId) {
     const id = Number(runId || 0);
     if (!id) return null;
+    const seq = ++assistantRunDetailLoadSeq;
     state.nutrientAssistant.detailLoading = true;
     try {
       const res = await api(`./api/profile/nutrient-assistant/plans/${id}`);
+      if (seq !== assistantRunDetailLoadSeq) return null;
       state.nutrientAssistant.detailRun = res.run || null;
       state.nutrientAssistant.detailPreparedActions = Array.isArray(res.prepared_actions) ? res.prepared_actions : [];
       state.nutrientAssistant.result = res.run?.response_json || null;
@@ -5036,7 +5047,7 @@ function adminField(label, field, value, kind='input') {
       state.nutrientAssistant.basisRunId = id;
       return res.run || null;
     } finally {
-      state.nutrientAssistant.detailLoading = false;
+      if (seq === assistantRunDetailLoadSeq) state.nutrientAssistant.detailLoading = false;
     }
   }
   async function fetchAssistantJob(jobId) {
@@ -5045,7 +5056,9 @@ function adminField(label, field, value, kind='input') {
     const res = await api(`./api/profile/nutrient-assistant/jobs/${id}`);
     return res.job || null;
   }
+  let assistantJobPollVersion = 0;
   function stopAssistantJobPolling() {
+    assistantJobPollVersion++;
     if (state.nutrientAssistant.jobPollTimer) {
       clearTimeout(state.nutrientAssistant.jobPollTimer);
       state.nutrientAssistant.jobPollTimer = null;
@@ -5053,11 +5066,17 @@ function adminField(label, field, value, kind='input') {
   }
   function scheduleAssistantJobPolling(jobId, delayMs = 3800) {
     stopAssistantJobPolling();
+    const version = assistantJobPollVersion;
     state.nutrientAssistant.jobPollTimer = setTimeout(async ()=>{
+      if (version !== assistantJobPollVersion) return;
+      state.nutrientAssistant.jobPollTimer = null;
       const id = Number(jobId || state.nutrientAssistant.currentJobId || 0);
       if (!id) return;
+      const selectedRunId = state.nutrientAssistant.currentRunId;
+      const selectedRunVersion = assistantRunDetailLoadSeq;
       try {
         const job = await fetchAssistantJob(id);
+        if (version !== assistantJobPollVersion) return;
         const prevStatus = String(state.nutrientAssistant.currentJobStatus || '');
         const status = String(job?.status || '');
         state.nutrientAssistant.currentJobId = id;
@@ -5068,12 +5087,15 @@ function adminField(label, field, value, kind='input') {
           scheduleAssistantJobPolling(id, 3800);
         } else if (status === 'done' && Number(job?.result_run_id || 0) > 0) {
           stopAssistantJobPolling();
+          const completionVersion = assistantJobPollVersion;
           state.nutrientAssistant.computing = false;
           state.nutrientAssistant.blocked = false;
           state.nutrientAssistant.currentJobId = null;
           state.nutrientAssistant.currentJobStatus = 'done';
           await loadNutrientPlans(true);
-          await loadAssistantRunDetail(Number(job.result_run_id)).catch(()=>null);
+          if (completionVersion !== assistantJobPollVersion) return;
+          if (state.nutrientAssistant.currentRunId === selectedRunId && selectedRunVersion === assistantRunDetailLoadSeq) await loadAssistantRunDetail(Number(job.result_run_id)).catch(()=>null);
+          if (completionVersion !== assistantJobPollVersion) return;
           showToast('Расчёт готов');
         } else if (status === 'failed' || status === 'cancelled' || status === 'canceled') {
           stopAssistantJobPolling();
@@ -5086,6 +5108,7 @@ function adminField(label, field, value, kind='input') {
           scheduleAssistantJobPolling(id, 3800);
         }
       } catch {
+        if (version !== assistantJobPollVersion) return;
         state.nutrientAssistant.jobPollErrors = Number(state.nutrientAssistant.jobPollErrors || 0) + 1;
         if (state.nutrientAssistant.jobPollErrors <= 5) {
           scheduleAssistantJobPolling(id, 4200);
@@ -5960,8 +5983,8 @@ function adminField(label, field, value, kind='input') {
     document.querySelectorAll('[data-assistant-history]').forEach((el)=>el.addEventListener('click', async ()=>{
       try {
         const id = Number(el.dataset.assistantHistory);
-        await loadAssistantRunDetail(id);
-        showToast('Загружена версия расчёта');
+        const run = await loadAssistantRunDetail(id);
+        if (run) showToast('Загружена версия расчёта');
       } catch {
         showToast('Не удалось открыть расчёт');
       }
@@ -6024,13 +6047,14 @@ function adminField(label, field, value, kind='input') {
     document.querySelectorAll('[data-assistant-apply-run]').forEach((el)=>el.addEventListener('click', async ()=>{
       const runId = Number(el.dataset.assistantApplyRun || 0);
       if (!runId || state.nutrientAssistant.applying) return;
+      const selectedRunVersion = assistantRunDetailLoadSeq;
       state.nutrientAssistant.applying = true;
       renderActiveTab();
       try {
         await api('./api/profile/nutrient-assistant/apply', { method:'POST', body: { run_id: runId } });
         showToast('Расчёт принят');
         await Promise.all([loadNutrientPlans(true), loadMyNutrientPlans(true)]);
-        await loadAssistantRunDetail(runId).catch(()=>null);
+        if (state.nutrientAssistant.currentRunId === runId && selectedRunVersion === assistantRunDetailLoadSeq) await loadAssistantRunDetail(runId).catch(()=>null);
       } catch (e) {
         showToast(e.message || 'Не удалось принять расчёт');
       }
@@ -6040,13 +6064,14 @@ function adminField(label, field, value, kind='input') {
     document.querySelectorAll('[data-assistant-cancel-run]').forEach((el)=>el.addEventListener('click', async ()=>{
       const runId = Number(el.dataset.assistantCancelRun || 0);
       if (!runId || state.nutrientAssistant.cancelling) return;
+      const selectedRunVersion = assistantRunDetailLoadSeq;
       state.nutrientAssistant.cancelling = true;
       renderActiveTab();
       try {
         await api(`./api/profile/nutrient-assistant/runs/${runId}/cancel`, { method:'POST', body:{} });
         showToast('Расчёт отклонён');
         await loadNutrientPlans(true);
-        await loadAssistantRunDetail(runId).catch(()=>null);
+        if (state.nutrientAssistant.currentRunId === runId && selectedRunVersion === assistantRunDetailLoadSeq) await loadAssistantRunDetail(runId).catch(()=>null);
       } catch (e) {
         showToast(e.message || 'Не удалось отклонить расчёт');
       }

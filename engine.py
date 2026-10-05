@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json
+import html
 from datetime import datetime, timedelta
 import aiosqlite
 import db
@@ -618,15 +619,15 @@ def format_supplement_details(row) -> str:
     dose = row["dose_ru"] or ""
     timing = row["timing_ru"] or ""
 
-    parts = [f"💊 <b>{title}</b>", f"📊 {evidence_line}"]
+    parts = [f"💊 <b>{html.escape(str(title))}</b>", f"📊 {html.escape(evidence_line)}"]
     if summary_verified:
-        parts.append(f"✅ <b>Проверено</b>: {summary_verified}")
+        parts.append(f"✅ <b>Проверено</b>: {html.escape(str(summary_verified))}")
     if summary_theoretical:
-        parts.append(f"🔬 <b>Теоретически</b>: {summary_theoretical}")
+        parts.append(f"🔬 <b>Теоретически</b>: {html.escape(str(summary_theoretical))}")
     if dose:
-        parts.append(f"💊 Дозировка: {dose}")
+        parts.append(f"💊 Дозировка: {html.escape(str(dose))}")
     if timing:
-        parts.append(f"⏰ Время: {timing}")
+        parts.append(f"⏰ Время: {html.escape(str(timing))}")
     parts.append("<i>Не медицинский совет.</i>")
     return "\n\n".join(parts)
 
@@ -665,14 +666,14 @@ def format_supplement_hub(
     else:
         today_label = "Сегодня: не отмечено"
 
-    parts = [f"💊 <b>{title}</b>"]
+    parts = [f"💊 <b>{html.escape(str(title))}</b>"]
     if summary:
-        parts.append(summary)
+        parts.append(html.escape(str(summary)))
     parts.append(f"Статус: <b>{status}</b>")
-    parts.append(f"Доза: <b>{dose_text}</b>")
-    parts.append(f"Заметка: <b>{note_text}</b>")
+    parts.append(f"Доза: <b>{html.escape(str(dose_text))}</b>")
+    parts.append(f"Заметка: <b>{html.escape(str(note_text))}</b>")
     parts.append("<b>Расписание</b>")
-    parts.append(schedule_label)
+    parts.append(html.escape(schedule_label))
     parts.append("<b>Сегодня</b>")
     parts.append(today_label)
     return "\n\n".join(parts)

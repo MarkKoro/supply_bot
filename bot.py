@@ -23,6 +23,7 @@ import engine
 import seed_import
 import rules
 from ux import show
+from keyboards import is_http_url
 from keyboards import (
     main_menu,
     back,
@@ -782,6 +783,20 @@ async def _show_notifications_settings(update: Update, context: ContextTypes.DEF
     )
 
 
+async def _save_bot_supplement_schedule(conn, user_id: int, supplement_id: int, *, slot_id: str | None = None, time_override: str | None = None, set_override: bool = False) -> None:
+    async with db.transaction(conn) as tx:
+        member = await db.fetchone(tx, "SELECT 1 FROM user_supplements WHERE user_id=? AND supplement_id=? AND is_active=1", (int(user_id), int(supplement_id)))
+        if not member:
+            raise ValueError('supplement_not_found')
+        if slot_id is not None:
+            slots = await db.get_user_slots(tx, user_id)
+            if not any(str(slot.get('slot_id') or '') == str(slot_id) for slot in slots):
+                raise ValueError('slot_not_found')
+            await db.set_schedule_slot(tx, user_id, supplement_id, slot_id)
+        if set_override:
+            await db.set_schedule_time_override(tx, user_id, supplement_id, time_override)
+
+
 async def _show_supplement_time_screen(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -800,13 +815,13 @@ async def _show_supplement_time_screen(
     schedule_map = await db.get_user_schedule_map(conn, user_id)
     current = schedule_map.get(supplement_id, {"slot_id": "morning", "time_hhmm": None})
     slot = next((s for s in slots if str(s.get("slot_id") or "") == str(current.get("slot_id") or "")), None)
-    slot_title = str(slot.get("title_ru") or "Утро") if slot else "Утро"
+    slot_title = html.escape(str(slot.get("title_ru") or "Утро")) if slot else "Утро"
     slot_time = str(slot.get("time_local") or "--:--") if slot else "--:--"
     reminder_profile = await db.get_effective_reminders_for_supplement(conn, tg_uid, supplement_id)
     reminder_mode = str(reminder_profile.get("mode") or "slot").strip()
     reminder_times = [str(t).strip() for t in list(reminder_profile.get("times") or []) if str(t).strip()]
     override = str(current.get("time_hhmm") or "").strip()
-    title = (supplement["name_ru"] or supplement["name"] or "").strip()
+    title = html.escape((supplement["name_ru"] or supplement["name"] or "").strip())
     if reminder_mode == "custom" and reminder_times:
         active_time = ", ".join(reminder_times)
         time_block = (
@@ -3346,6 +3361,16 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await _show_timezone_picker(update, context, 0)
             return
 
+        compact_curated = re.fullmatch(r"curated:(open_id|add_id|detail_id):(\d+)(?::(-?\d+))?", data)
+        if compact_curated:
+            action, stack_id, page = compact_curated.groups()
+            stack = await db.admin_get_curated_stack_by_id(conn, int(stack_id))
+            if not stack or not int(stack['is_active'] or 0):
+                await show(update, context, "Стек не найден.", back(), route="menu:curated")
+                return
+            slug = str(stack['slug'])
+            data = f"curated:detail_page:{slug}:{page or 0}" if action == 'detail_id' else f"curated:{'add' if action == 'add_id' else 'open'}:{slug}"
+
         onboarding_state = await db.get_onboarding_state(conn, tg_uid)
         onboarding_status = str(onboarding_state.get("onboarding_status") or "")
         onboarding_raw = str(onboarding_state.get("onboarding_raw_json") or "")
@@ -4016,6 +4041,13 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if required_perm and not perms.get(required_perm, False):
                 await show(update, context, "Нет доступа к разделу.", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="admin:home")]]), route="admin:home")
                 return
+            item_action = re.fullmatch(r"admin:stack:item:(open|del|edit|move):(\d+):(\d+)(?::[^:]+)?", data)
+            if item_action:
+                _, stack_id, item_id = item_action.groups()
+                item = await db.admin_get_curated_stack_item(conn, int(item_id))
+                if not item or int(item['stack_id']) != int(stack_id):
+                    await _show_admin_stack_items(update, context, conn, int(stack_id))
+                    return
 
         if data == "admin:supp_search":
             await show(
@@ -4287,8 +4319,10 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
 
         if data.startswith("admin:stack:item:open:"):
-            _, _, _, _, stack_id, item_id = data.split(":")
-            await _show_admin_stack_item(update, context, conn, int(stack_id), int(item_id))
+            parts = data.split(":")
+            stack_id, item_id = int(parts[4]), int(parts[5])
+            page = int(parts[6]) if len(parts)>6 else 0
+            await _show_admin_stack_item(update, context, conn, stack_id, item_id, page)
             return
 
         if data.startswith("admin:stack:item:del:"):
@@ -4349,21 +4383,25 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             return
 
-        if data.startswith("admin:stack:item:pick:"):
+        if data.startswith(("admin:stack:item:pick:", "admin:stack:item:pick_id:")):
             parts = data.split(":", 5)
             if len(parts) != 6:
                 await show(update, context, "Некорректная команда выбора добавки.", back(), route="admin:stacks")
                 return
-            _, _, _, _, stack_id, slug = parts
-            supplement = await db.get_supplement_by_slug(conn, slug)
+            _, _, _, action, stack_id, value = parts
+            if not await db.admin_get_curated_stack_by_id(conn, int(stack_id)):
+                await show(update, context, "Стек не найден.", admin_stacks_kb(), route="admin:stacks")
+                return
+            supplement = await db.get_supplement_by_id(conn, int(value)) if action == 'pick_id' and value.isdigit() else await db.get_supplement_by_slug(conn, value) if action == 'pick' else None
             if not supplement:
                 await show(update, context, "Добавка не найдена.", back(), route=f"admin:stack:items:{stack_id}")
                 return
             name = str(supplement["name_ru"] or supplement["name_en"] or supplement["slug"])
+            slug = str(supplement['slug'])
             await show(
                 update,
                 context,
-                f"Добавляем: <b>{name}</b>\nОтправь:\nДоза | Время | Заметка(опц.)",
+                f"Добавляем: <b>{html.escape(name)}</b>\nОтправь:\nДоза | Время | Заметка(опц.)",
                 InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"admin:stack:items:{stack_id}")]]),
                 route="admin:stack:item_details_wait",
                 payload={"stack_id": int(stack_id), "slug": slug, "name": name},
@@ -5363,7 +5401,11 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 supplement_id = int(parts[2])
                 slot_id = parts[3]
                 user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
-                await db.set_schedule_slot(conn, user_id, supplement_id, slot_id)
+                try:
+                    await _save_bot_supplement_schedule(conn, user_id, supplement_id, slot_id=slot_id)
+                except ValueError:
+                    await _show_supplement_time_screen(update, context, conn, tg_uid, supplement_id)
+                    return
                 split_ctx = context.user_data.get("split_flow")
                 split_origin_id = None
                 if isinstance(split_ctx, dict) and int(split_ctx.get("new_id") or 0) == supplement_id:
@@ -5380,7 +5422,11 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if data.startswith("supplement:clear_override:"):
             supplement_id = int(data.split(":", 2)[2])
             user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
-            await db.set_schedule_time_override(conn, user_id, supplement_id, None)
+            try:
+                await _save_bot_supplement_schedule(conn, user_id, supplement_id, set_override=True)
+            except ValueError:
+                await _show_supplement_time_screen(update, context, conn, tg_uid, supplement_id)
+                return
             split_ctx = context.user_data.get("split_flow")
             split_origin_id = None
             if isinstance(split_ctx, dict) and int(split_ctx.get("new_id") or 0) == supplement_id:
@@ -5400,7 +5446,7 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 context,
                 (
                     "Напиши дозу (до 80 символов).\n"
-                    f"Рекомендуемая доза: {recommended_dose}"
+                    f"Рекомендуемая доза: {html.escape(recommended_dose)}"
                 ),
                 my_hub_back(supplement_id),
                 route=f"mysupp:set_dose:{supplement_id}",
@@ -6236,6 +6282,15 @@ async def _render_route(
     if route == "menu:home":
         await home(update, context, target_chat_id=target_chat_id, target_message_id=target_message_id)
         return
+    compact_curated = re.fullmatch(r"curated:(open_id|detail_id):(\d+)(?::(-?\d+))?", route)
+    if compact_curated:
+        _, stack_id, page = compact_curated.groups()
+        stack = await db.admin_get_curated_stack_by_id(conn, int(stack_id))
+        if not stack or not int(stack['is_active'] or 0):
+            await show(update, context, "Стек не найден.", back(), route="menu:curated", target_chat_id=target_chat_id, target_message_id=target_message_id)
+            return
+        await _show_curated_stack(update, context, conn, str(stack['slug']), page=int(page or 0), target_chat_id=target_chat_id, target_message_id=target_message_id)
+        return
     if route in {"cx:list", "menu:complexes", "settings:complexes"} or re.fullmatch(r"cx:list:\d+", route):
         page = int(route.split(":")[-1]) if route.startswith('cx:list:') else 0
         await _show_complexes_hub(update, context, conn, tg_uid, page, target_chat_id=target_chat_id, target_message_id=target_message_id)
@@ -6258,6 +6313,15 @@ async def _render_route(
             target_chat_id=target_chat_id,
             target_message_id=target_message_id,
         )
+        return
+    if re.fullmatch(r"cat:(card|evidence)(?::\d+)?", route):
+        parts = route.split(':')
+        supplement_id = int(parts[2]) if len(parts)>2 else int(payload.get('supplement_id') or 0) if isinstance(payload, dict) else 0
+        if supplement_id:
+            renderer = _show_catalog_evidence if parts[1] == 'evidence' else _show_catalog_card
+            await renderer(update, context, conn, tg_uid, supplement_id, target_chat_id=target_chat_id, target_message_id=target_message_id)
+        else:
+            await render_catalog(update, context, conn, 0, target_chat_id=target_chat_id, target_message_id=target_message_id)
         return
     if route == "supp_card":
         if isinstance(payload, dict):
@@ -6495,10 +6559,23 @@ async def _render_route(
         await _show_admin_home(update, context)
         return
     if route == "admin:stacks":
+        if not await _require_admin(update, context, "content_bulk"):
+            return
         page = 0
         if isinstance(payload, dict):
             page = int(payload.get("page") or 0)
         await _show_admin_stacks(update, context, conn, page)
+        return
+    if re.fullmatch(r"admin:stack:(?:open:\d+|items:\d+(?::\d+)?|item:open:\d+:\d+(?::\d+)?)", route):
+        if not await _require_admin(update, context, "content_bulk"):
+            return
+        parts = route.split(":")
+        if parts[2] == 'open':
+            await _show_admin_stack_editor(update, context, conn, int(parts[3]), target_chat_id=target_chat_id, target_message_id=target_message_id)
+        elif parts[2] == 'items':
+            await _show_admin_stack_items(update, context, conn, int(parts[3]), int(parts[4]) if len(parts)>4 else 0, target_chat_id=target_chat_id, target_message_id=target_message_id)
+        else:
+            await _show_admin_stack_item(update, context, conn, int(parts[4]), int(parts[5]), int(parts[6]) if len(parts)>6 else 0, target_chat_id=target_chat_id, target_message_id=target_message_id)
         return
     if route.startswith("cat:class:page:"):
         page = int(route.split(":")[-1])
@@ -6736,6 +6813,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     conn = await db.connect(s.DB_PATH)
     try:
         ui_message_id, ui_screen, ui_payload = await db.get_ui_state(conn, tg_uid)
+        if str(ui_screen or '').startswith('admin:stack:') and not await _require_admin(update, context, "content_bulk"):
+            return
         if ui_screen == "cat_search_wait":
             try:
                 payload_data = json.loads(ui_payload) if ui_payload else {}
@@ -7084,6 +7163,9 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             elif field == "description_ru":
                 description_ru = value
             elif field == "source_url":
+                if value and not is_http_url(value):
+                    await show(update, context, "Некорректная ссылка. Отправь http:// или https:// ссылку (до 2048 символов), либо '-' чтобы очистить.", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"admin:stack:open:{stack_id}")]]), route="admin:stack:edit_wait", payload=payload_data)
+                    return
                 source_url = value
             await db.admin_upsert_curated_stack(
                 conn,
@@ -7107,6 +7189,9 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             except json.JSONDecodeError:
                 payload_data = {}
             stack_id = int(payload_data.get("stack_id") or 0)
+            if not await db.admin_get_curated_stack_by_id(conn, stack_id):
+                await show(update, context, "Стек не найден.", admin_stacks_kb(), route="admin:stacks")
+                return
             query = txt.strip()
             if len(query) < 2:
                 await show(
@@ -7138,6 +7223,9 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             except json.JSONDecodeError:
                 payload_data = {}
             stack_id = int(payload_data.get("stack_id") or 0)
+            if not await db.admin_get_curated_stack_by_id(conn, stack_id):
+                await show(update, context, "Стек не найден.", admin_stacks_kb(), route="admin:stacks")
+                return
             slug = str(payload_data.get("slug") or "")
             name = str(payload_data.get("name") or slug)
             parts = [p.strip() for p in txt.split("|")]
@@ -7168,6 +7256,10 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 payload_data = {}
             stack_id = int(payload_data.get("stack_id") or 0)
             item_id = int(payload_data.get("item_id") or 0)
+            item = await db.admin_get_curated_stack_item(conn, item_id)
+            if not item or int(item['stack_id']) != stack_id:
+                await _show_admin_stack_items(update, context, conn, stack_id)
+                return
             parts = [p.strip() for p in txt.split("|")]
             dose_ru = parts[0] if len(parts) > 0 else ""
             timing_ru = parts[1] if len(parts) > 1 else ""
@@ -7194,6 +7286,13 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         tg_uid = update.effective_user.id
         conn = await db.connect(s.DB_PATH)
         try:
+            if supplement_id is not None:
+                user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
+                member = await db.fetchone(conn, "SELECT 1 FROM user_supplements WHERE user_id=? AND supplement_id=? AND is_active=1", (user_id, int(supplement_id)))
+                if not member:
+                    context.user_data.pop(WAITING_KEY, None)
+                    await show(update, context, "БАД не найден в твоём списке.", my_list_back(), route="mysupp:list:0")
+                    return
             if waiting.startswith("mysupp:set_dose:"):
                 trimmed = txt.strip()
                 if not trimmed or len(trimmed) > 80:
@@ -7206,7 +7305,12 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     )
                 else:
                     user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
-                    await db.set_user_supp_dose(conn, user_id, supplement_id, trimmed)
+                    try:
+                        await db.set_user_supp_dose(conn, user_id, supplement_id, trimmed)
+                    except ValueError:
+                        context.user_data.pop(WAITING_KEY, None)
+                        await show(update, context, "БАД не найден в твоём списке.", my_list_back(), route="mysupp:list:0")
+                        return
                     context.user_data.pop(WAITING_KEY, None)
                     await show_my_supp_hub(update, context, tg_uid, supplement_id, conn=conn)
             elif waiting.startswith("mysupp:rem_add:"):
@@ -7273,7 +7377,12 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         )
                     await show(update, context, "Не понял время. Пример: 16:00", back_markup, route=f"supplement:set_override:{supplement_id}")
                 else:
-                    await db.set_schedule_time_override(conn, user_id, supplement_id, parsed_time)
+                    try:
+                        await _save_bot_supplement_schedule(conn, user_id, supplement_id, time_override=parsed_time, set_override=True)
+                    except ValueError:
+                        context.user_data.pop(WAITING_KEY, None)
+                        await _show_supplement_time_screen(update, context, conn, tg_uid, supplement_id)
+                        return
                     context.user_data.pop(WAITING_KEY, None)
                     await _show_supplement_time_screen(update, context, conn, tg_uid, supplement_id, split_origin_id=split_origin_id)
             else:
@@ -8252,7 +8361,7 @@ async def _show_admin_supp_results(update: Update, context: ContextTypes.DEFAULT
     offset = max(0, int(offset))
     rows = await db.search_supplements(conn, query, limit=10, offset=offset)
     has_next = len(rows) == 10
-    lines = [f"🔎 <b>Результаты поиска</b>: <code>{query}</code>"]
+    lines = [f"🔎 <b>Результаты поиска</b>: <code>{_escaped_text_chunks(_admin_preview(query, 300), 500)[0]}</code>"]
     if not rows:
         lines.append("\nНичего не найдено.")
     else:
@@ -8260,7 +8369,7 @@ async def _show_admin_supp_results(update: Update, context: ContextTypes.DEFAULT
             title = (item.get("name_ru") or item.get("name_en") or item.get("slug") or "Без названия").strip()
             grade = (item.get("evidence_grade") or "?").strip() or "?"
             mark = "🔗" if item.get("has_link") else "—"
-            lines.append(f"{idx}) {title} ({grade}) {mark}")
+            lines.append(f"{idx}) {html.escape(title)} ({html.escape(grade)}) {mark}")
     await show(
         update,
         context,
@@ -8292,12 +8401,12 @@ async def _show_admin_supp_card(
         update,
         context,
         "\n".join([
-            f"🧾 <b>{name}</b>",
-            f"EN: {row.get('name_en') or '—'}",
-            f"slug: <code>{row.get('slug') or ''}</code>",
+            f"🧾 <b>{html.escape(name)}</b>",
+            f"EN: {html.escape(str(row.get('name_en') or '—'))}",
+            f"slug: <code>{html.escape(str(row.get('slug') or ''))}</code>",
             f"Статус: {active_label}",
             f"Evidence / Confidence: {(row.get('evidence_grade') or '—')} / {(row.get('confidence') or '—')}",
-            f"Ссылка покупки: {purchase_url if purchase_url else 'нет'}",
+            f"Ссылка покупки: {html.escape(purchase_url) if purchase_url else 'нет'}",
         ]),
         admin_supp_card_kb(int(row["id"]), purchase_url),
         route=f"admin:supp_open:{int(row['id'])}",
@@ -8314,7 +8423,7 @@ async def _show_admin_supp_edit_picker(update: Update, context: ContextTypes.DEF
     await show(
         update,
         context,
-        f"✏️ <b>Редактирование полей</b>\n{name}\nВыбери поле для изменения.",
+        f"✏️ <b>Редактирование полей</b>\n{html.escape(name)}\nВыбери поле для изменения.",
         admin_supp_field_picker_kb(int(supplement_id)),
         route=f"admin:supp_edit:{int(supplement_id)}",
         payload={"supplement_id": int(supplement_id)},
@@ -8338,7 +8447,7 @@ async def _show_admin_supp_field_input(
     current_value = str(row.get(field) or "")
     lines = [
         f"✍️ <b>{_admin_field_label(field)}</b>",
-        f"Текущее значение: <code>{_admin_preview(current_value)}</code>",
+        f"Текущее значение: <code>{html.escape(_admin_preview(current_value))}</code>",
         "Пришли новое значение сообщением.",
     ]
     if field in ADMIN_JSON_FIELDS:
@@ -8427,26 +8536,30 @@ def _admin_preview(value: str, limit: int = 280) -> str:
     return text[: limit - 1].rstrip() + "…"
 
 
-async def _show_admin_stack_editor(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, stack_id: int) -> None:
+async def _show_admin_stack_editor(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, stack_id: int, *, target_chat_id: int | None = None, target_message_id: int | None = None) -> None:
     stack = await db.admin_get_curated_stack_by_id(conn, stack_id)
     if not stack:
-        await show(update, context, "Стек не найден.", admin_stacks_kb(), route="admin:stacks")
+        await show(update, context, "Стек не найден.", admin_stacks_kb(), route="admin:stacks", target_chat_id=target_chat_id, target_message_id=target_message_id)
         return
     tags = []
     try:
         tags = json.loads(stack["tags_json"] or "[]")
     except Exception:
         tags = []
+    if not isinstance(tags, list):
+        tags = []
     tags_text = ", ".join([str(t).strip() for t in tags if str(t).strip()]) if tags else "—"
     status = "🟢" if int(stack["is_active"] or 0) else "⚪"
     desc = _short_line(str(stack["description_ru"] or "—"), 120)
+    def preview(value, budget):
+        return _escaped_text_chunks(_short_line(value, budget), budget)[0]
     text = (
-        f"🧩 <b>{stack['title_ru'] or 'Без названия'}</b> {status}\n"
-        f"slug: <code>{stack['slug']}</code>\n"
-        f"Автор: {stack['author_ru'] or '—'}\n"
-        f"Теги: {tags_text}\n"
-        f"Источник: {stack['source_url'] or '—'}\n"
-        f"Описание: {desc}"
+        f"🧩 <b>{preview(stack['title_ru'] or 'Без названия', 120)}</b> {status}\n"
+        f"slug: <code>{preview(stack['slug'], 160)}</code>\n"
+        f"Автор: {preview(stack['author_ru'] or '—', 120)}\n"
+        f"Теги: {preview(tags_text, 200)}\n"
+        f"Источник: {preview(stack['source_url'] or '—', 240)}\n"
+        f"Описание: {preview(desc, 120)}"
     )
     await show(
         update,
@@ -8454,10 +8567,15 @@ async def _show_admin_stack_editor(update: Update, context: ContextTypes.DEFAULT
         text,
         admin_stack_editor_kb(int(stack["id"]), int(stack["is_active"] or 0)),
         route=f"admin:stack:open:{int(stack['id'])}",
+        target_chat_id=target_chat_id,
+        target_message_id=target_message_id,
     )
 
 
-async def _show_admin_stack_items(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, stack_id: int, page: int = 0) -> None:
+async def _show_admin_stack_items(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, stack_id: int, page: int = 0, *, target_chat_id: int | None = None, target_message_id: int | None = None) -> None:
+    if not await db.admin_get_curated_stack_by_id(conn, int(stack_id)):
+        await show(update, context, "Стек не найден.", admin_stacks_kb(), route="admin:stacks", target_chat_id=target_chat_id, target_message_id=target_message_id)
+        return
     items = await db.list_curated_stack_items(conn, int(stack_id))
     entries = []
     for idx, item in enumerate(items, start=1):
@@ -8473,26 +8591,41 @@ async def _show_admin_stack_items(update: Update, context: ContextTypes.DEFAULT_
     if len(pages)>1:
         lines.append(f"Страница {page+1}/{len(pages)}")
     page_items = {entry['item']['raw']['id']:entry['item']['raw'] for entry in pages[page]}
-    await show(update, context, '\n'.join(lines), admin_stack_items_kb(int(stack_id), list(page_items.values()), page=page, has_prev=page>0, has_next=page+1<len(pages)), route=f"admin:stack:items:{int(stack_id)}:{page}")
+    await show(update, context, '\n'.join(lines), admin_stack_items_kb(int(stack_id), list(page_items.values()), page=page, has_prev=page>0, has_next=page+1<len(pages)), route=f"admin:stack:items:{int(stack_id)}:{page}", target_chat_id=target_chat_id, target_message_id=target_message_id)
 
 
-async def _show_admin_stack_item(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, stack_id: int, item_id: int) -> None:
+async def _show_admin_stack_item(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, stack_id: int, item_id: int, page: int = 0, *, target_chat_id: int | None = None, target_message_id: int | None = None) -> None:
     item = await db.admin_get_curated_stack_item(conn, int(item_id))
-    if not item:
-        await show(update, context, "Элемент не найден.", admin_stack_items_kb(stack_id, []), route=f"admin:stack:items:{stack_id}")
+    if not item or int(item['stack_id']) != int(stack_id):
+        await _show_admin_stack_items(update, context, conn, stack_id, target_chat_id=target_chat_id, target_message_id=target_message_id)
         return
-    text = (
-        f"<b>{item['supplement_name'] or item['supplement_slug'] or 'Без названия'}</b>\n"
+    name = str(item['supplement_name'] or item['supplement_slug'] or 'Без названия')
+    content = (
+        f"{name}\n"
         f"Доза: {item['dose_ru'] or '—'}\n"
         f"Время: {item['timing_ru'] or '—'}\n"
         f"Заметка: {item['notes_ru'] or '—'}"
     )
+    pages = _escaped_text_chunks(content, 2800)
+    page = min(max(0,int(page)),len(pages)-1)
+    text = pages[page]
+    rows = list(admin_stack_item_editor_kb(stack_id, int(item_id)).inline_keyboard)
+    if len(pages)>1:
+        text += f"\n\nСтраница {page+1}/{len(pages)}"
+        nav = []
+        if page>0:
+            nav.append(InlineKeyboardButton('⬅️', callback_data=f'admin:stack:item:open:{stack_id}:{item_id}:{page-1}'))
+        if page+1<len(pages):
+            nav.append(InlineKeyboardButton('➡️', callback_data=f'admin:stack:item:open:{stack_id}:{item_id}:{page+1}'))
+        rows.insert(-1, nav)
     await show(
         update,
         context,
         text,
-        admin_stack_item_editor_kb(stack_id, int(item_id)),
-        route=f"admin:stack:item:open:{stack_id}:{int(item_id)}",
+        InlineKeyboardMarkup(rows),
+        route=f"admin:stack:item:open:{stack_id}:{int(item_id)}:{page}",
+        target_chat_id=target_chat_id,
+        target_message_id=target_message_id,
     )
 
 
@@ -8727,7 +8860,7 @@ async def _show_catalog_list(
 
     lines = ["📚 <b>Каталог</b>"]
     if list_mode == "search":
-        lines.append(f"Поиск: «{query}»")
+        lines.append(f"Поиск: «{_escaped_text_chunks(_admin_preview(query, 300), 500)[0]}»")
     elif list_mode == "class":
         lines.append(f"Цель: {rules.get_catalog_class_title(class_key)}")
     elif list_mode == "type":
@@ -8820,8 +8953,8 @@ async def _show_catalog_card(
     taken_days = int(card_stats.get("taken_days") or 0)
 
     text = (
-        f"💊 <b>{title}</b>\n\n"
-        f"Кратко: {summary}\n\n"
+        f"💊 <b>{html.escape(str(title))}</b>\n\n"
+        f"Кратко: {html.escape(summary)}\n\n"
         f"Доказательность: {evidence_text}\n"
         f"Уверенность: {confidence_text}\n"
         f"Исследования на людях: {human_trials}\n"
@@ -8841,17 +8974,18 @@ async def _show_catalog_card(
     btns.append([InlineKeyboardButton("💊 Как принимать", callback_data=f"supp:open:{row['id']}")])
     btns.append([InlineKeyboardButton("🧩 Совместимость", callback_data=f"card:compat:{row['id']}")])
     btns.append([InlineKeyboardButton("📊 Доказательность", callback_data=f"card:evidence:{row['id']}")])
-    if str(row.get("purchase_url") or "").strip():
+    if is_http_url(row.get("purchase_url")):
         btns.append([InlineKeyboardButton("🛒 Где купить", url=str(row.get("purchase_url") or "").strip())])
     btns.append([InlineKeyboardButton("⬅️ Назад", callback_data="cat:back")])
 
     payload = await _load_catalog_payload(conn, tg_uid)
+    payload['supplement_id'] = int(row['id'])
     await show(
         update,
         context,
         text,
         InlineKeyboardMarkup(btns),
-        route="cat:card",
+        route=f"cat:card:{int(row['id'])}",
         payload=payload,
         target_chat_id=target_chat_id,
         target_message_id=target_message_id,
@@ -8881,7 +9015,7 @@ async def _show_catalog_evidence(
 
     text = (
         f"📊 <b>Доказательность</b>\n"
-        f"{title}\n\n"
+        f"{html.escape(str(title))}\n\n"
         f"Уровень базы: {evidence_text}\n"
         f"Уверенность: {confidence_text}\n"
         f"Исследования на людях: {human_trials}\n"
@@ -8889,12 +9023,13 @@ async def _show_catalog_evidence(
     )
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"cat:open:{row['id']}")]])
     payload = await _load_catalog_payload(conn, tg_uid)
+    payload['supplement_id'] = int(row['id'])
     await show(
         update,
         context,
         text,
         kb,
-        route="cat:evidence",
+        route=f"cat:evidence:{int(row['id'])}",
         payload=payload,
         target_chat_id=target_chat_id,
         target_message_id=target_message_id,
@@ -8952,7 +9087,7 @@ async def render_search_results(
     has_next = (page + 1) * page_size < total
     text = (
         "🔎 Результаты поиска: "
-        f"{query}\n"
+        f"{_escaped_text_chunks(_admin_preview(query, 300), 500)[0]}\n"
         f"Найдено: {total}\n\n"
         "Выбери БАД:"
     )
@@ -9391,7 +9526,7 @@ async def _show_curated_stack(
         lines.extend(['', f"Страница {page+1}/{len(pages)} · Позиций: {len(items)}"])
     lines.extend(['', '<i>Это не медсовет.</i>'])
     back_page = int(context.user_data.get('curated_page') or 0)
-    await show(update, context, '\n'.join(lines), curated_stack_card(slug,source_url=stack['source_url'],back_page=back_page,item_buttons=list(item_buttons.values()),page=page,has_prev=page>0,has_next=page+1<len(pages)),route=f"curated:detail_page:{slug}:{page}",target_chat_id=target_chat_id,target_message_id=target_message_id)
+    await show(update, context, '\n'.join(lines), curated_stack_card(slug,stack_id=int(stack['id']),source_url=stack['source_url'],back_page=back_page,item_buttons=list(item_buttons.values()),page=page,has_prev=page>0,has_next=page+1<len(pages)),route=f"curated:detail_id:{int(stack['id'])}:{page}",target_chat_id=target_chat_id,target_message_id=target_message_id)
 
 async def _show_my_list(
     update: Update,
@@ -9433,7 +9568,7 @@ async def _show_my_list(
     ]
     for idx, row in enumerate(rows, start=1):
         dose = str(row["dose_text"] or "").strip() or "—"
-        lines.append(f"{idx}) {row['name']} — доза: {dose}")
+        lines.append(f"{idx}) {html.escape(str(row['name']))} — доза: {html.escape(dose)}")
 
     await show(
         update,
@@ -9479,9 +9614,9 @@ async def show_my_supp_hub(
 
         name_ru = (row["name_ru"] or row["name"] or "").strip()
         name_en = (row["name_en"] or "").strip()
-        name_line = f"💊 <b>{name_ru}</b>"
+        name_line = f"💊 <b>{html.escape(name_ru)}</b>"
         if name_en and name_en != name_ru:
-            name_line = f"{name_line} ({name_en})"
+            name_line = f"{name_line} ({html.escape(name_en)})"
         dose_text = (row["dose_text"] or "").strip() or "—"
         start_date, duration = _format_start_date_and_duration(row["created_at"])
         taken_count = int(row["taken_count"] or 0)
@@ -9494,7 +9629,7 @@ async def show_my_supp_hub(
         text = (
             "⚙️ <b>Управление добавкой</b>\n\n"
             f"{name_line}\n\n"
-            f"Доза: {dose_text}\n"
+            f"Доза: {html.escape(dose_text)}\n"
             f"Дата начала: {start_date}\n"
             f"Уже принимается: {duration}\n"
             f"Всего принял: {taken_count} раз\n"
@@ -9529,7 +9664,7 @@ async def _show_add_to_stack_slot_picker(
     user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
     slots = await db.get_user_slots(conn, user_id)
     enabled_slots = [slot for slot in slots if bool(slot.get("is_enabled", True))]
-    title = str(row.get("name_ru") or row.get("name_en") or row.get("name") or "Добавка")
+    title = html.escape(str(row.get("name_ru") or row.get("name_en") or row.get("name") or "Добавка"))
     pending = context.user_data.get("add_to_stack_pending") if isinstance(context.user_data.get("add_to_stack_pending"), dict) else {}
     back_cb = str(pending.get("back_cb") or "cat:back")
     text = (
@@ -9554,11 +9689,23 @@ async def _complete_add_to_stack_with_slot(
     supplement_id: int,
     slot_id: str,
 ) -> None:
-    await db.add_user_supplement(conn, tg_uid, int(supplement_id))
-    user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
-    await db.set_schedule_slot(conn, user_id, int(supplement_id), str(slot_id or "morning"))
-    await db.set_schedule_time_override(conn, user_id, int(supplement_id), None)
     pending = context.user_data.get("add_to_stack_pending") if isinstance(context.user_data.get("add_to_stack_pending"), dict) else {}
+    try:
+        async with db.transaction(conn) as tx:
+            user_id = await db.get_or_create_user(tx, tg_uid, tz_name="")
+            slots = await db.get_user_slots(tx, user_id)
+            if not any(str(slot.get('slot_id') or '') == str(slot_id) for slot in slots):
+                raise ValueError('slot_not_found')
+            existing = await db.fetchone(tx, "SELECT 1 FROM user_supplements WHERE user_id=? AND supplement_id=? AND is_active=1", (user_id, int(supplement_id)))
+            if not existing:
+                await db.add_user_supplement(tx, tg_uid, int(supplement_id))
+                await db.set_schedule_slot(tx, user_id, int(supplement_id), str(slot_id))
+                await db.set_schedule_time_override(tx, user_id, int(supplement_id), None)
+    except ValueError:
+        await _show_add_to_stack_slot_picker(update, context, conn, tg_uid, supplement_id)
+        return
+    if pending and context.user_data.get("add_to_stack_pending") is not pending:
+        return
     mode = str(pending.get("mode") or "")
     context.user_data.pop("add_to_stack_pending", None)
     context.user_data.pop(WAITING_KEY, None)

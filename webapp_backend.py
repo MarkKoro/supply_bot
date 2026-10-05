@@ -2533,7 +2533,7 @@ async def api_curated_stacks(x_telegram_init_data: str = Header(default="", alia
     conn = await db.connect(s.DB_PATH)
     try:
         user_id = await db.get_or_create_user(conn, tg_user_id, tz_name="")
-        stack_rows = await db.list_curated_stacks(conn, limit=100, offset=0)
+        stack_rows = await db.list_curated_stacks(conn, limit=None, offset=0)
         user_stack_ids = await db.get_user_stack_supplement_ids(conn, tg_user_id)
         items_out: list[dict] = []
         for row in stack_rows:
@@ -2565,6 +2565,8 @@ async def api_curated_stacks(x_telegram_init_data: str = Header(default="", alia
 
             duplicate_count = sum(1 for item in resolved_items if item["already_in_stack"])
             missing_count = sum(1 for item in resolved_items if item["not_found"])
+            tags = _decode_json_or_default(row['tags_json'], [])
+            tags = [tag for tag in tags if isinstance(tag, str)] if isinstance(tags, list) else []
             items_out.append(
                 {
                     "id": stack_id,
@@ -2573,7 +2575,7 @@ async def api_curated_stacks(x_telegram_init_data: str = Header(default="", alia
                     "author_ru": str(row["author_ru"] or "").strip(),
                     "description_ru": str(row["description_ru"] or "").strip(),
                     "source_url": str(row["source_url"] or "").strip(),
-                    "tags": json.loads(row["tags_json"] or "[]") if row["tags_json"] else [],
+                    "tags": tags,
                     "items": resolved_items,
                     "items_total": len(resolved_items),
                     "already_in_stack_count": duplicate_count,

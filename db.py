@@ -2281,7 +2281,7 @@ def build_search_blob(name_ru: str | None, name_en: str | None, aliases: list[st
     return "|".join(parts)
 
 async def _backfill_search_blob(conn: aiosqlite.Connection) -> None:
-    rows = await fetchall(conn, "SELECT id, name_ru, name_en, aliases, aliases_json FROM supplements")
+    rows = await fetchall(conn, "SELECT id, name, slug, name_ru, name_en, aliases, aliases_json FROM supplements")
     for row in rows:
         aliases = []
         aliases.extend(_parse_aliases_list(row["aliases"]))
@@ -2292,7 +2292,7 @@ async def _backfill_search_blob(conn: aiosqlite.Connection) -> None:
             (int(row["id"]),),
         )
         aliases.extend([str(item["alias_raw"] or "") for item in alias_rows])
-        search_blob = build_search_blob(row["name_ru"], row["name_en"], aliases)
+        search_blob = build_search_blob(row["name_ru"] or row["name"], row["name_en"], [*aliases, str(row['slug'] or '')])
         await conn.execute(
             "UPDATE supplements SET search_blob=? WHERE id=?",
             (search_blob, int(row["id"])),
@@ -3572,7 +3572,7 @@ async def upsert_supplement(conn: aiosqlite.Connection, s: dict) -> int:
     if isinstance(tags_raw, (list, tuple)):
         tags_raw = " ".join([str(item) for item in tags_raw if item])
     evidence_fields = _extract_evidence_fields(s.get("evidence_json"), s.get("payload_json"))
-    search_blob = s.get("search_blob") or build_search_blob(name_ru, name_en, aliases_list)
+    search_blob = s.get("search_blob") or build_search_blob(name_ru or display_name, name_en, [*aliases_list, str(s.get('slug') or '')])
     await conn.execute(
         """INSERT INTO supplements(
           slug,name,name_ru,name_en,aliases,aliases_json,alias_norm,search_blob,
@@ -4124,6 +4124,17 @@ async def admin_set_supplement_field(
         f"UPDATE supplements SET {column}=?, updated_at_utc=? WHERE id=?",
         (normalized if normalized is not None else "", utc_now_iso(), int(supplement_id)),
     )
+    if safe_field in {'name_ru', 'name_en'}:
+        metadata = dict(await fetchone(conn, "SELECT * FROM supplements WHERE id=?", (int(supplement_id),)))
+        name_ru = str(metadata['name_ru'] or '').strip()
+        name_en = str(metadata['name_en'] or '').strip()
+        metadata['name'] = f'{name_ru} ({name_en})' if name_ru and name_en else name_ru or name_en or metadata['name']
+        aliases = _parse_aliases_list(metadata.get('aliases_json') or metadata.get('aliases') or '')
+        alias_rows = await fetchall(conn, 'SELECT alias_raw FROM supplement_aliases WHERE supplement_id=?', (int(supplement_id),))
+        aliases.extend(str(alias['alias_raw'] or '') for alias in alias_rows)
+        alias_norm = await _build_supplement_alias_norm(conn, metadata)
+        search_blob = build_search_blob(name_ru or metadata['name'], name_en, [*aliases, str(metadata['slug'] or '')])
+        await conn.execute('UPDATE supplements SET name=?, alias_norm=?, search_blob=? WHERE id=?', (metadata['name'], alias_norm, search_blob, int(supplement_id)))
     await _admin_insert_audit(
         conn,
         int(admin_tg_id),
@@ -5150,11 +5161,11 @@ async def upsert_aliases(conn: aiosqlite.Connection, supplement_id: int, aliases
     if row:
         alias_norm = await _build_supplement_alias_norm(conn, row)
         search_blob = build_search_blob(
-            row["name_ru"] if "name_ru" in row.keys() else None,
+            row["name_ru"] or row["name"],
             row["name_en"] if "name_en" in row.keys() else None,
-            _parse_aliases_list(
+            [*_parse_aliases_list(
                 row["aliases_json"] if "aliases_json" in row.keys() else row["aliases"] if "aliases" in row.keys() else ""
-            ),
+            ), str(row['slug'] or '')],
         )
         await conn.execute(
             "UPDATE supplements SET alias_norm=?, search_blob=? WHERE id=?",
@@ -5309,14 +5320,14 @@ async def admin_get_global_stats(conn: aiosqlite.Connection) -> dict:
     }
 
 # curated stacks
-async def list_curated_stacks(conn: aiosqlite.Connection, limit: int, offset: int = 0):
+async def list_curated_stacks(conn: aiosqlite.Connection, limit: int | None, offset: int = 0):
     return await fetchall(
         conn,
         """SELECT * FROM curated_stacks
            WHERE is_active=1
            ORDER BY created_at DESC, title_ru
            LIMIT ? OFFSET ?""",
-        (limit, offset),
+        (-1 if limit is None else int(limit), offset),
     )
 
 async def get_curated_stack(conn: aiosqlite.Connection, slug: str):
@@ -6308,19 +6319,26 @@ async def list_user_supplements_page(
     status_join = "LEFT JOIN supplement_day_state sds ON sds.user_id=us.user_id AND sds.supplement_id=us.supplement_id AND sds.day=?"
     rows = await fetchall(
         conn,
-        f"""SELECT us.*, s.id AS supplement_id, s.slug, s.name, s.name_ru, s.name_en,
+        f"""SELECT us.*, COALESCE(NULLIF(uss.dose_text,''), us.dose_text) AS effective_dose_text,
+                  s.id AS supplement_id, s.slug, s.name, s.name_ru, s.name_en,
                   s.summary_ru, s.summary_verified, s.summary_theoretical,
                   s.molecular_mechanisms, s.mechanisms,
                   sds.status AS today_status
            FROM user_supplements us
            JOIN supplements s ON s.id=us.supplement_id
+           LEFT JOIN user_supp_settings uss ON uss.user_id=us.user_id AND uss.supplement_id=us.supplement_id
            {status_join}
            WHERE us.user_id=? AND us.is_active=1 AND us.enabled=1{filters}
            ORDER BY s.name
            LIMIT ? OFFSET ?""",
         tuple(params),
     )
-    return rows, total
+    result = []
+    for row in rows:
+        item = dict(row)
+        item['dose_text'] = item.pop('effective_dose_text')
+        result.append(item)
+    return result, total
 
 async def set_user_supplement_dose(
     conn: aiosqlite.Connection,
@@ -6329,11 +6347,7 @@ async def set_user_supplement_dose(
     dose_text: str | None,
 ) -> None:
     user_id = await get_or_create_user(conn, tg_user_id)
-    await conn.execute(
-        "UPDATE user_supplements SET dose_text=? WHERE user_id=? AND supplement_id=?",
-        (dose_text, user_id, supplement_id),
-    )
-    await conn.commit()
+    await set_user_supp_dose(conn, user_id, supplement_id, dose_text)
 
 async def set_user_supp_dose_legacy(
     conn: aiosqlite.Connection,
@@ -6562,6 +6576,9 @@ async def set_user_supp_fields(
            WHERE user_id=? AND supplement_id=? AND is_active=1""",
         (str(dose_text or "").strip(), str(note_text or "").strip(), user_id, int(supplement_id)),
     )
+    if (cur.rowcount or 0) == 0:
+        await conn.commit()
+        return False
     await conn.execute(
         """INSERT OR IGNORE INTO user_supp_settings(user_id, supplement_id, updated_at)
            VALUES(?,?,?)""",
@@ -7401,18 +7418,18 @@ async def upsert_user_supp_settings(
 
 async def set_user_supp_dose(
     conn: aiosqlite.Connection,
-    user_ref: int,
+    user_id: int,
     supplement_id: int,
     dose_text: str | None,
 ) -> None:
-    existing_user = await fetchone(conn, "SELECT id FROM users WHERE id=?", (int(user_ref),))
-    resolved_user_id = int(existing_user["id"]) if existing_user else await get_or_create_user(conn, int(user_ref))
-    await upsert_user_supp_settings(
-        conn,
-        resolved_user_id,
-        supplement_id,
-        {"dose_text": dose_text},
-    )
+    # The bot passes the internal users.id, never a Telegram ID.
+    async with transaction(conn) as tx:
+        member = await fetchone(tx, 'SELECT 1 FROM user_supplements WHERE user_id=? AND supplement_id=? AND is_active=1', (int(user_id), int(supplement_id)))
+        if not member:
+            raise ValueError('supplement_not_found')
+        value = str(dose_text or '').strip()
+        await tx.execute('UPDATE user_supplements SET dose_text=? WHERE user_id=? AND supplement_id=?', (value, int(user_id), int(supplement_id)))
+        await upsert_user_supp_settings(tx, int(user_id), int(supplement_id), {'dose_text':value})
 
 async def set_user_supp_reminder_time(
     conn: aiosqlite.Connection,

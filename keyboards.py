@@ -1,9 +1,20 @@
 from __future__ import annotations
 from datetime import datetime
+from urllib.parse import urlsplit
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 
 import tz
+
+def is_http_url(value: str | None) -> bool:
+    url = str(value or '').strip()
+    if not url or len(url) > 2048 or any(char.isspace() or ord(char) < 32 for char in url):
+        return False
+    try:
+        parsed = urlsplit(url)
+        return parsed.scheme in {'http', 'https'} and bool(parsed.hostname) and parsed.port != 0
+    except ValueError:
+        return False
 
 def main_menu(
     *,
@@ -385,7 +396,7 @@ def curated_stacks_list(rows, page: int, has_prev: bool, has_next: bool, *, is_a
     btns = []
     for r in rows:
         label = f"🧠 {r['title_ru']}"
-        btns.append([InlineKeyboardButton(label, callback_data=f"curated:open:{r['slug']}")])
+        btns.append([InlineKeyboardButton(label, callback_data=f"curated:open_id:{int(r['id'])}")])
     nav = []
     if has_prev:
         nav.append(InlineKeyboardButton("◀️", callback_data=f"curated:page:{page - 1}"))
@@ -486,7 +497,7 @@ def admin_stack_search_kb(stack_id: int, rows_data, page: int, has_prev: bool, h
     rows: list[list[InlineKeyboardButton]] = []
     for row in rows_data:
         title = row.get("name_ru") or row.get("name_en") or row.get("slug") or "Без названия"
-        rows.append([InlineKeyboardButton(str(title), callback_data=f"admin:stack:item:pick:{stack_id}:{row['slug']}")])
+        rows.append([InlineKeyboardButton(str(title), callback_data=f"admin:stack:item:pick_id:{stack_id}:{int(row['id'])}")])
     nav: list[InlineKeyboardButton] = []
     if has_prev:
         nav.append(InlineKeyboardButton("◀️", callback_data=f"admin:stack:item:search_page:{stack_id}:{max(0, page - 1)}"))
@@ -548,7 +559,8 @@ def admin_supp_card_kb(supplement_id: int, purchase_url: str) -> InlineKeyboardM
     if has_link:
         rows.append([InlineKeyboardButton("✏️ Изменить ссылку", callback_data=f"admin:supp_set_link:{supplement_id}")])
         rows.append([InlineKeyboardButton("🗑 Удалить ссылку", callback_data=f"admin:supp_clear_link:{supplement_id}")])
-        rows.append([InlineKeyboardButton("🛒 Открыть ссылку", url=purchase_url)])
+        if is_http_url(purchase_url):
+            rows.append([InlineKeyboardButton("🛒 Открыть ссылку", url=purchase_url)])
     else:
         rows.append([InlineKeyboardButton("➕ Добавить ссылку", callback_data=f"admin:supp_set_link:{supplement_id}")])
     rows.append([InlineKeyboardButton("✏️ Редактировать поля", callback_data=f"admin:supp_edit:{supplement_id}")])
@@ -604,6 +616,7 @@ def curated_stack_card(
     page: int = 0,
     has_prev: bool = False,
     has_next: bool = False,
+    stack_id: int | None = None,
 ) -> InlineKeyboardMarkup:
     btns = []
     for item in list(item_buttons or []):
@@ -611,16 +624,18 @@ def curated_stack_card(
         supp_id = int(item.get("supplement_id") or 0)
         if supp_id > 0:
             btns.append([InlineKeyboardButton(label, callback_data=f"supp:open:{supp_id}")])
-    if source_url:
+    if is_http_url(source_url):
         btns.append([InlineKeyboardButton("🔗 Источник", url=source_url)])
+    page_prefix = f"curated:detail_id:{int(stack_id)}" if stack_id is not None else f"curated:detail_page:{slug}"
     nav = []
     if has_prev:
-        nav.append(InlineKeyboardButton("⬅️", callback_data=f"curated:detail_page:{slug}:{page-1}"))
+        nav.append(InlineKeyboardButton("⬅️", callback_data=f"{page_prefix}:{page-1}"))
     if has_next:
-        nav.append(InlineKeyboardButton("➡️", callback_data=f"curated:detail_page:{slug}:{page+1}"))
+        nav.append(InlineKeyboardButton("➡️", callback_data=f"{page_prefix}:{page+1}"))
     if nav:
         btns.append(nav)
-    btns.append([InlineKeyboardButton("➕ Добавить себе", callback_data=f"curated:add:{slug}")])
+    add_cb = f"curated:add_id:{int(stack_id)}" if stack_id is not None else f"curated:add:{slug}"
+    btns.append([InlineKeyboardButton("➕ Добавить себе", callback_data=add_cb)])
     btns.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"curated:page:{back_page}")])
     return InlineKeyboardMarkup(btns)
 
@@ -640,7 +655,7 @@ def supplement_page(
         InlineKeyboardButton("⛔ Несовместимо", callback_data=f"supp:compat:{supplement_id}:antagonism:0"),
     ])
     btns.append([InlineKeyboardButton("⚠️ Осторожно", callback_data=f"supp:compat:{supplement_id}:caution:0")])
-    if show_buy:
+    if is_http_url(show_buy):
         btns.append([shop_url_button(show_buy)])
     btns.append([InlineKeyboardButton("⬅️ Назад", callback_data=back_route)])
     btns.append([InlineKeyboardButton("🏠 Меню", callback_data="menu:home")])
@@ -745,7 +760,7 @@ def supp_tabs_kb(
         btns.append([InlineKeyboardButton(primary_label, callback_data=primary_cb)])
         btns.append([InlineKeyboardButton("⬅️ Назад", callback_data=back_cb)])
         btns.append([InlineKeyboardButton("🏠 Меню", callback_data="menu:home")])
-    if purchase_url:
+    if is_http_url(purchase_url):
         btns.append([InlineKeyboardButton("🛒 Где купить", url=purchase_url)])
     return InlineKeyboardMarkup(btns)
 

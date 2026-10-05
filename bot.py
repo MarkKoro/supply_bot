@@ -3282,8 +3282,12 @@ async def reminder_fire_batch(
     try:
         user_row = await db.fetchone(
             conn,
-            """SELECT tg_user_id, tz_name, last_chat_id
-               FROM users WHERE tg_user_id=?""",
+            """SELECT u.id, u.tg_user_id, u.tz_name, u.last_chat_id
+               FROM users u
+               LEFT JOIN user_notification_prefs np ON np.user_id=u.id
+               WHERE u.tg_user_id=? AND COALESCE(u.is_banned,0)=0
+                 AND COALESCE(u.deleted_at_utc,'')=''
+                 AND COALESCE(np.reminders_enabled,1)=1""",
             (tg_user_id,),
         )
         if not user_row:
@@ -3300,9 +3304,14 @@ async def reminder_fire_batch(
 
         entries: list[dict] = []
         day = db.get_user_local_date(user_row['tz_name'] or 'UTC')
+        slots = {str(slot['slot_id']): slot for slot in await db.get_user_slots(conn, int(user_row['id']))}
+        schedules = await db.get_user_schedule_map(conn, int(user_row['id']))
         for supplement_id in dict.fromkeys(supplement_ids):
             user_supp = await db.get_user_supplement(conn, tg_user_id, supplement_id)
             if not user_supp:
+                continue
+            slot_id = str((schedules.get(supplement_id) or {}).get('slot_id') or 'morning')
+            if not bool((slots.get(slot_id) or {}).get('is_enabled', True)) and not await db.list_reminders_for_supplement(conn, tg_user_id, supplement_id):
                 continue
             if await db.get_day_status(conn, tg_user_id, day, supplement_id) in {'taken', 'skipped'}:
                 continue
@@ -5622,7 +5631,11 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 supplement_id = int(parts[3])
                 time_local = parts[4].replace("-", ":")
                 page = int(parts[5])
-                await db.upsert_reminder(conn, tg_uid, supplement_id, time_local, enabled=1)
+                try:
+                    await db.add_reminder_for_supplement(conn, tg_uid, supplement_id, time_local)
+                except ValueError:
+                    await show(update, context, "Напоминание недоступно. Обнови список БАДов и выбери время заново.", my_list_back(), route="mysupp:list:0")
+                    return
                 await _show_my_supp_reminders(update, context, conn, tg_uid, supplement_id, page=page)
             return
 
@@ -7464,7 +7477,12 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         route=f"mysupp:rem:add:{supplement_id}",
                     )
                 else:
-                    await db.upsert_reminder(conn, tg_uid, supplement_id, parsed_time, enabled=1)
+                    try:
+                        await db.add_reminder_for_supplement(conn, tg_uid, supplement_id, parsed_time)
+                    except ValueError:
+                        context.user_data.pop(WAITING_KEY, None)
+                        await show(update, context, "БАД не найден в твоём списке.", my_list_back(), route="mysupp:list:0")
+                        return
                     context.user_data.pop(WAITING_KEY, None)
                     await _show_my_supp_reminders(update, context, conn, tg_uid, supplement_id)
             elif waiting == "schedule:add_custom":
@@ -9931,6 +9949,9 @@ async def _show_my_supp_reminders(
     target_chat_id: int | None = None,
     target_message_id: int | None = None,
 ) -> None:
+    if not await db.user_has_supplement(conn, tg_uid, supplement_id):
+        await show(update, context, "БАД не найден в твоём списке.", my_list_back(), route="mysupp:list:0")
+        return
     supplement = await db.get_supplement_by_id(conn, supplement_id)
     if not supplement:
         await show(update, context, "БАД не найден.", my_list_back(), route="mysupp:list:0")
@@ -9938,7 +9959,7 @@ async def _show_my_supp_reminders(
     reminders = await db.list_reminders_for_user(conn, tg_uid)
     reminder_times = [str(r["time_local"]) for r in reminders if int(r["supplement_id"]) == supplement_id]
     name = (supplement["name_ru"] or supplement["name"] or "").strip()
-    title = f"⏰ <b>Напоминания</b>\n{name}"
+    title = f"⏰ <b>Напоминания</b>\n{html.escape(name)}"
     if reminder_times:
         lines = [
             title,
@@ -9946,7 +9967,7 @@ async def _show_my_supp_reminders(
             "Добавь новое время или удали существующие напоминания.",
             "",
             "Текущие напоминания:",
-            *[f"• {t}" for t in reminder_times],
+            *[f"• {html.escape(t)}" for t in reminder_times],
         ]
     else:
         lines = [

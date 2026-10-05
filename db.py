@@ -6832,26 +6832,35 @@ async def set_reminders_for_supplement(
     if normalized_mode not in {"slot", "custom"}:
         raise ValueError("invalid_mode")
 
-    await conn.execute(
-        "DELETE FROM reminders WHERE user_id=? AND supplement_id=?",
-        (int(tg_user_id), int(supplement_id)),
-    )
-
+    normalized_times: set[str] = set()
     if normalized_mode == "custom":
-        seen: set[str] = set()
         for raw in list(times or []):
             norm = _normalize_hhmm(str(raw or "").strip())
-            if not norm or norm in seen:
-                continue
-            seen.add(norm)
-            await conn.execute(
+            if not norm:
+                raise ValueError("invalid_time")
+            normalized_times.add(norm)
+
+    async with transaction(conn) as tx:
+        if not await user_has_supplement(tx, int(tg_user_id), int(supplement_id)):
+            raise ValueError("supplement_not_found")
+        await tx.execute("DELETE FROM reminders WHERE user_id=? AND supplement_id=?", (int(tg_user_id), int(supplement_id)))
+        for norm in sorted(normalized_times):
+            await tx.execute(
                 """INSERT INTO reminders(user_id, supplement_id, time_local, enabled, created_at)
                    VALUES(?,?,?,?,?)
                    ON CONFLICT(user_id, supplement_id, time_local) DO UPDATE SET enabled=excluded.enabled""",
                 (int(tg_user_id), int(supplement_id), norm, 1, utc_now_iso()),
             )
 
-    await conn.commit()
+
+async def add_reminder_for_supplement(conn: aiosqlite.Connection, tg_user_id: int, supplement_id: int, time_local: str) -> None:
+    normalized = _normalize_hhmm(str(time_local or "").strip())
+    if not normalized:
+        raise ValueError("invalid_time")
+    async with transaction(conn) as tx:
+        if not await user_has_supplement(tx, int(tg_user_id), int(supplement_id)):
+            raise ValueError("supplement_not_found")
+        await upsert_reminder(tx, int(tg_user_id), int(supplement_id), normalized, enabled=1)
 
 async def list_reminders_for_user(conn: aiosqlite.Connection, user_id: int):
     return await fetchall(
@@ -6916,8 +6925,8 @@ async def list_due_reminders(conn: aiosqlite.Connection):
            LEFT JOIN user_schedule_slots uss
              ON uss.user_id=us.user_id
             AND uss.slot_id=COALESCE(NULLIF(sch.slot_id,''), 'morning')
-            AND uss.is_enabled=1
            WHERE us.is_active=1
+             AND COALESCE(uss.is_enabled, 1)=1
              AND COALESCE(np.reminders_enabled, 1)=1
              AND COALESCE(u.is_banned,0)=0 AND COALESCE(u.deleted_at_utc,'')=''
              AND us.enabled=1

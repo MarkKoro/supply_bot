@@ -2775,6 +2775,8 @@ async def api_reminders_for_supplement(
 
     conn = await db.connect(s.DB_PATH)
     try:
+        if not await db.user_has_supplement(conn, tg_user_id, int(supplement_id)):
+            return JSONResponse({"ok": False, "code": "supplement_not_found"}, status_code=404)
         effective = await db.get_effective_reminders_for_supplement(conn, tg_user_id, int(supplement_id))
     finally:
         await conn.close()
@@ -2804,6 +2806,9 @@ async def api_reminders_set(
             times=list(body.times or []),
         )
         effective = await db.get_effective_reminders_for_supplement(conn, tg_user_id, int(body.supplement_id))
+    except ValueError as exc:
+        code = str(exc)
+        return JSONResponse({"ok": False, "code": code}, status_code=404 if code == "supplement_not_found" else 400)
     finally:
         await conn.close()
 

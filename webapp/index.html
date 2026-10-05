@@ -4984,11 +4984,21 @@ function adminField(label, field, value, kind='input') {
     } catch {}
     state.nutrientAssistant.myPlansLoading = false;
   }
+  let assistantDraftLoadSeq = 0;
+  let assistantDraftVersion = 0;
+  let assistantDraftDirty = false;
+  let assistantDraftPending = 0;
+  let assistantDraftSaveQueue = Promise.resolve();
   async function loadNutrientDraft(force) {
     if (state.nutrientAssistant.loadingDraft && !force) return;
+    if (assistantDraftPending || assistantDraftDirty) return;
+    const seq = ++assistantDraftLoadSeq;
+    const version = assistantDraftVersion;
+    const snapshot = JSON.stringify([state.nutrientAssistant.form, state.nutrientAssistant.manualLabs, state.nutrientAssistant.draftSourceRunId]);
     state.nutrientAssistant.loadingDraft = true;
     try {
       const res = await api('./api/profile/nutrient-assistant/draft');
+      if (seq !== assistantDraftLoadSeq || version !== assistantDraftVersion || snapshot !== JSON.stringify([state.nutrientAssistant.form, state.nutrientAssistant.manualLabs, state.nutrientAssistant.draftSourceRunId])) return;
       const draft = res.draft || {};
       state.nutrientAssistant.form = { ...(state.nutrientAssistant.form || {}), ...(draft.assistant_profile || {}) };
       state.nutrientAssistant.manualLabs = normalizeAssistantLabs(draft.labs || []);
@@ -4996,7 +5006,9 @@ function adminField(label, field, value, kind='input') {
       state.nutrientAssistant.draftUpdatedAt = String(draft.updated_at_utc || '');
       state.nutrientAssistant.draftSourceRunId = Number(draft.source_run_id || 0) || null;
     } catch {}
-    state.nutrientAssistant.loadingDraft = false;
+    finally {
+      if (seq === assistantDraftLoadSeq) state.nutrientAssistant.loadingDraft = false;
+    }
   }
   async function loadAssistantRegistry(force) {
     if (state.nutrientAssistant.registryAnalytes && !force) return;
@@ -5063,13 +5075,13 @@ function adminField(label, field, value, kind='input') {
           await loadNutrientPlans(true);
           await loadAssistantRunDetail(Number(job.result_run_id)).catch(()=>null);
           showToast('Расчёт готов');
-        } else if (status === 'failed') {
+        } else if (status === 'failed' || status === 'cancelled' || status === 'canceled') {
           stopAssistantJobPolling();
           state.nutrientAssistant.computing = false;
           state.nutrientAssistant.blocked = false;
-          state.nutrientAssistant.currentJobStatus = 'failed';
+          state.nutrientAssistant.currentJobStatus = status;
           state.nutrientAssistant.currentJobId = null;
-          showToast(String(job?.error_message || 'Расчёт завершился с ошибкой'));
+          showToast(status === 'failed' ? String(job?.error_message || 'Расчёт завершился с ошибкой') : 'Расчёт отменён');
         } else {
           scheduleAssistantJobPolling(id, 3800);
         }
@@ -5088,20 +5100,34 @@ function adminField(label, field, value, kind='input') {
     }, delayMs);
   }
   async function saveNutrientDraft(partial = {}) {
+    clearTimeout(state.nutrientAssistant.autosaveTimer);
+    state.nutrientAssistant.autosaveTimer = null;
     const hasProfile = Object.prototype.hasOwnProperty.call(partial, 'assistant_profile');
     const hasLabs = Object.prototype.hasOwnProperty.call(partial, 'labs');
     const hasScope = Object.prototype.hasOwnProperty.call(partial, 'compute_scope');
     const hasSource = Object.prototype.hasOwnProperty.call(partial, 'source_run_id');
-    const payload = {
+    const payload = JSON.parse(JSON.stringify({
       assistant_profile: hasProfile ? partial.assistant_profile : collectAssistantForm(),
       labs: hasLabs ? partial.labs : collectAssistantLabs(),
       compute_scope: hasScope ? partial.compute_scope : { mode: 'current_draft' },
       source_run_id: hasSource ? partial.source_run_id : (Number(state.nutrientAssistant.draftSourceRunId || 0) || null)
-    };
-    const res = await api('./api/profile/nutrient-assistant/draft', { method:'POST', body: payload });
-    if (res?.draft?.updated_at_utc) state.nutrientAssistant.draftUpdatedAt = String(res.draft.updated_at_utc || '');
-    if (res?.draft) state.nutrientAssistant.draftSourceRunId = Number(res.draft.source_run_id || 0) || null;
-    return res.draft || null;
+    }));
+    const version = ++assistantDraftVersion;
+    assistantDraftDirty = true;
+    assistantDraftPending++;
+    const operation = assistantDraftSaveQueue.then(async () => {
+      try {
+        const res = await api('./api/profile/nutrient-assistant/draft', { method:'POST', body: payload });
+        if (version === assistantDraftVersion) {
+          assistantDraftDirty = false;
+          if (res?.draft?.updated_at_utc) state.nutrientAssistant.draftUpdatedAt = String(res.draft.updated_at_utc || '');
+          if (res?.draft) state.nutrientAssistant.draftSourceRunId = Number(res.draft.source_run_id || 0) || null;
+        }
+        return res.draft || null;
+      } finally { assistantDraftPending--; }
+    });
+    assistantDraftSaveQueue = operation.catch(() => null);
+    return operation;
   }
 
   function updateAssistantDraftTimestampUi() {
@@ -5113,9 +5139,10 @@ function adminField(label, field, value, kind='input') {
   }
 
   function scheduleAssistantDraftAutosave(delayMs = 650){
+    assistantDraftDirty = true;
+    assistantDraftVersion++;
     clearTimeout(state.nutrientAssistant.autosaveTimer);
     state.nutrientAssistant.autosaveTimer = setTimeout(async ()=>{
-      if (String(state.profileUi?.activeModule || '') !== 'assistant') return;
       syncExpandedAssistantLabRow();
       state.nutrientAssistant.form = collectAssistantForm();
       const labs = collectAssistantLabs();
@@ -5763,6 +5790,8 @@ function adminField(label, field, value, kind='input') {
     });
     document.querySelector('[data-assistant-add-lab]')?.addEventListener('click', ()=>{
       syncExpandedAssistantLabRow();
+      assistantDraftDirty = true;
+      assistantDraftVersion++;
       state.nutrientAssistant.result = null;
       state.nutrientAssistant.currentRunId = null;
       state.nutrientAssistant.basisRunId = null;
@@ -5790,11 +5819,18 @@ function adminField(label, field, value, kind='input') {
       renderActiveTab();
     });
     document.querySelector('[data-assistant-save-draft]')?.addEventListener('click', async ()=>{
+      if (state.nutrientAssistant.savingDraft) return;
+      state.nutrientAssistant.savingDraft = true;
       syncExpandedAssistantLabRow();
-      const draft = await saveNutrientDraft().catch(()=>null);
-      if (draft?.updated_at_utc) state.nutrientAssistant.draftUpdatedAt = String(draft.updated_at_utc || '');
-      showToast('Черновик сохранён');
-      renderActiveTab();
+      try {
+        const draft = await saveNutrientDraft();
+        if (!draft) throw new Error('Не удалось сохранить черновик');
+        showToast('Черновик сохранён');
+      } catch { showToast('Не удалось сохранить черновик. Попробуйте ещё раз.'); }
+      finally {
+        state.nutrientAssistant.savingDraft = false;
+        updateAssistantDraftTimestampUi();
+      }
     });
     document.querySelector('[data-assistant-open-help]')?.addEventListener('click', ()=>{
       state.nutrientAssistant.introOpen = true;
@@ -5971,6 +6007,7 @@ function adminField(label, field, value, kind='input') {
     document.querySelectorAll('[data-assistant-field]').forEach((el)=>{
       const stagedAutosave = ()=>{
         const preview = collectAssistantForm();
+        state.nutrientAssistant.form = preview;
         const autoStage = detectAssistantStage(preview, normalizeAssistantLabs(state.nutrientAssistant.manualLabs || []));
         state.nutrientAssistant.stage = Math.max(Number(state.nutrientAssistant.stage || 1), autoStage);
         scheduleAssistantDraftAutosave();

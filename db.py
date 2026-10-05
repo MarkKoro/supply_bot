@@ -10605,7 +10605,7 @@ async def upsert_nutrient_assistant_draft(
           assistant_profile_json=excluded.assistant_profile_json,
           labs_json=excluded.labs_json,
           compute_scope_json=excluded.compute_scope_json,
-          source_run_id=COALESCE(excluded.source_run_id, nutrient_assistant_drafts.source_run_id),
+          source_run_id=excluded.source_run_id,
           updated_at_utc=excluded.updated_at_utc""",
         (
             user_id,
@@ -10625,6 +10625,9 @@ async def ensure_nutrient_assistant_draft(conn: aiosqlite.Connection, tg_user_id
     existing = await get_nutrient_assistant_draft(conn, tg_user_id)
     if existing:
         return existing
+    if not isinstance(conn, _TransactionConnection):
+        async with transaction(conn) as tx:
+            return await ensure_nutrient_assistant_draft(tx, tg_user_id)
     profile = await get_user_health_profile(conn, tg_user_id)
     return await upsert_nutrient_assistant_draft(conn, tg_user_id, assistant_profile=profile or {}, labs=[], compute_scope={}, source_run_id=None)
 

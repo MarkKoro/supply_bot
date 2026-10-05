@@ -9273,6 +9273,9 @@ async def get_user_slots(conn: aiosqlite.Connection, user_id: int) -> list[dict]
     out.sort(key=lambda item: (str(item.get("time_local") or "99:99"), str(item.get("slot_id") or "")))
 
     if changed or len(out) != len(rows):
+        if not isinstance(conn, _TransactionConnection):
+            async with transaction(conn) as tx:
+                return await get_user_slots(tx, user_id)
         await set_user_slots(conn, user_id, out)
         return await get_user_slots(conn, user_id)
     return out
@@ -9286,20 +9289,20 @@ async def set_user_slots(conn: aiosqlite.Connection, user_id: int, slots_list: l
         if base_id not in by_id:
             by_id[base_id] = dict(base)
 
-    await conn.execute("DELETE FROM user_schedule_slots WHERE user_id=?", (user_id,))
-    for slot in by_id.values():
-        await conn.execute(
-            """INSERT INTO user_schedule_slots(user_id, slot_id, title_ru, time_local, is_enabled)
-               VALUES(?,?,?,?,?)""",
-            (
-                user_id,
-                str(slot.get("slot_id") or "").strip(),
-                str(slot.get("title_ru") or "Слот").strip() or "Слот",
-                str(slot.get("time_local") or "08:00").strip(),
-                1 if slot.get("is_enabled", True) else 0,
-            ),
-        )
-    await conn.commit()
+    async with transaction(conn) as tx:
+        await tx.execute("DELETE FROM user_schedule_slots WHERE user_id=?", (user_id,))
+        for slot in by_id.values():
+            await tx.execute(
+                """INSERT INTO user_schedule_slots(user_id, slot_id, title_ru, time_local, is_enabled)
+                   VALUES(?,?,?,?,?)""",
+                (
+                    user_id,
+                    str(slot.get("slot_id") or "").strip(),
+                    str(slot.get("title_ru") or "Слот").strip() or "Слот",
+                    str(slot.get("time_local") or "08:00").strip(),
+                    1 if slot.get("is_enabled", True) else 0,
+                ),
+            )
 
 
 async def upsert_user_slot(
@@ -9337,17 +9340,29 @@ async def set_user_slot_time(conn: aiosqlite.Connection, user_id: int, slot_id: 
         await upsert_user_slot(tx, user_id, slot_id, str(existing.get("title_ru") or "Слот"), normalized, is_enabled=1 if existing.get("is_enabled", True) else 0)
 
 
+async def set_user_slot_enabled(conn: aiosqlite.Connection, user_id: int, slot_id: str, is_enabled: bool | None = None) -> None:
+    target = str(slot_id or "").strip()
+    async with transaction(conn) as tx:
+        await get_user_slots(tx, user_id)
+        existing = await fetchone(tx, "SELECT is_enabled FROM user_schedule_slots WHERE user_id=? AND slot_id=?", (user_id, target))
+        if not existing:
+            raise ValueError("slot_not_found")
+        enabled = not bool(existing["is_enabled"]) if is_enabled is None else bool(is_enabled)
+        await tx.execute("UPDATE user_schedule_slots SET is_enabled=? WHERE user_id=? AND slot_id=?", (1 if enabled else 0, user_id, target))
+
+
 async def add_custom_slot(conn: aiosqlite.Connection, user_id: int, time_local: str, title_ru: str | None = None) -> str:
     normalized = _normalize_hhmm(time_local)
     if not normalized:
         raise ValueError("invalid HH:MM")
-    base = f"t_{normalized.replace(':', '')}"
-    slot_id = base
-    n = 2
-    while await fetchone(conn, "SELECT 1 FROM user_schedule_slots WHERE user_id=? AND slot_id=?", (user_id, slot_id)):
-        slot_id = f"{base}_{n}"
-        n += 1
-    await upsert_user_slot(conn, user_id, slot_id, (title_ru or normalized), normalized, is_enabled=1)
+    async with transaction(conn) as tx:
+        base = f"t_{normalized.replace(':', '')}"
+        slot_id = base
+        n = 2
+        while await fetchone(tx, "SELECT 1 FROM user_schedule_slots WHERE user_id=? AND slot_id=?", (user_id, slot_id)):
+            slot_id = f"{base}_{n}"
+            n += 1
+        await upsert_user_slot(tx, user_id, slot_id, (title_ru or normalized), normalized, is_enabled=1)
     return slot_id
 
 

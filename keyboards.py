@@ -897,7 +897,8 @@ def settings_notifications_kb(*, reminders_enabled: bool, slots: list[dict]) -> 
         slot_id = str(slot.get("slot_id") or "")
         title = str(slot.get("title_ru") or "Слот")
         state = "✅" if bool(slot.get("is_enabled", True)) else "⛔"
-        rows.append([InlineKeyboardButton(f"{state} {title}", callback_data=f"settings:notifications:slot:{slot_id}")])
+        desired = 0 if bool(slot.get("is_enabled", True)) else 1
+        rows.append([InlineKeyboardButton(f"{state} {title}", callback_data=f"settings:notifications:slot:{slot_id}:{desired}")])
     rows.append([InlineKeyboardButton("⏰ Изменить время слотов", callback_data="settings:schedule")])
     rows.append([InlineKeyboardButton("💊 Точечные напоминания БАДов", callback_data="menu:my")])
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="menu:settings")])

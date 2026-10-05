@@ -7045,7 +7045,7 @@ function adminField(label, field, value, kind='input') {
               </label>
               ${state.complexHub.returnToToday ? '<button class="btn secondary" type="button" data-settings-back-complex style="margin-top:8px;">Вернуться к комплексу на «Сегодня»</button>' : ''}
               <div class="row" style="margin-top:6px;align-items:center;justify-content:space-between;gap:8px;">
-                <div class="muted">Активные слоты: ${enabledSlots.length}/${scheduleSlots.length || 0}</div>
+                <div class="muted" data-enabled-slots-count>Активные слоты: ${enabledSlots.length}/${scheduleSlots.length || 0}</div>
                 <button class="btn secondary" type="button" data-settings-add-slot ${state.settingsUi?.addingSlot ? 'disabled' : ''} title="Добавить слот">+</button>
               </div>
               <div class="settings-slot-grid">${scheduleSlots.map((slot)=>`<article class="settings-slot-card">
@@ -7053,7 +7053,7 @@ function adminField(label, field, value, kind='input') {
                   <label class="settings-checkbox-row" style="padding:8px 10px;">
                     <span>${esc(slot.title_ru || 'Слот')}</span>
                     <span class="settings-checkbox-wrap">
-                      <input type="checkbox" data-slot-enabled="${esc(slot.slot_id || '')}" ${slot.is_enabled ? 'checked' : ''} ${notificationsEnabled ? '' : 'disabled'}/>
+                      <input type="checkbox" data-slot-enabled="${esc(slot.slot_id || '')}" ${slot.is_enabled ? 'checked' : ''} ${notificationsEnabled && !state.settingsUi.slotBusy[slot.slot_id] ? '' : 'disabled'}/>
                       <span class="settings-checkbox-custom" aria-hidden="true"></span>
                     </span>
                   </label>
@@ -7155,6 +7155,7 @@ function adminField(label, field, value, kind='input') {
         if (!slotId || state.settingsUi.slotBusy[slotId]) return;
         const enabled = !!e?.target?.checked;
         state.settingsUi.slotBusy[slotId] = true;
+        el.disabled = true;
         markScheduleChanged();
         try {
           await api('./api/schedule/slot_enabled', { method: 'POST', body: { slot_id: slotId, is_enabled: enabled } });
@@ -7168,6 +7169,15 @@ function adminField(label, field, value, kind='input') {
           showToast('Не удалось обновить слот');
         } finally {
           delete state.settingsUi.slotBusy[slotId];
+          const slots = state.settingsSchedule.slots || [];
+          const saved = slots.find((x) => String(x.slot_id || '') === slotId);
+          document.querySelectorAll('[data-slot-enabled]').forEach((control) => {
+            if (String(control.dataset.slotEnabled || '') !== slotId) return;
+            if (saved) control.checked = !!saved.is_enabled;
+            control.disabled = !saved || state.settingsData?.reminders_enabled === false;
+          });
+          const count = document.querySelector('[data-enabled-slots-count]');
+          if (count) count.textContent = `Активные слоты: ${slots.filter((x) => !!x.is_enabled).length}/${slots.length}`;
         }
       });
     });

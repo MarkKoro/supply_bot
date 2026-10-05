@@ -2944,18 +2944,9 @@ async def api_schedule_slot_enabled(body: SlotEnabledBody, x_telegram_init_data:
     conn = await db.connect(s.DB_PATH)
     try:
         user_id = await db.get_or_create_user(conn, tg_user_id, tz_name="")
-        slots = await db.get_user_slots(conn, user_id)
-        target_slot_id = str(body.slot_id or "").strip()
-        slot_exists = any(str(slot.get("slot_id") or "") == target_slot_id for slot in slots)
-        if not slot_exists:
-            return JSONResponse({"ok": False, "code": "slot_not_found"}, status_code=404)
-        updated: list[dict] = []
-        for slot in slots:
-            next_slot = dict(slot)
-            if str(slot.get("slot_id") or "") == target_slot_id:
-                next_slot["is_enabled"] = bool(body.is_enabled)
-            updated.append(next_slot)
-        await db.set_user_slots(conn, user_id, updated)
+        await db.set_user_slot_enabled(conn, user_id, body.slot_id, body.is_enabled)
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "code": str(exc)}, status_code=404 if str(exc) == "slot_not_found" else 400)
     finally:
         await conn.close()
     return JSONResponse({"ok": True})

@@ -751,13 +751,14 @@ async def _show_reminders_home(update: Update, context: ContextTypes.DEFAULT_TYP
     lines = ["⏰ <b>Напоминания</b>"]
     for slot in slots:
         state = "вкл" if slot.get("is_enabled", True) else "выкл"
-        lines.append(f"• {slot.get('title_ru', 'Слот')} — {slot.get('time_local', '--:--')} ({state})")
+        lines.append(f"• {html.escape(str(slot.get('title_ru', 'Слот')))} — {slot.get('time_local', '--:--')} ({state})")
     text = "\n".join(lines)
     rows = [
         [InlineKeyboardButton("Изменить время", callback_data="rem:edit")],
     ]
     for slot in slots:
-        rows.append([InlineKeyboardButton(f"Вкл/Выкл: {slot.get('title_ru','Слот')}", callback_data=f"rem:toggle:{slot.get('slot_id','')}")])
+        desired = 0 if bool(slot.get("is_enabled", True)) else 1
+        rows.append([InlineKeyboardButton(f"Вкл/Выкл: {slot.get('title_ru','Слот')}", callback_data=f"rem:toggle:{slot.get('slot_id','')}:{desired}")])
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="today:home")])
     await show(update, context, text, InlineKeyboardMarkup(rows), route="rem:home")
 
@@ -773,7 +774,7 @@ async def _show_schedule_home(update: Update, context: ContextTypes.DEFAULT_TYPE
     for slot in slots:
         if not slot.get("is_enabled", True):
             continue
-        lines.append(f"• [{slot.get('time_local','--:--')}] {slot.get('title_ru','Слот')}")
+        lines.append(f"• [{slot.get('time_local','--:--')}] {html.escape(str(slot.get('title_ru','Слот')))}")
     await show(update, context, "\n".join(lines), schedule_menu_kb(has_custom_slots=has_custom_slots), route="settings:schedule")
 
 
@@ -3801,16 +3802,15 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await _show_notifications_settings(update, context, conn, tg_uid)
             return
         if data.startswith("settings:notifications:slot:"):
-            slot_id = data.split(":", 3)[3]
+            parts = data.split(":", 3)[3].rsplit(":", 1)
+            slot_id = parts[0]
+            desired = parts[1] == "1" if len(parts) == 2 and parts[1] in {"0", "1"} else None
             user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
-            slots = await db.get_user_slots(conn, user_id)
-            updated = []
-            for slot in slots:
-                next_slot = dict(slot)
-                if str(slot.get("slot_id") or "") == slot_id:
-                    next_slot["is_enabled"] = not bool(slot.get("is_enabled", True))
-                updated.append(next_slot)
-            await db.set_user_slots(conn, user_id, updated)
+            try:
+                await db.set_user_slot_enabled(conn, user_id, slot_id, desired)
+            except ValueError:
+                await show(update, context, "Слот уже удалён. Обнови список уведомлений.", InlineKeyboardMarkup([[InlineKeyboardButton("🔔 Уведомления", callback_data="settings:notifications")]]), route="settings:notifications")
+                return
             await _show_notifications_settings(update, context, conn, tg_uid)
             return
         if data == "settings:complexes":
@@ -4571,13 +4571,15 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
 
         if data.startswith("rem:toggle:"):
-            slot_id = data.split(":", 2)[2]
+            parts = data.split(":", 2)[2].rsplit(":", 1)
+            slot_id = parts[0]
+            desired = parts[1] == "1" if len(parts) == 2 and parts[1] in {"0", "1"} else None
             user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
-            slots = await db.get_user_slots(conn, user_id)
-            for slot in slots:
-                if str(slot.get("slot_id") or "") == slot_id:
-                    slot["is_enabled"] = not bool(slot.get("is_enabled", True))
-            await db.set_user_slots(conn, user_id, slots)
+            try:
+                await db.set_user_slot_enabled(conn, user_id, slot_id, desired)
+            except ValueError:
+                await show(update, context, "Слот уже удалён. Обнови список напоминаний.", InlineKeyboardMarkup([[InlineKeyboardButton("⏰ Напоминания", callback_data="rem:home")]]), route="rem:home")
+                return
             await _show_reminders_home(update, context, conn, tg_uid)
             return
 

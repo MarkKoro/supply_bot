@@ -596,19 +596,19 @@ def _parse_classes(raw) -> set[str]:
     if not raw:
         return set()
     if isinstance(raw, (list, tuple, set)):
-        return {str(item) for item in raw if item}
+        return {item.strip() for item in raw if isinstance(item, str) and item.strip()}
     try:
         data = json.loads(raw)
-    except json.JSONDecodeError:
+    except (TypeError, ValueError):
         return set()
     if not isinstance(data, list):
         return set()
-    return {str(item) for item in data if item}
+    return {item.strip() for item in data if isinstance(item, str) and item.strip()}
 
 def _classes_raw(row) -> str:
-    if "interaction_classes_json" in row.keys() and row["interaction_classes_json"]:
+    if "interaction_classes_json" in row.keys() and _parse_classes(row["interaction_classes_json"]):
         return row["interaction_classes_json"]
-    return row["interaction_classes"] or "[]"
+    return (row["interaction_classes"] or "[]") if "interaction_classes" in row.keys() else "[]"
 
 def format_supplement_details(row) -> str:
     title = _supp_title(row)

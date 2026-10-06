@@ -6,6 +6,10 @@
   <title>ГУДы БАДы WebApp</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
+    @property --bg-1 { syntax:"<color>"; inherits:true; initial-value:#070b1a; }
+    @property --bg-2 { syntax:"<color>"; inherits:true; initial-value:#101a44; }
+    @property --bg-3 { syntax:"<color>"; inherits:true; initial-value:#1b0f3a; }
+    @property --accent { syntax:"<color>"; inherits:true; initial-value:#7db7ff; }
     :root {
       --bg-1: #070b1a;
       --bg-2: #101a44;
@@ -13,11 +17,16 @@
       --card: rgba(16, 24, 52, 0.68);
       --card-strong: rgba(24, 36, 74, 0.82);
       --text: #eef2ff;
-      --muted: rgba(218, 228, 248, 0.8);
+      --muted: #c9d3e5;
       --accent: #7db7ff;
+      --accent-soft: rgba(125,183,255,.16);
+      --surface: #141c35;
+      --surface-raised: #1c2944;
+      --bg-soft: #0f172b;
       --green: #49d88d;
       --red: #ff5a6f;
       --neutral: rgba(255,255,255,0.17);
+      --line: rgba(255,255,255,.18);
     }
 
     html[data-theme="nebula"] { --bg-1:#0c0a23; --bg-2:#25125d; --bg-3:#130b2d; --accent:#b48bff; }
@@ -41,8 +50,8 @@
       font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
       color: var(--text);
       background:
-        radial-gradient(1100px 640px at 12% -8%, rgba(67, 132, 255, 0.42) 0%, transparent 62%),
-        radial-gradient(980px 580px at 92% 2%, rgba(66, 48, 143, 0.42) 0%, transparent 58%),
+        radial-gradient(1100px 640px at 12% -8%, var(--accent-soft) 0%, transparent 62%),
+        radial-gradient(980px 580px at 92% 2%, var(--accent-soft) 0%, transparent 58%),
         linear-gradient(160deg, var(--bg-1) 0%, var(--bg-2) 54%, var(--bg-3) 100%);
       overflow: hidden;
     }
@@ -52,7 +61,7 @@
       position: fixed;
       inset: 0;
       pointer-events: none;
-      opacity: 0.05;
+      opacity: 0.025;
       background-image: radial-gradient(rgba(255,255,255,0.9) 0.5px, transparent 0.5px);
       background-size: 3px 3px;
       mix-blend-mode: screen;
@@ -82,7 +91,7 @@
       scrollbar-gutter: stable;
       overflow-y: auto;
       overflow-x: hidden;
-      padding: 14px 14px calc(100px + env(safe-area-inset-bottom));
+      padding: 14px 14px calc(100px + var(--bulk-clearance,0px) + env(safe-area-inset-bottom));
       -webkit-overflow-scrolling: touch;
       touch-action: pan-y;
     }
@@ -144,9 +153,8 @@
       color: var(--text);
       background: linear-gradient(170deg, rgba(255,255,255,0.16), rgba(255,255,255,0.05));
       box-shadow:
-        0 12px 24px rgba(0,0,0,0.34),
-        0 2px 0 rgba(255,255,255,0.18) inset,
-        0 -2px 0 rgba(0,0,0,0.4) inset;
+        0 6px 14px rgba(0,0,0,0.2),
+        0 1px 0 rgba(255,255,255,0.08) inset;
     }
 
     .btn {
@@ -168,8 +176,8 @@
         0 -1px 0 rgba(0,0,0,0.55) inset;
     }
 
-    .btn.secondary { opacity: 0.88; }
-    .btn[disabled] { opacity: .45; cursor: not-allowed; }
+    .btn.secondary { background: var(--surface); }
+    .btn[disabled] { color:var(--muted); background:var(--surface); box-shadow:none; cursor:not-allowed; }
     .btn.cta-active {
       border-color: rgba(125,183,255,0.95);
       box-shadow:
@@ -186,21 +194,19 @@
     .card {
       border-radius: 20px;
       padding: 14px;
-      background: linear-gradient(180deg, rgba(255,255,255,0.12), rgba(255,255,255,0.06));
+      color: var(--text);
+      background: linear-gradient(180deg, var(--surface-raised), var(--surface));
       border: 1px solid rgba(255,255,255,0.18);
       box-shadow:
-        0 22px 42px rgba(3,7,20,0.44),
-        0 7px 14px rgba(2,6,18,0.4),
-        0 1px 0 rgba(255,255,255,0.25) inset,
-        0 -2px 0 rgba(0,0,0,0.35) inset;
-      backdrop-filter: blur(10px);
+        0 12px 26px rgba(3,7,20,0.28),
+        0 1px 0 rgba(255,255,255,0.08) inset;
       margin-bottom: 12px;
     }
 
     .catalog-list > .card,
     .history-list > .history-item {
-      content-visibility: auto;
-      contain-intrinsic-size: auto 220px;
+      /* Keep the actual height when returning to an already loaded list. */
+      contain: style;
     }
 
     .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
@@ -247,7 +253,7 @@
       border: 0;
       border-radius: 14px;
       min-height: 52px;
-      color: rgba(210, 222, 246, 0.8);
+      color: var(--muted);
       background: rgba(255,255,255,0.03);
       font-size: 11px;
       display: flex;
@@ -255,11 +261,14 @@
       align-items: center;
       justify-content: center;
       gap: 3px;
+      padding: 5px 2px;
+      overflow-wrap: anywhere;
+      line-height: 1.25;
     }
 
     .tab.active {
       color: white;
-      background: linear-gradient(180deg, rgba(125,183,255,0.34), rgba(73,109,198,0.24));
+      background: var(--accent-soft);
       box-shadow:
         0 10px 16px rgba(6,13,34,0.42),
         0 0 0 1px rgba(182, 213, 255, 0.35) inset,
@@ -282,7 +291,7 @@
     .tabs[data-skin="neon"] .tab.active::after { content:""; position:absolute; inset:-3px; border-radius:16px; border:1px solid rgba(117,226,255,.65); }
     .tabs[data-skin="thumbs"] .tab.active::after { content:"👍"; position:absolute; top:-10px; right:6px; font-size:12px; }
     .tabs[data-skin="gold"] .tab.active { box-shadow:0 0 0 1px rgba(255,211,122,.9) inset,0 8px 20px rgba(165,118,36,.45); }
-    .tabs[data-skin="plasma"] .tab.active::after { content:""; position:absolute; inset:-2px; border-radius:15px; background:linear-gradient(120deg, rgba(96,163,255,.2), rgba(249,112,255,.2)); z-index:-1; filter:blur(1px);}
+    .tabs[data-skin="plasma"] .tab.active { background:linear-gradient(120deg, rgba(96,163,255,.22), rgba(249,112,255,.22)); box-shadow:0 0 0 1px rgba(225,169,255,.6) inset,0 0 16px rgba(205,125,255,.2); }
     .tabs[data-skin="frost"] .tab.active { box-shadow:0 0 0 1px rgba(172,236,255,.7) inset,0 0 16px rgba(141,218,255,.4);}
     .tabs[data-skin="minimal"] .tab.active { background:rgba(255,255,255,.08); box-shadow: inset 0 -2px 0 var(--accent);}
     .tabs[data-skin="glitch"] .tab.active { text-shadow: 1px 0 rgba(255,80,80,.5), -1px 0 rgba(80,220,255,.5); box-shadow:0 0 0 1px rgba(121,200,255,.35) inset, 2px 0 10px rgba(255,88,122,.2), -2px 0 10px rgba(88,195,255,.2);}
@@ -291,13 +300,13 @@
     .tabs[data-skin="mono"] .tab { background: rgba(255,255,255,.015); color: rgba(221,226,233,.78); }
     .tabs[data-skin="mono"] .tab.active { background: rgba(255,255,255,.06); box-shadow: inset 0 -2px 0 #e1e5ec; color: #fff; }
     .tabs[data-skin="pulse2"] .tab.active { box-shadow: 0 0 0 1px rgba(255,170,200,.55) inset, 0 0 18px rgba(255,126,184,.28); animation: pulse2Active 1.4s ease-in-out infinite; }
-    @keyframes pulse2Active { 0% { transform: translateY(0); } 50% { transform: translateY(-1px); } 100% { transform: translateY(0); } }
+    @keyframes pulse2Active { 0%,100% { box-shadow:0 0 0 1px rgba(255,170,200,.55) inset,0 0 12px rgba(255,126,184,.2); } 50% { box-shadow:0 0 0 1px rgba(255,170,200,.8) inset,0 0 18px rgba(255,126,184,.35); } }
     .tab { position: relative; }
     .topbar-title-row { display:flex; align-items:center; justify-content:center; gap:8px; flex-wrap:wrap; width:100%; text-align:center; }
     .badge-pill { font-size:11px; padding:5px 10px; border-radius:999px; border:1px solid rgba(130,167,255,.55); background:linear-gradient(170deg, rgba(125,183,255,0.26), rgba(73,109,198,0.16)); box-shadow: 0 1px 0 rgba(255,255,255,.2) inset; white-space:nowrap; }
     .ach-grid{display:grid;gap:8px;margin-top:8px;}
     .ach-item{border:1px solid rgba(255,255,255,.14);border-radius:12px;padding:8px;background:rgba(255,255,255,.05);}
-    .ach-item.locked{opacity:.72;}
+    .ach-item.locked{border-style:dashed; background:var(--surface);}
     .ach-category { margin-top: 10px; }
     .ach-category-title { font-size: 13px; color: var(--muted); margin: 8px 0 6px; text-transform: uppercase; letter-spacing: .02em; }
     .new-pill { margin-left: 8px; padding: 2px 7px; border-radius: 999px; background: rgba(255,77,109,.18); border:1px solid rgba(255,77,109,.5); color:#ffd7df; font-size:11px; font-weight:800; display:inline-flex; align-items:center; max-width:100%; }
@@ -483,18 +492,18 @@
       width: 100%;
       border: 1px solid rgba(255,255,255,0.28);
       border-radius: 12px;
-      background: rgba(15, 24, 54, 0.7);
+      background: var(--bg-soft);
       color: var(--text);
       padding: 10px 12px;
       transition: transform .08s ease, box-shadow .12s ease, border-color .12s ease;
       box-shadow: 0 10px 22px rgba(0,0,0,0.25), 0 1px 0 rgba(255,255,255,0.12) inset;
     }
-    .select option { background: #ffffff; color: #1c2236; }
+    .select option { background: var(--bg-soft); color: var(--text); }
     .textarea { min-height: 88px; resize: vertical; }
-    .input::placeholder, .textarea::placeholder, .search-input::placeholder { color: rgba(224, 232, 246, 0.72); }
+    input::placeholder, textarea::placeholder { color:var(--muted); opacity:1; }
 
     .btn, .chip, .card, .tab, .input, .select, .textarea, .search-input {
-      transition: transform .08s ease, box-shadow .12s ease, border-color .12s ease;
+      transition: transform .1s ease, box-shadow .18s ease, border-color .18s ease, background-color .18s ease;
     }
 
     .search-input {
@@ -504,7 +513,7 @@
       border-radius: 999px;
       padding: 10px 12px;
       color: var(--text);
-      background: rgba(255,255,255,0.10);
+      background: var(--bg-soft);
       box-shadow: 0 10px 22px rgba(0,0,0,0.25), 0 1px 0 rgba(255,255,255,0.14) inset;
     }
 
@@ -513,8 +522,8 @@
     .select:focus,
     .textarea:focus {
       outline: none;
-      border-color: rgba(125,183,255,0.75);
-      box-shadow: 0 0 0 3px rgba(125,183,255,0.18), 0 10px 24px rgba(0,0,0,0.28), 0 1px 0 rgba(255,255,255,0.18) inset;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-soft), 0 10px 24px rgba(0,0,0,0.28);
     }
 
     .card.item-row:active,
@@ -526,7 +535,7 @@
     }
     .error-text { color: #ffb3bb; font-size: 12px; margin-top: 4px; }
     .admin-grid { display:grid; gap:10px; }
-    .admin-card { cursor:pointer; }
+    .admin-card { cursor:pointer; text-align:left; font-size:14px; line-height:1.45; }
     .admin-card.selecting { display:flex; align-items:flex-start; gap:10px; }
     .admin-select-count { margin-top:8px; font-size:12px; color: var(--muted); }
     .bulk-bar { position: fixed; left:10px; right:10px; bottom: calc(80px + env(safe-area-inset-bottom)); z-index: 29; display:flex; gap:8px; overflow-x:auto; padding:10px; border-radius:16px; background: rgba(8,13,34,0.92); border:1px solid rgba(255,255,255,0.2); }
@@ -565,7 +574,7 @@
       padding-top: 2px;
     }
     .today-ai-pill { margin-left:8px; padding:2px 8px; border-radius:999px; font-size:11px; font-weight:700; border:1px solid rgba(125,183,255,.6); background:rgba(125,183,255,.15); color:#d9e8ff; }
-    .today-item-row.blocked { opacity:.72; background: rgba(140,148,165,.16); border-color: rgba(170,176,194,.28); }
+    .today-item-row.blocked { background: rgba(140,148,165,.16); border-color: rgba(170,176,194,.28); }
     .today-item-row.blocked .status-pill { background: rgba(173,179,194,.28); color:#e5e8ef; }
     .complex-row-toggle {
       width: 100%;
@@ -579,8 +588,8 @@
     .status-skipped { background: rgba(255,107,121,0.24); border-color: rgba(255,167,177,0.65); box-shadow: 0 0 10px rgba(255,107,121,0.35); }
     .status-none { background: var(--neutral); border-color: rgba(255,255,255,0.2); }
 
-    .fade { animation: fadeIn .22s ease; }
-    @keyframes fadeIn { from {opacity: 0; transform: translateY(6px);} to {opacity: 1; transform: translateY(0);} }
+    .fade { animation: none; }
+    @keyframes fadeIn { from {opacity: .35;} to {opacity: 1;} }
     @keyframes shimmer { 0% { background-position: 180% 0; } 100% { background-position: -20% 0; } }
 
     .preview-grid { display: grid; gap: 10px; }
@@ -620,7 +629,7 @@
       display: flex;
       justify-content: center;
       pointer-events: none;
-      z-index: 25;
+      z-index: 100;
     }
 
     .toast {
@@ -709,7 +718,7 @@
     .badge.minus { background: rgba(255,107,121,0.24); color:#ffd0d5; }
     .badge.mixed { background: rgba(255,191,92,0.26); color:#ffe1b0; }
     .sheet-backdrop { position: fixed; inset:0; background: rgba(2,5,16,0.58); z-index: 32; }
-    .sheet { position: fixed; left:10px; right:10px; bottom: calc(82px + env(safe-area-inset-bottom)); z-index: 33; max-height: 66vh; overflow: auto; opacity:1; transform: translateY(0); transition: opacity .18s ease, transform .18s ease, border-color .18s ease; }
+    .sheet { position: fixed; left:10px; right:10px; bottom: calc(82px + env(safe-area-inset-bottom)); z-index: 33; max-height: 66vh; overflow: auto; overscroll-behavior:contain; border:1px solid rgba(255,255,255,.22); border-radius:18px; padding:14px; color:var(--text); background:linear-gradient(180deg,var(--surface-raised),var(--surface)); box-shadow:0 20px 40px rgba(0,0,0,.4); }
     .sheet-empty { padding:12px; border-radius: 14px; background: rgba(255,255,255,0.05); color: var(--muted); text-align:center; }
 
     .progress { height:8px; border-radius:999px; background: rgba(255,255,255,.15); overflow:hidden; margin-top:8px; }
@@ -717,7 +726,7 @@
     .survey-option { width:100%; border-radius:14px; border:1px solid rgba(255,255,255,.2); padding:12px; margin-top:8px; background: rgba(255,255,255,.07); color:var(--text); text-align:left; font-weight:700; }
     .survey-option.active { box-shadow: 0 0 0 1px rgba(130,167,255,.8) inset, 0 0 16px rgba(130,167,255,.45); background: rgba(130,167,255,.2); }
     .survey-goals { display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; }
-    .survey-note { width:100%; min-height:110px; border-radius:14px; border:1px solid rgba(255,255,255,.2); background: rgba(255,255,255,.08); color:var(--text); padding:10px; }
+    .survey-note { width:100%; min-height:110px; border-radius:14px; border:1px solid rgba(255,255,255,.2); background:var(--bg-soft); color:var(--text); padding:10px; }
     .rec-card { border:1px solid rgba(255,255,255,.16); border-radius:14px; padding:10px; margin-top:8px; background: rgba(255,255,255,.06); }
     .ios-group { margin-top: 12px; border-radius: 16px; overflow: hidden; border: 1px solid rgba(255,255,255,.12); background: rgba(255,255,255,.04); }
     .ios-group details { border-bottom: 1px solid rgba(255,255,255,.08); }
@@ -788,7 +797,7 @@
       overflow: auto;
       max-height: calc(100vh - 180px - env(safe-area-inset-top) - env(safe-area-inset-bottom));
       min-height: 0;
-      padding: 14px 14px calc(120px + env(safe-area-inset-bottom));
+      padding: 14px 14px calc(18px + env(safe-area-inset-bottom));
       background: linear-gradient(180deg, rgba(14,18,36,0.95), rgba(10,14,30,0.95));
       overscroll-behavior: contain;
       -webkit-overflow-scrolling: touch;
@@ -813,7 +822,7 @@
       border-radius: 18px;
       padding-top: 0;
     }
-    .bodymap-sheet-head { position: sticky; top: 0; z-index: 1; padding: 14px 0 10px; background: #10162e; }
+    .bodymap-sheet-head { position: sticky; top: 0; z-index: 1; padding: 14px 0 10px; background: var(--surface-raised); }
     .bodymap-effect, .compat-item { padding: 12px 0; border-bottom: 1px solid rgba(255,255,255,.12); overflow-wrap: anywhere; }
     .bodymap-effect:last-child, .compat-item:last-child { border-bottom: 0; }
     .bodymap-effect .item-row { width: 100%; color: var(--text); text-align: left; margin: 0; }
@@ -1004,13 +1013,62 @@
     #app { height: var(--app-height, 100%); }
     input, textarea, select, .input, .search-input, .select, .textarea { font-size: 16px; }
     button, a { -webkit-tap-highlight-color: transparent; }
+    button, input, textarea, select { font-family:inherit; }
+    html { transition:--bg-1 .24s ease, --bg-2 .24s ease, --bg-3 .24s ease, --accent .24s ease; }
+    button { color:var(--text); }
+    button:disabled { cursor:not-allowed; }
+    button:disabled:active { transform:none; }
+    a { color:var(--accent); text-underline-offset:3px; }
+    a:visited { color:var(--accent); }
+    pre, code { overflow-wrap:anywhere; }
+    input, textarea, select { color-scheme:dark; accent-color:var(--accent); }
+    .settings-checkbox-wrap input:focus-visible + .settings-checkbox-custom { outline:2px solid var(--accent); outline-offset:3px; }
+    .today-slot-head { flex-wrap:wrap; }
+    .today-slot-head > .row { flex-wrap:wrap; justify-content:flex-start; }
+    .toast { max-width:calc(100vw - 24px); border-radius:14px; overflow-wrap:anywhere; }
+    .input::selection, .textarea::selection { background:var(--accent); color:var(--bg-1); }
+    .tab-enter { animation:fadeIn .18s ease-out; }
+    .modal-enter { animation:fadeIn .18s ease-out; }
+    .modal-enter > .modal-card, .modal-enter > .stack-slot-panel, .modal-enter > .payment-success-card,
+    .sheet.modal-enter, .bodymap-sheet-card.modal-enter, .catalog-modal-head.modal-enter { animation:unlockSheetIn .2s ease-out; }
+    .unlock-card { animation:none; }
+    .unlock-overlay.modal-enter .unlock-card { animation:unlockSheetIn .2s ease-out; }
+    .unlock-overlay:not(.modal-enter) .unlock-card.sparkle::after { animation:none; display:none; }
+    .sheet, .modal-card, .stack-slot-panel, .catalog-modal-body, .bodymap-sheet-card { scrollbar-gutter:stable; scroll-padding:14px; }
+    .modal-card > .row:first-child, .sheet > .row:first-child, .stack-slot-panel > .row:first-child {
+      position:sticky; top:-14px; z-index:2; padding:10px 0; background:var(--surface-raised); flex-wrap:wrap;
+    }
+    .catalog-modal-head, .stack-slot-panel, .unlock-card, .payment-success-card, .coach-card {
+      background:linear-gradient(180deg,var(--surface-raised),var(--surface));
+    }
+    .catalog-modal-body { background:var(--surface); }
+    .modal-overlay, .stack-slot-overlay, .bodymap-sheet-overlay, .payment-success-overlay, .unlock-overlay {
+      padding-top:calc(12px + env(safe-area-inset-top)); overscroll-behavior:contain;
+    }
+    .sheet { max-height:min(80vh,calc(var(--app-height,100vh) - 112px)) !important; }
+    .keyboard-open .main-content { padding-bottom:calc(24px + var(--keyboard-inset,0px)); }
+    .keyboard-open .catalog-modal-shell, .keyboard-open .bodymap-sheet-overlay,
+    .keyboard-open .unlock-overlay, .keyboard-open .payment-success-overlay { bottom:var(--keyboard-inset,0px); height:auto; padding-bottom:12px; }
+    .keyboard-open .catalog-modal-body, .keyboard-open .bodymap-sheet-card { max-height:calc(var(--visible-height,100vh) - 100px); }
+    @supports (background:color-mix(in srgb, black, white)) {
+      :root {
+        --surface:color-mix(in srgb,var(--bg-2) 46%,#111522);
+        --surface-raised:color-mix(in srgb,var(--bg-2) 56%,#222a3b);
+        --bg-soft:color-mix(in srgb,var(--bg-1) 60%,#101625);
+        --accent-soft:color-mix(in srgb,var(--accent) 16%,transparent);
+      }
+      .catalog-quick-icon, .organ-icon { background:var(--accent-soft); color:var(--accent); }
+      .tab.active, .seg-btn.active, .survey-option.active, .badge-pill, .profile-module-btn.active { background:var(--accent-soft); border-color:var(--accent); }
+      .btn.cta-active, .catalog-quick-card.active { border-color:var(--accent); box-shadow:0 0 0 2px var(--accent-soft); }
+      .ach-progress .bar > i, .level-mini .bar > i, .progress > i { background:linear-gradient(90deg,var(--accent),var(--green)); }
+    }
     .btn, .tab { min-height: 44px; }
     button:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
     .catalog-list { min-height: 88px; }
     .catalog-status { min-height: 24px; }
     .startup-card { max-width: 460px; margin: 12vh auto 0; }
     @supports (height: 100svh) { #app { height: var(--app-height, 100svh); } }
-    .keyboard-open .tabs { visibility: hidden; pointer-events: none; }
+    .keyboard-open .tabs, .keyboard-open .bulk-bar { visibility: hidden; pointer-events: none; }
     .keyboard-open .sheet { bottom: calc(12px + var(--keyboard-inset, 0px)); max-height: calc(var(--visible-height, 100vh) - 24px) !important; }
     .keyboard-open .modal-overlay { bottom: var(--keyboard-inset, 0px); padding-bottom: 12px; }
     .keyboard-open .modal-card { max-height: calc(var(--visible-height, 100vh) - 24px); }
@@ -1502,6 +1560,9 @@
     document.documentElement.dataset.theme = cosmetics.theme_id || "base";
     document.documentElement.dataset.tabSkin = cosmetics.tab_skin_id || "classic";
     document.documentElement.dataset.badge = cosmetics.badge_id || "none";
+    const tabs = appEl?.querySelector('.tabs');
+    if (tabs) tabs.dataset.skin = document.documentElement.dataset.tabSkin;
+    if (document.getElementById('topbarMain')) renderTopbarActions();
   }
 
   function getThemeMeta(id) {
@@ -1634,7 +1695,6 @@
           </div>
         </section>
       </div>
-      ${renderComplexSchedulePicker()}
     `;
   }
 
@@ -1859,7 +1919,6 @@
           </div>
         </section>
       </div>
-      ${renderComplexSchedulePicker()}
     `;
   }
 
@@ -2377,7 +2436,9 @@
     }
   }
 
+  const deferredPaymentRenders = new WeakSet();
   function renderPaymentScreen(planId) {
+    if (activeRenderPointers.size) { scheduleUiRender(() => { if (appEl.dataset.paymentPlan === String(planId)) renderPaymentScreen(planId); }); return; }
     const meta = planMeta(planId);
     const pending = loadPendingPayment();
     const pendingForPlan = pending && String(pending.plan_id || "") === String(planId || "") && isPendingForCurrentProject();
@@ -2389,7 +2450,7 @@
     const needsEmailForReceipt = wantsReceipt && !hasReceiptEmail;
     const canPrepare = !state.payment.savingEmail && !state.payment.savingReceiptPref && (!wantsReceipt || hasReceiptEmail);
     const activeStep = pendingForPlan ? 'open' : (needsEmailForReceipt ? 'email' : 'prepare');
-    appEl.innerHTML = `
+    const nextHtml = `
       <div class="main-content">
         <div class="card fade">
           <h2 style="margin:0 0 8px">Оплата Premium</h2>
@@ -2414,7 +2475,7 @@
                 <input id="receiptEmailInput" type="email" placeholder="example@mail.com" value="${esc(state.payment.emailInput || '')}" class="${activeStep === 'email' ? 'input-cta-active' : ''}" style="flex:1; min-width:220px; padding:10px; border-radius:10px; border:1px solid var(--accent); background:var(--bg-soft); color:var(--text); box-shadow:0 0 0 1px rgba(125,183,255,0.25);" />
                 <button class="btn secondary ${activeStep === 'email' ? 'cta-active' : ''}" id="saveReceiptEmailBtn" ${state.payment.savingEmail ? 'disabled' : ''}>${state.payment.savingEmail ? 'Сохранение…' : 'Сохранить email'}</button>
               </div>
-              ${state.payment.emailError ? `<div class="muted" style="margin-top:6px; color:#ff6b6b">${esc(state.payment.emailError)}</div>` : ''}
+              ${state.payment.emailError ? `<div class="error-text">${esc(state.payment.emailError)}</div>` : ''}
             `}
           </div>` : ''}
           <div class="row" style="margin-top:12px; gap:8px; flex-wrap:wrap;">
@@ -2428,6 +2489,26 @@
         </div>
       </div>
     `;
+    const template = document.createElement('template'); template.innerHTML = nextHtml;
+    const active = document.activeElement;
+    const samePlan = appEl.dataset.paymentPlan === String(planId);
+    if (samePlan && active?.id === 'receiptEmailInput' && template.content.querySelector('#receiptEmailInput')) {
+      syncBusyControls(appEl,template.content);
+      if (!deferredPaymentRenders.has(active)) {
+        deferredPaymentRenders.add(active);
+        active.addEventListener('blur', () => {
+          deferredPaymentRenders.delete(active);
+          scheduleUiRender(() => { if (appEl.dataset.paymentPlan === String(planId)) renderPaymentScreen(planId); });
+        }, {once:true});
+      }
+      return;
+    }
+    const main = samePlan ? appEl.querySelector('.main-content') : null;
+    const scrollTop = main?.scrollTop || 0;
+    if (main) { main.innerHTML = template.content.querySelector('.main-content').innerHTML; main.scrollTop = scrollTop; }
+    else appEl.innerHTML = nextHtml;
+    appEl.dataset.paymentPlan = String(planId);
+    document.getElementById('receiptEmailInput')?.addEventListener('input', e => { state.payment.emailInput = e.target.value; });
     document.getElementById('prepareRedirectPaymentBtn')?.addEventListener('click', (e) => prepareRedirectPayment(planId, e.currentTarget));
     document.getElementById('openExternalPaymentBtn')?.addEventListener('click', () => openExternalPayment(pending?.confirmation_url || ''));
     document.getElementById('saveReceiptEmailBtn')?.addEventListener('click', () => saveReceiptEmail(document.getElementById('receiptEmailInput'), planId));
@@ -2486,28 +2567,26 @@
 
   function hasOpenModal() {
     return Boolean(
-      state.catalog?.detail ||
+      state.catalog?.detail || (state.activeTab === 'catalog' && state.catalog?.filtersOpen) ||
       state.bodyMapSheet ||
       state.catalog?.addToComplexModal?.open ||
       state.catalog?.addToStackSlotModal?.open ||
-      state.mySupplements?.open ||
-      state.complexHub?.open ||
-      state.complexHub?.schedulePicker?.open ||
-      state.suppHub?.open ||
-      state.profileUi?.editOpen ||
-      state.profileUi?.manualOpen ||
-      state.profileUi?.uploadOpen ||
-      state.profileUi?.reviewOpen ||
-      state.nutrientAssistant?.introOpen ||
-      state.nutrientAssistant?.myNutrientsOpen ||
-      state.nutrientAssistant?.pendingOverwriteRuns?.length ||
-      state.nutrientAssistant?.blocked
+      (state.activeTab === 'today' && (state.mySupplements?.open || state.complexHub?.open || state.complexHub?.schedulePicker?.open || state.suppHub?.open)) ||
+      (state.activeTab === 'profile' && (state.profileUi?.editOpen || state.profileUi?.manualOpen || state.profileUi?.uploadOpen || state.profileUi?.reviewOpen ||
+        state.nutrientAssistant?.introOpen || state.nutrientAssistant?.myNutrientsOpen || state.nutrientAssistant?.pendingOverwriteRuns?.length || state.nutrientAssistant?.blocked)) ||
+      (state.activeTab === 'admin' && (state.admin?.detail || state.admin?.bulkPrompt || state.admin?.bulkConfirm)) ||
+      (state.activeTab === 'settings' && state.settingsUi?.slotEdit?.open) || state.unlockToast?.open || state.payment?.successInfo
     );
   }
 
   function syncModalScrollLock() {
     appEl?.classList?.toggle('modal-scroll-lock', hasOpenModal());
+    syncBulkClearance();
     syncGuideOverlay();
+  }
+  function syncBulkClearance() {
+    const bar = appEl?.querySelector('.bulk-bar');
+    document.documentElement.style.setProperty('--bulk-clearance',`${bar ? bar.getBoundingClientRect().height + 12 : 0}px`);
   }
 
   function syncGuideOverlay() {
@@ -2518,7 +2597,107 @@
   }
 
   function renderGlobalModals() {
-    return `${state.bodyMapSheet ? renderBodyMapSheet(state.bodyMapSheet) : ''}${state.catalog?.detail ? renderDetailModal(state.catalog.detail) : ''}${renderAddToComplexModal()}${renderAddToStackSlotModal()}`;
+    const todayModals = state.activeTab === 'today'
+      ? `${renderMySupplementsSheet()}${renderComplexHubSheet()}${renderSuppHubSheet()}${renderComplexSchedulePicker()}` : '';
+    return `${todayModals}${state.bodyMapSheet ? renderBodyMapSheet(state.bodyMapSheet) : ''}${state.catalog?.detail ? renderDetailModal(state.catalog.detail) : ''}${renderAddToComplexModal()}${renderAddToStackSlotModal()}`;
+  }
+
+  const modalSelector = '.modal-overlay, .sheet, .sheet-backdrop, .stack-slot-overlay, .bodymap-sheet-overlay, .catalog-modal-overlay, .catalog-modal-shell, .unlock-overlay, .payment-success-overlay';
+  const activeRenderPointers = new Set();
+  const deferredRenderJobs = new Set();
+  function scheduleUiRender(job) {
+    deferredRenderJobs.add(job);
+    requestAnimationFrame(() => {
+      if (activeRenderPointers.size) return;
+      const jobs = [...deferredRenderJobs]; deferredRenderJobs.clear();
+      jobs.forEach(render => render());
+    });
+  }
+  document.addEventListener('pointerdown', event => activeRenderPointers.add(event.pointerId),true);
+  const releaseRenderPointer = event => {
+    activeRenderPointers.delete(event.pointerId);
+    if (!activeRenderPointers.size && deferredRenderJobs.size) scheduleUiRender(() => {});
+  };
+  document.addEventListener('pointerup',releaseRenderPointer,true);
+  document.addEventListener('pointercancel',releaseRenderPointer,true);
+  window.addEventListener('blur', () => { activeRenderPointers.clear(); if (deferredRenderJobs.size) scheduleUiRender(() => {}); });
+  function modalKey(node) {
+    const kind = [...node.classList].find(c => !['card','fade','modal-enter'].includes(c)) || node.tagName;
+    const identity = node.getAttribute('data-motion-key');
+    if (identity) return `${kind}:${identity}`;
+    const marker = [...node.attributes].find(a => a.name.startsWith('data-') && a.name !== 'data-motion-key');
+    const backdrop = node.classList.contains('sheet') ? node.previousElementSibling : null;
+    const backMarker = backdrop?.classList.contains('sheet-backdrop') ? [...backdrop.attributes].find(a => a.name.startsWith('data-')) : null;
+    return `${kind}:${marker?.name || backMarker?.name || ''}:${marker?.value || backMarker?.value || ''}`;
+  }
+  function captureModalLayout(root) {
+    return new Map([...root.querySelectorAll(modalSelector)].map(node => [modalKey(node), {
+      scroll: [node, ...node.querySelectorAll('.modal-card, .stack-slot-panel, .catalog-modal-body, .bodymap-sheet-card')].map(el => el.scrollTop)
+    }]));
+  }
+  function animateRemovedModals(root, nextRoot) {
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches || !Element.prototype.animate) return;
+    const remaining = new Set([...nextRoot.querySelectorAll(modalSelector)].map(modalKey));
+    for (const node of root.querySelectorAll(modalSelector)) {
+      if (remaining.has(modalKey(node))) continue;
+      const box = node.getBoundingClientRect();
+      if (!box.width || !box.height) continue;
+      const ghost = node.cloneNode(true), style = getComputedStyle(node);
+      const originals = [node,...node.querySelectorAll('*')];
+      const copies = [ghost,...ghost.querySelectorAll('*')];
+      // A short, inert visual copy lets closing finish without retaining actions.
+      for (const [index,el] of copies.entries()) {
+        for (const attr of [...el.attributes]) if (attr.name === 'id' || attr.name.startsWith('data-') || attr.name.startsWith('on')) el.removeAttribute(attr.name);
+        if (el.matches('input,textarea,select') && el.type !== 'file') el.value = originals[index].value;
+        const computed = getComputedStyle(originals[index]);
+        if (computed.position === 'sticky') {
+          for (const property of ['position','top','z-index','padding','background','flex-wrap']) el.style.setProperty(property,computed.getPropertyValue(property));
+        }
+      }
+      ghost.className = 'modal-exit-visual'; ghost.inert = true; ghost.setAttribute('aria-hidden','true');
+      for (const property of ['display','flex-direction','align-items','justify-content','padding','background','color','border','border-radius','box-shadow']) ghost.style.setProperty(property,style.getPropertyValue(property));
+      Object.assign(ghost.style,{position:'fixed',left:`${box.left}px`,top:`${box.top}px`,width:`${box.width}px`,height:`${box.height}px`,maxHeight:'none',margin:'0',overflow:'hidden',zIndex:style.zIndex,pointerEvents:'none'});
+      document.body.append(ghost);
+      copies.forEach((el,index) => { el.scrollTop = originals[index].scrollTop; el.scrollLeft = originals[index].scrollLeft; });
+      const animation = ghost.animate([{opacity:1},{opacity:0}],{duration:140,easing:'ease-out'});
+      animation.finished.catch(() => {}).finally(() => ghost.remove());
+    }
+  }
+  function restoreModalLayout(root, previous) {
+    for (const node of root.querySelectorAll(modalSelector)) {
+      const saved = previous.get(modalKey(node));
+      const scrollers = [node, ...node.querySelectorAll('.modal-card, .stack-slot-panel, .catalog-modal-body, .bodymap-sheet-card')];
+      scrollers.forEach((el,i) => { if (saved) el.scrollTop = saved.scroll[i] || 0; });
+      if (!saved) node.classList.add('modal-enter');
+      const panel = node.matches('.sheet, .catalog-modal-shell') ? node : node.querySelector('.modal-card, .stack-slot-panel, .bodymap-sheet-card, .unlock-card, .payment-success-card');
+      if (panel) { panel.setAttribute('role','dialog'); panel.setAttribute('aria-modal','true'); }
+    }
+  }
+  function syncAuxModals() {
+    const root = document.getElementById('auxModalRoot');
+    if (!root) return;
+    const html = `${renderUnlockToastCard()}${renderPaymentSuccessModal()}`;
+    if (root.dataset.markup === html) return;
+    const layout = captureModalLayout(root);
+    const next = document.createElement('template'); next.innerHTML = html;
+    animateRemovedModals(root,next.content);
+    root.innerHTML = html;
+    root.dataset.markup = html;
+    restoreModalLayout(root,layout);
+    bindUnlockToastEvents(); bindPaymentSuccessEvents();
+  }
+
+  function moveTabModals(target, previous) {
+    const root = document.getElementById('tabModalRoot');
+    if (!root) return;
+    animateRemovedModals(root,target);
+    root.replaceChildren();
+    // Fixed windows must not inherit a card's transform, clipping or backdrop.
+    for (const node of [...target.querySelectorAll(`${modalSelector}, .bulk-bar`)]) {
+      if (node.closest('#tabModalRoot')) continue;
+      root.append(node);
+    }
+    restoreModalLayout(root,previous);
   }
 
   let lastGlobalModalsHtml = "";
@@ -2529,26 +2708,43 @@
     const nextHtml = renderGlobalModals();
     if (lastGlobalModalsHtml !== nextHtml) {
       const field = document.activeElement;
-      const modal = field?.id === 'addComplexNameInput' ? state.catalog.addToComplexModal
-        : field?.id === 'addStackSlotTime' ? state.catalog.addToStackSlotModal : null;
-      if (modal?.open && Number(field.closest('[data-catalog-modal-supplement]')?.dataset.catalogModalSupplement) === Number(modal.supplementId)) {
+      const template = document.createElement('template');
+      template.innerHTML = nextHtml;
+      const snapshot = getFocusableSnapshot(root);
+      const nextField = snapshot?.selector ? template.content.querySelector(snapshot.selector) : null;
+      if (snapshot && isEditing() && nextField && field.closest('.sheet, .modal-card, .stack-slot-panel')
+          && modalKey(field.closest('.sheet, .modal-card, .stack-slot-panel')) === modalKey(nextField.closest('.sheet, .modal-card, .stack-slot-panel'))) {
+        syncBusyControls(root,template.content);
         if (!deferredGlobalRenders.has(field)) {
           deferredGlobalRenders.add(field);
-          field.addEventListener('blur', () => { deferredGlobalRenders.delete(field); requestAnimationFrame(renderActiveTab); }, {once:true});
+          field.addEventListener('blur', () => { deferredGlobalRenders.delete(field); scheduleUiRender(renderActiveTab); }, {once:true});
         }
         return;
       }
-      const sheetScrollTop = root.querySelector('.bodymap-sheet-card')?.scrollTop || 0;
+      const layout = captureModalLayout(root);
+      animateRemovedModals(root,template.content);
       root.innerHTML = nextHtml;
       lastGlobalModalsHtml = nextHtml;
-      const sheet = root.querySelector('.bodymap-sheet-card');
-      if (sheet) sheet.scrollTop = sheetScrollTop;
+      restoreModalLayout(root,layout);
       bindBodyMapSheetEvents();
       bindDetailModalEvents();
+      if (state.activeTab === 'today') bindTodayEvents();
     }
   }
 
   function renderMainApp() {
+    if (activeRenderPointers.size) { scheduleUiRender(renderMainApp); return; }
+    delete appEl.dataset.paymentPlan;
+    if (document.getElementById('mainContent')) {
+      const tabs = appEl.querySelector('.tabs');
+      const nextTabs = renderTabs(false);
+      const template = document.createElement('template'); template.innerHTML = nextTabs;
+      const next = template.content.querySelector('.tabs');
+      if (tabs && next && tabs.className !== next.className) {
+        tabs.replaceWith(next); bindMainEvents();
+      } else appEl.querySelectorAll('.tab[data-tab]').forEach(btn => btn.classList.toggle('active',btn.dataset.tab === state.activeTab));
+      syncAuxModals(); renderActiveTab(); return;
+    }
     const topbarBadgeHtml = renderTopbarBadgeHtml();
     appEl.innerHTML = `
       <div class="main-content" id="mainContent">
@@ -2562,10 +2758,10 @@
         <section id="tabContent" class="fade"></section>
       </div>
       ${renderTabs(false)}
-      ${renderUnlockToastCard()}
-      ${renderPaymentSuccessModal()}
+      <div id="auxModalRoot"></div>
+      <div id="tabModalRoot"></div>
       <div id="guideRoot"></div>
-      <div id="globalModalRoot">${renderGlobalModals()}</div>
+      <div id="globalModalRoot"></div>
     `;
 
     lastRenderedTabKey = "";
@@ -2573,8 +2769,7 @@
     lastGlobalModalsHtml = "";
     lastTopbarActionsHtml = "";
     bindMainEvents();
-    bindUnlockToastEvents();
-    bindPaymentSuccessEvents();
+    syncAuxModals();
     bindGuideEvents();
     syncModalScrollLock();
     renderActiveTab();
@@ -2662,7 +2857,7 @@
     const active = document.activeElement;
     if (!active || !root?.contains(active)) return null;
     const tag = String(active.tagName || "").toLowerCase();
-    if (!["input", "textarea", "select"].includes(tag) && !active.isContentEditable) return null;
+    if (!["input", "textarea", "select", "button", "a"].includes(tag) && !active.isContentEditable) return null;
 
     let selector = "";
     if (active.id) {
@@ -2714,16 +2909,47 @@
       candidate.focus();
     }
     if (typeof snapshot.selectionStart === "number" && typeof snapshot.selectionEnd === "number" && typeof candidate.setSelectionRange === "function") {
-      candidate.setSelectionRange(snapshot.selectionStart, snapshot.selectionEnd);
+      try { candidate.setSelectionRange(snapshot.selectionStart, snapshot.selectionEnd); } catch {}
     }
   }
 
+  function syncBusyControls(root, nextRoot) {
+    root.querySelectorAll('button, input, select, textarea').forEach(control => {
+      const attrs = [...control.attributes].filter(a => a.name.startsWith('data-'));
+      const selector = control.id ? `#${escSelector(control.id)}`
+        : attrs.length ? control.tagName.toLowerCase() + attrs.map(a => `[${a.name}="${escSelector(a.value)}"]`).join('') : '';
+      const next = selector ? nextRoot.querySelector(selector) : null;
+      if (!next) return;
+      control.disabled = next.disabled;
+      if (control.tagName === 'BUTTON' && control.innerHTML !== next.innerHTML) control.innerHTML = next.innerHTML;
+    });
+  }
+
+  function captureScrollAnchor(root) {
+    if (!root || root.scrollTop < 1) return null;
+    const top = root.getBoundingClientRect().top;
+    const candidates = [...root.querySelectorAll('[data-item], [data-catalog-open], [data-admin-open], [data-complex]')];
+    const node = candidates.find(el => { const box = el.getBoundingClientRect(); return box.bottom > top + 4 && box.top < top + root.clientHeight; });
+    if (!node) return null;
+    const attr = ['data-item','data-catalog-open','data-admin-open','data-complex'].find(key => node.hasAttribute(key));
+    const slot = node.closest('[data-slot]');
+    const selector = `${slot ? `[data-slot="${escSelector(slot.dataset.slot)}"] ` : ''}[${attr}="${escSelector(node.getAttribute(attr))}"]`;
+    return {selector,top:node.getBoundingClientRect().top};
+  }
+  function restoreScrollAnchor(root, anchor) {
+    const node = anchor?.selector ? root?.querySelector(anchor.selector) : null;
+    if (node) root.scrollTop += node.getBoundingClientRect().top - anchor.top;
+  }
+
   function renderActiveTab() {
+    if (activeRenderPointers.size) { scheduleUiRender(renderActiveTab); return; }
     const target = document.getElementById("tabContent");
     if (!target) return;
+    syncAuxModals();
     const scrollRoot = document.getElementById("mainContent");
     const tabKey = String(state.activeTab || "");
     const prevScrollTop = scrollRoot ? scrollRoot.scrollTop : 0;
+    const scrollAnchor = lastRenderedTabKey === tabKey ? captureScrollAnchor(scrollRoot) : null;
     let nextHtml = "";
     let binder = null;
 
@@ -2766,6 +2992,20 @@
       return;
     }
     const focused = document.activeElement;
+    const editedModal = focused?.closest('#tabModalRoot .sheet, #tabModalRoot .modal-card');
+    if (previousTabKey === tabKey && editedModal && isEditing()) {
+      const snapshot = getFocusableSnapshot(appEl);
+      const template = document.createElement('template'); template.innerHTML = nextHtml;
+      const nextField = snapshot?.selector ? template.content.querySelector(snapshot.selector) : null;
+      if (nextField && modalKey(editedModal) === modalKey(nextField.closest('.sheet, .modal-card'))) {
+        syncBusyControls(document.getElementById('tabModalRoot'),template.content);
+        if (!deferredHubRenders.has(focused)) {
+          deferredHubRenders.add(focused);
+          focused.addEventListener('blur', () => { deferredHubRenders.delete(focused); scheduleUiRender(renderActiveTab); }, {once:true});
+        }
+        syncGlobalModals(); syncModalScrollLock(); return;
+      }
+    }
     const editingSupplement = ['hubDose', 'hubNote', 'hubTime'].includes(focused?.id)
         && state.suppHub.open && !state.suppHub.loading && !state.suppHub.loadError
         && Number(focused.closest('[data-supp-hub-id]')?.dataset.suppHubId) === Number(state.suppHub.item?.supplement_id);
@@ -2775,26 +3015,27 @@
     if (previousTabKey === tabKey && (editingSupplement || editingSlot)) {
       // Do not remove the focused field during a background refresh: on phones
       // that can close and immediately reopen the software keyboard.
-      const saveButton = target.querySelector('[data-supp-hub-save]');
+      const saveButton = appEl.querySelector('[data-supp-hub-save]');
       if (saveButton) {
         saveButton.disabled = !!state.suppHub.saving;
         saveButton.textContent = state.suppHub.saving ? 'Сохраняем...' : 'Сохранить';
       }
       if (editingSlot) {
         const busy = !!state.settingsUi.slotBusy[state.settingsUi.slotEdit.slotId];
-        ['settingsSlotTimeSave', 'settingsSlotDeleteBtn'].forEach(id => { const button = target.querySelector(`#${id}`); if (button) button.disabled = busy; });
+        ['settingsSlotTimeSave', 'settingsSlotDeleteBtn'].forEach(id => { const button = appEl.querySelector(`#${id}`); if (button) button.disabled = busy; });
       }
       if (!deferredHubRenders.has(focused)) {
         deferredHubRenders.add(focused);
         focused.addEventListener('blur', () => {
           deferredHubRenders.delete(focused);
-          requestAnimationFrame(renderActiveTab);
+          scheduleUiRender(renderActiveTab);
         }, {once:true});
       }
       return;
     }
     const openComplexes = previousTabKey === tabKey ? [...target.querySelectorAll('[data-complex] details[open]')].map(el => el.closest('[data-complex]').dataset.complex) : [];
-    const focusSnapshot = getFocusableSnapshot(target);
+    const focusSnapshot = previousTabKey === tabKey ? getFocusableSnapshot(appEl) : null;
+    const modalLayout = captureModalLayout(document.getElementById('tabModalRoot'));
     const searchId = tabKey === 'admin' ? 'adminSearch' : 'catalogSearch';
     const toolbarSelector = tabKey === 'admin' ? '.admin-toolbar' : '.catalog-toolbar';
     const keepToolbar = previousTabKey === tabKey && ['catalog','admin'].includes(tabKey) && document.activeElement?.id === searchId;
@@ -2819,6 +3060,7 @@
       }
     }
     if (!keptToolbar) target.innerHTML = nextHtml;
+    moveTabModals(target,modalLayout);
     for (const id of openComplexes) {
       const details = target.querySelector(`[data-complex="${escSelector(id)}"] details`);
       if (details) details.open = true;
@@ -2828,7 +3070,12 @@
     lastRenderedTabKey = tabKey;
     lastRenderedTabHtml = nextHtml;
     if (scrollRoot) scrollRoot.scrollTop = previousTabKey === tabKey ? prevScrollTop : 0;
-    if (!keptToolbar) restoreFocusableSnapshot(target, focusSnapshot);
+    if (previousTabKey === tabKey) restoreScrollAnchor(scrollRoot,scrollAnchor);
+    if (!keptToolbar) restoreFocusableSnapshot(appEl, focusSnapshot);
+    if (previousTabKey !== tabKey) {
+      target.classList.remove('tab-enter');
+      requestAnimationFrame(() => { target.classList.add('tab-enter'); });
+    }
     if (typeof binder === "function") binder(keptToolbar);
     target.querySelectorAll("[data-open-bot-start]").forEach((btn) => {
       btn.addEventListener("click", () => {
@@ -3336,11 +3583,11 @@
     const ev = ['A','B','C','D'];
     const tgts = CATALOG_FILTER_TARGETS;
     const chip=(v,arr,key,labels)=>`<button class="chip ${arr.includes(v)?'green':''}" data-filter-toggle="${key}:${v}">${labels?.[v] || v}</button>`;
-    return `<div class="card" style="position:fixed;left:10px;right:10px;bottom:90px;z-index:30;max-height:60vh;overflow:auto">
+    return `<div class="sheet-backdrop" data-filter-close></div><div class="card sheet" data-catalog-filters>
       <div class="row"><strong>Фильтры</strong><div style="display:flex; gap:8px"><button class="btn secondary" id="resetFilters" type="button">Сброс</button><button class="btn secondary" data-filter-close>Закрыть</button></div></div>
       <div style="margin-top:8px">Доказательность: ${ev.map(v=>chip(v,filters.evidence,'evidence')).join(' ')}</div>
       <div style="margin-top:8px">Куда/зачем: ${tgts.map(v=>chip(v,filters.targets,'targets',TARGET_LABELS_RU)).join(' ')}</div>
-      <div style="margin-top:8px"><select id="sortSelect" style="width:100%;padding:8px;border-radius:10px"><option value="alpha" ${filters.sort==='alpha'?'selected':''}>По алфавиту</option><option value="evidence" ${filters.sort==='evidence'?'selected':''}>По доказательности</option><option value="trials" ${filters.sort==='trials'?'selected':''}>По исследованиям</option><option value="effect" ${filters.sort==='effect'?'selected':''}>По эффекту</option></select></div>
+      <div style="margin-top:8px"><select id="sortSelect" class="select"><option value="alpha" ${filters.sort==='alpha'?'selected':''}>По алфавиту</option><option value="evidence" ${filters.sort==='evidence'?'selected':''}>По доказательности</option><option value="trials" ${filters.sort==='trials'?'selected':''}>По исследованиям</option><option value="effect" ${filters.sort==='effect'?'selected':''}>По эффекту</option></select></div>
     </div>`;
   }
 
@@ -3389,7 +3636,7 @@
     `).join('');
     const openedSection = available.find((s) => s.key === activeSection);
     return `<div class="catalog-modal-overlay" data-detail-close></div>
-      <div class="catalog-modal-shell">
+      <div class="catalog-modal-shell" data-motion-key="catalog:${esc(item.slug || item.id)}">
         <div class="card catalog-modal-head">
           <div class="row" style="align-items:flex-start; gap:8px; flex-wrap:nowrap">
             <strong class="modal-title">${displayName}</strong>
@@ -4232,7 +4479,7 @@ function adminField(label, field, value, kind='input') {
 
   function renderAdminModal(item, audit) {
     return `<div class="sheet-backdrop" data-admin-close></div>
-      <aside class="sheet fade">
+      <aside class="sheet fade" data-motion-key="admin:${esc(item.id)}">
         <div class="row"><strong>✏️ ${esc(item.slug)}</strong><button class="btn secondary" data-admin-close>Закрыть</button></div>
         <div class="row" style="margin-top:8px"><span class="muted">Статус: ${item.is_active ? '🟢 В каталоге' : '⚪ Скрыт'}</span><button class="btn" data-admin-toggle="${item.is_active ? 0 : 1}">${item.is_active ? 'Скрыть' : 'Показать'}</button></div>
         ${adminField('Название RU','name_ru',item.name_ru)}
@@ -4716,7 +4963,7 @@ function adminField(label, field, value, kind='input') {
   function renderBodyMapSheet(systemKey) {
     const data = bodyMapSystem(systemKey);
     const list = data.top || [];
-    return `<div class="bodymap-sheet-overlay" data-sheet-close>
+    return `<div class="bodymap-sheet-overlay" data-sheet-close data-motion-key="bodymap:${esc(systemKey)}">
       <section class="card bodymap-sheet-card" role="dialog" aria-modal="true" aria-labelledby="bodymapSheetTitle" data-bodymap-sheet onclick="event.stopPropagation()">
         <div class="bodymap-sheet-head">
           <div class="row"><strong id="bodymapSheetTitle">${SYSTEM_LABELS[systemKey] || systemKey}</strong><button class="btn secondary" data-sheet-close>Закрыть</button></div>
@@ -6570,7 +6817,6 @@ function adminField(label, field, value, kind='input') {
           }).join('')}
         </div>
       </div>
-      ${renderComplexSchedulePicker()}
     `;
   }
 
@@ -6630,7 +6876,6 @@ function adminField(label, field, value, kind='input') {
           }).join('')}
         </div>
       </div>
-      ${renderComplexSchedulePicker()}
     `;
   }
 
@@ -6780,7 +7025,6 @@ function adminField(label, field, value, kind='input') {
           </div>
         `}
       </div>
-      ${renderComplexSchedulePicker()}
     `;
   }
 
@@ -6789,9 +7033,6 @@ function adminField(label, field, value, kind='input') {
     if (!slots.length) {
       return `
         <div class="card">На сегодня приёмов не найдено.</div>
-        ${renderMySupplementsSheet()}
-        ${renderComplexHubSheet()}
-        ${renderSuppHubSheet()}
       `;
     }
 
@@ -6803,7 +7044,7 @@ function adminField(label, field, value, kind='input') {
       const totalAll = items.length + complexes.reduce((acc,c)=>acc + (c.total_count||0),0);
       return `
         <article class="card fade" data-slot="${esc(slot.slot_id)}">
-          <div class="row">
+          <div class="row today-slot-head">
             <div><strong>${esc(slot.title || "Слот")} · ${esc(slot.time_local || "--:--")}</strong></div>
             <div class="row" style="gap:8px">
               <button type="button" class="btn secondary" data-slot-action="all-taken" data-slot-id="${esc(slot.slot_id)}" title="Отметить всё как принято" ${todayActionBusy(todayItems(slot)) ? 'disabled' : ''}>✅ Всё</button>
@@ -6836,9 +7077,6 @@ function adminField(label, field, value, kind='input') {
         </article>
       `;
       }).join("")}
-      ${renderMySupplementsSheet()}
-      ${renderComplexHubSheet()}
-      ${renderSuppHubSheet()}
     `;
   }
 
@@ -7550,10 +7788,18 @@ function adminField(label, field, value, kind='input') {
   }
 
   function renderTopbarActions() {
+    if (activeRenderPointers.size) { scheduleUiRender(renderActiveTab); return; }
     const wrap = document.getElementById('topbarActions');
     const header = document.getElementById('topbarMain');
     const titleRow = document.getElementById('topbarTitleRow');
     const metaRow = document.getElementById('topbarMetaRow');
+    const scrollRoot = document.getElementById('mainContent');
+    const scrollAnchor = captureScrollAnchor(scrollRoot);
+    const previousHeight = header?.getBoundingClientRect().height || 0;
+    const keepPosition = () => {
+      if (scrollAnchor) restoreScrollAnchor(scrollRoot,scrollAnchor);
+      else if (scrollRoot?.scrollTop > 0) scrollRoot.scrollTop += (header?.getBoundingClientRect().height || 0) - previousHeight;
+    };
     const showTodayActions = state.activeTab === 'today';
     const showSettingsMeta = state.activeTab === 'settings';
     const badgeHtml = renderTopbarBadgeHtml();
@@ -7578,6 +7824,7 @@ function adminField(label, field, value, kind='input') {
         wrap.innerHTML = '';
         lastTopbarActionsHtml = '';
       }
+      keepPosition();
       return;
     }
     const nextHtml = `
@@ -7591,6 +7838,7 @@ function adminField(label, field, value, kind='input') {
       lastTopbarActionsHtml = nextHtml;
       bindTopbarActions();
     }
+    keepPosition();
   }
 
   function renderTopbarBadgeHtml() {
@@ -7672,7 +7920,7 @@ function adminField(label, field, value, kind='input') {
   }
 
   function bindTodayEvents() {
-    appEl.querySelectorAll("[data-item]").forEach((row) => {
+    unboundDetailControls("[data-item]").forEach((row) => {
       row.addEventListener("click", (e) => {
         e.preventDefault();
         const supplementId = row.dataset.item;
@@ -7681,7 +7929,7 @@ function adminField(label, field, value, kind='input') {
       });
     });
 
-    appEl.querySelectorAll("[data-complex-toggle]").forEach(btn => {
+    unboundDetailControls("[data-complex-toggle]").forEach(btn => {
       btn.addEventListener('click', async e => {
         e.preventDefault();
         e.stopPropagation();
@@ -7696,7 +7944,7 @@ function adminField(label, field, value, kind='input') {
       });
     });
 
-    appEl.querySelectorAll("[data-slot-action]").forEach((btn) => {
+    unboundDetailControls("[data-slot-action]").forEach((btn) => {
       btn.addEventListener("click", async (e) => {
         e.preventDefault();
         const slotId = btn.dataset.slotId;
@@ -7706,14 +7954,14 @@ function adminField(label, field, value, kind='input') {
       });
     });
 
-    appEl.querySelectorAll('[data-complex-hub-close]').forEach((el) => {
+    unboundDetailControls('[data-complex-hub-close]').forEach((el) => {
       el.addEventListener('click', () => {
         state.complexHub.open = false;
         renderActiveTab();
       });
     });
 
-    appEl.querySelectorAll('[data-complex-expand]').forEach((el) => {
+    unboundDetailControls('[data-complex-expand]').forEach((el) => {
       el.addEventListener('click', async () => {
         const cid = Number(el.dataset.complexExpand || 0);
         if (!cid) return;
@@ -7724,7 +7972,7 @@ function adminField(label, field, value, kind='input') {
       });
     });
 
-    appEl.querySelectorAll('[data-complex-create]').forEach((el) => {
+    unboundDetailControls('[data-complex-create]').forEach((el) => {
       el.addEventListener('click', async () => {
         if (state.complexHub.creating) return;
         const name = prompt('Введите название нового комплекса');
@@ -7740,7 +7988,7 @@ function adminField(label, field, value, kind='input') {
       });
     });
 
-    appEl.querySelectorAll('[data-complex-rename]').forEach((el) => {
+    unboundDetailControls('[data-complex-rename]').forEach((el) => {
       el.addEventListener('click', async () => {
         const cid = Number(el.dataset.complexRename || 0);
         if (!cid || state.complexHub.actionBusy[cid]) return;
@@ -7764,7 +8012,7 @@ function adminField(label, field, value, kind='input') {
       });
     });
 
-    appEl.querySelectorAll('[data-complex-delete]').forEach((el) => {
+    unboundDetailControls('[data-complex-delete]').forEach((el) => {
       el.addEventListener('click', async () => {
         const cid = Number(el.dataset.complexDelete || 0);
         if (!cid || state.complexHub.actionBusy[cid]) return;
@@ -7791,7 +8039,7 @@ function adminField(label, field, value, kind='input') {
       });
     });
 
-    appEl.querySelectorAll('[data-complex-schedule]').forEach((el) => {
+    unboundDetailControls('[data-complex-schedule]').forEach((el) => {
       el.addEventListener('click', () => {
         const cid = Number(el.dataset.complexSchedule || 0);
         if (!cid) return;
@@ -7800,14 +8048,14 @@ function adminField(label, field, value, kind='input') {
       });
     });
 
-    appEl.querySelectorAll('[data-complex-schedule-close]').forEach((el) => {
+    unboundDetailControls('[data-complex-schedule-close]').forEach((el) => {
       el.addEventListener('click', () => {
         state.complexHub.schedulePicker = { open: false, complexId: 0 };
         renderActiveTab();
       });
     });
 
-    appEl.querySelectorAll('[data-complex-schedule-slot]').forEach((el) => {
+    unboundDetailControls('[data-complex-schedule-slot]').forEach((el) => {
       el.addEventListener('click', async () => {
         const cid = Number(el.dataset.complexId || 0);
         const slotId = String(el.dataset.complexScheduleSlot || '').trim();
@@ -7831,7 +8079,7 @@ function adminField(label, field, value, kind='input') {
       });
     });
 
-    appEl.querySelectorAll('[data-complex-schedule-settings]').forEach((el) => {
+    unboundDetailControls('[data-complex-schedule-settings]').forEach((el) => {
       el.addEventListener('click', async () => {
         state.complexHub.returnToToday = true;
         state.complexHub.schedulePicker = { open: false, complexId: 0 };
@@ -7844,7 +8092,7 @@ function adminField(label, field, value, kind='input') {
       });
     });
 
-    appEl.querySelectorAll('[data-complex-schedule-clear]').forEach((el) => {
+    unboundDetailControls('[data-complex-schedule-clear]').forEach((el) => {
       el.addEventListener('click', async () => {
         const cid = Number(el.dataset.complexScheduleClear || 0);
         if (!cid || state.complexHub.actionBusy[cid]) return;
@@ -7866,7 +8114,7 @@ function adminField(label, field, value, kind='input') {
       });
     });
 
-    appEl.querySelectorAll('[data-complex-open-supp]').forEach((el) => {
+    unboundDetailControls('[data-complex-open-supp]').forEach((el) => {
       el.addEventListener('click', async () => {
         const sid = Number(el.dataset.complexOpenSupp || 0);
         if (!sid) return;
@@ -7874,7 +8122,7 @@ function adminField(label, field, value, kind='input') {
       });
     });
 
-    appEl.querySelectorAll('[data-complex-remove-item]').forEach((el) => {
+    unboundDetailControls('[data-complex-remove-item]').forEach((el) => {
       el.addEventListener('click', async () => {
         const cid = Number(el.dataset.complexRemoveItem || 0);
         const sid = Number(el.dataset.supplementId || 0);
@@ -7899,7 +8147,7 @@ function adminField(label, field, value, kind='input') {
       });
     });
 
-    appEl.querySelectorAll('[data-complex-add-item]').forEach((el) => {
+    unboundDetailControls('[data-complex-add-item]').forEach((el) => {
       el.addEventListener('click', async () => {
         const cid = Number(el.dataset.complexAddItem || 0);
         if (!cid) return;
@@ -7917,21 +8165,21 @@ function adminField(label, field, value, kind='input') {
       });
     });
 
-    appEl.querySelectorAll("[data-my-supp-close]").forEach((el) => {
+    unboundDetailControls("[data-my-supp-close]").forEach((el) => {
       el.addEventListener("click", () => {
         state.mySupplements.open = false;
         renderActiveTab();
       });
     });
 
-    appEl.querySelectorAll("[data-my-supp-tab]").forEach((el) => {
+    unboundDetailControls("[data-my-supp-tab]").forEach((el) => {
       el.addEventListener("click", () => {
         state.mySupplements.tab = el.dataset.mySuppTab === "frozen" ? "frozen" : "active";
         renderActiveTab();
       });
     });
 
-    appEl.querySelectorAll("[data-my-supp-freeze]").forEach((el) => {
+    unboundDetailControls("[data-my-supp-freeze]").forEach((el) => {
       el.addEventListener("click", async () => {
         const supplementId = Number(el.dataset.mySuppFreeze);
         const enabled = Number(el.dataset.enabled);
@@ -7950,13 +8198,13 @@ function adminField(label, field, value, kind='input') {
       });
     });
 
-    appEl.querySelectorAll("[data-my-supp-open]").forEach((el) => {
+    unboundDetailControls("[data-my-supp-open]").forEach((el) => {
       el.addEventListener("click", async () => {
         await openSupplementHub(Number(el.dataset.mySuppOpen));
       });
     });
 
-    appEl.querySelectorAll('[data-supp-hub-close]').forEach((el) => {
+    unboundDetailControls('[data-supp-hub-close]').forEach((el) => {
       el.addEventListener('click', () => {
         state.suppHub.open = false;
         state.suppHub.loadVersion = (state.suppHub.loadVersion || 0) + 1;
@@ -7964,11 +8212,11 @@ function adminField(label, field, value, kind='input') {
       });
     });
 
-    appEl.querySelector('[data-supp-hub-retry]')?.addEventListener('click', () => openSupplementHub(state.suppHub.item?.supplement_id));
+    unboundDetailControls('[data-supp-hub-retry]')[0]?.addEventListener('click', () => openSupplementHub(state.suppHub.item?.supplement_id));
 
-    document.getElementById('hubDose')?.addEventListener('input', (e) => { state.suppHub.doseText = e.target.value || ''; });
-    document.getElementById('hubNote')?.addEventListener('input', (e) => { state.suppHub.noteText = e.target.value || ''; });
-    appEl.querySelectorAll('[data-hub-slot-choice]').forEach((el) => {
+    unboundDetailControls('#hubDose')[0]?.addEventListener('input', (e) => { state.suppHub.doseText = e.target.value || ''; });
+    unboundDetailControls('#hubNote')[0]?.addEventListener('input', (e) => { state.suppHub.noteText = e.target.value || ''; });
+    unboundDetailControls('[data-hub-slot-choice]').forEach((el) => {
       el.addEventListener('click', async () => {
         const nextSlotId = String(el.dataset.hubSlotChoice || 'morning');
         if (String(state.suppHub.slotId || '') === nextSlotId && state.suppHub.timeMode !== 'custom') return;
@@ -7983,7 +8231,7 @@ function adminField(label, field, value, kind='input') {
       });
     });
 
-    appEl.querySelectorAll('[data-time-mode]').forEach((el) => {
+    unboundDetailControls('[data-time-mode]').forEach((el) => {
       el.addEventListener('click', async () => {
         const mode = el.dataset.timeMode === 'custom' ? 'custom' : 'slot';
         if (state.suppHub.timeMode === mode) return;
@@ -8003,20 +8251,20 @@ function adminField(label, field, value, kind='input') {
       });
     });
 
-    appEl.querySelector('[data-supp-hub-history]')?.addEventListener('click', async () => {
+    unboundDetailControls('[data-supp-hub-history]')[0]?.addEventListener('click', async () => {
       state.suppHub.historyOpen = !state.suppHub.historyOpen;
       renderActiveTab();
       if (state.suppHub.historyOpen) await loadSuppHubHistory();
     });
 
-    appEl.querySelectorAll('[data-history-month]').forEach(el => {
+    unboundDetailControls('[data-history-month]').forEach(el => {
       el.addEventListener('click', async () => {
         state.suppHub.historyMonthOffset = Number(state.suppHub.historyMonthOffset || 0) + (String(el.dataset.historyMonth || '').startsWith('-') ? -1 : 1);
         await loadSuppHubHistory();
       });
     });
 
-    appEl.querySelector('[data-my-supp-split]')?.addEventListener('click', async () => {
+    unboundDetailControls('[data-my-supp-split]')[0]?.addEventListener('click', async () => {
       const hub = state.suppHub, sid = Number(hub.item?.supplement_id || 0), version = hub.loadVersion;
       if (!sid || hub.actionBusy || hub.saving) return;
       hub.actionBusy = true;
@@ -8040,7 +8288,7 @@ function adminField(label, field, value, kind='input') {
       finally { hub.actionBusy = false; renderActiveTab(); }
     });
 
-    appEl.querySelector('[data-split-cancel]')?.addEventListener('click', async () => {
+    unboundDetailControls('[data-split-cancel]')[0]?.addEventListener('click', async () => {
       const hub = state.suppHub, draft = hub.splitDraft, version = hub.loadVersion;
       if (!draft?.newId || !draft?.originId || hub.actionBusy || hub.saving) return;
       hub.actionBusy = true;
@@ -8054,7 +8302,7 @@ function adminField(label, field, value, kind='input') {
       finally { hub.actionBusy = false; renderActiveTab(); }
     });
 
-    appEl.querySelector('[data-split-apply]')?.addEventListener('click', async () => {
+    unboundDetailControls('[data-split-apply]')[0]?.addEventListener('click', async () => {
       const hub = state.suppHub, draft = hub.splitDraft;
       if (!draft || hub.actionBusy || hub.saving) return;
       if (await persistSuppHub() && hub.splitDraft === draft) {
@@ -8064,7 +8312,7 @@ function adminField(label, field, value, kind='input') {
       }
     });
 
-    appEl.querySelector('[data-my-supp-delete]')?.addEventListener('click', async () => {
+    unboundDetailControls('[data-my-supp-delete]')[0]?.addEventListener('click', async () => {
       const hub = state.suppHub, sid = Number(hub.item?.supplement_id || 0), version = hub.loadVersion;
       if (!sid || hub.actionBusy || hub.saving) return;
       if (!confirm('Удалить добавку из моих БАДов? История приёмов сохранится.')) return;
@@ -8085,12 +8333,12 @@ function adminField(label, field, value, kind='input') {
         await Promise.all([loadMySupplements({force:true, silent:true}), loadToday({force:true, silent:true})]);
       } finally { hub.actionBusy = false; hub.deleting = false; renderActiveTab(); }
     });
-    document.getElementById('hubTime')?.addEventListener('input', (e) => {
+    unboundDetailControls('#hubTime')[0]?.addEventListener('input', (e) => {
       const val = normalizeHHMM(e.target.value || '');
       state.suppHub.customTime = val;
       if (state.suppHub.timeMode === 'custom') state.suppHub.time = val;
     });
-    appEl.querySelectorAll('[data-schedule-add-slot]').forEach((el) => {
+    unboundDetailControls('[data-schedule-add-slot]').forEach((el) => {
       el.addEventListener('click', async () => {
         const time = normalizeHHMM(state.suppHub.timeMode === 'custom' ? state.suppHub.customTime : state.suppHub.time);
         if (!time) return showToast('Укажите корректное время');
@@ -8109,7 +8357,7 @@ function adminField(label, field, value, kind='input') {
       });
     });
 
-    appEl.querySelectorAll('[data-supp-hub-save]').forEach((el) => {
+    unboundDetailControls('[data-supp-hub-save]').forEach((el) => {
       el.addEventListener('click', async () => {
         await persistSuppHub({ showSavedToast: true });
         renderActiveTab();
@@ -8245,6 +8493,7 @@ function adminField(label, field, value, kind='input') {
       document.documentElement.style.setProperty('--visible-height', `${visible}px`);
       document.documentElement.style.setProperty('--keyboard-inset', `${Math.max(0, window.innerHeight - visible - (window.visualViewport?.offsetTop || 0))}px`);
       document.documentElement.classList.toggle('keyboard-open',keyboard);
+      syncBulkClearance();
       keepFocusedFieldVisible();
     });
   }

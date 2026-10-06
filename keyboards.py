@@ -26,6 +26,7 @@ def main_menu(
         [InlineKeyboardButton("📅 Сегодня", callback_data="menu:today")],
         [InlineKeyboardButton("💊 Мои БАДы", callback_data="menu:my")],
         [InlineKeyboardButton("📚 Каталог БАДов", callback_data="menu:catalog")],
+        [InlineKeyboardButton("🧪 Анализы", callback_data="labs:home")],
     ]
     if show_ai_checkin:
         rows.append([InlineKeyboardButton("📝 Ежедневный опрос", callback_data="menu:checkin_ai")])

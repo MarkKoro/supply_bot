@@ -12353,3 +12353,208 @@ async def get_recent_lab_results_for_user(
             (user_id, int(limit)),
         )
     return [dict(row) for row in rows]
+
+
+def suggest_lab_reference(row: dict, profile: dict, report_date: str = "") -> dict | None:
+    """Select only an unambiguous sex/age range literally printed in the report.
+
+    Birth year leaves a one-year uncertainty; boundary ages deliberately do not match.
+    Confirmed numeric bounds are immutable here. Unrecognised conditions never match.
+    """
+    if row.get("ref_low") not in (None, "") or row.get("ref_high") not in (None, ""):
+        return None
+    import re
+    from openai_client import lab_number
+    text = str(row.get("reference_text") or "").strip()
+    parts = [part.strip() for part in re.split(r"[;\n]+", text) if part.strip()]
+    if not parts:
+        return None
+    sex = str(profile.get("sex_at_birth") or "").lower()
+    sex = {"male": "m", "female": "f"}.get(sex, sex)
+    date_text = str(row.get("measured_at") or report_date or "")
+    try:
+        age_max = datetime.fromisoformat(date_text).year - int(profile.get("birth_year"))
+        age_min = age_max - 1
+    except (ValueError, TypeError):
+        age_min = age_max = None
+    matches = []
+    for part in parts:
+        match = re.fullmatch(r"([^:]+):\s*(-?\d+(?:[.,]\d+)?)\s*[-–—]\s*(-?\d+(?:[.,]\d+)?)", part)
+        if not match:
+            return None
+        label, low_text, high_text = match.groups()
+        label = label.strip().lower().replace("ё", "е")
+        low, high = lab_number(low_text), lab_number(high_text)
+        if low is None or high is None or low > high:
+            return None
+        sex_match = re.search(r"\b(мужчины|мужской|муж|male|men|женщины|женский|жен|female|women)\b", label)
+        required_sex = None
+        if sex_match:
+            required_sex = "m" if sex_match.group() in {"мужчины", "мужской", "муж", "male", "men"} else "f"
+            label = label[:sex_match.start()] + label[sex_match.end():]
+        age_match = re.search(r"(\d+)\s*[-–—]\s*(\d+)\s*(?:лет|года|год|years|y)\b", label)
+        required_age = None
+        if age_match:
+            required_age = (int(age_match.group(1)), int(age_match.group(2)))
+            label = label[:age_match.start()] + label[age_match.end():]
+        if label.strip(" ,()") or (required_sex is None and required_age is None):
+            return None
+        if required_sex and required_sex != sex:
+            continue
+        if required_age and (age_min is None or not required_age[0] <= age_min <= age_max <= required_age[1]):
+            continue
+        matches.append({"ref_low": low, "ref_high": high, "label": match.group(1).strip(), "source": "report"})
+    return matches[0] if len(matches) == 1 else None
+
+
+class LabInputError(ValueError):
+    def __init__(self, status_code: int, detail: str):
+        super().__init__(detail)
+        self.status_code = status_code
+
+
+async def ingest_lab_document(db_path: str, tg_user_id: int, data: bytes, filename: str,
+                              *, report_date="", lab_name="", notes="", allow_ai=False,
+                              uploads_dir=None, parser=None) -> dict:
+    """One owned, deduplicated storage path for Telegram and WebApp uploads."""
+    import asyncio
+    import hashlib
+    import mimetypes
+    import uuid
+    from pathlib import Path
+    from openai_client import LAB_FILE_LIMIT, LAB_EXTENSIONS, read_lab_document
+    uploads_dir = Path(uploads_dir) if uploads_dir is not None else Path(db_path).resolve().parent / "uploads" / "labs"
+    parser = parser or read_lab_document
+    try:
+        report_date = validate_lab_date(report_date)
+    except ValueError as exc:
+        raise LabInputError(status_code=400, detail=str(exc)) from None
+    filename = Path(str(filename or "document").replace("\\", "/")).name[:160]
+    ext = Path(filename).suffix.lower()
+    if ext not in LAB_EXTENSIONS:
+        raise LabInputError(status_code=415, detail="Поддерживаются PDF, JPG, PNG, WEBP, DOCX, XLSX, CSV, TXT и JSON")
+    if not data or len(data) > LAB_FILE_LIMIT:
+        raise LabInputError(status_code=413, detail="Выберите непустой файл размером до 12 МБ")
+    digest = hashlib.sha256(data).hexdigest()
+    root = uploads_dir / str(tg_user_id)
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temporary = root / (uuid.uuid4().hex + ext)
+    stored = None
+    stored_committed = False
+    conn = await connect(db_path)
+    try:
+        async with transaction(conn) as tx:
+            uid = await get_or_create_user(tx, tg_user_id)
+            duplicate = await fetchone(tx, "SELECT id FROM lab_reports WHERE user_id=? AND source_sha256=?", (uid, digest))
+            if duplicate:
+                return {"ok": True, "report_id": duplicate["id"], "duplicate": True}
+            storage = await fetchone(tx, "SELECT COUNT(*) AS n,COALESCE(SUM(source_size),0) AS size FROM lab_reports WHERE user_id=? AND source_sha256!=''", (uid,))
+            if storage["n"] >= 200 or int(storage["size"]) + len(data) > 200 * 1024 * 1024:
+                raise LabInputError(status_code=413, detail="Лимит документов: 200 файлов или 200 МБ. Удалите ненужные документы")
+        await asyncio.to_thread(temporary.write_bytes, data)
+        temporary.chmod(0o600)
+        try:
+            document = await asyncio.to_thread(parser, str(temporary))
+            document["results"] = [validate_lab_result(row) for row in document.get("results") or []]
+            if not report_date:
+                report_date = validate_lab_date(document.get("report_date"))
+            if not lab_name:
+                lab_name = str(document.get("lab_name") or "")
+        except ValueError as exc:
+            raise LabInputError(status_code=400, detail=str(exc)) from None
+        async with transaction(conn) as tx:
+            uid = await get_or_create_user(tx, tg_user_id)
+            duplicate = await fetchone(tx, "SELECT id FROM lab_reports WHERE user_id=? AND source_sha256=?", (uid, digest))
+            if duplicate:
+                return {"ok": True, "report_id": duplicate["id"], "duplicate": True}
+            storage = await fetchone(tx, "SELECT COUNT(*) AS n,COALESCE(SUM(source_size),0) AS size FROM lab_reports WHERE user_id=? AND source_sha256!=''", (uid,))
+            if storage["n"] >= 200 or int(storage["size"]) + len(data) > 200 * 1024 * 1024:
+                raise LabInputError(status_code=413, detail="Достигнут лимит документов. Удалите ненужные файлы")
+            active = await find_active_assistant_job(tx, tg_user_id, "lab_parse")
+            needs_ai = bool(allow_ai) and not document.get("complete")
+            if needs_ai and active:
+                raise LabInputError(status_code=409, detail="Дождитесь распознавания предыдущего документа")
+            # Server-owned random path; a client's filename is never used as a path.
+            stored = root / (uuid.uuid4().hex + ext)
+            report_id = await create_lab_report(tx, tg_user_id, {"source": "file_upload", "report_date": report_date,
+                "lab_name": lab_name[:200], "notes": notes[:4000], "source_filename": filename,
+                "mime_type": mimetypes.guess_type(filename)[0] or "application/octet-stream", "source_file_path": str(stored),
+                "parse_status": "queued" if needs_ai else "needs_manual_review",
+                "parse_notes": "Проверьте все строки бланка: обычное чтение могло распознать документ частично" if document.get("results") else "Добавьте результаты вручную или разрешите ИИ-распознавание"})
+            await tx.execute("UPDATE lab_reports SET source_sha256=?,source_size=? WHERE id=?", (digest, len(data), report_id))
+            if document.get("results"):
+                await add_lab_results_batch(tx, tg_user_id, report_id, document["results"])
+            if needs_ai:
+                job_id = await create_assistant_job(tx, tg_user_id, json.dumps({"report_id": report_id, "allow_ai": True, "document": document}, ensure_ascii=False), uuid.uuid4().hex, kind="lab_parse", monthly_limit=None)
+                await tx.execute("UPDATE lab_reports SET parse_job_id=? WHERE id=?", (job_id, report_id))
+            temporary.replace(stored)
+        stored_committed = True
+        return {"ok": True, "report_id": report_id, "queued": needs_ai}
+    finally:
+        temporary.unlink(missing_ok=True)
+        if stored is not None and not stored_committed:
+            stored.unlink(missing_ok=True)
+        await conn.close()
+
+async def recognize_lab_document(db_path: str, uid: int, report_id: int, *, uploads_dir=None, parser=None) -> dict:
+    import asyncio
+    import uuid
+    from pathlib import Path
+    from openai_client import read_lab_document
+    uploads_dir = Path(uploads_dir) if uploads_dir is not None else Path(db_path).resolve().parent / "uploads" / "labs"
+    parser = parser or read_lab_document
+    conn = await connect(db_path)
+    try:
+        report = await get_lab_report_by_id(conn, uid, report_id)
+        if not report:
+            raise LabInputError(status_code=404, detail="Документ не найден")
+        path = Path(report["source_file_path"]).resolve()
+        if path.parent != (uploads_dir / str(uid)).resolve() or not path.is_file():
+            raise LabInputError(status_code=404, detail="Исходный файл не найден")
+        try:
+            document = await asyncio.to_thread(parser, str(path))
+        except ValueError as exc:
+            raise LabInputError(status_code=400, detail=str(exc)) from None
+        async with transaction(conn) as tx:
+            current = await get_lab_report_by_id(tx, uid, report_id)
+            if not current:
+                raise LabInputError(status_code=404, detail="Документ удалён")
+            active = await find_active_assistant_job(tx, uid, "lab_parse")
+            if active and int(current["parse_job_id"] or 0) != int(active["id"]):
+                raise LabInputError(status_code=409, detail="Дождитесь предыдущего распознавания")
+            job_id = await create_assistant_job(tx, uid, json.dumps({"report_id": report_id, "allow_ai": True, "document": document}, ensure_ascii=False), uuid.uuid4().hex, kind="lab_parse", monthly_limit=None)
+            metadata = json.loads(current.get("parse_metadata_json") or "{}")
+            metadata["confirmed"] = current["parse_status"] in {"manual", "manual_reviewed"} or bool(metadata.get("confirmed"))
+            await tx.execute("UPDATE lab_reports SET parse_status='queued',parse_job_id=?,parse_metadata_json=?,updated_at_utc=? WHERE id=?", (job_id, json.dumps(metadata, ensure_ascii=False), utc_now_iso(), report_id))
+        return {"ok": True, "report_id": report_id, "job_id": job_id}
+    finally:
+        await conn.close()
+
+def lab_report_revision(report: dict, rows: list[dict]) -> str:
+    import hashlib
+    snapshot = {key: report.get(key) for key in ("id", "report_date", "lab_name", "notes", "parse_status", "parse_job_id", "parse_metadata_json")}
+    snapshot["results"] = [{key: row.get(key) for key in ("analyte_code", "analyte_name", "value_text", "value_num", "unit", "ref_low", "ref_high", "reference_text", "measured_at")} for row in rows]
+    return hashlib.sha256(json.dumps(snapshot, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+
+
+async def confirm_lab_report(conn, tg_user_id: int, report_id: int, rows: list[dict], metadata: dict, *, expected_revision="") -> dict:
+    from openai_client import clean_extracted_lab_rows
+    clean = [validate_lab_result(row) for row in clean_extracted_lab_rows(rows)]
+    if not clean or len(clean) != len(rows):
+        raise LabInputError(400, "Проверьте названия и результаты всех показателей")
+    async with transaction(conn) as tx:
+        report = await get_lab_report_by_id(tx, tg_user_id, report_id)
+        if not report:
+            raise LabInputError(404, "Документ не найден")
+        if expected_revision and expected_revision != lab_report_revision(report, await get_lab_results_by_report_id(tx, tg_user_id, report_id)):
+            raise LabInputError(409, "Анализ изменён в другом окне. Обновите его перед сохранением; ваш черновик остаётся на экране")
+        payload = {**report, **metadata, "parse_status": "manual_reviewed", "parse_notes": ""}
+        payload["report_date"] = validate_lab_date(payload.get("report_date"))
+        if report.get("parse_job_id"):
+            await cancel_assistant_job(tx, tg_user_id, int(report["parse_job_id"]))
+        await update_lab_report_meta(tx, tg_user_id, report_id, payload)
+        await replace_lab_results(tx, tg_user_id, report_id, clean)
+        await tx.execute("UPDATE lab_reports SET parse_metadata_json='{}' WHERE id=?", (report_id,))
+        await mark_all_active_plans_stale(tx, tg_user_id, "lab:updated")
+        return await get_lab_report_by_id(tx, tg_user_id, report_id)
+

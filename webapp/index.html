@@ -911,6 +911,11 @@
     .field-grid { display:grid; gap:8px; }
     .field-grid.two { grid-template-columns:repeat(2,minmax(0,1fr)); }
     .lab-result-row { border:1px solid rgba(255,255,255,.14); border-radius:12px; padding:8px; margin-bottom:8px; background:rgba(255,255,255,.03); }
+    .lab-file-input { position:absolute; width:1px; height:1px; opacity:0; }
+    .lab-actions label.btn:focus-within { outline:2px solid var(--accent); outline-offset:3px; }
+    .lab-views { display:flex; gap:6px; flex-wrap:wrap; margin-top:12px; }
+    .lab-views .btn { flex:1; min-width:80px; padding:10px 8px; }
+    .lab-views [aria-selected="true"] { border-color:var(--accent); background:var(--btn-gradient); }
     .profile-module-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; margin-bottom:10px; }
     .profile-module-btn { min-height:98px; border-radius:16px; text-align:left; padding:10px; display:grid; gap:6px; align-content:flex-start; line-height:1.25; overflow:hidden; white-space:normal; }
     .profile-module-btn strong { display:block; font-size:14px; overflow-wrap:anywhere; }
@@ -994,6 +999,7 @@
     .coach-card h4 { margin: 0; font-size: 15px; }
     .coach-skip-top { margin-left:auto; }
     .coach-card .muted { line-height: 1.35; }
+    .coach-card { max-height:calc(var(--visible-height,100vh) - 16px); overflow:auto; }
     .coach-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 10px; }
     .coach-actions-left { display:flex; align-items:center; gap:8px; min-width:96px; }
     .coach-actions-right { display:flex; align-items:center; gap:8px; }
@@ -1312,8 +1318,8 @@
     { id: "profile", title: "Профиль", icon: "👤" },
     { id: "settings", title: "Настройки", icon: "⚙️" }
   ];
-  const GUIDE_KEYS = { main: 'main_tabs', survey: 'survey_tab', profile: 'profile_tab' };
-  const GUIDE_VERSION = { main_tabs: 5, survey_tab: 5, profile_tab: 6 };
+  const GUIDE_KEYS = { main: 'main_tabs', survey: 'survey_tab', profile: 'profile_tab', labs: 'labs_tab' };
+  const GUIDE_VERSION = { main_tabs: 6, survey_tab: 5, profile_tab: 7, labs_tab: 1 };
   const SHOW_NUTRIENT_ASSISTANT_UI = true;
   const GUIDE_TEXT = {
     main_tabs: [
@@ -1328,7 +1334,15 @@
       { selector: '.survey-option, .survey-goals, #surveyNote', title: 'Вопросы опроса', text: 'Заполняйте ответы, чтобы помощник лучше понял ваше состояние, цели и ситуацию на день.' },
       { selector: '#surveyNext', title: 'Далее', text: 'Кнопка переводит вас к следующему шагу и в конце запускает расчёт рекомендаций.' }
     ],
+    labs_tab: [
+      {selector:'[data-open-upload]',title:'Бланк или фото',text:'Загрузите документ и проверьте прочитанные строки. Файл, отправленный через раздел «Анализы» в боте, появится и здесь.'},
+      {selector:'[data-open-manual]',title:'Любые показатели',text:'Можно ввести любое название из бланка, результат, единицу и его референс. Подсказки названий помогают искать, но не ограничивают список.'},
+      {selector:'[data-lab-view="documents"]',title:'Документы',text:'Здесь находятся бланки, проверка результатов и редактирование. Дату забора указывайте по бланку.'},
+      {selector:'[data-lab-view="history"]',title:'Динамика и приём',text:'Результаты по датам и ваши отметки приёма хранятся рядом. Связанные карточки показывают последний отмеченный приём и сохранённую дозу.'}
+    ],
     profile_tab: [
+      {selector:'[data-profile-module="assistant"]',title:'Анализы',text:'Бланки, любые показатели, динамика и история приёма. Загрузка доступна и здесь, и в боте.'},
+      {selector:'[data-profile-module="achievements"]',title:'Достижения',text:'Ваши отметки открывают достижения и элементы оформления.'},
       { selector: '[data-profile-module="organs"]', title: 'Карта органов', text: 'Здесь можно быстро увидеть, какие системы организма вы поддерживаете добавками.' },
       { selector: '[data-profile-module="cosmetics"]', title: 'Косметика', text: 'В этом разделе вы меняете внешний вид интерфейса: темы, иконки вкладок и бейдж.' }
     ]
@@ -1415,6 +1429,7 @@
       plan_id: String(qp.get("plan_id") || "").trim(),
       source: String(qp.get("source") || "").trim(),
       tutorial: String(qp.get("tutorial") || "").trim(),
+      report_id: Math.max(0, Number(qp.get('report_id')) || 0),
     };
   }
 
@@ -1799,9 +1814,9 @@
     return 'Уверенность не указана';
   }
 
-  async function fetchWithDeadline(url, options) {
+  async function fetchWithDeadline(url, options, timeoutMs=30000) {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 30000);
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const response = await fetch(url, { ...options, signal: controller.signal });
       const body = await response.text();
@@ -1950,11 +1965,12 @@
   }
 
   function hasSeenGuide(name) {
-    return localStorage.getItem(guideStorageKey(name)) === "1";
+    try { return localStorage.getItem(guideStorageKey(name)) === "1" || Boolean(state.guideSeen?.[name]); } catch { return Boolean(state.guideSeen?.[name]); }
   }
 
   function markGuideSeen(name) {
-    localStorage.setItem(guideStorageKey(name), "1");
+    state.guideSeen = {...state.guideSeen,[name]:true};
+    try { localStorage.setItem(guideStorageKey(name), "1"); } catch {}
   }
 
   function findGuideTarget(step) {
@@ -1987,9 +2003,10 @@
     };
     const cardW = Math.min(360, window.innerWidth - 24);
     const preferBottom = rect.top < window.innerHeight * 0.56;
+    const cardHeight = Math.min(window.innerHeight-16,document.querySelector('.coach-card')?.getBoundingClientRect().height||220);
     const cardTop = preferBottom
-      ? clamp(rect.top + rect.height + 18, 8, window.innerHeight - 190)
-      : clamp(rect.top - 158, 8, window.innerHeight - 190);
+      ? clamp(rect.top + rect.height + 18, 8, window.innerHeight - cardHeight - 8)
+      : clamp(rect.top - cardHeight - 18, 8, window.innerHeight - cardHeight - 8);
     const cardLeft = clamp(rect.left + rect.width / 2 - cardW / 2, 8, window.innerWidth - cardW - 8);
     const fromX = rect.left + rect.width / 2;
     const fromY = preferBottom ? rect.top + rect.height : rect.top;
@@ -2129,11 +2146,15 @@
         else renderPaywall();
       } else {
         if (sp.tutorial === "main_reset") {
-          Object.values(GUIDE_KEYS).forEach((key) => localStorage.removeItem(guideStorageKey(key)));
+          Object.values(GUIDE_KEYS).forEach((key) => { try { localStorage.removeItem(guideStorageKey(key)); } catch {} });
         }
         restoreNavigation();
+        if (sp.screen === 'labs') {
+          state.activeTab = 'profile';state.profileUi.activeModule = 'assistant';state.profileUi.labView = 'overview';state.restoreScroll = 0;
+          state.labDeepLink = sp.report_id;
+        }
         renderMainApp();
-        maybeStartGuide(GUIDE_KEYS.main);
+        if (sp.screen !== 'labs') maybeStartGuide(GUIDE_KEYS.main);
         startAutoSync();
         await Promise.allSettled([
           loadToday(),
@@ -2165,9 +2186,12 @@
 
   function isEditing() { return !!document.activeElement?.matches('input,textarea,select,[contenteditable="true"]'); }
   let resumeInFlight = false;
+  let resumePending = false;
   let lastResumeAt = 0;
   async function refreshOnResume() {
-    if (document.visibilityState !== 'visible' || !state.me || isEditing() || resumeInFlight || Date.now() - lastResumeAt < 5000) return;
+    if (document.visibilityState !== 'visible' || !state.me || resumeInFlight || Date.now() - lastResumeAt < 5000) return;
+    if (isEditing()) { resumePending=true;return; }
+    resumePending=false;
     resumeInFlight = true;
     lastResumeAt = Date.now();
     try {
@@ -2180,7 +2204,8 @@
         await loadSurveyForTarget();
         renderActiveTab();
       }
-      await Promise.allSettled([loadToday({ force: true, silent: true }), checkPendingPaymentStatus({ silent: true })]);
+      await Promise.allSettled([loadToday({force:true,silent:true}),checkPendingPaymentStatus({silent:true}),refreshVisibleData()]);
+      if (!hasOpenModal() && !isEditing()) renderActiveTab();
     } catch (error) {
       if (error.message === 'UNAUTHORIZED') renderStartupFailure(error);
     } finally { resumeInFlight = false; }
@@ -2188,12 +2213,14 @@
 
   function navigationKey() { return `goody_navigation:${state.userId}`; }
   function saveNavigation() {
-    try { sessionStorage.setItem(navigationKey(), JSON.stringify({tab:state.activeTab,scroll:document.getElementById('mainContent')?.scrollTop || 0})); } catch {}
+    try { sessionStorage.setItem(navigationKey(), JSON.stringify({tab:state.activeTab,module:state.profileUi.activeModule,labView:state.profileUi.labView,scroll:document.getElementById('mainContent')?.scrollTop || 0})); } catch {}
   }
   function restoreNavigation() {
     try {
       const saved = JSON.parse(sessionStorage.getItem(navigationKey()) || '{}');
       if (['today','catalog','profile','survey','settings'].includes(saved.tab)) state.activeTab = saved.tab;
+      if (['organs','assistant','achievements','cosmetics'].includes(saved.module)) state.profileUi.activeModule = saved.module;
+      if (['overview','documents','history'].includes(saved.labView)) state.profileUi.labView = saved.labView;
       state.restoreScroll = Math.max(0, Number(saved.scroll) || 0);
     } catch {}
   }
@@ -2202,18 +2229,50 @@
     else if (state.activeTab === 'profile') await loadProfileShell(true);
     else if (state.activeTab === 'survey') await loadSurveyForTarget();
     else if (state.activeTab === 'settings') await Promise.allSettled([loadSettingsData(true),loadScheduleData(true)]);
+    if (state.labDeepLink) {
+      const id = state.labDeepLink;state.labDeepLink = 0;
+      const report = state.profileLabs.reports.find(item=>Number(item.id)===id);
+      if (report) { state.profileUi.selectedReportId=id;state.profileUi.reviewDraft=null;state.profileUi.reviewOpen=true; }
+      else showToast('Анализ не найден или удалён');
+    }
     renderActiveTab();
     const root = document.getElementById('mainContent');
     if (root) root.scrollTop = state.restoreScroll || 0;
   }
 
+  async function refreshVisibleData() {
+    const jobs=[loadMySupplements({force:true,silent:true}),loadAchievements(true)];
+    if (state.activeTab==='profile') jobs.push(loadProfileData(true),loadProfileLabs(true),loadBodyMap(true),loadStatsOnly());
+    if (state.activeTab==='settings') jobs.push(loadSettingsData(true),loadScheduleData(true),loadStatsOnly());
+    if (state.activeTab==='catalog') jobs.push(refreshCatalogSnapshot());
+    await Promise.allSettled(jobs);
+  }
+  async function refreshCatalogSnapshot() {
+    const c=state.catalog;
+    if(c.loading||c.loadingMore||catalogStackActions.size)return;
+    const revision=catalogStackRevision,requestId=++catalogRequestId;
+    const page=c.page,query=c.q,filters=JSON.stringify(c.filters);
+    const f=c.filters;
+    try {
+      const pages=await Promise.all(Array.from({length:page+1},(_,index)=>{
+        const qp=new URLSearchParams({q:query||'',page:String(index),page_size:'20',sort:f.sort||'alpha'});
+        if(f.evidence.length)qp.set('evidence',f.evidence.join(','));if(f.targets.length)qp.set('targets',f.targets.join(','));
+        return api(`./api/catalog?${qp}`);
+      }));
+      if(requestId!==catalogRequestId||revision!==catalogStackRevision||query!==c.q||page!==c.page||filters!==JSON.stringify(c.filters))return;
+      c.items=[...new Map(pages.flatMap(result=>result.items||[]).map(item=>[item.id,item])).values()];
+      c.total=Number(pages[0]?.total)||c.items.length;c.hasMore=c.items.length<c.total;
+    } catch { /* Keep the visible catalogue and its scroll position during offline resume. */ }
+  }
   let autoSyncTimer = null;
   function startAutoSync() {
     if (autoSyncTimer) return;
     autoSyncTimer = setInterval(async () => {
       if (document.visibilityState !== 'visible' || !state.me?.webapp_access || isEditing()) return;
       try {
-        if (state.activeTab === 'today') await loadToday({ force: true, silent: true });
+        if (state.activeTab === 'today') await loadToday({force:true,silent:true});
+        else await refreshVisibleData();
+        if (!hasOpenModal() && !isEditing()) renderActiveTab();
       } catch {}
     }, 45000);
   }
@@ -2604,6 +2663,8 @@
     if (!root) return;
     root.innerHTML = renderGuideOverlay();
     bindGuideEvents();
+    const card=root.querySelector('.coach-card');
+    if(card){updateGuideLayout();card.style.top=`${state.guide.card.top}px`;}
   }
 
   function renderGlobalModals() {
@@ -2697,17 +2758,24 @@
     bindUnlockToastEvents(); bindPaymentSuccessEvents();
   }
 
+  const modalSourceHtml=new WeakMap();
   function moveTabModals(target, previous) {
     const root = document.getElementById('tabModalRoot');
-    if (!root) return;
+    if (!root) return [];
+    const oldNodes=new Map([...root.children].map(node=>[modalKey(node),node]));
+    const restore=[];
     animateRemovedModals(root,target);
     root.replaceChildren();
     // Fixed windows must not inherit a card's transform, clipping or backdrop.
     for (const node of [...target.querySelectorAll(`${modalSelector}, .bulk-bar`)]) {
       if (node.closest('#tabModalRoot')) continue;
+      const source=node.outerHTML,old=oldNodes.get(modalKey(node));
+      if(old&&modalSourceHtml.get(old)===source)restore.push([node,old]);
+      modalSourceHtml.set(node,source);
       root.append(node);
     }
     restoreModalLayout(root,previous);
+    return restore;
   }
 
   let lastGlobalModalsHtml = "";
@@ -2787,6 +2855,7 @@
 
   function activateTab(tab) {
     if (!tab || state.activeTab === tab) return;
+    closeGuide();
     state.activeTab = tab;
     saveNavigation();
     appEl.querySelectorAll(".tab[data-tab]").forEach((btn) => {
@@ -2833,7 +2902,7 @@
         }
         if (tab === "profile") {
           await loadProfileShell(true);
-          maybeStartGuide(GUIDE_KEYS.profile);
+          maybeStartGuide(state.profileUi.activeModule==='assistant'?GUIDE_KEYS.labs:GUIDE_KEYS.profile);
         }
         if (tab === "admin" && !state.admin.items.length) {
           await loadAdminSupplements(true);
@@ -2958,8 +3027,9 @@
     syncAuxModals();
     const scrollRoot = document.getElementById("mainContent");
     const tabKey = String(state.activeTab || "");
+    const renderKey = tabKey === 'profile' ? `${tabKey}:${state.profileUi.activeModule}:${state.profileUi.labView||'overview'}` : tabKey;
     const prevScrollTop = scrollRoot ? scrollRoot.scrollTop : 0;
-    const scrollAnchor = lastRenderedTabKey === tabKey ? captureScrollAnchor(scrollRoot) : null;
+    const scrollAnchor = lastRenderedTabKey === renderKey ? captureScrollAnchor(scrollRoot) : null;
     let nextHtml = "";
     let binder = null;
 
@@ -2996,14 +3066,14 @@
     renderTopbarActions();
 
     const previousTabKey = lastRenderedTabKey;
-    if (previousTabKey === tabKey && lastRenderedTabHtml === nextHtml) {
+    if (previousTabKey === renderKey && lastRenderedTabHtml === nextHtml) {
       syncModalScrollLock();
       syncGlobalModals();
       return;
     }
     const focused = document.activeElement;
     const editedModal = focused?.closest('#tabModalRoot .sheet, #tabModalRoot .modal-card');
-    if (previousTabKey === tabKey && editedModal && isEditing()) {
+    if (previousTabKey === renderKey && editedModal && isEditing()) {
       const snapshot = getFocusableSnapshot(appEl);
       const template = document.createElement('template'); template.innerHTML = nextHtml;
       const nextField = snapshot?.selector ? template.content.querySelector(snapshot.selector) : null;
@@ -3022,7 +3092,7 @@
     const editingSlot = tabKey === 'settings' && focused?.id === 'settingsSlotTimeInput'
         && state.settingsUi.slotEdit.open
         && focused.closest('[data-settings-slot-id]')?.dataset.settingsSlotId === state.settingsUi.slotEdit.slotId;
-    if (previousTabKey === tabKey && (editingSupplement || editingSlot)) {
+    if (previousTabKey === renderKey && (editingSupplement || editingSlot)) {
       // Do not remove the focused field during a background refresh: on phones
       // that can close and immediately reopen the software keyboard.
       const saveButton = appEl.querySelector('[data-supp-hub-save]');
@@ -3043,12 +3113,12 @@
       }
       return;
     }
-    const openComplexes = previousTabKey === tabKey ? [...target.querySelectorAll('[data-complex] details[open]')].map(el => el.closest('[data-complex]').dataset.complex) : [];
-    const focusSnapshot = previousTabKey === tabKey ? getFocusableSnapshot(appEl) : null;
+    const openComplexes = previousTabKey === renderKey ? [...target.querySelectorAll('[data-complex] details[open]')].map(el => el.closest('[data-complex]').dataset.complex) : [];
+    const focusSnapshot = previousTabKey === renderKey ? getFocusableSnapshot(appEl) : null;
     const modalLayout = captureModalLayout(document.getElementById('tabModalRoot'));
     const searchId = tabKey === 'admin' ? 'adminSearch' : 'catalogSearch';
     const toolbarSelector = tabKey === 'admin' ? '.admin-toolbar' : '.catalog-toolbar';
-    const keepToolbar = previousTabKey === tabKey && ['catalog','admin'].includes(tabKey) && document.activeElement?.id === searchId;
+    const keepToolbar = previousTabKey === renderKey && ['catalog','admin'].includes(tabKey) && document.activeElement?.id === searchId;
     let keptToolbar = false;
     if (keepToolbar) {
       const toolbar = target.querySelector(toolbarSelector);
@@ -3070,23 +3140,26 @@
       }
     }
     if (!keptToolbar) target.innerHTML = nextHtml;
-    moveTabModals(target,modalLayout);
+    const stableModals=moveTabModals(target,modalLayout);
     for (const id of openComplexes) {
       const details = target.querySelector(`[data-complex="${escSelector(id)}"] details`);
       if (details) details.open = true;
     }
     syncModalScrollLock();
     syncGlobalModals();
-    lastRenderedTabKey = tabKey;
+    lastRenderedTabKey = renderKey;
     lastRenderedTabHtml = nextHtml;
-    if (scrollRoot) scrollRoot.scrollTop = previousTabKey === tabKey ? prevScrollTop : 0;
-    if (previousTabKey === tabKey) restoreScrollAnchor(scrollRoot,scrollAnchor);
+    if (scrollRoot) scrollRoot.scrollTop = previousTabKey === renderKey ? prevScrollTop : 0;
+    if (previousTabKey === renderKey) restoreScrollAnchor(scrollRoot,scrollAnchor);
     if (!keptToolbar) restoreFocusableSnapshot(appEl, focusSnapshot);
-    if (previousTabKey !== tabKey) {
+    if (previousTabKey !== renderKey) {
       target.classList.remove('tab-enter');
       requestAnimationFrame(() => { target.classList.add('tab-enter'); });
     }
     if (typeof binder === "function") binder(keptToolbar);
+    // Bind only the new nodes, then restore unchanged windows with their original
+    // handlers. Background data must not replace a consent button mid-tap.
+    for(const [fresh,previous] of stableModals)fresh.replaceWith(previous);
     target.querySelectorAll("[data-open-bot-start]").forEach((btn) => {
       btn.addEventListener("click", () => {
         haptic();
@@ -3095,7 +3168,7 @@
     });
     requestAnimationFrame(() => {
       if (state.activeTab === "survey") maybeStartGuide(GUIDE_KEYS.survey);
-      if (state.activeTab === "profile") maybeStartGuide(GUIDE_KEYS.profile);
+      if (state.activeTab === "profile") maybeStartGuide(state.profileUi.activeModule==='assistant'?GUIDE_KEYS.labs:GUIDE_KEYS.profile);
     });
   }
 
@@ -5493,7 +5566,10 @@ function adminField(label, field, value, kind='input') {
         <label class="muted">Состояния и особенности здоровья (каждую позицию с новой строки)<textarea class="textarea" data-profile-lines="conditions_json">${esc(parseJsonToLines(p.conditions_json))}</textarea></label>
       </div><div class="row" style="margin-top:10px"><button class="btn" data-profile-save>${state.profile.saving?'Сохраняем…':'Сохранить'}</button></div></section></div>`;
   }
-  function analyteOptions(selected){ return ANALYTE_PRESETS.map(a=>`<option value="${esc(a.title)}"></option>`).join(''); }
+  function analyteOptions(selected){
+    const common=['Гемоглобин','Эритроциты','Гематокрит','Лейкоциты','Тромбоциты','MCV','MCH','MCHC','RDW','Нейтрофилы','Лимфоциты','Моноциты','Эозинофилы','Базофилы','СОЭ','Глюкоза','HbA1c','Инсулин','Холестерин общий','ЛПНП','ЛПВП','Триглицериды','АпоB','Липопротеин (а)','АЛТ','АСТ','ГГТ','Щелочная фосфатаза','Билирубин общий','Билирубин прямой','Альбумин','Общий белок','Креатинин','СКФ','Мочевина','Мочевая кислота','Натрий','Калий','Хлор','Кальций ионизированный','Фосфор','ТТГ','Т4 свободный','Т3 свободный','Антитела к ТПО','Паратгормон','Кортизол','Пролактин','Тестостерон','Эстрадиол','ЛГ','ФСГ','Витамин B1','Витамин B2','Витамин B6','Витамин A','Витамин E','Медь','Селен','Йод','Трансферрин','ОЖСС','Насыщение трансферрина','Гомоцистеин','Кетоны','Белок в моче','Удельный вес мочи','pH мочи','Кальпротектин'];
+    return [...new Set([...ANALYTE_PRESETS.map(a=>a.title),...common,...(state.profileLabs.reports||[]).flatMap(r=>(r.results||[]).map(x=>x.analyte_name))])].filter(Boolean).map(name=>`<option value="${esc(name)}"></option>`).join('');
+  }
   function unitOptions(code, unit){ const item=ANALYTE_PRESETS.find(a=>a.code===code); return [...new Set([unit,...(item?.units||[])].filter(Boolean))].map(u=>`<option value="${esc(u)}">${esc(u)}</option>`).join(''); }
   function renderLabRow(idx,row={}) {
     const code=row.analyte_code||'';
@@ -5501,10 +5577,11 @@ function adminField(label, field, value, kind='input') {
     return `<div class="lab-result-row" data-lab-row="${idx}"><div class="row"><strong>Показатель ${idx+1}</strong><button type="button" class="btn secondary" data-remove-lab-row="${idx}">Убрать</button></div>
       <input type="hidden" data-lab-field="analyte_code" value="${esc(code)}"/>
       <label class="muted">Название<input class="input" list="labAnalyteNames" data-lab-field="analyte_name" value="${esc(name)}" placeholder="Как в бланке"/></label>
-      <div class="field-grid two"><label class="muted">Результат<input class="input" inputmode="decimal" data-lab-field="value_num" value="${esc(row.value_text??row.value_num??'')}" placeholder="Число или текст из бланка"/></label><label class="muted">Единица<input class="input" data-lab-field="unit" value="${esc(row.unit||'')}" placeholder="Как в бланке"/></label></div>
+      <div class="field-grid two"><label class="muted">Результат<input class="input" data-lab-field="value_num" value="${esc(row.value_text??row.value_num??'')}" placeholder="Число или текст из бланка"/></label><label class="muted">Единица<input class="input" data-lab-field="unit" value="${esc(row.unit||'')}" placeholder="Как в бланке"/></label></div>
       <div class="field-grid two"><label class="muted">Референс от<input class="input" inputmode="decimal" data-lab-field="ref_low" value="${esc(row.ref_low??'')}"/></label><label class="muted">Референс до<input class="input" inputmode="decimal" data-lab-field="ref_high" value="${esc(row.ref_high??'')}"/></label></div>
       <label class="muted">Референс текстом, если указан<textarea class="textarea" data-lab-field="reference_text" maxlength="1000">${esc(row.reference_text||'')}</textarea></label>
-      ${row.measured_at?`<label class="muted">Дата этого показателя<input type="date" class="input" data-lab-field="measured_at" value="${esc(row.measured_at)}"/></label>`:'<input type="hidden" data-lab-field="measured_at" value=""/>'}</div>`;
+      ${row.suggested_reference?`<button type="button" class="btn secondary" data-lab-fill-reference data-ref-low="${esc(row.suggested_reference.ref_low)}" data-ref-high="${esc(row.suggested_reference.ref_high)}">Из бланка: ${esc(row.suggested_reference.label)} · ${esc(row.suggested_reference.ref_low)}–${esc(row.suggested_reference.ref_high)}</button>`:''}
+      <label class="muted">Дата этого показателя, если отличается<input type="date" class="input" data-lab-field="measured_at" value="${esc(row.measured_at||'')}"/></label></div>`;
   }
 
   function captureLabDraft(type) {
@@ -5547,11 +5624,12 @@ function adminField(label, field, value, kind='input') {
     const draft = type==='manual' ? (state.profileUi.manualDraft || {results:[{}]}) : (state.profileUi.uploadDraft || {});
     const busy = type==='manual' ? state.profileUi.savingManual : state.profileUi.uploading;
     return `<div class="modal-overlay" data-close-${type}><section class="card modal-card" onclick="event.stopPropagation()"><div class="row"><strong>${type==='manual'?'Новый анализ':'Загрузка анализа'}</strong><button class="btn secondary" data-close-${type} ${busy?'disabled':''}>Закрыть</button></div>
+      ${type==='upload'?`<div class="lab-actions"><label class="btn secondary">Выбрать файл<input type="file" id="labsFile" accept=".pdf,.jpg,.jpeg,.png,.webp,.docx,.xlsx,.csv,.txt,.json" class="lab-file-input"/></label><label class="btn secondary">Фото / камера<input type="file" id="labsPhoto" accept="image/jpeg,image/png,image/webp" class="lab-file-input"/></label></div><div class="muted" data-lab-file-name>${esc(state.profileUi.uploadFile?.name||'')}</div>`:''}
       <div class="field-grid" style="margin-top:10px"><label class="muted">Дата забора<input type="date" class="input" id="${type}ReportDate" value="${esc(draft.report_date||'')}"/></label>
       <label class="muted">Лаборатория<input class="input" id="${type}LabName" value="${esc(draft.lab_name||'')}" placeholder="Для сравнения результатов"/></label>
       <label class="muted">Комментарий<textarea class="textarea" id="${type}Notes">${esc(draft.notes||'')}</textarea></label>
       ${type==='manual'?`<datalist id="labAnalyteNames">${analyteOptions()}</datalist><div id="manualRows">${(draft.results||[{}]).map(renderLabRowForMap).join('')}</div><button class="btn secondary" data-add-manual-row>+ Показатель</button><button class="btn" data-save-manual ${busy?'disabled':''}>${busy?'Сохраняем…':'Сохранить анализ'}</button>`:
-      `<div class="muted">PDF, фото JPG/PNG/WEBP, DOCX, XLSX, CSV, TXT или JSON · до 12 МБ · до 20 страниц</div><input type="file" class="input" id="labsFile" accept=".pdf,.jpg,.jpeg,.png,.webp,.docx,.xlsx,.csv,.txt,.json"/><div class="muted" data-lab-file-name>${esc(state.profileUi.uploadFile?.name||'')}</div>
+      `<div class="muted">PDF, фото JPG/PNG/WEBP, DOCX, XLSX, CSV, TXT или JSON · до 12 МБ · до 20 страниц</div>
       <label class="muted"><input type="checkbox" id="labAllowAi" ${draft.allow_ai?'checked':''}/> Разрешаю передать документ в OpenAI для распознавания, если обычного чтения недостаточно</label>
       <div class="muted">После загрузки можно проверить и исправить каждый результат.</div><button class="btn" data-upload-labs ${busy?'disabled':''}>${busy?'Читаем документ…':'Загрузить документ'}</button>`}
       <div class="muted" role="status" data-lab-form-status>${esc(state.profileUi.labFormError||'')}</div></div></section></div>`;
@@ -5566,7 +5644,8 @@ function adminField(label, field, value, kind='input') {
     return `<div class="modal-overlay" data-close-review><section class="card modal-card" onclick="event.stopPropagation()"><div class="row"><strong>Проверка результатов</strong><button class="btn secondary" data-close-review ${busy?'disabled':''}>Закрыть</button></div>
       <div class="muted" style="margin-top:8px">${esc(r.parse_notes||'Проверьте значения, единицы и референсы по бланку.')}</div>
       <div class="field-grid" style="margin-top:8px"><label class="muted">Дата забора<input type="date" class="input" id="reviewReportDate" value="${esc(r.report_date||'')}"/></label><label class="muted">Лаборатория<input class="input" id="reviewLabName" value="${esc(r.lab_name||'')}"/></label><label class="muted">Комментарий<textarea class="textarea" id="reviewNotes">${esc(r.notes||'')}</textarea></label>
-      <datalist id="labAnalyteNames">${analyteOptions()}</datalist><div id="reviewRows">${(r.results?.length?r.results:[{}]).map(renderLabRowForMap).join('')}</div><button class="btn secondary" data-add-review-row>+ Показатель</button><button class="btn" data-save-review ${busy?'disabled':''}>${busy?'Сохраняем…':'Подтвердить и сохранить'}</button><div class="muted" role="status" data-lab-form-status>${esc(state.profileUi.labFormError||'')}</div></div></section></div>`;
+      <datalist id="labAnalyteNames">${analyteOptions()}</datalist><div id="reviewRows">${(r.results?.length?r.results:[{}]).map(renderLabRowForMap).join('')}</div><button class="btn secondary" data-add-review-row>+ Показатель</button><button class="btn" data-save-review ${busy?'disabled':''}>${busy?'Сохраняем…':'Подтвердить и сохранить'}</button><div class="muted" role="status" data-lab-form-status>${esc(state.profileUi.labFormError||'')}</div>
+      ${state.profileUi.labConflict?'<button class="btn secondary" data-lab-reload-review>Показать свежую версию</button>':''}${state.profileUi.reviewConflictDraft?'<button class="btn secondary" data-lab-restore-draft>Вернуть мой черновик</button>':''}</div></section></div>`;
   }
 
   function renderProfileModulesGrid() {
@@ -6017,23 +6096,38 @@ function adminField(label, field, value, kind='input') {
     }).join('');
     const intakes=(summary.intakes||[]).map(item=>`<div class="lab-history-point"><strong>${esc(item.name)}</strong><div class="muted">${esc(item.first_day)} — ${esc(item.last_day)} · отмечен приём: ${item.taken_days} дн.${item.skipped_days?` · пропуск: ${item.skipped_days} дн.`:''}</div>
       ${Object.entries(item.doses||{}).map(([dose,days])=>`<div class="muted">${esc(dose)} · в плане отмеченных дней: ${days}</div>`).join('')}${item.unknown_dose_days?`<div class="muted">Доза не записана: ${item.unknown_dose_days} дн.</div>`:''}</div>`).join('');
-    const reportList=reports.map(report=>`<details class="lab-series" data-lab-report="${report.id}"><summary><strong>${esc(report.report_date||'Дата не указана')}</strong><span>${esc(report.lab_name||report.source_filename||'Анализ')}</span><span class="muted">${report.parse_status==='queued'?'Распознаём…':report.parse_status==='needs_manual_review'?'Нужна проверка':`${report.results?.length||0} показателей`}</span></summary>
+    const documentQuery=String(state.profileUi.labDocQuery||'').trim().toLocaleLowerCase();
+    const visibleReports=reports.filter(report=>!documentQuery||[report.report_date,report.lab_name,report.source_filename,...(report.results||[]).map(row=>row.analyte_name)].join(' ').toLocaleLowerCase().includes(documentQuery));
+    const reportList=visibleReports.map(report=>`<details class="lab-series" data-lab-report="${report.id}"><summary><strong>${esc(report.report_date||'Дата не указана')}</strong><span>${esc(report.lab_name||report.source_filename||'Анализ')}</span><span class="muted">${report.parse_status==='queued'?'Распознаём…':report.parse_status==='needs_manual_review'?'Нужна проверка':`${report.results?.length||0} показателей`}</span></summary>
       <div class="ios-content"><div class="muted">${esc(report.parse_notes||'')}</div>${report.notes?`<div class="muted">${esc(report.notes)}</div>`:''}
       ${(report.results||[]).map(row=>`<div class="lab-history-point"><strong>${esc(row.analyte_name)}</strong><div>${esc(row.value_text??row.value_num??'—')} ${esc(row.unit||'')}</div><div class="muted">Референс: ${esc(row.reference_text||`${row.ref_low??'—'} — ${row.ref_high??'—'}`)}</div>${row.measured_at?`<div class="muted">${esc(row.measured_at)}</div>`:''}</div>`).join('')}
       <div class="row lab-actions"><button class="btn secondary" data-open-review="${report.id}">${report.parse_status==='queued'?'Ввести вручную':report.parse_status==='needs_manual_review'?'Проверить':'Редактировать'}</button>
       ${report.source_filename?`<button class="btn secondary" data-lab-source="${report.id}">Скачать</button>${report.parse_status!=='queued'?`<button class="btn secondary" data-lab-recognize="${report.id}">Распознать с ИИ</button>`:''}`:''}<button class="btn secondary" data-lab-delete="${report.id}">Удалить</button></div></div></details>`).join('');
-    return `<section class="card fade"><div class="row"><h2 style="margin:0">Мои анализы</h2><button class="btn secondary" data-lab-refresh>Обновить</button></div><div class="muted" style="margin-top:8px">Сохраняйте бланки и результаты, сравнивайте их с историей приёма.</div><div class="row lab-actions"><button class="btn" data-open-upload>Загрузить файл</button><button class="btn secondary" data-open-manual>Ввести вручную</button><button class="btn secondary" data-open-edit>Мой профиль</button></div>
+    const view=state.profileUi.labView||'overview';
+    const pending=reports.filter(report=>!['manual','manual_reviewed'].includes(report.parse_status)).sort((a,b)=>Number(b.id)-Number(a.id));
+    const historyQuery=String(state.profileUi.labHistoryQuery||'').trim().toLocaleLowerCase();
+    const filteredSeries=historyQuery?(summary.series||[]).filter(group=>group.name.toLocaleLowerCase().includes(historyQuery)):summary.series||[];
+    const historyDoc=document.createElement('template');historyDoc.innerHTML=series;
+    if(historyQuery)historyDoc.content.querySelectorAll('[data-lab-series]').forEach(el=>{if(!filteredSeries.some(group=>group.analyte_code+'|'+group.unit===el.dataset.labSeries))el.remove();});
+    const related=candidates.length?`<section class="card fade"><h3>Связанные позиции каталога</h3><div class="muted">Для показателей ниже референса бланка. Выберите, что хотите отслеживать.</div>
+      ${candidates.map(item=>`<div class="lab-history-point"><strong>${esc(item.name)}</strong><div class="muted">${esc(item.analytes.join(', '))}</div>
+      <div class="muted">${item.last_intake?`Последний отмеченный приём: ${esc(item.last_intake.day)} · ${item.last_intake.doses?.length?esc(item.last_intake.doses.join(' · ')):'доза не записана'}`:'Приём этой позиции ещё не отмечен'}</div>
+      <div class="row lab-actions"><button class="btn secondary" data-lab-catalog="${esc(item.slug)}">Карточка</button>${item.can_resume?`<button class="btn" data-lab-resume="${item.supplement_id}">Возобновить приём</button>`:item.in_stack?`<button class="btn secondary" data-lab-open-list>${item.stack_source==='complex'?'В вашем комплексе':'В вашем списке'}</button>`:`<button class="btn" data-lab-pick="${item.supplement_id}">В мой список</button>`}</div></div>`).join('')}
+      ${newCandidates.length>1?'<button class="btn" data-lab-pick-all>Добавить все в список</button>':''}</section>`:'';
+    return `<section class="card fade"><div class="row"><h2 style="margin:0">Мои анализы</h2><button class="btn secondary" data-lab-help aria-label="Как пользоваться анализами">?</button></div><div class="row lab-actions"><button class="btn" data-open-upload>Загрузить файл</button><button class="btn secondary" data-open-manual>Ввести вручную</button></div>
+      <div class="lab-views" role="tablist" aria-label="Раздел анализов">${[['overview','Обзор'],['documents','Документы'],['history','Динамика']].map(([id,title])=>`<button type="button" class="btn secondary" role="tab" aria-selected="${view===id}" data-lab-view="${id}">${title}</button>`).join('')}</div>
       ${state.profileLabs.loading&&!reports.length?'<div class="muted" role="status">Загружаем историю…</div>':''}${state.profileLabs.error?`<div class="muted" role="status">${esc(state.profileLabs.error)}</div>`:''}
-      <div class="muted">${summary.ai_configured?`Обращения к ИИ: ${summary.ai_used||0} из ${summary.ai_limit||20} за месяц`:'Таблицы и текст читаются без ИИ. Для распознавания фото администратору нужно подключить OpenAI.'}</div></section>
-      ${candidates.length?`<section class="card fade"><h3>Связанные позиции каталога</h3><div class="muted">Для показателей ниже референса бланка. Выберите, что хотите отслеживать; доза вашего продукта вводится отдельно.</div>
-      ${candidates.map(item=>`<div class="lab-history-point"><strong>${esc(item.name)}</strong><div class="muted">${esc(item.analytes.join(', '))}</div><div class="row lab-actions"><button class="btn secondary" data-lab-catalog="${esc(item.slug)}">Открыть карточку</button><button class="btn" data-lab-pick="${item.supplement_id}" ${item.in_stack?'disabled':''}>${item.in_stack?'Уже в моём списке':'В мой список'}</button></div></div>`).join('')}
-      ${newCandidates.length>1?'<button class="btn" data-lab-pick-all>Добавить все в список</button>':''}</section>`:''}
-      <section class="card fade"><h3>Динамика показателей</h3>${series||'<div class="muted">Появится после сохранения и проверки результатов. Референсы берутся из вашего бланка.</div>'}</section>
+      <div class="row lab-actions"><button class="btn secondary" data-open-edit>Мой профиль</button><button class="btn secondary" data-lab-refresh>Обновить</button></div></section>
+      ${view==='overview'?`${pending.length?`<section class="card fade"><h3>Нужна проверка · ${pending.length}</h3>${pending.slice(0,3).map(report=>`<div class="lab-history-point"><strong>${esc(report.report_date||report.source_filename||'Анализ без даты')}</strong><div class="muted">${report.parse_status==='queued'?'Распознаём документ…':'Проверьте значения из бланка'}</div><button class="btn secondary" data-open-review="${report.id}">${report.parse_status==='queued'?'Ввести вручную':'Проверить результаты'}</button></div>`).join('')}</section>`:''}${related}
+      <section class="card fade"><h3>Ваша история</h3><div class="muted">Документов: ${reports.length} · показателей с историей: ${(summary.series||[]).length}</div><div class="row lab-actions"><button class="btn secondary" data-lab-view="documents">Все документы</button><button class="btn secondary" data-lab-view="history">Динамика и приём</button></div>${!reports.length?'<div class="muted">Добавьте бланк или введите результаты. Сохраняются любые показатели и единицы из вашей лаборатории.</div>':''}</section>`:''}
+      ${view==='documents'?`<section class="card fade"><h3>Документы и результаты</h3><label class="muted">Найти документ<input type="search" class="input" data-lab-document-search value="${esc(state.profileUi.labDocQuery||'')}" placeholder="Дата, лаборатория или показатель"/></label>${reportList||(documentQuery?'<div class="muted">Нет документов по этому запросу</div>':labsEmptyState())}</section>`:''}
+      ${view==='history'?`<section class="card fade"><h3>Динамика показателей</h3><label class="muted">Найти показатель<input class="input" data-lab-history-search value="${esc(state.profileUi.labHistoryQuery||'')}" placeholder="Название из бланка"/></label>${historyDoc.innerHTML||'<div class="muted">Нет показателей для отображения. Результаты появятся после проверки бланка.</div>'}</section>
       ${(summary.series||[]).length?renderLabExplanation(summary):''}
-      <section class="card fade"><h3>Приём между анализами</h3><div class="muted">${summary.interval?.from?`${esc(summary.interval.from)} — ${esc(summary.interval.to)} · после первого анализа`:'По вашим отметкам'} · без отметки приём неизвестен.</div>${intakes||'<div class="muted">За этот период отметок приёма пока нет.</div>'}</section>
-      ${summary.after_latest?.length?`<section class="card fade"><h3>После последнего анализа</h3>${summary.after_latest.map(item=>`<div class="lab-history-point"><strong>${esc(item.name)}</strong><div class="muted">${esc(item.first_day)} — ${esc(item.last_day)} · отмечен приём: ${item.taken_days} дн.${item.skipped_days?` · пропуск: ${item.skipped_days} дн.`:''}</div>${Object.entries(item.doses||{}).map(([dose,days])=>`<div class="muted">${esc(dose)} · в плане отмеченных дней: ${days}</div>`).join('')}${item.unknown_dose_days?`<div class="muted">Доза не записана: ${item.unknown_dose_days} дн.</div>`:''}</div>`).join('')}</section>`:''}
-      <section class="card fade"><h3>Документы и результаты</h3>${reportList||labsEmptyState()}</section>${renderLabSelectionModal()}${renderLabAiConsentModal()}`;
+      <section class="card fade"><h3>Приём между анализами</h3><div class="muted">${summary.interval?.from?`${esc(summary.interval.from)} — ${esc(summary.interval.to)} · после первого анализа`:'По вашим отметкам'}</div>${intakes||'<div class="muted">За этот период отметок приёма пока нет.</div>'}</section>
+      ${summary.after_latest?.length?`<section class="card fade"><h3>После последнего анализа</h3>${summary.after_latest.map(item=>`<div class="lab-history-point"><strong>${esc(item.name)}</strong><div class="muted">${esc(item.first_day)} — ${esc(item.last_day)} · отмечен приём: ${item.taken_days} дн.</div>${Object.entries(item.doses||{}).map(([dose,days])=>`<div class="muted">${esc(dose)} · ${days} дн.</div>`).join('')}${item.unknown_dose_days?`<div class="muted">Доза не записана: ${item.unknown_dose_days} дн.</div>`:''}</div>`).join('')}</section>`:''}`:''}
+      ${view==='documents'||view==='history'?`<section class="card"><div class="muted">${summary.ai_configured?`Обращения к ИИ: ${summary.ai_used||0} из ${summary.ai_limit||20} за месяц`:'Таблицы и текст читаются без ИИ. Для распознавания фото администратору нужно подключить OpenAI.'}</div></section>`:''}${renderLabSelectionModal()}${renderLabAiConsentModal()}`;
   }
+
   function renderLabExplanation(summary) {
     const item=summary.explanation||{};
     const response=item.response||{};
@@ -6046,8 +6140,8 @@ function adminField(label, field, value, kind='input') {
     const ids=state.profileUi.labSelection||[];
     if(!ids.length)return '';
     const items=(state.profileLabs.summary?.candidates||[]).filter(item=>ids.includes(item.supplement_id));
-    return `<div class="modal-overlay" data-close-lab-selection><section class="card modal-card" onclick="event.stopPropagation()"><div class="row"><strong>Добавить в мой список</strong><button class="btn secondary" data-close-lab-selection ${state.profileUi.labAdding?'disabled':''}>Закрыть</button></div><div class="muted" style="margin-top:8px">Укажите дозу вашего продукта или добавьте её позже в списке.</div>
-      <div class="field-grid">${items.map(item=>`<label class="muted">${esc(item.name)}<input class="input" data-lab-dose="${item.supplement_id}" maxlength="120" placeholder="Например, число и единица с упаковки" value="${esc(state.profileUi.labDoses?.[item.supplement_id]||'')}"/></label>`).join('')}</div><button class="btn" data-lab-add-confirm ${state.profileUi.labAdding?'disabled':''}>${state.profileUi.labAdding?'Добавляем…':'Добавить в мой список'}</button><div class="muted" role="status" data-lab-form-status>${esc(state.profileUi.labFormError||'')}</div></section></div>`;
+    return `<div class="modal-overlay" data-close-lab-selection><section class="card modal-card" onclick="event.stopPropagation()"><div class="row"><strong>${state.profileUi.labResume?.length?'Возобновить приём':'Добавить в мой список'}</strong><button class="btn secondary" data-close-lab-selection ${state.profileUi.labAdding?'disabled':''}>Закрыть</button></div><div class="muted" style="margin-top:8px">Укажите дозу вашего продукта или добавьте её позже в списке.</div>
+      <div class="field-grid">${items.map(item=>`<label class="muted">${esc(item.name)}${item.can_resume?`<div>Сохранённая доза: ${esc(item.current_dose||'не указана')}. История и настройки сохранятся.</div>`:''}<input class="input" data-lab-dose="${item.supplement_id}" ${item.can_resume?'disabled':''} maxlength="120" placeholder="Например, число и единица с упаковки" value="${esc(item.can_resume?item.current_dose:state.profileUi.labDoses?.[item.supplement_id]||'')}"/></label>${!item.can_resume?(item.last_intake?.doses||[]).map((dose,index)=>`<button type="button" class="btn secondary" data-lab-reuse-dose="${item.supplement_id}" data-dose-index="${index}">Повторить мою дозу: ${esc(dose)}</button>`).join(''):''}`).join('')}</div><button class="btn" data-lab-add-confirm ${state.profileUi.labAdding?'disabled':''}>${state.profileUi.labAdding?'Сохраняем…':state.profileUi.labResume?.length?'Возобновить с прежними настройками':'Добавить в мой список'}</button><div class="muted" role="status" data-lab-form-status>${esc(state.profileUi.labFormError||'')}</div></section></div>`;
   }
   function renderLabAiConsentModal() {
     if(state.profileUi.labExplainOpen)return `<div class="modal-overlay" data-close-lab-ai><section class="card modal-card" onclick="event.stopPropagation()"><div class="row"><strong>Пояснить историю</strong><button class="btn secondary" data-close-lab-ai>Закрыть</button></div><div class="muted" style="margin-top:8px">В OpenAI будут переданы подтверждённые показатели, отметки приёма, записанные дозы и данные профиля. Пояснение сохранится; повторное открытие не требует нового запроса.</div><button class="btn" data-lab-explain-confirm>Разрешаю, получить пояснение</button><div class="muted" role="status" data-lab-form-status>${esc(state.profileUi.labFormError||'')}</div></section></div>`;
@@ -6148,6 +6242,32 @@ function adminField(label, field, value, kind='input') {
     showToast(message);
   }
   function bindLabTrackingEvents() {
+    document.querySelector('[data-lab-reload-review]')?.addEventListener('click',async event=>{
+      event.currentTarget.disabled=true;captureLabDraft('review');state.profileUi.reviewConflictDraft=structuredClone(state.profileUi.reviewDraft);
+      await loadProfileLabs(true);
+      if(state.profileLabs.error){event.currentTarget.disabled=false;return setLabFormError(state.profileLabs.error);}
+      state.profileUi.reviewDraft=null;state.profileUi.labConflict=false;state.profileUi.labFormError='Показана свежая версия. Ваш черновик сохранён.';renderActiveTab();
+    });
+    document.querySelector('[data-lab-restore-draft]')?.addEventListener('click',()=>{
+      const saved=state.profileLabs.reports.find(report=>Number(report.id)===Number(state.profileUi.selectedReportId));
+      state.profileUi.reviewDraft={...state.profileUi.reviewConflictDraft,revision:saved?.revision||''};state.profileUi.reviewConflictDraft=null;state.profileUi.labFormError='Ваш черновик восстановлен. Сверьте правки со свежими результатами перед сохранением.';renderActiveTab();
+    });
+    document.querySelectorAll('[data-lab-view]').forEach(el=>el.onclick=()=>{closeGuide();state.profileUi.labView=el.dataset.labView;saveNavigation();renderActiveTab();});
+    document.querySelector('[data-lab-help]')?.addEventListener('click',()=>{closeGuide();startGuide(GUIDE_KEYS.labs,availableGuideSteps(GUIDE_KEYS.labs));});
+    document.querySelector('[data-lab-history-search]')?.addEventListener('input',event=>{state.profileUi.labHistoryQuery=event.target.value;renderActiveTab();});
+    document.querySelector('[data-lab-document-search]')?.addEventListener('input',event=>{state.profileUi.labDocQuery=event.target.value;renderActiveTab();});
+    document.querySelectorAll('[data-lab-fill-reference]').forEach(el=>el.onclick=()=>{
+      const row=el.closest('[data-lab-row]');row.querySelector('[data-lab-field="ref_low"]').value=el.dataset.refLow;row.querySelector('[data-lab-field="ref_high"]').value=el.dataset.refHigh;
+      captureLabDraft(row.closest('#manualRows')?'manual':'review');el.disabled=true;el.textContent='Референс подставлен из бланка';
+    });
+    document.querySelectorAll('[data-lab-reuse-dose]').forEach(el=>el.onclick=()=>{
+      const item=(state.profileLabs.summary?.candidates||[]).find(item=>String(item.supplement_id)===el.dataset.labReuseDose);
+      const dose=item?.last_intake?.doses?.[Number(el.dataset.doseIndex)||0];if(!dose)return;
+      state.profileUi.labDoses={...state.profileUi.labDoses,[item.supplement_id]:dose};const field=document.querySelector(`[data-lab-dose="${item.supplement_id}"]`);if(field)field.value=dose;
+      showToast('Подставлена ваша записанная доза');
+    });
+    document.querySelectorAll('[data-lab-open-list]').forEach(el=>el.onclick=async()=>{activateTab('today');await openMySupplements();});
+    document.querySelectorAll('[data-lab-resume]').forEach(el=>el.onclick=()=>{state.profileUi.labResume=[Number(el.dataset.labResume)];state.profileUi.labSelection=[Number(el.dataset.labResume)];state.profileUi.labFormError='';renderActiveTab();});
     document.querySelectorAll('[data-lab-series],[data-lab-report]').forEach(el=>{
       const key=el.dataset.labSeries||'report:'+el.dataset.labReport;
       el.open=Boolean(state.profileUi.labDetails?.[key]);
@@ -6170,7 +6290,7 @@ function adminField(label, field, value, kind='input') {
     if(upload)upload.querySelectorAll('input,textarea').forEach(el=>{
       const capture=()=>{
         state.profileUi.uploadDraft={report_date:document.getElementById('uploadReportDate')?.value||'',lab_name:document.getElementById('uploadLabName')?.value||'',notes:document.getElementById('uploadNotes')?.value||'',allow_ai:Boolean(document.getElementById('labAllowAi')?.checked)};
-        const file=document.getElementById('labsFile')?.files?.[0];if(file)state.profileUi.uploadFile=file;
+        const file=el.type==='file'?el.files?.[0]:null;if(file)state.profileUi.uploadFile=file;
         const label=document.querySelector('[data-lab-file-name]');if(label)label.textContent=state.profileUi.uploadFile?.name||'';
       };el.oninput=capture;el.onchange=capture;
     });
@@ -6181,16 +6301,17 @@ function adminField(label, field, value, kind='input') {
       try{
         const draft=state.profileUi[type+'Draft']||{};
         if(type==='manual'&&!draft.client_request_id)draft.client_request_id=crypto.randomUUID();
-        const body={source:'manual',client_request_id:draft.client_request_id||'',report_date:draft.report_date||'',lab_name:draft.lab_name||'',notes:draft.notes||'',results:collectLabRows(type+'Rows')};
+        const body={expected_revision:type==='review'?(draft.revision||''):'',source:'manual',client_request_id:draft.client_request_id||'',report_date:draft.report_date||'',lab_name:draft.lab_name||'',notes:draft.notes||'',results:collectLabRows(type+'Rows')};
         await api(type==='manual'?'./api/profile/labs':`./api/profile/labs/${state.profileUi.selectedReportId}`,{method:type==='manual'?'POST':'PUT',body});
         state.profileUi[type+'Open']=false;state.profileUi[type+'Draft']=null;
+        if(type==='review'){state.profileUi.labConflict=false;state.profileUi.reviewConflictDraft=null;}
         await loadProfileLabs(true);showToast('Анализ сохранён');
-      }catch(e){setLabFormError(e.message||'Не удалось сохранить анализ');}
+      }catch(e){setLabFormError(e.message||'Не удалось сохранить анализ');if(type==='review'&&e.httpStatus===409){state.profileUi.labConflict=true;renderActiveTab();}}
       finally{state.profileUi[key]=false;if(!state.profileUi[type+'Open'])renderActiveTab();else document.querySelector(`[data-save-${type}]`)?.removeAttribute('disabled');}
     });
     document.querySelector('[data-upload-labs]')?.addEventListener('click',async(event)=>{
       if(state.profileUi.uploading)return;
-      const file=document.getElementById('labsFile')?.files?.[0]||state.profileUi.uploadFile;
+      const file=state.profileUi.uploadFile||document.getElementById('labsFile')?.files?.[0];
       if(!file)return setLabFormError('Выберите файл');
       if(file.size>12*1024*1024)return setLabFormError('Максимальный размер — 12 МБ');
       state.profileUi.uploading=true;event.currentTarget.disabled=true;event.currentTarget.textContent='Читаем документ…';
@@ -6198,11 +6319,12 @@ function adminField(label, field, value, kind='input') {
         const draft=state.profileUi.uploadDraft||{};const form=new FormData();form.append('file',file);
         for(const key of ['report_date','lab_name','notes'])form.append(key,draft[key]||'');
         form.append('allow_ai',draft.allow_ai?'true':'false');
-        const res=await fetch(normalizeApiPath('api/profile/labs/upload'),{method:'POST',headers:{'X-Telegram-Init-Data':state.initData},body:form});
+        const send=()=>fetchWithDeadline(normalizeApiPath('api/profile/labs/upload'),{method:'POST',headers:{'X-Telegram-Init-Data':state.initData},body:form},90000);
+        let res=await send();if(res.status===401&&refreshInitDataFromTelegram())res=await send();
         const data=await res.json();if(!res.ok||!data.ok)throw new Error(typeof data.detail==='string'?data.detail:'Не удалось загрузить документ');
         await loadProfileLabs(true);state.profileUi.uploadOpen=false;state.profileUi.uploadFile=null;state.profileUi.uploadDraft=null;
         const report=state.profileLabs.reports.find(x=>Number(x.id)===Number(data.report_id));
-        if(report&&report.parse_status!=='queued'){state.profileUi.selectedReportId=data.report_id;state.profileUi.reviewDraft=null;state.profileUi.reviewOpen=true;}
+        if(report&&report.parse_status!=='queued'){state.profileUi.selectedReportId=data.report_id;state.profileUi.reviewDraft=null;state.profileUi.reviewConflictDraft=null;state.profileUi.labConflict=false;state.profileUi.reviewOpen=true;}
         showToast(data.duplicate?'Этот документ уже сохранён':data.queued?'Документ сохранён. Распознаём…':'Документ загружен');
       }catch(e){setLabFormError(e.message||'Не удалось загрузить документ');}
       finally{state.profileUi.uploading=false;if(!state.profileUi.uploadOpen)renderActiveTab();else{const btn=document.querySelector('[data-upload-labs]');if(btn){btn.disabled=false;btn.textContent='Загрузить документ';}}}
@@ -6234,17 +6356,17 @@ function adminField(label, field, value, kind='input') {
       const id=state.profileUi.labRecognizeId,button=event.currentTarget;button.disabled=true;
       try{await api(`./api/profile/labs/${id}/recognize`,{method:'POST',body:{allow_ai:true}});state.profileUi.labRecognizeId=null;await loadProfileLabs(true);renderActiveTab();}catch(e){button.disabled=false;setLabFormError(e.message||'Не удалось начать распознавание');}
     });
-    const pick=ids=>{state.profileUi.labSelection=ids;state.profileUi.labDoses=state.profileUi.labDoses||{};state.profileUi.labFormError='';renderActiveTab();};
+    const pick=ids=>{state.profileUi.labResume=[];state.profileUi.labSelection=ids;state.profileUi.labDoses=state.profileUi.labDoses||{};state.profileUi.labFormError='';renderActiveTab();};
     document.querySelectorAll('[data-lab-pick]').forEach(el=>el.onclick=()=>pick([Number(el.dataset.labPick)]));
     document.querySelector('[data-lab-pick-all]')?.addEventListener('click',()=>pick((state.profileLabs.summary?.candidates||[]).filter(x=>!x.in_stack).map(x=>x.supplement_id)));
     document.querySelectorAll('[data-close-lab-selection]').forEach(el=>el.onclick=()=>{if(state.profileUi.labAdding)return;state.profileUi.labSelection=[];renderActiveTab();});
     document.querySelectorAll('[data-lab-dose]').forEach(el=>el.oninput=()=>{state.profileUi.labDoses=state.profileUi.labDoses||{};state.profileUi.labDoses[el.dataset.labDose]=el.value;});
     document.querySelector('[data-lab-add-confirm]')?.addEventListener('click',async(event)=>{
       if(state.profileUi.labAdding)return;state.profileUi.labAdding=true;const button=event.currentTarget;button.disabled=true;
-      try{const out=await api('./api/profile/labs/add-selected',{method:'POST',body:{supplement_ids:state.profileUi.labSelection,doses:state.profileUi.labDoses||{}}});
+      try{const out=await api('./api/profile/labs/add-selected',{method:'POST',body:{supplement_ids:state.profileUi.labSelection,resume_ids:state.profileUi.labResume||[],doses:state.profileUi.labDoses||{}}});
         state.profileUi.labSelection=[];catalogStackRevision++;
         await Promise.allSettled([loadProfileLabs(true),loadMySupplements({force:true,silent:true}),loadToday({force:true,silent:true}),loadBodyMap(true),loadStatsOnly(),loadScheduleData(true),loadAchievements(true)]);
-        showToast(out.added.length?'Добавлено в ваш список':'Эти позиции уже есть в списке');renderActiveTab();
+        showToast(out.resumed?.length?'Приём возобновлён':out.added.length?'Добавлено в ваш список':'Эти позиции уже есть в списке');renderActiveTab();
       }catch(e){setLabFormError(e.message||'Не удалось добавить позиции');button.disabled=false;}
       finally{state.profileUi.labAdding=false;}
     });
@@ -6254,7 +6376,10 @@ function adminField(label, field, value, kind='input') {
   function bindProfileEvents() {
     document.querySelectorAll('[data-profile-module]').forEach((el)=>el.addEventListener('click', async ()=>{
       const next = String(el.dataset.profileModule || 'organs');
+      closeGuide();
       state.profileUi.activeModule = next;
+      state.profileUi.labView = state.profileUi.labView || 'overview';
+      saveNavigation();
       if (next === 'achievements' && getUnseenAchievementsCount() > 0) {
         await markAchievementsSeen();
       }
@@ -6285,7 +6410,7 @@ function adminField(label, field, value, kind='input') {
     document.querySelectorAll('[data-open-upload]').forEach((el)=>el.addEventListener('click', ()=>{ state.profileUi.labFormError=''; state.profileUi.uploadOpen=true; renderActiveTab(); }));
     document.querySelectorAll('[data-close-upload]').forEach((el)=>el.addEventListener('click', ()=>{ if(state.profileUi.uploading)return; state.profileUi.uploadOpen=false; renderActiveTab(); }));
     document.querySelectorAll('[data-close-review]').forEach((el)=>el.addEventListener('click', ()=>{ if(state.profileUi.savingReview)return; captureLabDraft('review'); state.profileUi.reviewOpen=false; renderActiveTab(); }));
-    document.querySelectorAll('[data-open-review]').forEach((el)=>el.addEventListener('click', ()=>{ const id=Number(el.dataset.openReview); if(Number(state.profileUi.reviewDraft?.id)!==id)state.profileUi.reviewDraft=null; state.profileUi.selectedReportId=id; state.profileUi.labFormError=''; state.profileUi.reviewOpen=true; renderActiveTab(); }));
+    document.querySelectorAll('[data-open-review]').forEach((el)=>el.addEventListener('click', ()=>{ const id=Number(el.dataset.openReview); if(Number(state.profileUi.selectedReportId)!==id){state.profileUi.reviewConflictDraft=null;state.profileUi.labConflict=false;} if(Number(state.profileUi.reviewDraft?.id)!==id)state.profileUi.reviewDraft=null; state.profileUi.selectedReportId=id; state.profileUi.labFormError=''; state.profileUi.reviewOpen=true; renderActiveTab(); }));
     document.querySelector('[data-assistant-open-premium]')?.addEventListener('click', () => {
       haptic();
       state.activeTab = "settings";
@@ -7548,6 +7673,7 @@ function adminField(label, field, value, kind='input') {
           </div>
         </div>
       </section>
+      <section class="card"><button class="btn secondary" data-replay-guide>Как пользоваться приложением</button></section>
       ${slotEdit.open ? `<div class="modal-overlay" data-slot-edit-close>
         <section class="card modal-card" data-settings-slot-id="${esc(slotEdit.slotId)}" onclick="event.stopPropagation()">
           <div class="row"><strong>Изменить время слота</strong><button class="btn secondary" type="button" data-slot-edit-close>Закрыть</button></div>
@@ -7569,6 +7695,9 @@ function adminField(label, field, value, kind='input') {
   }
 
   function bindSettingsEvents() {
+    document.querySelector('[data-replay-guide]')?.addEventListener('click',()=>{
+      Object.values(GUIDE_KEYS).forEach(key=>{try{localStorage.removeItem(guideStorageKey(key));}catch{}});state.guideSeen={};closeGuide();activateTab('today');startGuide(GUIDE_KEYS.main,availableGuideSteps(GUIDE_KEYS.main));
+    });
     document.querySelectorAll('[data-settings-section]').forEach((el) => {
       el.addEventListener('toggle', () => {
         const key = String(el.dataset.settingsSection || '');
@@ -8633,6 +8762,64 @@ function adminField(label, field, value, kind='input') {
     return `${summaryHtml}${calHtml}${rowsHtml}`;
   }
 
+  let nativeDialogKey='',nativeReturnFocus=null,nativeReturnSelector='';
+  function nativeTopDialog() {
+    return [...appEl.querySelectorAll('[role="dialog"]')].filter(el=>{
+      const box=el.getBoundingClientRect();return box.width&&box.height;
+    }).sort((a,b)=>{
+      const z=el=>{let value=0;for(let node=el;node&&node!==appEl;node=node.parentElement){const n=Number(getComputedStyle(node).zIndex);if(Number.isFinite(n))value=Math.max(value,n);}return value;};
+      return z(a)-z(b);
+    }).at(-1);
+  }
+  function nativeBack() {
+    const dialog=nativeTopDialog();
+    if(dialog){
+      const close=[...dialog.querySelectorAll('button')].find(el=>[...el.attributes].some(attr=>/^data-(?:close-|.+-(?:close|cancel)$)/.test(attr.name)));
+      if(close&&!close.disabled)close.click();
+      return true;
+    }
+    if(state.guide.active){closeGuide();return true;}
+    if(state.activeTab==='profile'&&state.profileUi.activeModule==='assistant'&&state.profileUi.labView&&state.profileUi.labView!=='overview'){
+      state.profileUi.labView='overview';saveNavigation();renderActiveTab();return true;
+    }
+    if(state.activeTab==='profile'&&state.profileUi.activeModule!=='organs'){
+      closeGuide();state.profileUi.activeModule='organs';saveNavigation();renderActiveTab();return true;
+    }
+    return false;
+  }
+  function syncNativeNavigation() {
+    const dialog=nativeTopDialog(),key=dialog?modalKey(dialog):'';
+    if(key&&!nativeDialogKey){
+      nativeReturnFocus=document.activeElement;
+      const attr=[...(nativeReturnFocus?.attributes||[])].find(attr=>attr.name.startsWith('data-'));
+      nativeReturnSelector=attr?`[${attr.name}="${CSS.escape(attr.value)}"]`:'';
+    }
+    if(dialog){
+      dialog.tabIndex=-1;
+      const heading=dialog.querySelector('strong,h2,h3,h4');if(heading)dialog.setAttribute('aria-label',heading.textContent.trim());
+      if(key!==nativeDialogKey&&!isEditing())dialog.focus({preventScroll:true});
+    }else if(nativeDialogKey){
+      const opener=nativeReturnFocus?.isConnected?nativeReturnFocus:nativeReturnSelector?document.querySelector(nativeReturnSelector):null;
+      opener?.focus?.({preventScroll:true});nativeReturnFocus=null;nativeReturnSelector='';
+    }
+    nativeDialogKey=key;
+    const canBack=Boolean(dialog||state.guide.active||(state.activeTab==='profile'&&state.profileUi.activeModule!=='organs'));
+    if(canBack)tg?.BackButton?.show?.();else tg?.BackButton?.hide?.();
+  }
+  let nativeNavFrame=0;
+  new MutationObserver(()=>{cancelAnimationFrame(nativeNavFrame);nativeNavFrame=requestAnimationFrame(syncNativeNavigation);}).observe(appEl,{childList:true,subtree:true});
+  tg?.BackButton?.onClick?.(nativeBack);
+  document.addEventListener('keydown',event=>{
+    if(event.key==='Escape'&&nativeBack()){event.preventDefault();return;}
+    if(event.key!=='Tab')return;
+    const dialog=nativeTopDialog();if(!dialog)return;
+    const fields=[...dialog.querySelectorAll('button,input,textarea,select,a[href],[tabindex="0"]')].filter(el=>!el.disabled&&(el.type==='file'||el.getBoundingClientRect().width>0));
+    if(!fields.length){event.preventDefault();dialog.focus({preventScroll:true});return;}
+    const first=fields[0],last=fields.at(-1),focused=document.activeElement;
+    if(event.shiftKey&&(focused===first||focused===dialog)){event.preventDefault();last.focus();}
+    else if(!event.shiftKey&&(focused===last||!dialog.contains(focused))){event.preventDefault();first.focus();}
+  });
+
   let viewportFrame = 0;
   let stableHeight = window.innerHeight;
   function keepFocusedFieldVisible() {
@@ -8668,7 +8855,7 @@ function adminField(label, field, value, kind='input') {
   tg?.onEvent?.('viewportChanged',syncViewport);
   tg?.onEvent?.('activated',refreshOnResume);
   document.addEventListener('focusin',syncViewport);
-  document.addEventListener('focusout',() => { syncViewport(); });
+  document.addEventListener('focusout',() => { syncViewport();if(resumePending)setTimeout(refreshOnResume,250); });
   window.addEventListener('pagehide',saveNavigation);
   window.addEventListener('focus',refreshOnResume);
   syncViewport();

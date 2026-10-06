@@ -2,6 +2,7 @@ from __future__ import annotations
 import asyncio
 import traceback
 import calendar
+import csv
 import html
 import json
 import logging
@@ -14,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, Update, WebAppInfo
+from telegram.error import TelegramError
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, MessageHandler, PreCheckoutQueryHandler, ContextTypes, filters
 )
@@ -7046,10 +7048,256 @@ async def _render_route(
 
     await home(update, context, target_chat_id=target_chat_id, target_message_id=target_message_id)
 
+async def _labs_access(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    if not update.effective_chat or update.effective_chat.type != "private" or not update.effective_user:
+        return False
+    if not await guard_not_banned(update, context):
+        return False
+    s = context.application.bot_data["settings"]
+    conn = await db.connect(s.DB_PATH)
+    try:
+        consent = await db.has_required_consent(conn, update.effective_user.id,
+            offer_version=s.OFFER_VERSION, privacy_version=s.PRIVACY_VERSION)
+    finally:
+        await conn.close()
+    if not consent:
+        await _render_consent_screen(update, context)
+        return False
+    return await require_premium_or_upsell(update, context, "Анализы")
+
+
+def _labs_web_button(context, report_id=0):
+    url = build_webapp_entry_url(context.application.bot_data["settings"].WEBAPP_URL)
+    if not url or not is_http_url(url):
+        return []
+    url += "&screen=labs" + (f"&report_id={int(report_id)}" if report_id else "")
+    return [[InlineKeyboardButton("Открыть в приложении", web_app=WebAppInfo(url=url))]]
+
+
+async def _labs_report_screen(update, context, conn, report_id, page=0, draft=None):
+    uid = update.effective_user.id
+    report = await db.get_lab_report_by_id(conn, uid, int(report_id))
+    if not report:
+        await show(update, context, "Анализ не найден или удалён.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("Мои анализы", callback_data="labs:home")]]), route="labs:home")
+        return
+    rows = await db.get_lab_results_by_report_id(conn, uid, report_id)
+    revision = db.lab_report_revision(report, rows)
+    meta = json.loads(report.get("parse_metadata_json") or "{}")
+    review = draft or {**report, "results": meta.get("pending_results", rows), "revision": revision}
+    values = review["results"]
+    pages = max(1, (len(values) + 4) // 5)
+    page = max(0, min(int(page), pages - 1))
+    statuses = {"queued": "Распознаём…", "manual": "Сохранён", "manual_reviewed": "Проверен"}
+    text = f"🧪 <b>{html.escape(str(review.get('lab_name') or report.get('source_filename') or 'Анализ'))}</b>\n"
+    text += f"Дата забора: {html.escape(str(review.get('report_date') or 'не указана'))}\n{statuses.get(report['parse_status'], 'Проверьте результаты')} · {len(values)} показателей\n\n"
+    if report.get("parse_notes"):
+        text += html.escape(str(report["parse_notes"])[:300]) + "\n\n"
+    for row in values[page*5:(page+1)*5]:
+        reference = row.get("reference_text") or f"{row.get('ref_low') if row.get('ref_low') is not None else '—'} — {row.get('ref_high') if row.get('ref_high') is not None else '—'}"
+        text += f"<b>{html.escape(str(row.get('analyte_name') or row.get('analyte_code') or 'Показатель'))}</b>\n{html.escape(str(row.get('value_text') or row.get('value_num') or '0'))} {html.escape(str(row.get('unit') or ''))}\nРеференс: {html.escape(str(reference)[:160])}\n\n"
+    if not values:
+        text += "Пока нет прочитанных строк. Введите их вручную или распознайте документ.\n"
+    kb = []
+    if pages > 1:
+        nav = []
+        if page: nav.append(InlineKeyboardButton("←", callback_data=f"labs:report:{report_id}:{page-1}"))
+        nav.append(InlineKeyboardButton(f"{page+1}/{pages}", callback_data="noop"))
+        if page+1 < pages: nav.append(InlineKeyboardButton("→", callback_data=f"labs:report:{report_id}:{page+1}"))
+        kb.append(nav)
+    if values:
+        kb.append([InlineKeyboardButton("Подтвердить и сохранить", callback_data=f"labs:confirm:{report_id}")])
+    profile = await db.get_user_health_profile(conn, uid)
+    if any(db.suggest_lab_reference(row, profile, review.get("report_date", "")) for row in values):
+        kb.append([InlineKeyboardButton("Референсы бланка для моего профиля", callback_data=f"labs:refs:{report_id}")])
+    kb.append([InlineKeyboardButton("Ввести / заменить результаты", callback_data=f"labs:edit:{report_id}")])
+    kb.append([InlineKeyboardButton("Дата забора", callback_data=f"labs:date:{report_id}"), InlineKeyboardButton("Лаборатория", callback_data=f"labs:lab:{report_id}")])
+    if report.get("source_filename") and report["parse_status"] != "queued":
+        kb.append([InlineKeyboardButton("Распознать с ИИ", callback_data=f"labs:ai:{report_id}")])
+    kb += _labs_web_button(context, report_id)
+    kb.append([InlineKeyboardButton("Обновить результаты", callback_data=f"labs:refresh:{report_id}")])
+    kb.append([InlineKeyboardButton("Мои анализы", callback_data="labs:home")])
+    await show(update, context, text, InlineKeyboardMarkup(kb), route="labs:review",
+        payload={"report_id": report_id, "page": page, "draft": review})
+
+
+async def on_labs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _labs_access(update, context): return
+    if update.callback_query: await _safe_answer_callback(update)
+    data = str(update.callback_query.data) if update.callback_query else "labs:home"
+    uid = update.effective_user.id
+    s = context.application.bot_data["settings"]
+    conn = await db.connect(s.DB_PATH)
+    try:
+        _, screen, raw = await db.get_ui_state(conn, uid)
+        saved = json.loads(raw or "{}")
+        parts = data.split(":")
+        action = parts[1] if len(parts)>1 else "home"
+        rid = int(parts[2]) if len(parts)>2 and parts[2].isdigit() else 0
+        draft = saved.get("draft") if saved.get("report_id") == rid else None
+        if action == "home":
+            reports = await db.get_user_lab_reports(conn, uid)
+            page = max(0, rid)
+            page = min(page, max(0, (len(reports)-1)//8))
+            kb = [[InlineKeyboardButton("Загрузить файл / фото", callback_data="labs:upload")],
+                  [InlineKeyboardButton("Ввести вручную", callback_data="labs:manual")]]
+            for report in reports[page*8:(page+1)*8]:
+                label = f"{report['report_date'] or 'Без даты'} · {report['lab_name'] or report['source_filename'] or 'Анализ'}"
+                kb.append([InlineKeyboardButton(label[:100], callback_data=f"labs:report:{report['id']}:0")])
+            nav = []
+            if page: nav.append(InlineKeyboardButton("←", callback_data=f"labs:home:{page-1}"))
+            if (page+1)*8<len(reports): nav.append(InlineKeyboardButton("→", callback_data=f"labs:home:{page+1}"))
+            if nav: kb.append(nav)
+            kb += _labs_web_button(context)
+            kb.append([InlineKeyboardButton("В меню", callback_data="menu:home")])
+            await show(update, context, "🧪 <b>Мои анализы</b>\nЗагрузите бланк или введите показатели. Результаты и история общие с приложением.", InlineKeyboardMarkup(kb), route="labs:home")
+        elif action == "upload":
+            await show(update, context, "Отправьте фото или документ: PDF, JPG, PNG, WEBP, DOCX, XLSX, CSV, TXT, JSON — до 12 МБ. Затем проверьте результаты.",
+                InlineKeyboardMarkup([[InlineKeyboardButton("Отмена", callback_data="labs:home")]]), route="labs:upload")
+        elif action in {"manual", "edit", "date", "lab"}:
+            if rid and not await db.get_lab_report_by_id(conn, uid, rid): raise db.LabInputError(404, "Анализ не найден")
+            prompt = {"date": "Отправьте дату забора: ГГГГ-ММ-ДД. Чтобы убрать дату, отправьте —.",
+                "lab": "Отправьте название лаборатории. Чтобы убрать его, отправьте —."}.get(action,
+                "Отправьте показатели по одному в строке:\n<code>Магний;0,8;ммоль/л;0,7;1,0</code>\n<code>Новый показатель;не обнаружено</code>\nНазвание;результат;единица;референс от;референс до. Последние поля можно оставить пустыми.\n" + ("Отправленные строки заменят текущие только после подтверждения." if rid else "Можно вводить любые названия из бланка."))
+            await show(update, context, prompt, InlineKeyboardMarkup([[InlineKeyboardButton("Отмена", callback_data=f"labs:report:{rid}:0" if rid else "labs:home")]]),
+                route=f"labs:input:{action}", payload={"report_id": rid, "draft": draft})
+        elif action in {"report", "refresh"}:
+            await _labs_report_screen(update, context, conn, rid, int(parts[3]) if len(parts)>3 else 0, draft=draft if action == "report" else None)
+        elif action in {"confirm", "refs"}:
+            if screen != "labs:review" or not draft: raise db.LabInputError(409, "Откройте анализ заново перед подтверждением")
+            if action == "refs":
+                profile = await db.get_user_health_profile(conn, uid)
+                for row in draft["results"]:
+                    selected = db.suggest_lab_reference(row, profile, draft.get("report_date", ""))
+                    if selected:
+                        row.update({"ref_low": selected["ref_low"], "ref_high": selected["ref_high"]})
+                await _labs_report_screen(update, context, conn, rid, saved.get("page", 0), draft=draft)
+            else:
+                await db.confirm_lab_report(conn, uid, rid, draft["results"], draft, expected_revision=draft.get("revision", ""))
+                await _labs_report_screen(update, context, conn, rid)
+                await _safe_answer_callback(update, "Анализ сохранён")
+        elif action in {"ai", "recognize"}:
+            if action == "ai":
+                if not await db.get_lab_report_by_id(conn, uid, rid): raise db.LabInputError(404, "Анализ не найден")
+                await show(update, context, "Для распознавания этот документ будет отправлен в OpenAI. После обработки проверьте значения. Подтверждённые результаты сохраняются до вашей проверки.",
+                    InlineKeyboardMarkup([[InlineKeyboardButton("Разрешаю, распознать", callback_data=f"labs:recognize:{rid}")], [InlineKeyboardButton("Отмена", callback_data=f"labs:report:{rid}:0")]]), route="labs:ai", payload={"report_id": rid})
+            else:
+                if screen != "labs:ai" or saved.get("report_id") != rid: raise db.LabInputError(409, "Сначала разрешите распознавание этого документа")
+                if not s.OPENAI_API_KEY: raise db.LabInputError(503, "ИИ-распознавание пока не подключено. Можно ввести результаты вручную")
+                await db.recognize_lab_document(s.DB_PATH, uid, rid)
+                await _labs_report_screen(update, context, conn, rid)
+    except (ValueError, TypeError) as exc:
+        message = str(exc) if isinstance(exc, db.LabInputError) else "Не удалось открыть анализ. Попробуйте ещё раз."
+        await show(update, context, html.escape(message), InlineKeyboardMarkup([[InlineKeyboardButton("Мои анализы", callback_data="labs:home")]]), route="labs:home")
+    finally:
+        await conn.close()
+
+
+async def on_lab_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _labs_access(update, context): return
+    uid = update.effective_user.id
+    s = context.application.bot_data["settings"]
+    conn = await db.connect(s.DB_PATH)
+    try:
+        _, screen, _ = await db.get_ui_state(conn, uid)
+        if not str(screen).startswith("labs:"):
+            await show(update, context, "Для сохранения бланка откройте «Анализы» и отправьте файл ещё раз.", InlineKeyboardMarkup([[InlineKeyboardButton("Мои анализы", callback_data="labs:home")]]))
+            return
+        msg = update.effective_message
+        media = msg.document if msg.document else msg.photo[-1] if msg.photo else None
+        if not media: return
+        if media.file_size and media.file_size > 12*1024*1024:
+            raise db.LabInputError(413, "Файл должен быть не больше 12 МБ")
+        file = await media.get_file()
+        data = bytes(await file.download_as_bytearray())
+        filename = msg.document.file_name if msg.document else "analysis-photo.jpg"
+        result = await db.ingest_lab_document(s.DB_PATH, uid, data, filename, allow_ai=False)
+        await _labs_report_screen(update, context, conn, int(result["report_id"]))
+    except db.LabInputError as exc:
+        await show(update, context, html.escape(str(exc)), InlineKeyboardMarkup([[InlineKeyboardButton("Другой файл", callback_data="labs:upload")]]), route="labs:upload")
+    except (TelegramError, OSError):
+        await show(update, context, "Не удалось получить файл. Отправьте его повторно — сохранённые анализы остаются в истории.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("Повторить загрузку", callback_data="labs:upload")]]), route="labs:upload")
+    finally:
+        await conn.close()
+
+
+async def _handle_lab_text(update, context) -> bool:
+    uid = update.effective_user.id
+    conn = await db.connect(context.application.bot_data["settings"].DB_PATH)
+    try:
+        _, screen, raw = await db.get_ui_state(conn, uid)
+        if not str(screen).startswith("labs:input:"): return False
+        if not await _labs_access(update, context): return True
+        saved = json.loads(raw or "{}")
+        action = screen.split(":")[-1]
+        text = update.message.text.strip()
+        rid = int(saved.get("report_id") or 0)
+        report = await db.get_lab_report_by_id(conn, uid, rid) if rid else None
+        if rid and not report: raise db.LabInputError(404, "Анализ удалён")
+        draft = saved.get("draft") or report or {}
+        if report and "results" not in draft:
+            draft["results"] = await db.get_lab_results_by_report_id(conn, uid, rid)
+            draft["revision"] = db.lab_report_revision(report, draft["results"])
+        if action == "date":
+            draft["report_date"] = db.validate_lab_date("" if text == "—" else text)
+        elif action == "lab":
+            if len(text)>200: raise ValueError("Название лаборатории: до 200 символов")
+            draft["lab_name"] = "" if text == "—" else text
+        else:
+            from openai_client import clean_extracted_lab_rows
+            matrix = list(csv.reader(text.splitlines(), delimiter=";", strict=True))
+            rows = []
+            for cells in matrix:
+                if not any(cell.strip() for cell in cells): continue
+                if not 2<=len(cells)<=6: raise ValueError("В каждой строке нужны название и результат через ;")
+                cells += [""]*(6-len(cells))
+                name, value, unit, low, high, reference = [cell.strip() for cell in cells]
+                rows.append({"analyte_name":name,"value_text":value,"unit":unit,"ref_low":low,"ref_high":high,"reference_text":reference})
+            if not rows: raise ValueError("Добавьте хотя бы один показатель")
+            for row in rows:
+                for key in ("ref_low", "ref_high"):
+                    if row[key]:
+                        from openai_client import lab_number
+                        if lab_number(row[key]) is None: raise ValueError("Референсы должны быть числами или пустыми")
+            draft["results"] = [db.validate_lab_result(row) for row in clean_extracted_lab_rows(rows)]
+        if not rid:
+            import hashlib
+            import uuid
+            request_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"goody-lab:{uid}:{update.message.message_id}"))
+            request_hash = hashlib.sha256(json.dumps(draft["results"], ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+            async with db.transaction(conn) as tx:
+                internal_uid = await db.get_or_create_user(tx, uid)
+                previous = await db.fetchone(tx, "SELECT id,client_request_sha FROM lab_reports WHERE user_id=? AND client_request_id=?", (internal_uid, request_id))
+                if previous:
+                    if previous["client_request_sha"] != request_hash:
+                        raise db.LabInputError(409, "Это сообщение уже сохранено. Откройте анализ из истории для изменения")
+                    rid = int(previous["id"])
+                else:
+                    rid = await db.create_lab_report(tx, uid, {"source":"manual","parse_status":"needs_manual_review"})
+                    await db.add_lab_results_batch(tx, uid, rid, draft["results"])
+                    await tx.execute("UPDATE lab_reports SET client_request_id=?,client_request_sha=? WHERE id=?", (request_id, request_hash, rid))
+            if previous:
+                await _labs_report_screen(update, context, conn, rid)
+                return True
+            report = await db.get_lab_report_by_id(conn, uid, rid)
+            draft["revision"] = db.lab_report_revision(report, await db.get_lab_results_by_report_id(conn, uid, rid))
+        await _labs_report_screen(update, context, conn, rid, draft=draft)
+    except (ValueError, csv.Error) as exc:
+        # Keep both the incoming message and persisted draft available after validation fails.
+        await show(update, context, html.escape(str(exc)), InlineKeyboardMarkup([[InlineKeyboardButton("Отмена", callback_data="labs:home")]]), route=screen, payload=json.loads(raw or "{}"))
+    finally:
+        await conn.close()
+    return True
+
+
+
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard_not_banned(update, context):
         return
     if not update.message or not update.message.text:
+        return
+    if await _handle_lab_text(update, context):
         return
     if context.user_data.get("onboarding") == "tz":
         try:
@@ -8539,6 +8787,7 @@ async def _bootstrap() -> Application:
     app.bot_data["render_route"] = _render_route
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler(['labs', 'analyses'], on_labs))
     app.add_handler(CommandHandler("premium", premium_command))
     app.add_handler(CommandHandler("stats", admin_stats_command))
     app.add_handler(CommandHandler("paychecks", paychecks_command))
@@ -8549,6 +8798,8 @@ async def _bootstrap() -> Application:
         on_menu,
         pattern=r"^(main$|menu:|settings:|gift:|schedule:|cx:|supplement:|admin:|add_pick:|compat_pick:|cat:|curated:|supp:|card:|mysupp:|today:|intake:|premium:|onboard:|starter:|consent:|rem:(home|edit|set:|toggle:))",
     ))
+    app.add_handler(CallbackQueryHandler(on_labs, pattern=r'^labs:'))
+    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & (filters.Document.ALL | filters.PHOTO), on_lab_media))
     app.add_handler(CallbackQueryHandler(on_ai_add, pattern=r"^aiadd:"))
     app.add_handler(CallbackQueryHandler(on_ai_checkin, pattern=r"^aicheck:"))
     app.add_handler(CallbackQueryHandler(on_noop, pattern=r"^noop$"))

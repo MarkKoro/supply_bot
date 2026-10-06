@@ -66,6 +66,7 @@ def clean_extracted_lab_rows(rows: list[dict]) -> list[dict]:
         out.append({"analyte_code": lab_label_key(row.get("analyte_code") or name)[:160],
                     "analyte_name": name, "value_text": value_text, "value_num": lab_number(value_text),
                     "unit": unit, "ref_low": low, "ref_high": high, "reference_text": reference_text,
+                    "raw_json": row.get("raw_json") if isinstance(row.get("raw_json"), dict) else {},
                     "measured_at": str(row.get("measured_at") or "").strip()})
     return out
 

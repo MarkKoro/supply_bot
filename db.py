@@ -1,4 +1,5 @@
 from __future__ import annotations
+import asyncio
 import calendar
 import hashlib
 from contextlib import asynccontextmanager
@@ -632,18 +633,33 @@ async def transaction(conn):
         yield conn
         return
     nested = conn.in_transaction
-    await conn.execute("SAVEPOINT supply_atomic" if nested else "BEGIN IMMEDIATE")
+    started = False
     try:
+        deadline = time.monotonic() + 20
+        while True:
+            try:
+                await conn.execute("SAVEPOINT supply_atomic" if nested else "BEGIN IMMEDIATE")
+                started = True
+                break
+            except sqlite3.OperationalError as exc:
+                code = getattr(exc, "sqlite_errorcode", 0) or 0
+                busy = (code & 255) in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
+                if not code:
+                    busy = str(exc).lower() in {"database is locked", "database table is locked"}
+                if nested or not busy or time.monotonic() >= deadline:
+                    raise
+                # Retry only acquisition: no application writes have run yet.
+                await asyncio.sleep(0.05)
         yield _TransactionConnection(conn)
         if nested:
             await conn.execute("RELEASE SAVEPOINT supply_atomic")
         else:
             await conn.commit()
     except BaseException:
-        if nested:
+        if nested and started:
             await conn.execute("ROLLBACK TO SAVEPOINT supply_atomic")
             await conn.execute("RELEASE SAVEPOINT supply_atomic")
-        else:
+        elif not nested:
             await conn.rollback()
         raise
 

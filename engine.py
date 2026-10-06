@@ -220,6 +220,9 @@ async def apply_day_plan_actions_with_slots(
         picked.append({**action, "action": action.get("type") or "add"})
 
     picked = await resolve_recommendation_items(conn, user_id, picked)
+    picked = [item for item in picked if int(item.get("supplement_id") or 0) > 0]
+    if not picked:
+        return 0
     for item in picked:
         item["type"] = item["action"]
     await db.clear_day_plan(conn, user_id, date_local)

@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import tempfile
 import time
 from datetime import datetime, timedelta, timezone
@@ -1119,9 +1120,12 @@ def _ai_checkin_actions_payload(state: dict) -> dict:
         return {}
     try:
         payload = json.loads(raw)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, TypeError):
         return {}
     return payload if isinstance(payload, dict) else {}
+
+def _ai_checkin_callback(state: dict, data: str) -> str:
+    return f"{data}:{state.get('last_result_token') or 'expired'}"
 
 def _ai_checkin_entry_payload() -> dict:
     return {"screen": "entry"}
@@ -1267,6 +1271,8 @@ async def _render_ai_checkin_wizard(
     context: ContextTypes.DEFAULT_TYPE,
     *,
     state: dict | None = None,
+    target_chat_id: int | None = None,
+    target_message_id: int | None = None,
 ) -> None:
     state = state or _get_ai_checkin_state(context)
     step = int(state.get("step") or 1)
@@ -1289,6 +1295,8 @@ async def _render_ai_checkin_wizard(
             InlineKeyboardMarkup(rows),
             route=AI_CHECKIN_ROUTE,
             payload={"ai_checkin": state},
+            target_chat_id=target_chat_id,
+            target_message_id=target_message_id,
         )
         return
 
@@ -1314,6 +1322,8 @@ async def _render_ai_checkin_wizard(
             InlineKeyboardMarkup(rows),
             route=AI_CHECKIN_ROUTE,
             payload={"ai_checkin": state},
+            target_chat_id=target_chat_id,
+            target_message_id=target_message_id,
         )
         return
 
@@ -1339,6 +1349,8 @@ async def _render_ai_checkin_wizard(
             InlineKeyboardMarkup(rows),
             route=AI_CHECKIN_ROUTE,
             payload={"ai_checkin": state},
+            target_chat_id=target_chat_id,
+            target_message_id=target_message_id,
         )
         return
 
@@ -1365,6 +1377,8 @@ async def _render_ai_checkin_wizard(
             InlineKeyboardMarkup(rows),
             route=AI_CHECKIN_ROUTE,
             payload={"ai_checkin": state},
+            target_chat_id=target_chat_id,
+            target_message_id=target_message_id,
         )
         return
 
@@ -1408,6 +1422,8 @@ async def _render_ai_checkin_wizard(
         InlineKeyboardMarkup(rows),
         route=AI_CHECKIN_ROUTE,
         payload={"ai_checkin": state},
+        target_chat_id=target_chat_id,
+        target_message_id=target_message_id,
     )
 
 def build_ai_checkin_prompt(
@@ -1719,9 +1735,8 @@ async def _render_ai_checkin_results(
     disclaimer = str(payload.get("disclaimer_ru") or "").strip()
     actions = payload.get("actions") or []
     state = _get_ai_checkin_state(context)
-    target_day_label = _ai_checkin_target_day_label(str(state.get("target_day") or "today"))
     lines = [
-        f"🤖 AI-рекомендации на {target_day_label} ({_format_day_ru(date_local)})",
+        f"🤖 AI-рекомендации ({_format_day_ru(date_local)})",
         "",
         summary,
         "",
@@ -1764,9 +1779,9 @@ async def _render_ai_checkin_results(
 
     kb = InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("✅ Применить всё", callback_data="aicheck:apply:all")],
-            [InlineKeyboardButton("🎯 Выбрать точечно", callback_data="aicheck:select")],
-            [InlineKeyboardButton("❌ Не применять", callback_data="aicheck:deny")],
+            [InlineKeyboardButton("✅ Применить всё", callback_data=_ai_checkin_callback(state, "aicheck:apply:all"))],
+            [InlineKeyboardButton("🎯 Выбрать точечно", callback_data=_ai_checkin_callback(state, "aicheck:select"))],
+            [InlineKeyboardButton("❌ Не применять", callback_data=_ai_checkin_callback(state, "aicheck:deny"))],
         ]
     )
     await show(
@@ -1775,7 +1790,7 @@ async def _render_ai_checkin_results(
         "\n".join(lines),
         kb,
         route=AI_CHECKIN_ROUTE,
-        payload={"ai_checkin": _get_ai_checkin_state(context)},
+        payload={"ai_checkin": _get_ai_checkin_state(context), "screen": "results"},
         target_chat_id=target_chat_id,
         target_message_id=target_message_id,
     )
@@ -1791,6 +1806,7 @@ async def _render_ai_checkin_selection(
     target_message_id: int | None = None,
 ) -> None:
     actions = payload.get("actions") or []
+    state = _get_ai_checkin_state(context)
     lines = [f"🎯 Выбор действий ({_format_day_ru(date_local)})", ""]
     rows = []
     if actions:
@@ -1799,18 +1815,18 @@ async def _render_ai_checkin_selection(
             ru_name = action.get("ru_name") or action.get("slug") or "добавка"
             mark = "✅" if action_id in selected_ids else "⬜"
             rows.append(
-                [InlineKeyboardButton(f"{mark} {idx}) {ru_name}", callback_data=f"aicheck:toggle:{action_id}")]
+                [InlineKeyboardButton(f"{mark} {idx}) {ru_name}", callback_data=_ai_checkin_callback(state, f"aicheck:toggle:{action_id}"))]
             )
         rows.append(
             [
-                InlineKeyboardButton("✅ Применить выбранное", callback_data="aicheck:apply:selected"),
+                InlineKeyboardButton("✅ Применить выбранное", callback_data=_ai_checkin_callback(state, "aicheck:apply:selected")),
             ]
         )
     else:
         lines.append("Нет действий для выбора.")
     rows.append(
         [
-            InlineKeyboardButton("⬅️ Назад", callback_data="aicheck:back:results"),
+            InlineKeyboardButton("⬅️ Назад", callback_data=_ai_checkin_callback(state, "aicheck:back:results")),
             InlineKeyboardButton("🏠 Меню", callback_data="menu:home"),
         ]
     )
@@ -1820,7 +1836,7 @@ async def _render_ai_checkin_selection(
         "\n".join(lines),
         InlineKeyboardMarkup(rows),
         route=AI_CHECKIN_ROUTE,
-        payload={"ai_checkin": _get_ai_checkin_state(context)},
+        payload={"ai_checkin": _get_ai_checkin_state(context), "screen": "selection"},
         target_chat_id=target_chat_id,
         target_message_id=target_message_id,
     )
@@ -2110,19 +2126,27 @@ async def _finalize_ai_checkin(
         "date_local": day,
         "target_day": state.get("target_day") or "today",
     }
-    await db.upsert_daily_checkin(
-        conn,
-        tg_uid,
-        day,
-        {
-            "sleep_range": answers.get("sleep_range"),
-            "energy": answers.get("energy"),
-            "stress": answers.get("stress"),
-            "training": answers.get("training"),
-            "goals": goals,
-            "note": _truncate_text(answers.get("note"), 500),
-        },
-    )
+    result_token = secrets.token_hex(6)
+    state["last_ai_actions_json"] = ""
+    state["selected_action_ids"] = []
+    state["last_result_token"] = result_token
+    _set_ai_checkin_state(context, state)
+    async with db.transaction(conn) as tx:
+        checkin_id = await db.upsert_daily_checkin(
+            tx, tg_uid, day,
+            {
+                "sleep_range": answers.get("sleep_range"),
+                "energy": answers.get("energy"),
+                "stress": answers.get("stress"),
+                "training": answers.get("training"),
+                "goals": goals,
+                "note": _truncate_text(answers.get("note"), 500),
+            },
+        )
+        await tx.execute(
+            "UPDATE daily_checkins SET ai_prompt_hash=?, ai_raw_json=NULL, applied_json=NULL WHERE id=? AND user_id=?",
+            (f"bot:{result_token}", checkin_id, user_id),
+        )
 
     s = context.application.bot_data["settings"]
     if not s.OPENAI_API_KEY:
@@ -2184,10 +2208,10 @@ async def _finalize_ai_checkin(
     for row in recent_checkins_rows:
         raw_answers = str(row["answers_json"] or "{}").strip()
         try:
-            answers = json.loads(raw_answers) if raw_answers else {}
+            previous_answers = json.loads(raw_answers) if raw_answers else {}
         except json.JSONDecodeError:
-            answers = {}
-        recent_checkins_payload.append({"date_local": str(row["date_local"]), "answers": answers if isinstance(answers, dict) else {}})
+            previous_answers = {}
+        recent_checkins_payload.append({"date_local": str(row["date_local"]), "answers": previous_answers if isinstance(previous_answers, dict) else {}})
 
     ai_plan_history_payload = []
     for row in ai_plan_history_rows:
@@ -2302,7 +2326,7 @@ async def _finalize_ai_checkin(
         if dedup_key in seen_action_keys:
             continue
         ru_name = (row["name_ru"] or row["name_en"] or row["name"] or "").strip()
-        action_id = str(action.get("id") or f"a{idx}").strip()
+        action_id = f"a{idx}"
         confidence = action.get("confidence")
         if not isinstance(confidence, (float, int)) or confidence < 0 or confidence > 1:
             confidence = None
@@ -2363,6 +2387,21 @@ async def _finalize_ai_checkin(
             )
             seen_action_keys.add(dedup_key)
         payload["actions"] = clean_actions
+    current_state = _get_ai_checkin_state(context)
+    if current_state.get("last_result_token") != result_token:
+        return
+    stored_actions = [
+        {**action, "action": action["type"], "name_ru": action["ru_name"]}
+        for action in clean_actions
+    ]
+    cur = await conn.execute(
+        "UPDATE daily_checkins SET ai_raw_json=? WHERE id=? AND user_id=? AND ai_prompt_hash=?",
+        (json.dumps(stored_actions, ensure_ascii=False), checkin_id, user_id, f"bot:{result_token}"),
+    )
+    await conn.commit()
+    if not cur.rowcount or _get_ai_checkin_state(context).get("last_result_token") != result_token:
+        return
+    state["last_checkin_id"] = checkin_id
     state["last_ai_actions_json"] = json.dumps(payload, ensure_ascii=False)
     state["selected_action_ids"] = []
     state["last_date_local"] = day
@@ -5743,6 +5782,57 @@ async def on_noop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if q:
         await _safe_answer_callback(update)
 
+async def _apply_ai_checkin_result(conn, tg_uid: int, state: dict, *, selected: bool) -> str:
+    async with db.transaction(conn) as tx:
+        token = str(state.get("last_result_token") or "")
+        checkin = await db.get_daily_checkin_by_id(tx, int(state.get("last_checkin_id") or 0), tg_uid)
+        if not token or not checkin or checkin.get("ai_prompt_hash") != f"bot:{token}":
+            return "unavailable"
+        day = str(checkin.get("date_local") or "")
+        if day != state.get("last_date_local"):
+            return "unavailable"
+        tz_name = await db.get_user_tz(tx, tg_uid)
+        today = db.get_user_local_date(tz_name)
+        tomorrow = (datetime.strptime(today, "%Y-%m-%d").date() + timedelta(days=1)).isoformat()
+        if day not in {today, tomorrow}:
+            return "day_changed"
+        target_day = "today" if day == today else "tomorrow"
+        selected_ids = sorted({str(x) for x in state.get("selected_action_ids") or []}) if selected else []
+        saved = db._decode_json_or_default(checkin.get("applied_json"), {})
+        if isinstance(saved, dict) and saved:
+            prior_selections = saved.get("bot_applied_selections") or []
+            if saved.get("mode") == "all" or (selected and selected_ids in prior_selections):
+                return "already_applied"
+        else:
+            saved = {}
+        actions = db._decode_json_or_default(checkin.get("ai_raw_json"), None)
+        if not isinstance(actions, list):
+            return "unavailable"
+        user_id = await db.get_or_create_user(tx, tg_uid)
+        count = await engine.apply_day_plan_actions_with_slots(
+            tx, user_id=user_id, tg_user_id=tg_uid, date_local=day,
+            target_day=target_day, ai_actions={"actions": actions},
+            selected_ids=set(selected_ids) if selected else None,
+        )
+        if not count:
+            return "no_actions"
+        picked = [a for a in actions if not selected or str(a.get("id") or "") in selected_ids]
+        prior_selections = list(saved.get("bot_applied_selections") or [])
+        if selected:
+            prior_selections.append(selected_ids)
+        notice = {
+            "mode": "selected" if selected else "all", "date_local": day,
+            "target_day": target_day, "applied_at_utc": db.utc_now_iso(),
+            "selected_ids": sorted({int(a.get("supplement_id") or 0) for a in picked if a.get("supplement_id")}),
+            "items": [{"supplement_id": a.get("supplement_id"), "slug": a.get("slug"),
+                       "name_ru": a.get("name_ru") or a.get("ru_name"), "action": a.get("type")} for a in picked],
+            "summary": {"applied_count": count}, "bot_result_token": token,
+            "bot_applied_selections": prior_selections,
+        }
+        await db.set_daily_checkin_applied(tx, int(checkin["id"]), tg_uid, notice)
+        await db.evaluate_and_unlock_achievements(tx, tg_uid, day)
+        return "applied"
+
 async def on_ai_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard_not_banned(update, context):
         return
@@ -5757,7 +5847,29 @@ async def on_ai_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not data.startswith("aicheck:"):
         return
 
+    if not isinstance(context.user_data.get(AI_CHECKIN_STATE), dict):
+        s = context.application.bot_data["settings"]
+        conn = await db.connect(s.DB_PATH)
+        try:
+            _, screen, raw_payload = await db.get_ui_state(conn, update.effective_user.id)
+            saved_payload = db._decode_json_or_default(raw_payload, {})
+            saved_state = saved_payload.get("ai_checkin") if isinstance(saved_payload, dict) else None
+            if screen == AI_CHECKIN_ROUTE and isinstance(saved_state, dict):
+                _set_ai_checkin_state(context, dict(saved_state))
+        finally:
+            await conn.close()
     state = _get_ai_checkin_state(context)
+    result_actions = {"aicheck:apply:all", "aicheck:apply:selected", "aicheck:select", "aicheck:deny", "aicheck:back:results"}
+    base_data, _, token = data.rpartition(":")
+    if data in result_actions or data.startswith("aicheck:toggle:") or base_data in result_actions:
+        if not state.get("last_result_token") or token != state.get("last_result_token"):
+            await show(
+                update, context, "Эта кнопка относится к прежнему опросу. Откройте актуальный опрос.",
+                InlineKeyboardMarkup([[InlineKeyboardButton("📝 Опрос", callback_data="aicheck:entry")]]),
+                route=AI_CHECKIN_ROUTE,
+            )
+            return
+        data = base_data
     step = int(state.get("step") or 1)
     answers = state.get("answers", {}) if isinstance(state.get("answers"), dict) else {}
     if data in {"aicheck:apply:all", "aicheck:apply:selected"} and not isinstance(_ai_checkin_actions_payload(state).get("actions"), list):
@@ -5983,60 +6095,39 @@ async def on_ai_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
         return
 
-    if data == "aicheck:apply:all":
-        payload = _ai_checkin_actions_payload(state)
+    if data in {"aicheck:apply:all", "aicheck:apply:selected"}:
+        apply_state = dict(state)
+        apply_state["selected_action_ids"] = list(state.get("selected_action_ids") or [])
         s = context.application.bot_data["settings"]
         tg_uid = update.effective_user.id
         conn = await db.connect(s.DB_PATH)
         try:
-            user_id = await db.get_or_create_user(conn, tg_uid)
-            date_local = state.get("last_date_local") or await db.get_user_local_day(conn, user_id)
-            await engine.apply_day_plan_actions_with_slots(
-                conn,
-                user_id=user_id,
-                tg_user_id=tg_uid,
-                date_local=date_local,
-                target_day=str(state.get("target_day") or "today"),
-                ai_actions=payload,
-            )
+            try:
+                result = await _apply_ai_checkin_result(conn, tg_uid, apply_state, selected=data.endswith(":selected"))
+            except (ValueError, TypeError):
+                result = "unavailable"
         finally:
             await conn.close()
+        if result in {"unavailable", "day_changed", "no_actions"}:
+            text = {
+                "day_changed": "Дата опроса уже прошла. Откройте опрос на сегодня.",
+                "unavailable": "Сохранённый результат опроса недоступен. Откройте опрос ещё раз.",
+                "no_actions": "Нет действий для применения. Сохранённый план не изменён.",
+            }[result]
+            await show(
+                update, context, text,
+                InlineKeyboardMarkup([[InlineKeyboardButton("📝 Опрос", callback_data="aicheck:entry")]]),
+                route=AI_CHECKIN_ROUTE,
+            )
+            return
         kb = InlineKeyboardMarkup(
             [
                 [InlineKeyboardButton("📅 План дня", callback_data="menu:todayplan")],
                 [InlineKeyboardButton("🏠 Меню", callback_data="menu:home")],
             ]
         )
-        await show(update, context, "Готово ✅ План дня обновлён.", kb, route=AI_CHECKIN_ROUTE)
-        return
-
-    if data == "aicheck:apply:selected":
-        payload = _ai_checkin_actions_payload(state)
-        selected = list(state.get("selected_action_ids") or [])
-        s = context.application.bot_data["settings"]
-        tg_uid = update.effective_user.id
-        conn = await db.connect(s.DB_PATH)
-        try:
-            user_id = await db.get_or_create_user(conn, tg_uid)
-            date_local = state.get("last_date_local") or await db.get_user_local_day(conn, user_id)
-            await engine.apply_day_plan_actions_with_slots(
-                conn,
-                user_id=user_id,
-                tg_user_id=tg_uid,
-                date_local=date_local,
-                target_day=str(state.get("target_day") or "today"),
-                ai_actions=payload,
-                selected_ids=set(selected),
-            )
-        finally:
-            await conn.close()
-        kb = InlineKeyboardMarkup(
-            [
-                [InlineKeyboardButton("📅 План дня", callback_data="menu:todayplan")],
-                [InlineKeyboardButton("🏠 Меню", callback_data="menu:home")],
-            ]
-        )
-        await show(update, context, "Готово ✅ План дня обновлён.", kb, route=AI_CHECKIN_ROUTE)
+        text = "Этот результат уже применён. Ваши последующие изменения сохранены." if result == "already_applied" else "Готово ✅ План дня обновлён."
+        await show(update, context, text, kb, route=AI_CHECKIN_ROUTE)
         return
 
     if data == "aicheck:deny":
@@ -6580,11 +6671,20 @@ async def _render_route(
         )
         return
     if route == AI_CHECKIN_ROUTE:
-        if isinstance(payload, dict) and payload.get("ai_checkin"):
-            state = _get_ai_checkin_state(context)
+        if isinstance(payload, dict) and isinstance(payload.get("ai_checkin"), dict):
+            state = dict(payload["ai_checkin"])
             state["step"] = int(state.get("step") or 1)
             _set_ai_checkin_state(context, state)
-            await _render_ai_checkin_wizard(update, context, state=state)
+            result = _ai_checkin_actions_payload(state)
+            if payload.get("screen") in {"results", "selection"} and isinstance(result.get("actions"), list):
+                kwargs = {"date_local": str(state.get("last_date_local") or ""), "payload": result,
+                          "target_chat_id": target_chat_id, "target_message_id": target_message_id}
+                if payload.get("screen") == "selection":
+                    await _render_ai_checkin_selection(update, context, selected_ids=set(state.get("selected_action_ids") or []), **kwargs)
+                else:
+                    await _render_ai_checkin_results(update, context, **kwargs)
+            else:
+                await _render_ai_checkin_wizard(update, context, state=state, target_chat_id=target_chat_id, target_message_id=target_message_id)
         else:
             await _render_ai_checkin_entry(
                 update,

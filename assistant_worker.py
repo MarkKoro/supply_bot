@@ -50,7 +50,7 @@ async def process_assistant_job(conn, job: dict, worker_name: str) -> None:
         replace_run_id = int(request_payload.get("replace_run_id") or 0) or None
 
         stage = "run_compute_pipeline"
-        result = await run_nutrient_assistant_compute_pipeline(
+        await run_nutrient_assistant_compute_pipeline(
             conn,
             tg_user_id=tg_user_id,
             assistant_profile=dict(request_payload.get("assistant_profile") or {}),

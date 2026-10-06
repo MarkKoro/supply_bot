@@ -1261,12 +1261,20 @@ async def api_billing_create_invoice_link(
     req["prices"] = [{"label": "Premium", "amount": _stars_amount_for_plan(plan_id)}]
 
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/createInvoiceLink"
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        resp = await client.post(url, json=req)
-    data = resp.json()
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(url, json=req)
+        data = resp.json()
+    except (httpx.HTTPError, ValueError):
+        raise HTTPException(status_code=502, detail={"ok": False, "code": "INVOICE_UNAVAILABLE"}) from None
+    if not isinstance(data, dict) or resp.status_code >= 500:
+        raise HTTPException(status_code=502, detail={"ok": False, "code": "INVOICE_UNAVAILABLE"})
     if not data.get("ok"):
         raise HTTPException(status_code=400, detail=str(data))
-    return JSONResponse({"ok": True, "invoice_link": data.get("result")})
+    invoice_link = data.get("result")
+    if resp.status_code >= 400 or not isinstance(invoice_link, str) or not invoice_link.strip():
+        raise HTTPException(status_code=502, detail={"ok": False, "code": "INVOICE_UNAVAILABLE"})
+    return JSONResponse({"ok": True, "invoice_link": invoice_link.strip()})
 
 
 @app.post("/api/payments/redirect/create")

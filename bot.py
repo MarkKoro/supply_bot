@@ -5760,6 +5760,13 @@ async def on_ai_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     state = _get_ai_checkin_state(context)
     step = int(state.get("step") or 1)
     answers = state.get("answers", {}) if isinstance(state.get("answers"), dict) else {}
+    if data in {"aicheck:apply:all", "aicheck:apply:selected"} and not isinstance(_ai_checkin_actions_payload(state).get("actions"), list):
+        await show(
+            update, context, "Сохранённый результат опроса недоступен. Откройте опрос ещё раз.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("📝 Опрос", callback_data="aicheck:entry")]]),
+            route=AI_CHECKIN_ROUTE,
+        )
+        return
 
     if data == "aicheck:entry":
         context.user_data.pop(WAITING_KEY, None)
@@ -6033,15 +6040,9 @@ async def on_ai_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     if data == "aicheck:deny":
-        s = context.application.bot_data["settings"]
-        tg_uid = update.effective_user.id
-        conn = await db.connect(s.DB_PATH)
-        try:
-            user_id = await db.get_or_create_user(conn, tg_uid)
-            date_local = state.get("last_date_local") or await db.get_user_local_day(conn, user_id)
-            await db.clear_day_plan(conn, user_id, date_local)
-        finally:
-            await conn.close()
+        state["last_ai_actions_json"] = ""
+        state["selected_action_ids"] = []
+        _set_ai_checkin_state(context, state)
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Меню", callback_data="menu:home")]])
         await show(update, context, "Ок, не применяю.", kb, route=AI_CHECKIN_ROUTE)
 

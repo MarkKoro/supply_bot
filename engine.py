@@ -199,18 +199,30 @@ async def apply_day_plan_actions_with_slots(
     ai_actions: dict,
     selected_ids: set[str] | None = None,
 ) -> int:
-    await db.clear_day_plan(conn, user_id, date_local)
     actions = ai_actions.get("actions") if isinstance(ai_actions, dict) else None
     if not isinstance(actions, list):
         return 0
+    if not isinstance(conn, db._TransactionConnection):
+        async with db.transaction(conn) as tx:
+            return await apply_day_plan_actions_with_slots(
+                tx, user_id=user_id, tg_user_id=tg_user_id, date_local=date_local,
+                target_day=target_day, ai_actions=ai_actions, selected_ids=selected_ids,
+            )
+    if int(user_id) != await db.get_or_create_user(conn, tg_user_id):
+        raise ValueError("user_id_mismatch")
     picked: list[dict] = []
     for action in actions:
         if not isinstance(action, dict):
-            continue
+            raise ValueError("invalid_recommendation")
         action_id = str(action.get("id") or "").strip()
         if selected_ids is not None and action_id not in selected_ids:
             continue
-        picked.append(dict(action))
+        picked.append({**action, "action": action.get("type") or "add"})
+
+    picked = await resolve_recommendation_items(conn, user_id, picked)
+    for item in picked:
+        item["type"] = item["action"]
+    await db.clear_day_plan(conn, user_id, date_local)
 
     prepared, _created_times = await assign_slots_by_time(
         conn,
@@ -232,7 +244,7 @@ async def apply_day_plan_actions_with_slots(
         if supplement_id <= 0:
             continue
         hhmm = db._normalize_hhmm(str(action.get("suggested_time") or "").strip())
-        await conn.execute(
+        cur = await conn.execute(
             """INSERT OR IGNORE INTO day_plan_items(
                    user_id, date_local, supplement_id, action, dose_text, time_hint, slot_id, time_local, reason, source, created_at_utc
                ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
@@ -250,7 +262,7 @@ async def apply_day_plan_actions_with_slots(
                 db.utc_now_iso(),
             ),
         )
-        inserted += 1
+        inserted += max(0, int(cur.rowcount or 0))
     await ensure_supplement_reminders(
         conn,
         tg_user_id,

@@ -4,6 +4,7 @@ import math
 import logging
 import re
 import uuid
+import asyncio
 from decimal import Decimal, InvalidOperation
 from datetime import timedelta
 from datetime import datetime, timezone
@@ -12,7 +13,7 @@ from pathlib import Path
 import httpx
 from fastapi import Body, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.exception_handlers import http_exception_handler as fastapi_http_exception_handler
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, model_validator
 
@@ -20,7 +21,7 @@ from telegram_webapp_auth import verify_init_data
 import db
 import engine
 from settings import get_settings
-from openai_client import OpenAIConfig, _sync_call
+from openai_client import OpenAIConfig, _sync_call, LAB_FILE_LIMIT, LAB_EXTENSIONS, lab_label_key, read_lab_document
 from nutrient_assistant_pipeline import NutrientAssistantPipelineError as PipelineError
 import nutrient_assistant_pipeline as nutrient_pipeline
 from achievements import THEMES, TAB_SKINS, BADGES
@@ -28,9 +29,7 @@ from achievements import THEMES, TAB_SKINS, BADGES
 BASE_DIR = Path(__file__).resolve().parent
 WEBAPP_DIR = BASE_DIR / "webapp"
 ASSETS_DIR = WEBAPP_DIR / "assets"
-UPLOADS_DIR = BASE_DIR / "data" / "uploads" / "labs"
 ASSETS_DIR.mkdir(parents=True, exist_ok=True)
-UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="ГУДы БАДы WebApp")
 app.mount("/assets", StaticFiles(directory=str(ASSETS_DIR)), name="assets")
@@ -47,6 +46,7 @@ async def add_cache_headers(request, call_next):
 
 
 s = get_settings()
+UPLOADS_DIR = Path(s.DB_PATH).resolve().parent / "uploads" / "labs"
 BOT_TOKEN = s.TG_TOKEN
 log = logging.getLogger(__name__)
 
@@ -256,6 +256,7 @@ class LabsCreateBody(BaseModel):
         return clean
 
     source: str = "manual"
+    client_request_id: str = ""
     lab_name: str | None = ""
     report_date: str | None = ""
     notes: str | None = ""
@@ -1826,6 +1827,243 @@ async def api_profile_post(body: ProfileUpsertBody, x_telegram_init_data: str = 
         await conn.close()
 
 
+def _lab_public_report(report: dict) -> dict:
+    out = {key: value for key, value in report.items() if key not in {"source_file_path", "source_sha256", "parse_metadata_json"}}
+    metadata = _decode_json_or_default(report.get("parse_metadata_json"), {})
+    if isinstance(metadata, dict) and "pending_results" in metadata:
+        out["review_results"] = metadata["pending_results"]
+    return out
+
+
+def _lab_canonical_code(code: str, name: str) -> str:
+    aliases = {}
+    for key, item in ASSISTANT_ANALYTE_REGISTRY.items():
+        for label in [key, item.get("name_ru", ""), *item.get("aliases", [])]:
+            aliases[lab_label_key(label)] = key
+    aliases.update({lab_label_key(label): key for label, key in {
+        "Витамин D 25 OH": "vitamin_d_25oh", "25-OH витамин D": "vitamin_d_25oh", "25 hydroxy vitamin D": "vitamin_d_25oh",
+        "Магний": "magnesium_serum", "Magnesium serum": "magnesium_serum", "Vitamin B12": "vitamin_b12",
+        "Zinc": "zinc", "Фолиевая кислота": "folate", "Folate": "folate", "Ferritin": "ferritin",
+        "Serum iron": "serum_iron", "С-реактивный белок": "crp"}.items()})
+    return aliases.get(lab_label_key(code)) or aliases.get(lab_label_key(name)) or lab_label_key(code or name)[:160]
+
+
+def _lab_clean_saved_rows(rows: list[dict]) -> list[dict]:
+    if not 1 <= len(rows) <= 200:
+        raise HTTPException(status_code=400, detail="Добавьте от 1 до 200 показателей")
+    out = []
+    for item in rows:
+        clean = db.validate_lab_result(item)
+        name = str(clean.get("analyte_name") or clean.get("analyte_code") or "").strip()
+        value = str(clean.get("value_text") if clean.get("value_text") is not None else clean.get("value_num") if clean.get("value_num") is not None else "").strip()
+        if not name or not value or len(name) > 160 or len(value) > 160 or len(str(clean.get("unit") or "")) > 80:
+            raise HTTPException(status_code=400, detail="Проверьте название, результат и единицу каждого показателя")
+        if len(str(clean.get("reference_text") or "")) > 1000:
+            raise HTTPException(status_code=400, detail="Текст референса: не более 1000 символов")
+        from openai_client import lab_number
+        clean.update(analyte_name=name, analyte_code=_lab_canonical_code(str(clean.get("analyte_code") or ""), name),
+                     value_text=value, value_num=lab_number(value))
+        out.append(clean)
+    return out
+
+
+def _lab_unit_key(unit: str) -> str:
+    value = re.sub(r"\s+", "", str(unit or "").casefold().replace("μ", "u").replace("µ", "u"))
+    units = {"ммоль": "mmol", "мкмоль": "umol", "нмоль": "nmol", "пмоль": "pmol",
+             "моль": "mol", "мг": "mg", "мкг": "ug", "нг": "ng", "пг": "pg", "г": "g", "мл": "ml", "л": "l"}
+    return "/".join(units.get(part, part) for part in value.split("/"))
+
+
+async def _lab_summary(conn, tg_user_id: int) -> dict:
+    reports = await db.get_user_lab_reports(conn, tg_user_id)
+    series = {}
+    for report in reversed(reports):
+        metadata = _decode_json_or_default(report.get("parse_metadata_json"), {})
+        if report["parse_status"] not in {"manual", "manual_reviewed"} and not metadata.get("confirmed"):
+            continue
+        for row in await db.get_lab_results_by_report_id(conn, tg_user_id, int(report["id"])):
+            code = _lab_canonical_code(row["analyte_code"], row["analyte_name"])
+            key = (code, _lab_unit_key(row["unit"]))
+            group = series.setdefault(key, {"analyte_code": code, "name": row["analyte_name"], "unit": row["unit"], "points": []})
+            number, low, high = row["value_num"], row["ref_low"], row["ref_high"]
+            # Missing bounds and qualified/qualitative results are not converted to a diagnosis.
+            status = "unknown"
+            if number is not None and low is not None and number < low:
+                status = "below"
+            elif number is not None and high is not None and number > high:
+                status = "above"
+            elif number is not None and low is not None and high is not None:
+                status = "within"
+            group["points"].append({"report_id": report["id"], "date": row["measured_at"] or report["report_date"],
+                                    "value": row["value_text"], "number": number, "ref_low": low, "ref_high": high,
+                                    "lab_name": report["lab_name"], "reference_text": row["reference_text"], "status": status})
+    candidates = {}
+    existing = await db.get_user_stack_supplement_ids(conn, tg_user_id)
+    for group in series.values():
+        group["points"].sort(key=lambda point: (not bool(point["date"]), point["date"] or "", point["report_id"]))
+        group["delta"] = None
+        if len(group["points"]) > 1:
+            prev, last = group["points"][-2:]
+            comparable = (prev["date"] and last["date"] and prev["date"] < last["date"]
+                          and prev["lab_name"].strip() and lab_label_key(prev["lab_name"]) == lab_label_key(last["lab_name"])
+                          and prev["number"] is not None and last["number"] is not None
+                          and (prev["ref_low"], prev["ref_high"]) == (last["ref_low"], last["ref_high"]))
+            comparable = comparable and lab_label_key(prev["reference_text"]) == lab_label_key(last["reference_text"])
+            if comparable:
+                group["delta"] = round(last["number"] - prev["number"], 8)
+        code = str(ASSISTANT_ANALYTE_REGISTRY.get(group["analyte_code"], {}).get("nutrient_code") or "")
+        if code and group["points"][-1]["status"] == "below":
+            title = str(ASSISTANT_ANALYTE_REGISTRY[group["analyte_code"]]["name_ru"])
+            supplement = await db.find_supplement_by_slug_or_name(conn, code, title)
+            if supplement and int(supplement["is_active"] or 0):
+                sid = int(supplement["id"])
+                candidate = candidates.setdefault(sid, {"supplement_id": sid, "slug": str(supplement["slug"]),
+                    "name": str(supplement["name_ru"] or supplement["name_en"] or supplement["slug"]), "in_stack": sid in existing, "analytes": []})
+                if group["name"] not in candidate["analytes"]:
+                    candidate["analytes"].append(group["name"])
+    uid = await db.get_or_create_user(conn, tg_user_id)
+    dates = sorted(point["date"] for group in series.values() for point in group["points"] if point["date"])
+    start = dates[0] if dates else "0001-01-01"
+    current_day = db.get_user_local_date(await db.get_user_tz(conn, tg_user_id))
+    end = dates[-1] if len(set(dates)) > 1 else current_day
+    intake_rows = await db.fetchall(conn, """SELECT d.supplement_id,d.day,d.dose_snapshot_json,d.status,
+        COALESCE(NULLIF(s.name_ru,''),NULLIF(s.name_en,''),s.slug) AS name,s.slug FROM supplement_day_state d
+        JOIN supplements s ON s.id=d.supplement_id WHERE d.user_id=? AND d.day>? AND d.day<=? ORDER BY d.day,d.supplement_id""", (uid, start, current_day))
+    intakes, after_latest = {}, {}
+    for row in intake_rows:
+        target = after_latest if len(set(dates)) > 1 and row["day"] > end else intakes
+        item = target.setdefault(row["supplement_id"], {"name": row["name"], "slug": row["slug"], "taken_days": 0, "skipped_days": 0,
+            "first_day": row["day"], "last_day": row["day"], "doses": {}, "unknown_dose_days": 0})
+        item["last_day"] = row["day"]
+        if row["status"] == "taken":
+            item["taken_days"] += 1
+            try:
+                doses = json.loads(row["dose_snapshot_json"] or "[]")
+            except (ValueError, TypeError):
+                doses = []
+            if not doses:
+                item["unknown_dose_days"] += 1
+            for dose in doses:
+                item["doses"][str(dose)] = item["doses"].get(str(dose), 0) + 1
+        elif row["status"] == "skipped":
+            item["skipped_days"] += 1
+    usage = await db.fetchone(conn, "SELECT used FROM lab_ai_monthly_usage WHERE tg_user_id=? AND month_utc=?", (tg_user_id, db.utc_now_iso()[:7]))
+    current_stack = await db.get_user_supplements_with_enabled(conn, tg_user_id)
+    return {"series": sorted(series.values(), key=lambda group: group["name"].casefold()), "candidates": list(candidates.values()),
+            "intakes": list(intakes.values()), "interval": {"from": start if dates else "", "to": end},
+            "after_latest": list(after_latest.values()), "current_stack": current_stack,
+            "ai_configured": bool(s.OPENAI_API_KEY), "ai_used": int(usage["used"]) if usage else 0, "ai_limit": 20}
+
+
+@app.get("/api/profile/labs/summary")
+async def api_profile_labs_summary(x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
+    uid = await _auth_user_id(x_telegram_init_data)
+    if not await _premium_guard(uid):
+        raise HTTPException(status_code=402, detail="PREMIUM_REQUIRED")
+    conn = await db.connect(s.DB_PATH)
+    try:
+        summary = await _lab_summary(conn, uid)
+        profile = await db.get_user_health_profile(conn, uid)
+        fingerprint, _ = _lab_explanation_input(summary, profile)
+        internal_uid = await db.get_or_create_user(conn, uid)
+        explanation = await db.fetchone(conn, "SELECT * FROM lab_explanations WHERE user_id=?", (internal_uid,))
+        if explanation:
+            summary["explanation"] = {"status": explanation["status"], "fresh": explanation["input_hash"] == fingerprint,
+                "response": _decode_json_or_default(explanation["response_json"], {}), "error": explanation["error_text"]}
+        return JSONResponse({"ok": True, **summary}, headers={"Cache-Control": "no-store"})
+    finally:
+        await conn.close()
+
+
+def _lab_explanation_input(summary: dict, profile: dict) -> tuple[str, dict]:
+    context = {key: profile.get(key) for key in ("birth_year", "sex_at_birth", "diet_type", "height_cm", "weight_kg", "pregnancy_status", "lactation_status", "meds_json", "conditions_json")}
+    fingerprint = hashlib.sha256(json.dumps({"version": "lab-history-v1", "model": s.OPENAI_LAB_PARSE_MODEL,
+        "series": summary["series"], "intakes": summary["intakes"], "interval": summary["interval"], "after_latest": summary["after_latest"],
+        "current_stack": summary["current_stack"], "profile": context}, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+    groups = []
+    for group in summary["series"]:
+        points = group["points"]
+        groups.append({**group, "total_points": len(points), "points": points if len(points) <= 7 else [points[0], *points[-6:]]})
+    return fingerprint, {"as_of": db.utc_now_iso()[:10], "profile": context, "series": groups, "intakes": summary["intakes"], "interval": summary["interval"],
+        "after_latest": summary["after_latest"], "current_stack": summary["current_stack"],
+        "coverage": "Для каждого показателя переданы первый и до шести последних результатов. Полная история доступна в приложении."}
+
+
+@app.post("/api/profile/labs/explain")
+async def api_profile_labs_explain(body: dict = Body(default={}), x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
+    uid = await _auth_user_id(x_telegram_init_data)
+    if not await _premium_guard(uid):
+        raise HTTPException(status_code=402, detail="PREMIUM_REQUIRED")
+    if body.get("allow_ai") is not True:
+        raise HTTPException(status_code=400, detail="Нужно разрешение на передачу истории в OpenAI")
+    conn = await db.connect(s.DB_PATH)
+    try:
+        async with db.transaction(conn) as tx:
+            summary = await _lab_summary(tx, uid)
+            if not summary["series"]:
+                raise HTTPException(status_code=400, detail="Сначала подтвердите результаты анализов")
+            fingerprint, snapshot = _lab_explanation_input(summary, await db.get_user_health_profile(tx, uid))
+            internal_uid = await db.get_or_create_user(tx, uid)
+            cached = await db.fetchone(tx, "SELECT * FROM lab_explanations WHERE user_id=?", (internal_uid,))
+            if cached and cached["input_hash"] == fingerprint and cached["status"] == "done":
+                return JSONResponse({"ok": True, "cached": True})
+            if not s.OPENAI_API_KEY:
+                raise HTTPException(status_code=503, detail="OpenAI пока не подключён")
+            if len(json.dumps(snapshot, ensure_ascii=False)) > 60000:
+                raise HTTPException(status_code=400, detail="История слишком большая для одного пояснения. Все результаты доступны в разделе динамики")
+            active = await db.find_active_assistant_job(tx, uid, "lab_explain")
+            if active:
+                return JSONResponse({"ok": True, "job_id": active["id"], "queued": True})
+            job_id = await db.create_assistant_job(tx, uid, json.dumps({"input_hash": fingerprint, "snapshot": snapshot}, ensure_ascii=False), uuid.uuid4().hex, kind="lab_explain", monthly_limit=None)
+            await tx.execute("""INSERT INTO lab_explanations(user_id,input_hash,status,job_id,updated_at_utc) VALUES(?,?,'queued',?,?)
+                ON CONFLICT(user_id) DO UPDATE SET input_hash=excluded.input_hash,status='queued',job_id=excluded.job_id,
+                updated_at_utc=excluded.updated_at_utc,error_text=''""", (internal_uid, fingerprint, job_id, db.utc_now_iso()))
+        return JSONResponse({"ok": True, "job_id": job_id, "queued": True})
+    finally:
+        await conn.close()
+
+
+class LabSelectionBody(BaseModel):
+    supplement_ids: list[int]
+    doses: dict[str, str] = {}
+
+
+@app.post("/api/profile/labs/add-selected")
+async def api_profile_labs_add_selected(body: LabSelectionBody, x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
+    uid = await _auth_user_id(x_telegram_init_data)
+    if not await _premium_guard(uid):
+        raise HTTPException(status_code=402, detail="PREMIUM_REQUIRED")
+    if not 1 <= len(body.supplement_ids) <= 30:
+        raise HTTPException(status_code=400, detail="Выберите от 1 до 30 позиций")
+    if any(len(dose) > 120 for dose in body.doses.values()):
+        raise HTTPException(status_code=400, detail="Доза: не более 120 символов")
+    conn = await db.connect(s.DB_PATH)
+    try:
+        async with db.transaction(conn) as tx:
+            summary = await _lab_summary(tx, uid)
+            allowed = {item["supplement_id"]: item for item in summary["candidates"]}
+            if any(sid not in allowed for sid in body.supplement_ids):
+                raise HTTPException(status_code=409, detail="Результаты изменились. Обновите список")
+            added, slugs = [], []
+            existing = await db.get_user_stack_supplement_ids(tx, uid)
+            for sid in dict.fromkeys(body.supplement_ids):
+                if sid in existing:
+                    continue  # Never overwrite a dose, unfreeze, or duplicate an existing item.
+                await db.add_user_supplement(tx, uid, sid)
+                dose = body.doses.get(str(sid), "").strip()
+                if dose:
+                    await db.set_user_supp_fields(tx, uid, sid, dose, "")
+                added.append(sid)
+                slugs.append(allowed[sid]["slug"])
+            if slugs:
+                await db.enqueue_stack_change_rebuilds(tx, uid, slugs)
+                day = db.get_user_local_date(await db.get_user_tz(tx, uid))
+                await db.evaluate_and_unlock_achievements(tx, uid, day)
+        return JSONResponse({"ok": True, "added": added})
+    finally:
+        await conn.close()
+
+
 @app.get("/api/profile/labs")
 async def api_profile_labs_get(x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
     tg_user_id = await _auth_user_id(x_telegram_init_data)
@@ -1836,7 +2074,7 @@ async def api_profile_labs_get(x_telegram_init_data: str = Header(default="", al
         reports = await db.get_user_lab_reports(conn, tg_user_id)
         for report in reports:
             report["results"] = await db.get_lab_results_by_report_id(conn, tg_user_id, int(report["id"]))
-        return JSONResponse({"ok": True, "reports": reports})
+        return JSONResponse({"ok": True, "reports": [_lab_public_report(report) for report in reports]}, headers={"Cache-Control": "no-store"})
     finally:
         await conn.close()
 
@@ -1847,19 +2085,33 @@ async def api_profile_labs_post(body: LabsCreateBody, x_telegram_init_data: str 
     if not await _premium_guard(tg_user_id):
         return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
     source = str(body.source or "manual").strip()
+    body.results = _lab_clean_saved_rows(body.results)
+    if body.client_request_id and not re.fullmatch(r"[a-f0-9-]{36}", body.client_request_id):
+        raise HTTPException(status_code=400, detail="Некорректный идентификатор сохранения")
     if source not in {"manual", "pdf_upload", "voice_dictation"}:
         raise HTTPException(status_code=400, detail="Unsupported source")
     conn = await db.connect(s.DB_PATH)
     try:
         async with db.transaction(conn) as conn:
             payload = body.model_dump()
+            request_hash = hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+            internal_uid = await db.get_or_create_user(conn, tg_user_id)
+            if body.client_request_id:
+                saved = await db.fetchone(conn, "SELECT id,client_request_sha FROM lab_reports WHERE user_id=? AND client_request_id=?", (internal_uid, body.client_request_id))
+                if saved:
+                    if saved["client_request_sha"] != request_hash:
+                        raise HTTPException(status_code=409, detail="Этот анализ уже сохранён. Откройте его в истории для изменения")
+                    return JSONResponse({"ok": True, "report_id": saved["id"], "duplicate": True})
             payload["parse_status"] = "manual" if source == "manual" else "needs_manual_review"
             report_id = await db.create_lab_report(conn, tg_user_id, payload)
+            if body.client_request_id:
+                await conn.execute("UPDATE lab_reports SET client_request_id=?,client_request_sha=? WHERE id=?", (body.client_request_id, request_hash, report_id))
             inserted = await db.add_lab_results_batch(conn, tg_user_id, report_id, body.results)
             await db.mark_all_active_plans_stale(conn, tg_user_id, "lab:updated")
+            await conn.execute("UPDATE lab_reports SET parse_metadata_json='{}' WHERE id=?", (report_id,))
             report = await db.get_lab_report_by_id(conn, tg_user_id, report_id)
             await conn.commit()
-            return JSONResponse({"ok": True, "report_id": report_id, "inserted_results": inserted, "report": report})
+            return JSONResponse({"ok": True, "report_id": report_id, "inserted_results": inserted, "report": _lab_public_report(report)})
     finally:
         await conn.close()
 
@@ -1875,7 +2127,7 @@ async def api_profile_labs_report_get(report_id: int, x_telegram_init_data: str 
         if not report:
             raise HTTPException(status_code=404, detail="Report not found")
         report["results"] = await db.get_lab_results_by_report_id(conn, tg_user_id, int(report_id))
-        return JSONResponse({"ok": True, "report": report})
+        return JSONResponse({"ok": True, "report": _lab_public_report(report)})
     finally:
         await conn.close()
 
@@ -1885,17 +2137,23 @@ async def api_profile_labs_report_put(report_id: int, body: LabReportUpdateBody,
     tg_user_id = await _auth_user_id(x_telegram_init_data)
     if not await _premium_guard(tg_user_id):
         return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
+    body.results = _lab_clean_saved_rows(body.results)
+    body.parse_status = "manual_reviewed"
     conn = await db.connect(s.DB_PATH)
     try:
         async with db.transaction(conn) as conn:
             report = await db.update_lab_report_meta(conn, tg_user_id, int(report_id), body.model_dump())
             if not report:
                 raise HTTPException(status_code=404, detail="Report not found")
+            if report.get("parse_job_id"):
+                await db.cancel_assistant_job(conn, tg_user_id, int(report["parse_job_id"]))
             inserted = await db.replace_lab_results(conn, tg_user_id, int(report_id), body.results)
+            await conn.execute("UPDATE lab_reports SET parse_metadata_json='{}' WHERE id=?", (int(report_id),))
+            report["parse_metadata_json"] = "{}"
             await db.mark_all_active_plans_stale(conn, tg_user_id, "lab:updated")
             report["results"] = await db.get_lab_results_by_report_id(conn, tg_user_id, int(report_id))
             await conn.commit()
-            return JSONResponse({"ok": True, "report": report, "inserted_results": inserted})
+            return JSONResponse({"ok": True, "report": _lab_public_report(report), "inserted_results": inserted})
     finally:
         await conn.close()
 
@@ -1906,13 +2164,164 @@ async def api_profile_labs_upload(
     report_date: str = Form(default=""),
     lab_name: str = Form(default=""),
     notes: str = Form(default=""),
+    allow_ai: bool = Form(default=False),
     x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data"),
 ):
     tg_user_id = await _auth_user_id(x_telegram_init_data)
     if not await _premium_guard(tg_user_id):
         return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
-    _ = (file, report_date, lab_name, notes, tg_user_id)
-    return JSONResponse({"ok": False, "code": "MANUAL_LABS_ONLY"}, status_code=410)
+    try:
+        report_date = db.validate_lab_date(report_date)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    filename = Path(str(file.filename or "document").replace("\\", "/")).name[:160]
+    ext = Path(filename).suffix.lower()
+    if ext not in LAB_EXTENSIONS:
+        raise HTTPException(status_code=415, detail="Поддерживаются PDF, JPG, PNG, WEBP, DOCX, XLSX, CSV, TXT и JSON")
+    data = await file.read(LAB_FILE_LIMIT + 1)
+    await file.close()
+    if not data or len(data) > LAB_FILE_LIMIT:
+        raise HTTPException(status_code=413, detail="Выберите непустой файл размером до 12 МБ")
+    digest = hashlib.sha256(data).hexdigest()
+    root = UPLOADS_DIR / str(tg_user_id)
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temporary = root / (uuid.uuid4().hex + ext)
+    stored = None
+    stored_committed = False
+    conn = await db.connect(s.DB_PATH)
+    try:
+        async with db.transaction(conn) as tx:
+            uid = await db.get_or_create_user(tx, tg_user_id)
+            duplicate = await db.fetchone(tx, "SELECT id FROM lab_reports WHERE user_id=? AND source_sha256=?", (uid, digest))
+            if duplicate:
+                return JSONResponse({"ok": True, "report_id": duplicate["id"], "duplicate": True})
+            storage = await db.fetchone(tx, "SELECT COUNT(*) AS n,COALESCE(SUM(source_size),0) AS size FROM lab_reports WHERE user_id=? AND source_sha256!=''", (uid,))
+            if storage["n"] >= 200 or int(storage["size"]) + len(data) > 200 * 1024 * 1024:
+                raise HTTPException(status_code=413, detail="Лимит документов: 200 файлов или 200 МБ. Удалите ненужные документы")
+        await asyncio.to_thread(temporary.write_bytes, data)
+        temporary.chmod(0o600)
+        try:
+            document = await asyncio.to_thread(read_lab_document, str(temporary))
+            document["results"] = [db.validate_lab_result(row) for row in document.get("results") or []]
+            if not report_date:
+                report_date = db.validate_lab_date(document.get("report_date"))
+            if not lab_name:
+                lab_name = str(document.get("lab_name") or "")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        async with db.transaction(conn) as tx:
+            uid = await db.get_or_create_user(tx, tg_user_id)
+            duplicate = await db.fetchone(tx, "SELECT id FROM lab_reports WHERE user_id=? AND source_sha256=?", (uid, digest))
+            if duplicate:
+                return JSONResponse({"ok": True, "report_id": duplicate["id"], "duplicate": True})
+            storage = await db.fetchone(tx, "SELECT COUNT(*) AS n,COALESCE(SUM(source_size),0) AS size FROM lab_reports WHERE user_id=? AND source_sha256!=''", (uid,))
+            if storage["n"] >= 200 or int(storage["size"]) + len(data) > 200 * 1024 * 1024:
+                raise HTTPException(status_code=413, detail="Достигнут лимит документов. Удалите ненужные файлы")
+            active = await db.find_active_assistant_job(tx, tg_user_id, "lab_parse")
+            needs_ai = bool(allow_ai) and not document.get("complete")
+            if needs_ai and active:
+                raise HTTPException(status_code=409, detail="Дождитесь распознавания предыдущего документа")
+            # Server-owned random path; a client's filename is never used as a path.
+            stored = root / (uuid.uuid4().hex + ext)
+            report_id = await db.create_lab_report(tx, tg_user_id, {"source": "file_upload", "report_date": report_date,
+                "lab_name": lab_name[:200], "notes": notes[:4000], "source_filename": filename,
+                "mime_type": _guess_mime_type(filename), "source_file_path": str(stored),
+                "parse_status": "queued" if needs_ai else "needs_manual_review",
+                "parse_notes": "Проверьте все строки бланка: обычное чтение могло распознать документ частично" if document.get("results") else "Добавьте результаты вручную или разрешите ИИ-распознавание"})
+            await tx.execute("UPDATE lab_reports SET source_sha256=?,source_size=? WHERE id=?", (digest, len(data), report_id))
+            if document.get("results"):
+                await db.add_lab_results_batch(tx, tg_user_id, report_id, document["results"])
+            if needs_ai:
+                job_id = await db.create_assistant_job(tx, tg_user_id, json.dumps({"report_id": report_id, "allow_ai": True, "document": document}, ensure_ascii=False), uuid.uuid4().hex, kind="lab_parse", monthly_limit=None)
+                await tx.execute("UPDATE lab_reports SET parse_job_id=? WHERE id=?", (job_id, report_id))
+            temporary.replace(stored)
+        stored_committed = True
+        return JSONResponse({"ok": True, "report_id": report_id, "queued": needs_ai})
+    finally:
+        temporary.unlink(missing_ok=True)
+        if stored is not None and not stored_committed:
+            stored.unlink(missing_ok=True)
+        await conn.close()
+
+
+class LabRecognizeBody(BaseModel):
+    allow_ai: bool = False
+
+
+@app.post("/api/profile/labs/{report_id}/recognize")
+async def api_profile_labs_recognize(report_id: int, body: LabRecognizeBody, x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
+    uid = await _auth_user_id(x_telegram_init_data)
+    if not await _premium_guard(uid):
+        raise HTTPException(status_code=402, detail="PREMIUM_REQUIRED")
+    if not body.allow_ai:
+        raise HTTPException(status_code=400, detail="Нужно разрешение на отправку документа в OpenAI")
+    if not s.OPENAI_API_KEY:
+        raise HTTPException(status_code=503, detail="ИИ-распознавание пока не настроено")
+    conn = await db.connect(s.DB_PATH)
+    try:
+        report = await db.get_lab_report_by_id(conn, uid, report_id)
+        if not report:
+            raise HTTPException(status_code=404, detail="Документ не найден")
+        path = Path(report["source_file_path"]).resolve()
+        if path.parent != (UPLOADS_DIR / str(uid)).resolve() or not path.is_file():
+            raise HTTPException(status_code=404, detail="Исходный файл не найден")
+        try:
+            document = await asyncio.to_thread(read_lab_document, str(path))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        async with db.transaction(conn) as tx:
+            current = await db.get_lab_report_by_id(tx, uid, report_id)
+            if not current:
+                raise HTTPException(status_code=404, detail="Документ удалён")
+            active = await db.find_active_assistant_job(tx, uid, "lab_parse")
+            if active and int(current["parse_job_id"] or 0) != int(active["id"]):
+                raise HTTPException(status_code=409, detail="Дождитесь предыдущего распознавания")
+            job_id = await db.create_assistant_job(tx, uid, json.dumps({"report_id": report_id, "allow_ai": True, "document": document}, ensure_ascii=False), uuid.uuid4().hex, kind="lab_parse", monthly_limit=None)
+            metadata = _decode_json_or_default(current.get("parse_metadata_json"), {})
+            metadata["confirmed"] = current["parse_status"] in {"manual", "manual_reviewed"} or bool(metadata.get("confirmed"))
+            await tx.execute("UPDATE lab_reports SET parse_status='queued',parse_job_id=?,parse_metadata_json=?,updated_at_utc=? WHERE id=?", (job_id, json.dumps(metadata, ensure_ascii=False), db.utc_now_iso(), report_id))
+        return JSONResponse({"ok": True, "report_id": report_id, "job_id": job_id})
+    finally:
+        await conn.close()
+
+
+@app.get("/api/profile/labs/{report_id}/source")
+async def api_profile_labs_source(report_id: int, x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
+    uid = await _auth_user_id(x_telegram_init_data)
+    conn = await db.connect(s.DB_PATH)
+    try:
+        report = await db.get_lab_report_by_id(conn, uid, report_id)
+        if not report:
+            raise HTTPException(status_code=404, detail="Документ не найден")
+        path = Path(report["source_file_path"]).resolve()
+        if path.parent != (UPLOADS_DIR / str(uid)).resolve() or not path.is_file():
+            raise HTTPException(status_code=404, detail="Исходный файл не найден")
+        return FileResponse(path, filename=report["source_filename"], media_type="application/octet-stream", headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+    finally:
+        await conn.close()
+
+
+@app.delete("/api/profile/labs/{report_id}")
+async def api_profile_labs_delete(report_id: int, x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
+    uid = await _auth_user_id(x_telegram_init_data)
+    conn = await db.connect(s.DB_PATH)
+    try:
+        async with db.transaction(conn) as tx:
+            report = await db.get_lab_report_by_id(tx, uid, report_id)
+            if not report:
+                raise HTTPException(status_code=404, detail="Документ не найден")
+            if report["parse_job_id"]:
+                await db.cancel_assistant_job(tx, uid, int(report["parse_job_id"]))
+            internal_uid = await db.get_or_create_user(tx, uid)
+            await tx.execute("DELETE FROM lab_results WHERE report_id=? AND user_id=?", (report_id, internal_uid))
+            await tx.execute("DELETE FROM lab_reports WHERE id=? AND user_id=?", (report_id, internal_uid))
+            if report["source_file_path"]:
+                await tx.execute("INSERT OR IGNORE INTO lab_file_cleanup(source_file_path,tg_user_id) VALUES(?,?)", (report["source_file_path"], uid))
+            await db.mark_all_active_plans_stale(tx, uid, "lab:deleted")
+        await db.process_lab_file_cleanup(conn)
+        return JSONResponse({"ok": True})
+    finally:
+        await conn.close()
 
 
 @app.get("/api/profile/nutrients")

@@ -1113,6 +1113,25 @@ async def _ensure_profile_foundation_tables(conn: aiosqlite.Connection) -> None:
     await _ensure_column(conn, "lab_reports", "parse_notes", "TEXT")
     await _ensure_column(conn, "lab_reports", "source_file_path", "TEXT")
     await _ensure_column(conn, "lab_reports", "updated_at_utc", "TEXT")
+    await _ensure_column(conn, "lab_reports", "source_sha256", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "lab_reports", "parse_job_id", "INTEGER NOT NULL DEFAULT 0")
+    await _ensure_column(conn, "lab_reports", "ai_attempts", "INTEGER NOT NULL DEFAULT 0")
+    await _ensure_column(conn, "lab_reports", "source_size", "INTEGER NOT NULL DEFAULT 0")
+    await _ensure_column(conn, "lab_reports", "client_request_id", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "lab_reports", "client_request_sha", "TEXT NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "lab_reports", "parse_metadata_json", "TEXT NOT NULL DEFAULT '{}'")
+    await _ensure_column(conn, "lab_results", "reference_text", "TEXT NOT NULL DEFAULT ''")
+    await conn.execute("""CREATE TABLE IF NOT EXISTS lab_ai_monthly_usage (
+        tg_user_id INTEGER NOT NULL,month_utc TEXT NOT NULL,used INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(tg_user_id,month_utc))""")
+    await conn.execute("""CREATE TABLE IF NOT EXISTS lab_file_cleanup (
+        source_file_path TEXT PRIMARY KEY,tg_user_id INTEGER NOT NULL)""")
+    await conn.execute("""CREATE TABLE IF NOT EXISTS lab_explanations (
+        user_id INTEGER PRIMARY KEY,input_hash TEXT NOT NULL,status TEXT NOT NULL,
+        response_json TEXT NOT NULL DEFAULT '{}',job_id INTEGER NOT NULL DEFAULT 0,
+        updated_at_utc TEXT NOT NULL,error_text TEXT NOT NULL DEFAULT '')""")
+    await conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_lab_source ON lab_reports(user_id,source_sha256) WHERE source_sha256!=''")
+    await conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_lab_request ON lab_reports(user_id,client_request_id) WHERE client_request_id!=''")
     await _ensure_column(conn, "nutrient_protocol_defs", "rules_version", "TEXT NOT NULL DEFAULT ''")
     await _ensure_column(conn, "nutrient_protocol_defs", "readiness_level", "TEXT NOT NULL DEFAULT 'metadata_only'")
     await _ensure_column(conn, "nutrient_protocol_defs", "source_pack_id", "TEXT NOT NULL DEFAULT ''")
@@ -1687,6 +1706,7 @@ async def _ensure_supplement_day_state(conn: aiosqlite.Connection) -> None:
     await _ensure_column(conn, "supplement_day_state", "day", "TEXT NOT NULL DEFAULT ''")
     await _ensure_column(conn, "supplement_day_state", "status", "TEXT NOT NULL DEFAULT ''")
     await _ensure_column(conn, "supplement_day_state", "dose_override", "TEXT")
+    await _ensure_column(conn, "supplement_day_state", "dose_snapshot_json", "TEXT")
     await _ensure_column(conn, "supplement_day_state", "created_at", "TEXT NOT NULL DEFAULT ''")
     await conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_sds_user_day ON supplement_day_state(user_id, day)"
@@ -3005,6 +3025,8 @@ async def mark_access_expired_notice_sent(
     await conn.commit()
 
 async def _purge_user_content(conn, user_id: int, tg_user_id: int) -> int:
+    await conn.execute("""INSERT OR IGNORE INTO lab_file_cleanup(source_file_path,tg_user_id)
+        SELECT source_file_path,? FROM lab_reports WHERE user_id=? AND COALESCE(source_file_path,'')!=''""", (tg_user_id, user_id))
     # Pending work has not spent its reservation; running work may have called AI.
     for job in await fetchall(conn, "SELECT * FROM assistant_jobs WHERE tg_user_id=? AND status='queued' AND attempts=0", (tg_user_id,)):
         await _release_assistant_quota(conn, dict(job))
@@ -3017,7 +3039,7 @@ async def _purge_user_content(conn, user_id: int, tg_user_id: int) -> int:
         "nutrient_followup_reminders", "nutrient_plan_explanations",
         "nutrient_reminder_candidates", "nutrient_followup_items",
         "nutrient_plan_rebuild_jobs", "nutrient_plan_runs", "lab_results", "lab_reports",
-        "user_health_profile", "user_complex_schedules", "user_complexes",
+        "user_health_profile", "lab_explanations", "user_complex_schedules", "user_complexes",
         "supplement_day_state", "day_plan_items", "daily_checkins", "intake_log",
         "user_intake_log", "user_supp_settings", "user_supplement_split_groups",
         "user_schedules", "user_schedule_slots", "user_supplements",
@@ -3040,6 +3062,26 @@ async def _purge_user_content(conn, user_id: int, tg_user_id: int) -> int:
         receipt_email_collected_at='', wants_receipt=0
         WHERE id=?""", (user_id,))
     return len(internal_tables) + 6
+
+
+async def process_lab_file_cleanup(conn: aiosqlite.Connection) -> int:
+    database = await fetchone(conn, "PRAGMA database_list")
+    if not database or not database["file"]:
+        return 0
+    base = Path(database["file"]).resolve().parent / "uploads" / "labs"
+    count = 0
+    for row in await fetchall(conn, "SELECT source_file_path,tg_user_id FROM lab_file_cleanup LIMIT 100"):
+        path = Path(row["source_file_path"]).resolve()
+        if path.parent != (base / str(row["tg_user_id"])).resolve() or not re.fullmatch(r"[a-f0-9]{32}\.[a-z0-9]+", path.name):
+            continue  # Never delete a client-supplied or historical unrelated path.
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            continue
+        await conn.execute("DELETE FROM lab_file_cleanup WHERE source_file_path=?", (row["source_file_path"],))
+        count += 1
+    await conn.commit()
+    return count
 
 
 async def purge_user_data(conn: aiosqlite.Connection, tg_user_id: int) -> dict:
@@ -6176,22 +6218,16 @@ async def get_user_supplement_intake_history(
     ids_placeholders = ",".join("?" for _ in supplement_ids)
     rows = await fetchall(
         conn,
-        f"""SELECT sds.day, sds.status,
-                  COALESCE(NULLIF(dpi.dose_text,''), NULLIF(uss.dose_text,''), NULLIF(us.dose_text,''), '') AS dose_text,
-                  COALESCE(NULLIF(dpi.time_hint,''), NULLIF(sch.time_hhmm,''), '') AS time_hint
+        f"""SELECT sds.day, sds.status, sds.dose_snapshot_json,
+                  COALESCE(dpi.dose_text, '') AS dose_text,
+                  COALESCE(dpi.time_hint, '') AS time_hint
            FROM supplement_day_state sds
            LEFT JOIN day_plan_items dpi
              ON dpi.user_id=? AND dpi.supplement_id=sds.supplement_id AND dpi.date_local=sds.day
-           LEFT JOIN user_supp_settings uss
-             ON uss.user_id=? AND uss.supplement_id=sds.supplement_id
-           LEFT JOIN user_supplements us
-             ON us.user_id=? AND us.supplement_id=sds.supplement_id
-           LEFT JOIN user_schedules sch
-             ON sch.user_id=? AND sch.supplement_id=sds.supplement_id
            WHERE sds.user_id=? AND sds.supplement_id IN ({ids_placeholders})
            ORDER BY sds.day DESC
            LIMIT ?""",
-        (user_id, user_id, user_id, user_id, user_id, *supplement_ids, int(limit)),
+        (user_id, user_id, *supplement_ids, int(limit)),
     )
     entries_by_day: dict[str, dict] = {}
     status_rank = {"none": 0, "skipped": 1, "taken": 2}
@@ -6203,11 +6239,15 @@ async def get_user_supplement_intake_history(
         existing_rank = status_rank.get(str(existing.get("status") or "none"), 0) if existing else -1
         if existing and current_rank < existing_rank:
             continue
+        dose_text = str(row["dose_text"] or "").strip()
+        if row["dose_snapshot_json"] is not None:
+            doses = _decode_json_or_default(row["dose_snapshot_json"], [])
+            dose_text = " · ".join(str(dose) for dose in doses) if isinstance(doses, list) else ""
         entries_by_day[day] = {
             "day": day,
             "status": status,
             "status_label": "Принято" if status == "taken" else ("Пропуск" if status == "skipped" else "Не отмечено"),
-            "dose_text": str(row["dose_text"] or "").strip(),
+            "dose_text": dose_text,
             "time_hint": str(row["time_hint"] or "").strip(),
         }
     entries = sorted(entries_by_day.values(), key=lambda item: str(item.get("day") or ""), reverse=True)[: int(limit)]
@@ -7322,11 +7362,34 @@ async def set_day_state(
         )
         await conn.commit()
         return
+    existing = await fetchone(conn, "SELECT status,dose_snapshot_json FROM supplement_day_state WHERE user_id=? AND day=? AND supplement_id=?", (user_id, local_date, supplement_id))
+    snapshot = existing["dose_snapshot_json"] if existing and existing["status"] == "taken" else None
+    if status == "taken" and snapshot is None:
+        # Read only this item; a large complex must not rebuild every plan for every mark.
+        rows = await fetchall(conn, """SELECT dose_text AS dose FROM day_plan_items
+            WHERE user_id=? AND supplement_id=? AND date_local=? AND action='add'""", (user_id, supplement_id, local_date))
+        if local_date == get_user_local_date(await get_user_tz(conn, tg_user_id)):
+            complex_rows = await fetchall(conn, """SELECT ci.dose_override AS dose FROM user_complex_items ci
+                JOIN user_complexes c ON c.id=ci.complex_id
+                WHERE c.user_id=? AND ci.supplement_id=? AND EXISTS(
+                  SELECT 1 FROM user_complex_schedules cs WHERE cs.complex_id=c.id AND cs.user_id=? AND cs.is_enabled=1)""", (user_id, supplement_id, user_id))
+            personal_rows = await fetchall(conn, """SELECT COALESCE(NULLIF(uss.dose_text,''),us.dose_text,'') AS dose
+                FROM user_supplements us LEFT JOIN user_supp_settings uss
+                  ON uss.user_id=us.user_id AND uss.supplement_id=us.supplement_id
+                LEFT JOIN user_schedules sch ON sch.user_id=us.user_id AND sch.supplement_id=us.supplement_id
+                WHERE us.user_id=? AND us.supplement_id=? AND us.is_active=1 AND us.enabled=1
+                  AND NOT EXISTS(SELECT 1 FROM user_complex_items ci JOIN user_complex_schedules cs ON cs.complex_id=ci.complex_id
+                    WHERE cs.user_id=us.user_id AND cs.is_enabled=1 AND ci.supplement_id=us.supplement_id
+                    AND COALESCE(NULLIF(cs.slot_id,''),'morning')=COALESCE(NULLIF(sch.slot_id,''),'morning'))""", (user_id, supplement_id))
+            if complex_rows or personal_rows:
+                rows = complex_rows + personal_rows  # The visible stack takes precedence over a saved assistant plan.
+        doses = list(dict.fromkeys(str(row["dose"] or "").strip() for row in rows if str(row["dose"] or "").strip()))
+        snapshot = json.dumps(doses, ensure_ascii=False)
     await conn.execute(
-        """INSERT INTO supplement_day_state(user_id, day, supplement_id, status)
-           VALUES(?,?,?,?)
-           ON CONFLICT(user_id, supplement_id, day) DO UPDATE SET status=excluded.status""",
-        (user_id, local_date, supplement_id, status),
+        """INSERT INTO supplement_day_state(user_id, day, supplement_id, status,dose_snapshot_json)
+           VALUES(?,?,?,?,?)
+           ON CONFLICT(user_id, supplement_id, day) DO UPDATE SET status=excluded.status,dose_snapshot_json=excluded.dose_snapshot_json""",
+        (user_id, local_date, supplement_id, status, snapshot if status == "taken" else None),
     )
     await conn.commit()
 
@@ -8522,6 +8585,11 @@ async def list_complex_schedules(conn: aiosqlite.Connection, tg_user_id: int) ->
 
 
 async def toggle_complex_for_day(conn: aiosqlite.Connection, tg_user_id: int, local_date: str, complex_id: int, status: str) -> None:
+    async with transaction(conn) as tx:
+        await _toggle_complex_for_day(tx, tg_user_id, local_date, complex_id, status)
+
+
+async def _toggle_complex_for_day(conn, tg_user_id: int, local_date: str, complex_id: int, status: str) -> None:
     if status not in {"taken", "none"}:
         raise ValueError("status must be taken|none")
     user_id = await get_or_create_user(conn, int(tg_user_id))
@@ -8539,12 +8607,7 @@ async def toggle_complex_for_day(conn: aiosqlite.Connection, tg_user_id: int, lo
                 (user_id, local_date, sid),
             )
         else:
-            await conn.execute(
-                """INSERT INTO supplement_day_state(user_id, day, supplement_id, status)
-                   VALUES(?,?,?,?)
-                   ON CONFLICT(user_id, supplement_id, day) DO UPDATE SET status=excluded.status""",
-                (user_id, local_date, sid, "taken"),
-            )
+            await set_day_status(conn, tg_user_id, local_date, sid, "taken")
     await conn.commit()
 
 async def get_today_supplement_ids(conn: aiosqlite.Connection, tg_user_id: int, local_date: str) -> list[int]:
@@ -10206,8 +10269,8 @@ async def add_lab_results_batch(conn: aiosqlite.Connection, tg_user_id: int, rep
     count = 0
     for item in list(results or []):
         await conn.execute(
-            """INSERT INTO lab_results(report_id, user_id, analyte_code, analyte_name, value_text, value_num, unit, ref_low, ref_high, raw_json, measured_at, created_at_utc)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+            """INSERT INTO lab_results(report_id, user_id, analyte_code, analyte_name, value_text, value_num, unit, ref_low, ref_high, raw_json, measured_at, created_at_utc, reference_text)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 int(report_id), user_id,
                 str(item.get("analyte_code") or ""),
@@ -10220,6 +10283,7 @@ async def add_lab_results_batch(conn: aiosqlite.Connection, tg_user_id: int, rep
                 json.dumps(item.get("raw_json") if item.get("raw_json") is not None else {}, ensure_ascii=False),
                 str(item.get("measured_at") or ""),
                 now,
+                str(item.get("reference_text") or ""),
             ),
         )
         count += 1
@@ -10232,7 +10296,7 @@ async def get_user_lab_reports(conn: aiosqlite.Connection, tg_user_id: int) -> l
         conn,
         """SELECT id, source, lab_name, report_date, notes,
                   source_filename, mime_type, parse_status, parse_notes,
-                  source_file_path, created_at_utc, updated_at_utc
+                  source_file_path, source_sha256, parse_job_id, ai_attempts, parse_metadata_json, created_at_utc, updated_at_utc
            FROM lab_reports
            WHERE user_id=?
            ORDER BY COALESCE(report_date,'' ) DESC, id DESC""",
@@ -10243,7 +10307,7 @@ async def get_user_lab_reports(conn: aiosqlite.Connection, tg_user_id: int) -> l
 
 async def get_lab_results_by_report_id(conn: aiosqlite.Connection, tg_user_id: int, report_id: int) -> list[dict]:
     user_id = await get_or_create_user(conn, int(tg_user_id))
-    rows = await fetchall(conn, "SELECT id, report_id, analyte_code, analyte_name, value_text, value_num, unit, ref_low, ref_high, raw_json, measured_at, created_at_utc FROM lab_results WHERE user_id=? AND report_id=? ORDER BY id ASC", (user_id, int(report_id)))
+    rows = await fetchall(conn, "SELECT id, report_id, analyte_code, analyte_name, value_text, value_num, unit, ref_low, ref_high, raw_json, measured_at, created_at_utc, reference_text FROM lab_results WHERE user_id=? AND report_id=? ORDER BY id ASC", (user_id, int(report_id)))
     return [dict(row) for row in rows]
 
 
@@ -10253,7 +10317,7 @@ async def get_lab_report_by_id(conn: aiosqlite.Connection, tg_user_id: int, repo
         conn,
         """SELECT id, source, lab_name, report_date, notes,
                   source_filename, mime_type, parse_status, parse_notes,
-                  source_file_path, created_at_utc, updated_at_utc
+                  source_file_path, source_sha256, parse_job_id, ai_attempts, parse_metadata_json, created_at_utc, updated_at_utc
            FROM lab_reports WHERE user_id=? AND id=? LIMIT 1""",
         (user_id, int(report_id)),
     )

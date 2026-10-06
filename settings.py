@@ -44,6 +44,7 @@ class Settings:
     PRIVACY_VERSION: str
     OFFER_URL: str
     PRIVACY_URL: str
+    OPENAI_LAB_PARSE_MODEL: str = "gpt-4.1-mini"
 
 def _parse_admin_ids(value: str) -> list[int]:
     ids: list[int] = []
@@ -152,6 +153,7 @@ def get_settings() -> Settings:
         OPENAI_API_KEY=os.getenv("OPENAI_API_KEY", "").strip() or None,
         OPENAI_MODEL=os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip(),
         OPENAI_NUTRIENT_ASSISTANT_MODEL=os.getenv("OPENAI_NUTRIENT_ASSISTANT_MODEL", "gpt-5-mini").strip(),
+        OPENAI_LAB_PARSE_MODEL=os.getenv("OPENAI_LAB_PARSE_MODEL", "gpt-4.1-mini").strip() or "gpt-4.1-mini",
         OPENAI_TRANSCRIBE_MODEL=os.getenv("OPENAI_TRANSCRIBE_MODEL", "whisper-1").strip(),
         OPENAI_STT_MODEL=(
             os.getenv("OPENAI_STT_MODEL", "").strip()

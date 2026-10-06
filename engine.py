@@ -29,6 +29,37 @@ EVIDENCE_ORDER = {
 DEFAULT_AI_TIME = "08:00"
 
 
+async def resolve_recommendation_items(conn: aiosqlite.Connection, user_id: int, items: list[dict]) -> list[dict]:
+    """Resolve exact catalog IDs before either the plan or its reminders writes."""
+    resolved: list[dict] = []
+    catalog_slugs: dict[int, str] = {}
+    for raw in items:
+        if not isinstance(raw, dict):
+            raise ValueError("invalid_recommendation")
+        item = dict(raw)
+        action = str(item.get("action") or "add").strip().lower()
+        if action not in {"add", "adjust", "remove"}:
+            raise ValueError("invalid_recommendation_action")
+        value = item.get("supplement_id")
+        if value not in (None, "", 0) and not str(value).strip().isdigit():
+            raise ValueError("invalid_supplement_id")
+        supplement_id = int(value or 0)
+        slug = str(item.get("slug") or "").strip().lower()
+        if supplement_id <= 0 and slug:
+            row = await db.fetchone(conn, "SELECT id FROM supplements WHERE slug=?", (slug,))
+            supplement_id = int(row["id"]) if row else 0
+        if supplement_id > 0:
+            if supplement_id not in catalog_slugs:
+                await db._require_available_supplement(conn, user_id, supplement_id)
+                row = await db.fetchone(conn, "SELECT slug FROM supplements WHERE id=?", (supplement_id,))
+                catalog_slugs[supplement_id] = str(row["slug"] or "")
+            item["slug"] = catalog_slugs[supplement_id]
+        item["supplement_id"] = supplement_id
+        item["action"] = action
+        resolved.append(item)
+    return resolved
+
+
 async def _preferred_user_time(conn: aiosqlite.Connection, user_id: int) -> str:
     slots = await db.get_user_slots(conn, user_id)
     enabled = [s for s in slots if int(s.get("is_enabled", 1)) == 1]

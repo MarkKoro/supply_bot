@@ -3305,95 +3305,119 @@ async def api_checkin_apply(body: CheckinApplyBody, x_telegram_init_data: str = 
     tg_user_id = await _auth_user_id(x_telegram_init_data)
     if not await _premium_guard(tg_user_id):
         return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
+    mode = str(body.mode or "").strip().lower()
+    if mode not in {"all", "selected"}:
+        return JSONResponse({"ok": False, "code": "INVALID_APPLY_MODE"}, status_code=400)
+    selected = sorted({int(x) for x in body.selected_ids if int(x) > 0}) if mode == "selected" else []
     conn = await db.connect(s.DB_PATH)
     try:
-        checkin = await db.get_daily_checkin_by_id(conn, int(body.checkin_id), tg_user_id)
-        if not checkin:
-            return JSONResponse({"ok": False, "error": "NOT_FOUND"}, status_code=404)
-        recs = json.loads(checkin.get("ai_raw_json") or "[]") if checkin.get("ai_raw_json") else []
-        if not isinstance(recs, list):
-            recs = []
-        if body.mode == "all":
-            picked = recs
-        else:
-            selected = set(int(x) for x in (body.selected_ids or []))
-            picked = [x for x in recs if int(x.get("supplement_id") or 0) in selected]
-        tz_name = await db.get_user_tz(conn, tg_user_id)
-        _, today_local, _ = _resolve_target_day(tz_name, "today")
-        target_date = str(checkin.get("date_local") or "").strip() or today_local
-        target_day = _target_day_from_local_date(target_date, today_local)
-        if not target_day:
-            return JSONResponse(
-                {
-                    "ok": False,
-                    "code": "UNSUPPORTED_LOCAL_DATE",
-                    "message": "Only today's or tomorrow's local date is supported for applying recommendations",
-                },
-                status_code=400,
-            )
-        ctx_for_apply = await db.build_ai_context_compact(conn, tg_user_id, target_date)
-        complex_protected_slugs = {
-            str(slug or "").strip().lower()
-            for c in (ctx_for_apply.get("complexes") if isinstance(ctx_for_apply.get("complexes"), list) else [])
-            for slug in ((c or {}).get("slugs") if isinstance((c or {}).get("slugs"), list) else [])
-            if str(slug or "").strip()
-        }
-        if complex_protected_slugs:
+        async with db.transaction(conn) as conn:
+            checkin = await db.get_daily_checkin_by_id(conn, int(body.checkin_id), tg_user_id)
+            if not checkin:
+                return JSONResponse({"ok": False, "error": "NOT_FOUND"}, status_code=404)
+            saved = db._decode_json_or_default(checkin.get("applied_json"), {})
+            if isinstance(saved, dict) and saved:
+                saved_ids = saved.get("selected_ids")
+                if not isinstance(saved_ids, list):
+                    saved_ids = [int(item.get("supplement_id") or 0) for item in saved.get("items", []) if isinstance(item, dict)]
+                if saved.get("mode") == "all" or (mode == "selected" and saved.get("mode") == mode and sorted(saved_ids) == selected):
+                    return JSONResponse({
+                        "ok": True,
+                        "already_applied": True,
+                        "summary": saved.get("summary") or {},
+                        "date_local": str(saved.get("date_local") or checkin.get("date_local") or ""),
+                        "applied_notice": saved,
+                        "newly_unlocked": [],
+                        "newly_unlocked_details": [],
+                    })
+            recs = json.loads(checkin.get("ai_raw_json") or "[]") if checkin.get("ai_raw_json") else []
+            if not isinstance(recs, list):
+                raise ValueError("invalid_recommendations")
+            user_id = await db.get_or_create_user(conn, tg_user_id, tz_name="")
+            recs = await engine.resolve_recommendation_items(conn, user_id, recs)
+            if mode == "all":
+                picked = recs
+            else:
+                picked = [x for x in recs if int(x.get("supplement_id") or 0) in selected]
+            tz_name = await db.get_user_tz(conn, tg_user_id)
+            _, today_local, _ = _resolve_target_day(tz_name, "today")
+            target_date = str(checkin.get("date_local") or "").strip() or today_local
+            target_day = _target_day_from_local_date(target_date, today_local)
+            if not target_day:
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "code": "UNSUPPORTED_LOCAL_DATE",
+                        "message": "Only today's or tomorrow's local date is supported for applying recommendations",
+                    },
+                    status_code=400,
+                )
+            ctx_for_apply = await db.build_ai_context_compact(conn, tg_user_id, target_date)
+            complex_protected_slugs = {
+                str(slug or "").strip().lower()
+                for c in (ctx_for_apply.get("complexes") if isinstance(ctx_for_apply.get("complexes"), list) else [])
+                for slug in ((c or {}).get("slugs") if isinstance((c or {}).get("slugs"), list) else [])
+                if str(slug or "").strip()
+            }
+            if complex_protected_slugs:
+                picked = [
+                    x for x in picked
+                    if str(x.get("slug") or "").strip().lower() not in complex_protected_slugs
+                ]
+            status_map = await db.get_day_status_map(conn, tg_user_id, target_date)
             picked = [
                 x for x in picked
-                if str(x.get("slug") or "").strip().lower() not in complex_protected_slugs
+                if not (
+                    str(x.get("action") or "").strip().lower() == "remove"
+                    and str(status_map.get(int(x.get("supplement_id") or 0)) or "") == "taken"
+                )
             ]
-        status_map = await db.get_day_status_map(conn, tg_user_id, target_date)
-        picked = [
-            x for x in picked
-            if not (
-                str(x.get("action") or "").strip().lower() == "remove"
-                and str(status_map.get(int(x.get("supplement_id") or 0)) or "") == "taken"
+            user_id = await db.get_or_create_user(conn, tg_user_id, tz_name="")
+            prepared, created_times = await engine.assign_slots_by_time(
+                conn,
+                user_id,
+                picked,
+                target_day=target_day,
+                action_field="action",
+                add_actions={"add", "adjust"},
+                time_field="suggested_time",
+                slot_field="suggested_slot_id",
             )
-        ]
-        user_id = await db.get_or_create_user(conn, tg_user_id, tz_name="")
-        prepared, created_times = await engine.assign_slots_by_time(
-            conn,
-            user_id,
-            picked,
-            target_day=target_day,
-            action_field="action",
-            add_actions={"add", "adjust"},
-            time_field="suggested_time",
-            slot_field="suggested_slot_id",
-        )
-        summary = await db.apply_recommendations_to_today(conn, tg_user_id, target_date, prepared, mode=(body.mode or "selected"))
-        reminders_added = await engine.ensure_supplement_reminders(
-            conn,
-            tg_user_id,
-            prepared,
-            action_field="action",
-            add_actions={"add", "adjust"},
-            supplement_field="supplement_id",
-            time_field="suggested_time",
-        )
-        summary["new_time_groups"] = sorted(created_times)
-        summary["reminders_added"] = reminders_added
-        applied_notice = {
-            "applied_at_utc": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "target_day": target_day,
-            "date_local": target_date,
-            "mode": body.mode or "selected",
-            "items": [
-                {
-                    "supplement_id": int(item.get("supplement_id") or 0),
-                    "name_ru": str(item.get("name_ru") or item.get("name") or ""),
-                    "slug": str(item.get("slug") or ""),
-                    "action": str(item.get("action") or "add"),
-                }
-                for item in picked
-                if int(item.get("supplement_id") or 0) > 0
-            ],
-            "summary": summary,
-        }
-        await db.set_daily_checkin_applied(conn, int(body.checkin_id), tg_user_id, applied_notice)
-        newly = await db.evaluate_and_unlock_achievements(conn, tg_user_id, target_date)
-        newly_unlocked_details = await _build_newly_unlocked_details(conn, newly)
+            summary = await db.apply_recommendations_to_today(conn, tg_user_id, target_date, prepared, mode=mode)
+            reminders_added = await engine.ensure_supplement_reminders(
+                conn,
+                tg_user_id,
+                prepared,
+                action_field="action",
+                add_actions={"add", "adjust"},
+                supplement_field="supplement_id",
+                time_field="suggested_time",
+            )
+            summary["new_time_groups"] = sorted(created_times)
+            summary["reminders_added"] = reminders_added
+            applied_notice = {
+                "applied_at_utc": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "target_day": target_day,
+                "date_local": target_date,
+                "mode": mode,
+                "selected_ids": selected,
+                "items": [
+                    {
+                        "supplement_id": int(item.get("supplement_id") or 0),
+                        "name_ru": str(item.get("name_ru") or item.get("name") or ""),
+                        "slug": str(item.get("slug") or ""),
+                        "action": str(item.get("action") or "add"),
+                    }
+                    for item in picked
+                    if int(item.get("supplement_id") or 0) > 0
+                ],
+                "summary": summary,
+            }
+            await db.set_daily_checkin_applied(conn, int(body.checkin_id), tg_user_id, applied_notice)
+            newly = await db.evaluate_and_unlock_achievements(conn, tg_user_id, target_date)
+            newly_unlocked_details = await _build_newly_unlocked_details(conn, newly)
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "code": "INVALID_RECOMMENDATIONS", "error": str(exc)}, status_code=400)
     finally:
         await conn.close()
     return JSONResponse({
@@ -3416,49 +3440,53 @@ async def api_recommendations_apply_all(body: RecommendationsApplyBody, x_telegr
         return JSONResponse({"ok": False, "error": "TOO_MANY_RECOMMENDATIONS"}, status_code=400)
     conn = await db.connect(s.DB_PATH)
     try:
-        tz_name = await db.get_user_tz(conn, tg_user_id)
-        today_local = db.get_user_local_date(tz_name or None)
-        local_date = _normalize_local_date(body.local_date)
-        if body.local_date is not None and str(body.local_date).strip() and not local_date:
-            return JSONResponse(
-                {"ok": False, "code": "INVALID_LOCAL_DATE", "error": "local_date must be in YYYY-MM-DD format"},
-                status_code=400,
+        async with db.transaction(conn) as conn:
+            tz_name = await db.get_user_tz(conn, tg_user_id)
+            today_local = db.get_user_local_date(tz_name or None)
+            local_date = _normalize_local_date(body.local_date)
+            if body.local_date is not None and str(body.local_date).strip() and not local_date:
+                return JSONResponse(
+                    {"ok": False, "code": "INVALID_LOCAL_DATE", "error": "local_date must be in YYYY-MM-DD format"},
+                    status_code=400,
+                )
+            if not local_date:
+                local_date = today_local
+            target_day = _target_day_from_local_date(local_date, today_local)
+            if not target_day:
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "code": "UNSUPPORTED_LOCAL_DATE",
+                        "message": "Only today's or tomorrow's local date is supported for applying recommendations",
+                    },
+                    status_code=400,
+                )
+            user_id = await db.get_or_create_user(conn, tg_user_id, tz_name="")
+            recs = await engine.resolve_recommendation_items(conn, user_id, recs)
+            prepared, created_times = await engine.assign_slots_by_time(
+                conn,
+                user_id,
+                recs,
+                target_day=target_day,
+                action_field="action",
+                add_actions={"add", "adjust"},
+                time_field="suggested_time",
+                slot_field="suggested_slot_id",
             )
-        if not local_date:
-            local_date = today_local
-        target_day = _target_day_from_local_date(local_date, today_local)
-        if not target_day:
-            return JSONResponse(
-                {
-                    "ok": False,
-                    "code": "UNSUPPORTED_LOCAL_DATE",
-                    "message": "Only today's or tomorrow's local date is supported for applying recommendations",
-                },
-                status_code=400,
+            summary = await db.apply_recommendations_to_today(conn, tg_user_id, local_date, prepared, mode="apply_all")
+            reminders_added = await engine.ensure_supplement_reminders(
+                conn,
+                tg_user_id,
+                prepared,
+                action_field="action",
+                add_actions={"add", "adjust"},
+                supplement_field="supplement_id",
+                time_field="suggested_time",
             )
-        user_id = await db.get_or_create_user(conn, tg_user_id, tz_name="")
-        prepared, created_times = await engine.assign_slots_by_time(
-            conn,
-            user_id,
-            recs,
-            target_day=target_day,
-            action_field="action",
-            add_actions={"add", "adjust"},
-            time_field="suggested_time",
-            slot_field="suggested_slot_id",
-        )
-        summary = await db.apply_recommendations_to_today(conn, tg_user_id, local_date, prepared, mode="apply_all")
-        reminders_added = await engine.ensure_supplement_reminders(
-            conn,
-            tg_user_id,
-            prepared,
-            action_field="action",
-            add_actions={"add", "adjust"},
-            supplement_field="supplement_id",
-            time_field="suggested_time",
-        )
-        summary["new_time_groups"] = sorted(created_times)
-        summary["reminders_added"] = reminders_added
+            summary["new_time_groups"] = sorted(created_times)
+            summary["reminders_added"] = reminders_added
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "code": "INVALID_RECOMMENDATIONS", "error": str(exc)}, status_code=400)
     finally:
         await conn.close()
     today = await _today_payload(tg_user_id)

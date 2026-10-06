@@ -3039,13 +3039,18 @@
     }
     if (sv.view === 'review') {
       const todaySet = new Set();
-      for (const slot of (state.today?.slots || [])) {
-        for (const item of (slot.items || [])) todaySet.add(Number(item.supplement_id || 0));
-        for (const c of (slot.complexes || [])) for (const ci of (c.items || [])) todaySet.add(Number(ci.supplement_id || 0));
+      const takenSet = new Set();
+      for (const slot of (sv.target === 'today' && state.today?.day === surveyTargetDateISO('today') ? (state.today?.slots || []) : [])) {
+        const items = [...(slot.items || []), ...(slot.complexes || []).flatMap(c => c.items || [])];
+        for (const item of items) {
+          const sid = Number(item.supplement_id || 0);
+          todaySet.add(sid);
+          if (item.status === 'taken') takenSet.add(sid);
+        }
       }
       const rows = (sv.recommendations || []).map((r) => {
         const already = todaySet.has(Number(r.supplement_id || 0));
-        const removeTaken = r.action === 'remove' && already;
+        const removeTaken = r.action === 'remove' && takenSet.has(Number(r.supplement_id || 0));
         return `<div class="rec-card"><div class="row"><strong>${esc(r.name_ru || r.slug)}</strong><span class="badge ${r.action==='remove'?'minus':(r.action==='adjust'?'':'plus')}">${r.action==='add'?'+':(r.action==='remove'?'−':'≈')}</span></div><div class="muted" style="margin-top:6px">${esc(r.reason || '')}${removeTaken ? ' • уже выпито сегодня — убирать не нужно' : (already ? ' • уже в плане' : '')}</div></div>`;
       }).join('');
       return `${dateNotice}${surveyLimitBanner}<div class="card fade survey-card"><button class="btn secondary survey-help-btn survey-help-corner" type="button" data-survey-help>?</button><div class="row survey-head"><div class="survey-title-wrap"><h3 style="margin:0">Рекомендации</h3></div><div class="survey-target-wrap"><span class="muted" style="font-size:12px">Рекомендация на:</span><div class="segmented" data-survey-target><button class="seg-btn ${sv.target==='today'?'active':''}" data-set-target="today">Сегодня</button><button class="seg-btn ${sv.target==='tomorrow'?'active':''}" data-set-target="tomorrow">Завтра</button></div></div></div>${sv.helpOpen ? surveyHelpHtml : ''}${rows || '<div class="muted">Нет рекомендаций</div>'}<div style="margin-top:10px"><button class="btn" id="applyAll" style="width:100%; font-weight:800" ${sv.applying ? 'disabled' : ''}>✅ Применить всё</button></div><div class="survey-actions"><button class="btn secondary" id="cancelSurvey" ${sv.applying ? 'disabled' : ''}>Отмена</button></div></div>`;
@@ -3150,10 +3155,20 @@
     document.getElementById('applyAll')?.addEventListener('click', async ()=>{
       if (!await ensureSurveyDay() || state.survey.applying || state.survey.loading) return;
       haptic();
+      const checkinId = state.survey.checkinId;
+      const contextKey = state.survey.contextKey || `${state.survey.target}:${surveyTargetDateISO(state.survey.target)}`;
+      const currentContext = () => contextKey === state.survey.contextKey && contextKey === `${state.survey.target}:${surveyTargetDateISO(state.survey.target)}`;
       state.survey.applying = true;
       renderActiveTab();
       try {
-        const out = await api('./api/checkin/apply',{method:'POST', body:{checkin_id: state.survey.checkinId, selected_ids:[], mode:'all'}});
+        const out = await api('./api/checkin/apply',{method:'POST', body:{checkin_id: checkinId, selected_ids:[], mode:'all'}});
+        if (!currentContext() || state.survey.checkinId !== checkinId) {
+          showToast(`✅ План на ${String(out.date_local || '').split('-').reverse().join('.')} обновлён`);
+          if (out.date_local === surveyTargetDateISO('today')) await loadToday(true);
+          if (state.survey.contextKey !== `${state.survey.target}:${surveyTargetDateISO(state.survey.target)}`) await loadSurveyForTarget(true);
+          await showUnlockToastFromPayload(out);
+          return;
+        }
         if (out.date_local === surveyTargetDateISO('today')) showToast('✅ Применено к плану: сегодня');
         else showToast('✅ Применено на завтра');
         state.survey.appliedNotice = out.applied_notice || null;
@@ -3161,7 +3176,7 @@
         state.survey.loadedKey = '';
         if (out.date_local === surveyTargetDateISO('today')) {
           await loadToday(true);
-          activateTab('today');
+          if (state.activeTab === 'survey' && currentContext()) activateTab('today');
         } else {
           await loadSurveyForTarget(true);
           renderActiveTab();

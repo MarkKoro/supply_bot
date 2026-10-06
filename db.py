@@ -1127,6 +1127,7 @@ async def _ensure_profile_foundation_tables(conn: aiosqlite.Connection) -> None:
     await _ensure_column(conn, "user_supplements", "user_frozen", "INTEGER NOT NULL DEFAULT 0")
     await _ensure_column(conn, "nutrient_plan_explanations", "is_active", "INTEGER NOT NULL DEFAULT 1")
     await _ensure_column(conn, "nutrient_followup_reminders", "source_type", "TEXT NOT NULL DEFAULT 'nutrient_assistant'")
+    await _ensure_column(conn, "nutrient_followup_reminders", "source_candidate_id", "INTEGER")
     await _ensure_column(conn, "nutrient_plan_rebuild_jobs", "status", "TEXT NOT NULL DEFAULT 'queued'")
     await _ensure_column(conn, "llm_assistant_plan_actions", "nutrient_plan_run_id", "INTEGER")
     await _ensure_column(conn, "llm_assistant_plan_actions", "frequency_per_day", "INTEGER")
@@ -1150,6 +1151,7 @@ async def _ensure_profile_foundation_tables(conn: aiosqlite.Connection) -> None:
     await conn.execute("CREATE INDEX IF NOT EXISTS idx_nutrient_expl_plan_prompt_active ON nutrient_plan_explanations(plan_run_id, prompt_version, is_active)")
     await conn.execute("CREATE INDEX IF NOT EXISTS idx_nutrient_followup_rem_due ON nutrient_followup_reminders(status, scheduled_for_utc)")
     await conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_nutrient_followup_rem_dedupe ON nutrient_followup_reminders(user_id, plan_run_id, reminder_type, scheduled_for_utc)")
+    await conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_nutrient_reminder_candidate_identity ON nutrient_followup_reminders(user_id, plan_run_id, source_candidate_id) WHERE source_candidate_id IS NOT NULL")
     await conn.execute("CREATE INDEX IF NOT EXISTS idx_nutrient_rebuild_jobs_status_priority ON nutrient_plan_rebuild_jobs(status, priority, created_at_utc)")
     await conn.execute("CREATE INDEX IF NOT EXISTS idx_nutrient_rebuild_jobs_user_code ON nutrient_plan_rebuild_jobs(user_id, nutrient_code)")
     await conn.execute("CREATE INDEX IF NOT EXISTS idx_assistant_jobs_status_created ON assistant_jobs(status, created_at_utc, id)")
@@ -10972,6 +10974,9 @@ async def deactivate_active_nutrient_plans(conn: aiosqlite.Connection, tg_user_i
 
 
 async def remove_nutrient_code_from_user_stack(conn: aiosqlite.Connection, tg_user_id: int, nutrient_code: str) -> dict:
+    if not isinstance(conn, _TransactionConnection):
+        async with transaction(conn) as tx:
+            return await remove_nutrient_code_from_user_stack(tx, tg_user_id, nutrient_code)
     user_id = await get_or_create_user(conn, int(tg_user_id))
     code = str(nutrient_code or "").strip().lower()
     if not code:
@@ -10999,6 +11004,30 @@ async def remove_nutrient_code_from_user_stack(conn: aiosqlite.Connection, tg_us
             if int(r["supplement_id"] or 0) > 0
         }
     )
+    if supplement_ids:
+        # A nutrient is removed as a whole, including its user-created intake
+        # splits. Keep the group itself so historical intakes remain grouped.
+        placeholders = ",".join("?" for _ in supplement_ids)
+        intake_rows = await fetchall(
+            conn,
+            f"""WITH RECURSIVE intake_ids(id) AS (
+                SELECT supplement_id FROM user_supplements
+                WHERE user_id=? AND supplement_id IN ({placeholders})
+                UNION
+                SELECT CASE WHEN g.base_supplement_id=i.id
+                            THEN g.supplement_id ELSE g.base_supplement_id END
+                FROM intake_ids i
+                JOIN user_supplement_split_groups g
+                  ON g.base_supplement_id=i.id OR g.supplement_id=i.id
+                JOIN user_supplements us
+                  ON us.user_id=g.user_id AND us.supplement_id=
+                     CASE WHEN g.base_supplement_id=i.id
+                          THEN g.supplement_id ELSE g.base_supplement_id END
+                WHERE g.user_id=?
+            ) SELECT id FROM intake_ids ORDER BY id""",
+            (user_id, *supplement_ids, user_id),
+        )
+        supplement_ids = [int(row["id"]) for row in intake_rows]
 
     removed_plans = await deactivate_active_nutrient_plans(conn, int(tg_user_id), code)
     await conn.execute(
@@ -11014,7 +11043,9 @@ async def remove_nutrient_code_from_user_stack(conn: aiosqlite.Connection, tg_us
     if supplement_ids:
         placeholders = ",".join("?" for _ in supplement_ids)
         stack_cur = await conn.execute(
-            f"UPDATE user_supplements SET is_active=0, enabled=0 WHERE user_id=? AND supplement_id IN ({placeholders})",
+            f"""UPDATE user_supplements SET is_active=0, enabled=0
+                WHERE user_id=? AND supplement_id IN ({placeholders})
+                  AND (is_active!=0 OR enabled!=0)""",
             (user_id, *supplement_ids),
         )
         removed_stack_items = int(stack_cur.rowcount or 0)
@@ -11358,9 +11389,37 @@ async def activate_nutrient_reminders_for_plan(conn: aiosqlite.Connection, tg_us
         "SELECT id, candidate_type, trigger_date_utc, payload_json FROM nutrient_reminder_candidates WHERE user_id=? AND plan_run_id=? ORDER BY id ASC",
         (user_id, int(plan_run_id)),
     )
+    existing = await fetchall(conn, "SELECT id, source_candidate_id, reminder_type, scheduled_for_utc FROM nutrient_followup_reminders WHERE user_id=? AND plan_run_id=? ORDER BY id", (user_id, int(plan_run_id)))
+    covered = {int(row["source_candidate_id"]) for row in existing if row["source_candidate_id"] is not None}
+    legacy = [row for row in existing if row["source_candidate_id"] is None]
+    # Recover old identities only when the matching date, or remaining pair, is unique.
+    for candidate in candidates:
+        cid = int(candidate["id"])
+        if cid in covered:
+            continue
+        kind = str(candidate["candidate_type"] or "followup_review")
+        when = str(candidate["trigger_date_utc"] or "").strip()
+        matches = [row for row in legacy if row["reminder_type"] == kind and when and row["scheduled_for_utc"] == when]
+        same_source = [row for row in candidates if str(row["candidate_type"] or "followup_review") == kind and str(row["trigger_date_utc"] or "").strip() == when]
+        if len(matches) == 1 and len(same_source) == 1:
+            match = matches[0]
+            await conn.execute("UPDATE nutrient_followup_reminders SET source_candidate_id=? WHERE id=? AND user_id=?", (cid, match["id"], user_id))
+            covered.add(cid)
+            legacy.remove(match)
+    for kind in {str(row["candidate_type"] or "followup_review") for row in candidates}:
+        remaining = [row for row in candidates if int(row["id"]) not in covered and str(row["candidate_type"] or "followup_review") == kind]
+        old = [row for row in legacy if row["reminder_type"] == kind]
+        if len(remaining) == 1 and len(old) == 1:
+            cid = int(remaining[0]["id"])
+            await conn.execute("UPDATE nutrient_followup_reminders SET source_candidate_id=? WHERE id=? AND user_id=?", (cid, old[0]["id"], user_id))
+            covered.add(cid)
+            legacy.remove(old[0])
+    ambiguous_types = {row["reminder_type"] for row in legacy}
     activated: list[dict] = []
     for row in candidates:
         reminder_type = str(row["candidate_type"] or "followup_review")
+        if int(row["id"]) in covered or reminder_type in ambiguous_types:
+            continue
         scheduled = str(row["trigger_date_utc"] or "").strip()
         if not scheduled:
             scheduled = (datetime.now(timezone.utc) + timedelta(days=1)).replace(microsecond=0).isoformat()
@@ -11369,8 +11428,8 @@ async def activate_nutrient_reminders_for_plan(conn: aiosqlite.Connection, tg_us
         await conn.execute(
             """INSERT OR IGNORE INTO nutrient_followup_reminders(
                 user_id, plan_run_id, followup_item_id, nutrient_code, reminder_type, source_type,
-                scheduled_for_utc, delivered_at_utc, status, payload_json, created_at_utc, updated_at_utc
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                scheduled_for_utc, delivered_at_utc, status, payload_json, created_at_utc, updated_at_utc, source_candidate_id
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 user_id,
                 int(plan_run_id),
@@ -11384,6 +11443,7 @@ async def activate_nutrient_reminders_for_plan(conn: aiosqlite.Connection, tg_us
                 json.dumps(payload, ensure_ascii=False),
                 now,
                 now,
+                int(row["id"]),
             ),
         )
         if conn.total_changes > before:

@@ -109,7 +109,7 @@
       align-items: stretch;
       gap: 10px;
     }
-    .topbar-main { min-width: 0; flex: 1; }
+    .topbar-main { display:none; }
     .topbar-actions { display: flex; align-items: flex-start; justify-content: flex-end; }
     .topbar.topbar-today .topbar-actions { width: 100%; justify-content: stretch; }
     .today-header-actions {
@@ -303,7 +303,11 @@
     @keyframes pulse2Active { 0%,100% { box-shadow:0 0 0 1px rgba(255,170,200,.55) inset,0 0 12px rgba(255,126,184,.2); } 50% { box-shadow:0 0 0 1px rgba(255,170,200,.8) inset,0 0 18px rgba(255,126,184,.35); } }
     .tab { position: relative; }
     .topbar-title-row { display:flex; align-items:center; justify-content:center; gap:8px; flex-wrap:wrap; width:100%; text-align:center; }
-    .badge-pill { font-size:11px; padding:5px 10px; border-radius:999px; border:1px solid rgba(130,167,255,.55); background:linear-gradient(170deg, rgba(125,183,255,0.26), rgba(73,109,198,0.16)); box-shadow: 0 1px 0 rgba(255,255,255,.2) inset; white-space:nowrap; }
+    .tab-badge { position:absolute; right:-9px; bottom:-4px; width:20px; height:20px; display:grid; place-items:center; border-radius:50%; background:var(--surface-raised); border:1px solid var(--accent); font-size:12px; line-height:1; box-shadow:0 2px 5px rgba(0,0,0,.25); }
+    .settings-title-row { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px 12px; margin-bottom:12px; }
+    .settings-title-row .settings-heading { margin:0; }
+    .settings-badge { display:inline-flex; align-items:center; gap:7px; max-width:100%; padding:7px 10px; border-radius:12px; border:1px solid var(--accent); background:var(--accent-soft); color:var(--text); font-size:13px; overflow-wrap:anywhere; }
+    .settings-badge-icon { flex-shrink:0; font-size:18px; line-height:1; }
     .ach-grid{display:grid;gap:8px;margin-top:8px;}
     .ach-item{border:1px solid rgba(255,255,255,.14);border-radius:12px;padding:8px;background:rgba(255,255,255,.05);}
     .ach-item.locked{border-style:dashed; background:var(--surface);}
@@ -742,18 +746,20 @@
     .settings-section .ios-content { padding: 0 14px 12px; display:grid; gap:8px; }
     .settings-slot-grid { display:grid; gap:8px; margin-top:8px; }
     .settings-slot-card { border: 1px solid rgba(255,255,255,.14); border-radius: 14px; padding: 12px; background: rgba(255,255,255,.04); display:grid; gap:10px; box-shadow: 0 8px 18px rgba(0,0,0,.22), inset 0 1px 0 rgba(255,255,255,.12); }
-    .settings-slot-head { display:flex; align-items:center; gap:8px; justify-content:space-between; }
-    .settings-slot-time { display:flex; align-items:center; gap:8px; }
-    .settings-slot-time .btn { min-width: 34px; padding: 7px 10px; }
+    .settings-slot-head { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:center; gap:10px; }
+    .settings-slot-time { display:flex; align-items:center; gap:8px; white-space:nowrap; }
+    .settings-slot-time strong { font-variant-numeric:tabular-nums; }
+    .settings-slot-time .btn { width:44px; min-width:44px; padding:7px; }
 
     .settings-heading { margin: 0 0 12px; font-size: 20px; font-weight: 800; }
-    .settings-checkbox-row { display:flex; align-items:center; justify-content:space-between; gap:12px; padding: 10px 12px; border-radius: 12px; border:1px solid rgba(255,255,255,.14); background: rgba(255,255,255,.04); cursor:pointer; }
+    .settings-checkbox-row { display:flex; align-items:center; justify-content:space-between; gap:12px; min-width:0; min-height:44px; padding: 10px 12px; border-radius: 12px; border:1px solid rgba(255,255,255,.14); background: rgba(255,255,255,.04); cursor:pointer; }
+    .settings-checkbox-row > span:first-child { min-width:0; overflow-wrap:anywhere; line-height:1.35; }
     .settings-checkbox-label { font-weight: 600; }
-    .settings-checkbox-wrap { position: relative; width: 28px; height: 28px; display:inline-flex; align-items:center; justify-content:center; }
+    .settings-checkbox-wrap { position:relative; width:28px; height:28px; flex:0 0 28px; display:inline-grid; place-items:center; }
     .settings-checkbox-wrap input { position:absolute; inset:0; opacity:0; margin:0; cursor:pointer; }
-    .settings-checkbox-custom { width: 26px; height: 26px; border-radius: 8px; border: 2px solid rgba(181,208,255,.62); background: rgba(255,255,255,.08); box-shadow: inset 0 1px 0 rgba(255,255,255,.2); transition: opacity .18s ease, transform .18s ease, border-color .18s ease; }
+    .settings-checkbox-custom { position:relative; display:grid; place-items:center; pointer-events:none; width:26px; height:26px; border-radius:8px; border:2px solid rgba(181,208,255,.62); background:rgba(255,255,255,.08); box-shadow:inset 0 1px 0 rgba(255,255,255,.2); transition:opacity .18s ease, transform .18s ease, border-color .18s ease; }
     .settings-checkbox-wrap input:checked + .settings-checkbox-custom { background: linear-gradient(180deg, rgba(125,183,255,.75), rgba(78,126,214,.85)); border-color: rgba(203,227,255,.98); box-shadow: 0 0 0 3px rgba(125,183,255,.22); }
-    .settings-checkbox-wrap input:checked + .settings-checkbox-custom::after { content: '\2713'; color: #fff; font-size: 15px; font-weight: 900; display:grid; place-items:center; line-height: 1; }
+    .settings-checkbox-wrap input:checked + .settings-checkbox-custom::after { content:'\2713'; position:absolute; inset:0; color:#fff; font-size:15px; font-weight:900; display:grid; place-items:center; line-height:1; }
     .settings-checkbox-wrap input:disabled + .settings-checkbox-custom { opacity: .45; }
 
     #app.modal-scroll-lock .main-content { overflow: hidden; }
@@ -908,11 +914,14 @@
     }
     .stack-slot-actions { margin-top: 12px; display:grid; grid-template-columns:1fr 1fr; gap:8px; }
     @media (max-width: 460px) { .stack-slot-actions { grid-template-columns: 1fr; } }
-    .field-grid { display:grid; gap:8px; }
+    .field-grid { display:grid; grid-template-columns:minmax(0,1fr); gap:8px; min-width:0; }
     .field-grid.two { grid-template-columns:repeat(2,minmax(0,1fr)); }
+    .field-grid > *, .field-grid label { min-width:0; max-width:100%; }
     .lab-result-row { border:1px solid rgba(255,255,255,.14); border-radius:12px; padding:8px; margin-bottom:8px; background:rgba(255,255,255,.03); }
-    .lab-file-input { position:absolute; width:1px; height:1px; opacity:0; }
+    .lab-file-button { position:relative; display:grid; place-items:center; min-height:44px; min-width:0; }
+    .lab-file-input { position:absolute; inset:0; width:100%; height:100%; opacity:0; margin:0; padding:0; border:0; cursor:pointer; z-index:1; }
     .lab-actions label.btn:focus-within { outline:2px solid var(--accent); outline-offset:3px; }
+    [data-lab-file-name] { min-width:0; overflow-wrap:anywhere; }
     .lab-views { display:flex; gap:6px; flex-wrap:wrap; margin-top:12px; }
     .lab-views .btn { flex:1; min-width:80px; padding:10px 8px; }
     .lab-views [aria-selected="true"] { border-color:var(--accent); background:var(--btn-gradient); }
@@ -1028,6 +1037,11 @@
     a:visited { color:var(--accent); }
     pre, code { overflow-wrap:anywhere; }
     input, textarea, select { color-scheme:dark; accent-color:var(--accent); }
+    .input, .select, .textarea, .search-input { min-width:0; max-width:100%; }
+    input.input[type="date"], input.input[type="time"] { display:block; min-inline-size:0; inline-size:100%; max-inline-size:100%; min-height:44px; -webkit-appearance:none; appearance:none; }
+    input.input::-webkit-date-and-time-value { min-width:0; text-align:left; }
+    .modal-card, .sheet, .stack-slot-panel, .bodymap-sheet-card, .coach-card { min-width:0; overflow-x:hidden; overscroll-behavior-x:none; touch-action:pan-y; }
+    .modal-overlay, .stack-slot-overlay, .bodymap-sheet-overlay { overflow-x:hidden; overscroll-behavior-x:none; touch-action:pan-y; }
     .settings-checkbox-wrap input:focus-visible + .settings-checkbox-custom { outline:2px solid var(--accent); outline-offset:3px; }
     .today-slot-head { flex-wrap:wrap; }
     .today-slot-head > .row { flex-wrap:wrap; justify-content:flex-start; }
@@ -1080,6 +1094,11 @@
     .keyboard-open .modal-card { max-height: calc(var(--visible-height, 100vh) - 24px); }
     .keyboard-open .stack-slot-overlay { bottom: var(--keyboard-inset, 0px); padding: 12px 10px; }
     .keyboard-open .stack-slot-panel { max-height: calc(var(--visible-height, 100vh) - 24px); }
+    @media (max-width:600px), (max-height:500px) and (pointer:coarse) {
+      .modal-overlay { align-items:flex-start; padding-top:calc(12px + env(safe-area-inset-top)); }
+      .keyboard-open .modal-overlay, .keyboard-open .stack-slot-overlay { top:var(--viewport-top,0px); bottom:auto; height:var(--visible-height,100vh); padding-top:calc(12px + env(safe-area-inset-top)); }
+      .keyboard-open .modal-card, .keyboard-open .stack-slot-panel { max-height:calc(var(--visible-height,100vh) - 24px - env(safe-area-inset-top)); }
+    }
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
     }
@@ -1586,6 +1605,7 @@
     document.documentElement.dataset.badge = cosmetics.badge_id || "none";
     const tabs = appEl?.querySelector('.tabs');
     if (tabs) tabs.dataset.skin = document.documentElement.dataset.tabSkin;
+    refreshProfileUnseenDot();
     if (document.getElementById('topbarMain')) renderTopbarActions();
   }
 
@@ -2613,7 +2633,7 @@
     const showProfileDot = getUnseenAchievementsCount() > 0;
     return `<nav class="tabs ${(state.me?.role && state.me.role !== "none") ? "admin-enabled" : ""}" data-skin="${document.documentElement.dataset.tabSkin || "classic"}">
       ${list.map(t => `<button class="tab ${state.activeTab === t.id ? "active" : ""}" data-tab="${t.id}" ${isLocked ? "disabled" : ""}>
-        <span class="tab-emoji-wrap"><span class="tab-emoji">${t.icon}</span>${t.id === "profile" && showProfileDot ? '<i class="tab-unseen-dot" aria-hidden="true"></i>' : ''}</span>
+        <span class="tab-emoji-wrap"><span class="tab-emoji">${t.icon}</span>${t.id === "profile" ? renderTopbarBadgeHtml() : ''}${t.id === "profile" && showProfileDot ? '<i class="tab-unseen-dot" aria-hidden="true"></i>' : ''}</span>
         <span>${t.title}</span>
       </button>`).join("")}
     </nav>`;
@@ -2623,6 +2643,12 @@
     const showProfileDot = getUnseenAchievementsCount() > 0;
     const profileTab = appEl.querySelector('.tab[data-tab="profile"] .tab-emoji-wrap');
     if (!profileTab) return;
+    const badgeHtml=renderTopbarBadgeHtml();
+    const currentBadge=profileTab.querySelector('.tab-badge');
+    if (!badgeHtml) currentBadge?.remove();
+    else if (currentBadge?.outerHTML !== badgeHtml) {
+      currentBadge?.remove();profileTab.insertAdjacentHTML('beforeend',badgeHtml);
+    }
     let dot = profileTab.querySelector('.tab-unseen-dot');
     if (showProfileDot && !dot) {
       dot = document.createElement('i');
@@ -2823,12 +2849,11 @@
       } else appEl.querySelectorAll('.tab[data-tab]').forEach(btn => btn.classList.toggle('active',btn.dataset.tab === state.activeTab));
       syncAuxModals(); renderActiveTab(); return;
     }
-    const topbarBadgeHtml = renderTopbarBadgeHtml();
     appEl.innerHTML = `
       <div class="main-content" id="mainContent">
         <header class="topbar fade" id="topbarMain">
           <div class="topbar-main">
-            <div class="topbar-title-row" id="topbarTitleRow">${topbarBadgeHtml}</div>
+            <div class="topbar-title-row" id="topbarTitleRow"></div>
             <div class="topbar-meta-row" id="topbarMetaRow"></div>
           </div>
           <div id="topbarActions" class="topbar-actions"></div>
@@ -3024,6 +3049,12 @@
     if (activeRenderPointers.size) { scheduleUiRender(renderActiveTab); return; }
     const target = document.getElementById("tabContent");
     if (!target) return;
+    // Safari's native picker belongs to this input. Keep it connected for the
+    // whole upload form, including background refresh and picker cancellation.
+    if (state.activeTab === 'profile' && state.profileUi.uploadOpen && document.getElementById('labsFile')) {
+      document.querySelectorAll('#labsFile, #labsPhoto, [data-close-upload]').forEach(el => { el.disabled=!!state.profileUi.uploading; });
+      return;
+    }
     syncAuxModals();
     const scrollRoot = document.getElementById("mainContent");
     const tabKey = String(state.activeTab || "");
@@ -5624,7 +5655,7 @@ function adminField(label, field, value, kind='input') {
     const draft = type==='manual' ? (state.profileUi.manualDraft || {results:[{}]}) : (state.profileUi.uploadDraft || {});
     const busy = type==='manual' ? state.profileUi.savingManual : state.profileUi.uploading;
     return `<div class="modal-overlay" data-close-${type}><section class="card modal-card" onclick="event.stopPropagation()"><div class="row"><strong>${type==='manual'?'Новый анализ':'Загрузка анализа'}</strong><button class="btn secondary" data-close-${type} ${busy?'disabled':''}>Закрыть</button></div>
-      ${type==='upload'?`<div class="lab-actions"><label class="btn secondary">Выбрать файл<input type="file" id="labsFile" accept=".pdf,.jpg,.jpeg,.png,.webp,.docx,.xlsx,.csv,.txt,.json" class="lab-file-input"/></label><label class="btn secondary">Фото / камера<input type="file" id="labsPhoto" accept="image/jpeg,image/png,image/webp" class="lab-file-input"/></label></div><div class="muted" data-lab-file-name>${esc(state.profileUi.uploadFile?.name||'')}</div>`:''}
+      ${type==='upload'?`<div class="row lab-actions"><label class="btn secondary lab-file-button"><span aria-hidden="true">Выбрать файл</span><input type="file" id="labsFile" aria-label="Выбрать файл анализа" accept=".pdf,.jpg,.jpeg,.png,.webp,.docx,.xlsx,.csv,.txt,.json" class="lab-file-input"/></label><label class="btn secondary lab-file-button"><span aria-hidden="true">Фото / камера</span><input type="file" id="labsPhoto" aria-label="Выбрать фото анализа или сделать снимок" accept="image/jpeg,image/png,image/webp" class="lab-file-input"/></label></div><div class="muted" data-lab-file-name>${esc(state.profileUi.uploadFile?.name||'')}</div>`:''}
       <div class="field-grid" style="margin-top:10px"><label class="muted">Дата забора<input type="date" class="input" id="${type}ReportDate" value="${esc(draft.report_date||'')}"/></label>
       <label class="muted">Лаборатория<input class="input" id="${type}LabName" value="${esc(draft.lab_name||'')}" placeholder="Для сравнения результатов"/></label>
       <label class="muted">Комментарий<textarea class="textarea" id="${type}Notes">${esc(draft.notes||'')}</textarea></label>
@@ -6315,6 +6346,7 @@ function adminField(label, field, value, kind='input') {
       if(!file)return setLabFormError('Выберите файл');
       if(file.size>12*1024*1024)return setLabFormError('Максимальный размер — 12 МБ');
       state.profileUi.uploading=true;event.currentTarget.disabled=true;event.currentTarget.textContent='Читаем документ…';
+      document.querySelectorAll('#labsFile, #labsPhoto, [data-close-upload]').forEach(el=>{el.disabled=true;});
       try{
         const draft=state.profileUi.uploadDraft||{};const form=new FormData();form.append('file',file);
         for(const key of ['report_date','lab_name','notes'])form.append(key,draft[key]||'');
@@ -6327,7 +6359,7 @@ function adminField(label, field, value, kind='input') {
         if(report&&report.parse_status!=='queued'){state.profileUi.selectedReportId=data.report_id;state.profileUi.reviewDraft=null;state.profileUi.reviewConflictDraft=null;state.profileUi.labConflict=false;state.profileUi.reviewOpen=true;}
         showToast(data.duplicate?'Этот документ уже сохранён':data.queued?'Документ сохранён. Распознаём…':'Документ загружен');
       }catch(e){setLabFormError(e.message||'Не удалось загрузить документ');}
-      finally{state.profileUi.uploading=false;if(!state.profileUi.uploadOpen)renderActiveTab();else{const btn=document.querySelector('[data-upload-labs]');if(btn){btn.disabled=false;btn.textContent='Загрузить документ';}}}
+      finally{state.profileUi.uploading=false;if(!state.profileUi.uploadOpen)renderActiveTab();else{document.querySelectorAll('#labsFile, #labsPhoto, [data-close-upload]').forEach(el=>{el.disabled=false;});const btn=document.querySelector('[data-upload-labs]');if(btn){btn.disabled=false;btn.textContent='Загрузить документ';}}}
     });
     document.querySelector('[data-lab-refresh]')?.addEventListener('click',async()=>{await loadProfileLabs(true);renderActiveTab();});
     document.querySelectorAll('[data-lab-delete]').forEach(el=>el.addEventListener('click',async()=>{
@@ -7603,7 +7635,7 @@ function adminField(label, field, value, kind='input') {
     const slotEdit = state.settingsUi?.slotEdit || { open: false, slotId: "", time: "" };
     const slotEditIsCustom = slotEdit.open && !isDefaultScheduleSlot(slotEdit.slotId);
     return `
-      <h2 class="settings-heading">Настройки</h2>
+      <div class="settings-title-row"><h2 class="settings-heading">Настройки</h2>${renderSettingsBadgeHtml()}</div>
       <section class="card fade">
         <div class="settings-sections">
           <div class="settings-section">
@@ -8095,19 +8127,12 @@ function adminField(label, field, value, kind='input') {
       else if (scrollRoot?.scrollTop > 0) scrollRoot.scrollTop += (header?.getBoundingClientRect().height || 0) - previousHeight;
     };
     const showTodayActions = state.activeTab === 'today';
-    const showSettingsMeta = state.activeTab === 'settings';
-    const badgeHtml = renderTopbarBadgeHtml();
-    const hasBadge = Boolean(badgeHtml);
-    const showTopbar = showTodayActions || hasBadge || showSettingsMeta;
+    const showTopbar = showTodayActions;
     if (!wrap) return;
-    if (titleRow) titleRow.innerHTML = badgeHtml;
+    if (titleRow) titleRow.innerHTML = '';
     if (metaRow) {
-      metaRow.innerHTML = showSettingsMeta ? `
-        <span class="topbar-meta-item">📅 ${esc(formatDate())}</span>
-        <span class="topbar-meta-item">🕒 ${esc(formatTime())}</span>
-        <span class="topbar-meta-item">💳 ${esc(topbarAccessText())}</span>
-      ` : '';
-      metaRow.style.display = showSettingsMeta ? 'flex' : 'none';
+      metaRow.innerHTML = '';
+      metaRow.style.display = 'none';
     }
     if (header) {
       header.classList.toggle('topbar-today', showTodayActions);
@@ -8140,7 +8165,15 @@ function adminField(label, field, value, kind='input') {
     const badge = getBadgeMeta(badgeId);
     const label = String(badge.title_ru || '').trim();
     if (badgeId === 'none' || !label || label === badgeId) return '';
-    return `<span class="badge-pill">${esc(badge.emoji || "")} ${esc(label)}</span>`;
+    if (!badge.emoji) return '';
+    return `<span class="tab-badge" role="img" aria-label="Бейдж: ${esc(label)}" title="${esc(label)}">${esc(badge.emoji)}</span>`;
+  }
+
+  function renderSettingsBadgeHtml() {
+    const badgeId=document.documentElement.dataset.badge || 'none';
+    const badge=getBadgeMeta(badgeId);
+    if(badgeId==='none'||!badge.emoji||!badge.title_ru||badge.title_ru===badgeId)return '';
+    return `<span class="settings-badge"><span class="settings-badge-icon" aria-hidden="true">${esc(badge.emoji)}</span><span>${esc(badge.title_ru)}</span></span>`;
   }
 
   function bindTopbarActions() {
@@ -8821,32 +8854,41 @@ function adminField(label, field, value, kind='input') {
   });
 
   let viewportFrame = 0;
+  let focusScrollTimer = 0;
   let stableHeight = window.innerHeight;
+  function hasTypingFocus() {
+    const field=document.activeElement;
+    return !!field?.matches('textarea,[contenteditable="true"],input:not([type="file"]):not([type="checkbox"]):not([type="radio"]):not([type="button"]):not([type="submit"]):not([type="hidden"])');
+  }
   function keepFocusedFieldVisible() {
     const field = document.activeElement;
-    if (!isEditing() || !field) return;
+    if (!hasTypingFocus() || !field) return;
     const scroller = field.closest('.sheet, .modal-card, .stack-slot-panel, .main-content');
     if (!scroller) return;
     const viewTop = window.visualViewport?.offsetTop || 0;
     const viewBottom = viewTop + (window.visualViewport?.height || window.innerHeight);
     const box = scroller.getBoundingClientRect(), input = field.getBoundingClientRect();
-    const top = Math.max(box.top, viewTop) + 12;
+    const header=scroller.querySelector(':scope > .row:first-child');
+    const headerHeight=header && getComputedStyle(header).position==='sticky' ? header.getBoundingClientRect().height+8 : 12;
+    const top = Math.max(box.top, viewTop) + headerHeight;
     const bottom = Math.min(box.bottom, viewBottom) - 12;
-    if (input.top < top) scroller.scrollTop += input.top - top;
-    else if (input.bottom > bottom) scroller.scrollTop += Math.min(input.bottom - bottom, input.top - top);
+    const delta=input.top<top ? input.top-top : input.bottom>bottom ? Math.min(input.bottom-bottom,input.top-top) : 0;
+    if(Math.abs(delta)>2)scroller.scrollTo({left:0,top:Math.max(0,scroller.scrollTop+delta),behavior:window.matchMedia('(prefers-reduced-motion: reduce)').matches?'auto':'smooth'});
   }
   function syncViewport() {
     cancelAnimationFrame(viewportFrame);
     viewportFrame = requestAnimationFrame(() => {
       const visible = window.visualViewport?.height || window.innerHeight;
-      const keyboard = (isEditing() || document.documentElement.classList.contains('keyboard-open')) && stableHeight - visible > 120;
+      const keyboard = (hasTypingFocus() || document.documentElement.classList.contains('keyboard-open')) && stableHeight - visible > 120;
       if (!keyboard) stableHeight = Number(tg?.viewportStableHeight) || window.innerHeight;
       document.documentElement.style.setProperty('--app-height', `${stableHeight}px`);
       document.documentElement.style.setProperty('--visible-height', `${visible}px`);
+      document.documentElement.style.setProperty('--viewport-top', `${window.visualViewport?.offsetTop || 0}px`);
       document.documentElement.style.setProperty('--keyboard-inset', `${Math.max(0, window.innerHeight - visible - (window.visualViewport?.offsetTop || 0))}px`);
       document.documentElement.classList.toggle('keyboard-open',keyboard);
       syncBulkClearance();
-      keepFocusedFieldVisible();
+      clearTimeout(focusScrollTimer);
+      focusScrollTimer=setTimeout(keepFocusedFieldVisible,90);
     });
   }
   window.visualViewport?.addEventListener('resize',syncViewport);

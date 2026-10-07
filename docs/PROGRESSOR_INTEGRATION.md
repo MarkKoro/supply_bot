@@ -1,6 +1,6 @@
 # Progressor integration v1 — supply
 
-Status: implementation prepared; deployment verification and release commits are recorded in the top-level task INTEGRATION_STATUS.md. This document is the permanent repository contract for future working chats.
+Status: deployed on 2026-10-08 Asia/Bangkok. Core, all three native bridges/cache/export workers and shared navigation are active; production verification and backup manifests are recorded in the top-level task INTEGRATION_STATUS.md. This document is the permanent repository contract for future working chats.
 
 ## Independent services and source ownership
 
@@ -18,7 +18,7 @@ Gym: workout.completed/updated/deleted, profile.updated, bodyweight.updated. Com
 
 Food: meal.logged/updated/deleted, daily_nutrition.updated, nutrition_target.changed and profile.updated. Existing macros remain owned by meals/goals. Additional observations live in meal_nutrients keyed by meal_id/nutrient_code, with value (nullable), canonical g/mg/ug, source, confidence, reference, meal_version, revision and UTC updated_at. Registry: nutrients.py / Core schemas/nutrients.v1.json. Historical missing micronutrients are not backfilled. Unknown != known zero. AI photo/text/voice-description analysis automatically emits nutrient_schema_version=1 and item nutrients_per_100g with registered codes/canonical units; unknown=null. Typical food composition is an approximate ai_estimate, not a verified laboratory value or food database citation. Python computes consumed quantity and retains observed/total component coverage. Macro-only history remains unknown. Food owns writes and access checks; Core only reads.
 
-Supply: profile.updated, supplement.started/stopped/taken, lab.created/updated; current user_supplements and authoritative supplement_day_state (not the legacy user_intake_log). Internal user ids must join users.id. Deleted/banned users are excluded; lab metadata requires existing consent. Raw lab files, medical notes and billing data are not copied to Core.
+Supply: profile.updated, supplement.started/stopped/taken, lab.created/updated; current user_supplements and authoritative supplement_day_state (not the legacy user_intake_log). Internal user ids must join users.id. Deleted/banned users are excluded; lab metadata requires existing consent. Core event projections exclude raw lab files, medical notes and native billing tables. Owner-published private SQLite exports retain the native database for adapter and receipt-outbox compatibility; keep those exports root-only and never serve or commit them.
 
 Core read API: authenticated `/progressor/api/v1/me/context` and `/progressor/api/v1/me/recommendations/history`; the subject comes from a signed session, never a caller-supplied user id. Context includes activity, Food 7/30/90 day aggregates, targets, per-nutrient units/coverage/quality, Supply summary, source freshness and diagnostic reason codes. Future producers may use `/progressor/api/v1/events` with source-specific private ingest credentials; this is disabled unless credentials are configured. Invalid payloads get a durable hash-only dead letter.
 
@@ -153,3 +153,36 @@ Runtime: progressor_core.service, loopback 8040, /srv/progressor_core/current, s
 /srv/progressor_core/venv, ledger /var/lib/progressor/core.sqlite3, root-only config/key
 /etc/progressor/core.env and /etc/progressor/signing.key. Public prefix /progressor/ only
 exposes health/ready, assets, subscribe and /api/v1/; /internal/ and /metrics stay private.
+
+
+## Verified rollout and merchant configuration — 2026-10-08
+
+Production health/readiness is OK for all three sources and all 8 units (the original 7
+plus progressor_core.service). The 9 source/audience bridge combinations, invalid proof and
+wrong audience rejection, public pages/navigation, private-route denial and exactly one
+existing consumer per bot were verified without calling production user-modifying routes.
+Staging additionally exercised all 9 actual mobile frontend routes and registered native
+payment handlers; real Telegram/iPhone interaction and real money charges were not performed.
+
+Native domain source release: Gym PR #462, Food #95, Supply #266 (preceded by integration
+PRs #461/#94/#265). Core uses the existing Food YooKassa merchant; authenticated GET /me
+confirmed the live shop is enabled and the account matches. Its automatic receipt service
+is currently disabled. Before a first RUB payment request Core queries the selected merchant
+and includes receipt data only when its receipt mode is enabled. Otherwise the request follows
+the existing Food payment scheme without an automatic receipt; contact email is retained
+privately in Core. The UI does not promise automatic fiscal receipt delivery. Enabling or
+operating the merchant's receipt service is separate from deploying these bots.
+
+The provider request, contact email and idempotence key are immutable once stored. A lost
+response replays the exact original request; later shop-setting changes must not rewrite it.
+Old saved requests with receipt.customer.email remain replayable after the additive migration.
+Disabled/demo/mismatched merchants fail before a payment POST. Never make real test charges
+without an explicit instruction, print merchant secrets, or switch merchant accounts while
+provider orders remain outstanding.
+
+Pre-release application backup is /root/progressor-backups/20261007T163329Z-pre-progressor-release.tar.gz
+(SHA256 dbc2f34f5d0670c6af3dbef05373d52f6230509e9145b9c8f60f67992f6b0044), also verified off-server.
+Targeted rollback state/code/config is /root/progressor-deployments/20261007-progressor-v1/;
+script /root/rollback_progressor_20261007.py defaults to disabling new features while preserving
+financial compatibility. Do not restore DBs for code rollback. Public HTML/JS must remain 0644
+and their static directories 0755 for Nginx; root-only recovery/config writes use private modes.

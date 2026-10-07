@@ -1,0 +1,129 @@
+"""Progressor private control protocol v1; canonical copy in Core shared/.
+
+Calls run outside domain transactions. Native features remain usable on Core outages.
+Domains own their entitlement cache and successful-payment outbox.
+"""
+import asyncio
+import hashlib
+import hmac
+import json
+import logging
+import os
+import sqlite3
+import time
+import uuid
+from contextlib import closing
+from datetime import datetime,timezone
+from pathlib import Path
+from urllib.parse import urlparse
+import httpx
+
+SCHEMA = '''CREATE TABLE IF NOT EXISTS progressor_bundle_cache(user_id TEXT PRIMARY KEY,expires_at TEXT NOT NULL,revision INTEGER NOT NULL,updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS progressor_payment_outbox(receipt_id TEXT PRIMARY KEY,body TEXT NOT NULL,created_at TEXT NOT NULL,delivered INTEGER NOT NULL DEFAULT 0);'''
+
+def canonical(value): return json.dumps(value,sort_keys=True,separators=(',',':'),ensure_ascii=False,allow_nan=False)
+
+def signing_key():
+    return Path(os.environ['PROGRESSOR_SIGNING_KEY_FILE']).read_text().strip()
+
+def control_token(source,path,body,key,now=None):
+    import base64
+    stamp=int(time.time()) if now is None else now
+    payload={'typ':'progressor.control.v1','source':source,'path':path,'hash':hashlib.sha256(body).hexdigest(),'iat':stamp,'nonce':uuid.uuid4().hex}
+    encoded=base64.urlsafe_b64encode(canonical(payload).encode()).decode().rstrip('=')
+    return encoded+'.'+hmac.new(key.encode(),encoded.encode(),hashlib.sha256).hexdigest()
+
+def verify_control(token,path,body,key,now=None):
+    import base64
+    if not isinstance(token,str) or len(token)>2048 or len(key)<32: raise ValueError('invalid_control')
+    encoded,mac=token.split('.')
+    if not hmac.compare_digest(mac,hmac.new(key.encode(),encoded.encode(),hashlib.sha256).hexdigest()): raise ValueError('invalid_control')
+    payload=json.loads(base64.b64decode(encoded+'='*(-len(encoded)%4),altchars=b'-_',validate=True))
+    stamp=int(time.time()) if now is None else now
+    if payload.get('typ')!='progressor.control.v1' or payload.get('source') not in ('gym','food','supply') or type(payload.get('iat')) is not int or not -10<=stamp-payload['iat']<=60 or payload.get('path')!=path or payload.get('hash')!=hashlib.sha256(body).hexdigest(): raise ValueError('invalid_control')
+    return payload['source']
+
+def configured(): return os.getenv('PROGRESSOR_CLIENT_ENABLED','0')=='1'
+
+async def call(source,path,body,timeout=1.5):
+    if not configured(): raise RuntimeError('progressor_disabled')
+    origin=os.getenv('PROGRESSOR_INTERNAL_URL','http://127.0.0.1:8040')
+    parsed=urlparse(origin)
+    if parsed.hostname not in ('127.0.0.1','::1') or parsed.scheme!='http' or parsed.path not in ('','/'): raise ValueError('nonlocal_progressor_url')
+    raw=canonical(body).encode()
+    async with httpx.AsyncClient(timeout=timeout,trust_env=False) as client:
+        response=await client.post(origin.rstrip('/')+path,content=raw,headers={'Content-Type':'application/json','X-Progressor-Control':control_token(source,path,raw,signing_key())})
+        response.raise_for_status()
+        return response.json()
+
+async def ai_context(source,user_id):
+    try: return await call(source,'/internal/v1/ai-context',{'user_id':str(user_id)},timeout=.8)
+    except Exception: return None
+
+def parse_until(value):
+    try:
+        dt=datetime.fromisoformat(str(value).replace('Z','+00:00'))
+        return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
+    except (ValueError,TypeError): return None
+
+def bundle_until(db_path,user_id):
+    if not configured(): return None
+    try:
+        with closing(sqlite3.connect(Path(db_path).resolve().as_uri()+'?mode=ro',uri=True,timeout=.5)) as conn:
+            row=conn.execute('SELECT expires_at FROM progressor_bundle_cache WHERE user_id=?',(str(user_id),)).fetchone()
+            value=parse_until(row[0]) if row else None
+            return value if value and value>datetime.now(timezone.utc) else None
+    except sqlite3.Error: return None
+
+def ensure_schema(db_path):
+    with closing(sqlite3.connect(db_path,timeout=5)) as conn:
+        conn.executescript(SCHEMA); conn.commit()
+
+def apply_grants(db_path,items):
+    with closing(sqlite3.connect(db_path,timeout=5)) as conn:
+        with conn:
+            for row in items:
+                if not str(row['user_id']).isdecimal() or not 0<int(row['user_id'])<2**63 or not parse_until(row['expires_at']) or type(row['revision']) is not int or row['revision']<1: raise ValueError('invalid_grant')
+                old=conn.execute('SELECT expires_at,revision FROM progressor_bundle_cache WHERE user_id=?',(str(row['user_id']),)).fetchone()
+                if old and old[1]==row['revision'] and old[0]!=row['expires_at']: raise ValueError('grant_revision_conflict')
+                conn.execute('INSERT INTO progressor_bundle_cache VALUES(?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET expires_at=excluded.expires_at,revision=excluded.revision,updated_at=excluded.updated_at WHERE excluded.revision>progressor_bundle_cache.revision',(str(row['user_id']),row['expires_at'],row['revision'],datetime.now(timezone.utc).isoformat()))
+
+def record_receipt(db_path,body):
+    # The trusted Telegram consumer records the receipt before any network operation.
+    ensure_schema(db_path)
+    receipt_id=body['kind']+':'+body['charge_id']
+    value=canonical(body)
+    with closing(sqlite3.connect(db_path,timeout=5)) as conn:
+        with conn:
+            old=conn.execute('SELECT body FROM progressor_payment_outbox WHERE receipt_id=?',(receipt_id,)).fetchone()
+            if old and old[0]!=value: raise ValueError('receipt_conflict')
+            conn.execute('INSERT OR IGNORE INTO progressor_payment_outbox VALUES(?,?,?,0)',(receipt_id,value,datetime.now(timezone.utc).isoformat()))
+
+async def sync(source,db_path):
+    cursor=''
+    while True:
+        response=await call(source,'/internal/v1/grants',{'after':cursor})
+        await asyncio.to_thread(apply_grants,db_path,response['items'])
+        if not response.get('next'): break
+        cursor=response['next']
+
+def install_cache_worker(app,source,db_path):
+    if not configured(): return
+    from contextlib import asynccontextmanager
+    original=app.router.lifespan_context
+    @asynccontextmanager
+    async def lifespan(instance):
+        async with original(instance):
+            await asyncio.to_thread(ensure_schema,db_path)
+            async def worker():
+                while True:
+                    try: await sync(source,db_path)
+                    except Exception: logging.getLogger('progressor_client').warning('bundle_sync_unavailable source=%s',source)
+                    await asyncio.sleep(15)
+            task=asyncio.create_task(worker())
+            try: yield
+            finally:
+                task.cancel()
+                try: await task
+                except asyncio.CancelledError: pass
+    app.router.lifespan_context=lifespan

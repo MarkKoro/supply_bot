@@ -1010,7 +1010,7 @@ async def _render_settings_menu(update: Update, context: ContextTypes.DEFAULT_TY
     stats_available = sum(1 for key in ("today", "last7", "last30") if int((summary.get(key) or {}).get("expected") or 0) > 0)
 
     premium_active = await db.is_premium_active(conn, tg_uid)
-    premium_until = await db.get_premium_until(conn, tg_uid) if premium_active else None
+    premium_until = await db.get_effective_premium_until(conn, tg_uid) if premium_active else None
     premium_line = f"активен до {_format_until_ru(premium_until)}" if premium_active else "сейчас активной подписки нет — можно купить"
     starter_active = await db.is_starter_trial_active(conn, tg_uid)
     starter_row = await db.fetchone(
@@ -8786,6 +8786,8 @@ async def _bootstrap() -> Application:
     app.bot_data["settings"] = s
     app.bot_data["render_route"] = _render_route
 
+    from progressor_bot import install as install_progressor
+    install_progressor(app, "supply", s.DB_PATH)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler(['labs', 'analyses'], on_labs))
     app.add_handler(CommandHandler("premium", premium_command))

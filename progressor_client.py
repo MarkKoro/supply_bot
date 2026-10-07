@@ -11,6 +11,7 @@ import logging
 import os
 import sqlite3
 import time
+import tempfile
 import uuid
 from contextlib import closing
 from datetime import datetime,timezone
@@ -107,6 +108,42 @@ async def sync(source,db_path):
         if not response.get('next'): break
         cursor=response['next']
 
+def publish_source_snapshot(db_path,destination):
+    """Owner-produced online SQLite backup, atomically published without touching live rows.
+
+    Core reads this DELETE-journal copy in a read-only mount. The owner alone opens its
+    own live WAL database; Core never needs writable source directories or SHM files.
+    """
+    source=Path(db_path).resolve(strict=True);target=Path(destination)
+    if target.is_symlink() or target.parent.is_symlink() or source==target.resolve():
+        raise ValueError('unsafe_source_snapshot_path')
+    target.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
+    target.parent.chmod(0o700)
+    temporary=None
+    try:
+        with tempfile.NamedTemporaryFile(prefix='.source-',suffix='.sqlite3',dir=target.parent,delete=False) as stream:
+            temporary=Path(stream.name)
+        deadline=time.monotonic()+10
+        def progress(status,remaining,total):
+            if time.monotonic()>deadline:raise TimeoutError('source_snapshot_deadline')
+        with closing(sqlite3.connect(source.as_uri()+'?mode=ro',uri=True,timeout=1)) as original:
+            original.execute('PRAGMA query_only=ON')
+            with closing(sqlite3.connect(temporary,timeout=1)) as copy:
+                original.backup(copy,pages=256,progress=progress,sleep=.02)
+                copy.execute('PRAGMA journal_mode=DELETE')
+                if copy.execute('PRAGMA quick_check').fetchone()[0]!='ok':
+                    raise ValueError('invalid_source_snapshot')
+        with temporary.open('rb') as stream:os.fsync(stream.fileno())
+        temporary.replace(target)
+    finally:
+        if temporary and temporary.exists():temporary.unlink()
+
+async def source_snapshot_worker(source,db_path,destination):
+    while True:
+        try:await asyncio.to_thread(publish_source_snapshot,db_path,destination)
+        except Exception:logging.getLogger('progressor_client').warning('source_snapshot_unavailable source=%s',source)
+        await asyncio.sleep(30)
+
 def install_cache_worker(app,source,db_path):
     if not configured(): return
     from contextlib import asynccontextmanager
@@ -121,9 +158,19 @@ def install_cache_worker(app,source,db_path):
                     except Exception: logging.getLogger('progressor_client').warning('bundle_sync_unavailable source=%s',source)
                     await asyncio.sleep(15)
             task=asyncio.create_task(worker())
+            snapshot_task=None
+            if os.getenv('PROGRESSOR_SOURCE_SNAPSHOT_ENABLED','0')=='1':
+                if source not in ('gym','food','supply'):raise ValueError('invalid_snapshot_source')
+                root=Path('/var/lib/progressor-sources')
+                if root.is_symlink():raise ValueError('unsafe_snapshot_root')
+                snapshot_task=asyncio.create_task(source_snapshot_worker(source,db_path,root/source/'source.sqlite3'))
             try: yield
             finally:
                 task.cancel()
+                if snapshot_task:snapshot_task.cancel()
                 try: await task
                 except asyncio.CancelledError: pass
+                if snapshot_task:
+                    try:await snapshot_task
+                    except asyncio.CancelledError:pass
     app.router.lifespan_context=lifespan

@@ -15,3 +15,5 @@ This repository participates in the Progressor ecosystem. Before changing auth, 
 - Run the tests relevant to your change and update the integration document and durable work journal. Do not claim real Telegram/iPhone testing from browser emulation. Never start another consumer with the production bot token.
 
 - Shared payment/cache/AI contract: read the updated integration document before editing premium checks, prompts, payment callbacks or user purge. Never overwrite native expiry with a bundle. After paid bundle orders exist, preserve financial compatibility during rollback. Synchronize canonical shared helper copies and test paid-source/target gating.
+
+- Source export: the native API owns its online backup worker; Core reads only private atomically published DELETE-journal copies. Preserve snapshot freshness rejection and keep export/cache tasks independent. Never widen Core permissions to live database directories.

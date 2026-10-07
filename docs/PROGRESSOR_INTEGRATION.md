@@ -126,3 +126,30 @@ strand paid users. Use per-change code rollback with financial compatibility pre
 include env and must never be committed or published. Staging tokens/providers are dummy; zero
 additional Telegram consumers and zero real test charges. Record release commits, server changes,
 health/results and remaining physical-device test limits in the durable journal.
+
+
+## Production source snapshots and Core isolation
+
+The existing native API process owns a separate source-export worker, enabled by
+`PROGRESSOR_SOURCE_SNAPSHOT_ENABLED=1` alongside its bundle cache worker. Every 30 seconds
+it makes an online SQLite backup of its OWN database and atomically replaces the private
+`/var/lib/progressor-sources/{gym,food,supply}/source.sqlite3` file. This is a transient
+integration export, not the recovery backup. Files use DELETE journal and permissions 0600
+inside private directories; never publish them or commit them. The native owner alone opens
+its live WAL DB. Core's ProtectSystem=strict permits writes only to /var/lib/progressor.
+Core has no writable access to source directories, database files, WAL or SHM files.
+
+Production `PROGRESSOR_*_DB_RO` points to these owner-published copies, and Core uses
+`PROGRESSOR_REQUIRE_FRESH_SNAPSHOTS=1` to reject a file older than 90 seconds before a
+snapshot reconciliation. Failed/stale exports are not deletions and never refresh old
+data as current. Core's normal 30-second polling and 120-second source cutoff still apply;
+new changes ordinarily appear within about a minute. Export failures are independent of
+the entitlement-cache refresh and never prevent native operations. Leave the export off
+in local tests unless working on it; all three canonical progressor_client.py copies must
+remain identical. A full legacy rollback must preserve financial compatibility after
+bundle payments; disabling new features alone must keep cache and receipt workers running.
+
+Runtime: progressor_core.service, loopback 8040, /srv/progressor_core/current, separate
+/srv/progressor_core/venv, ledger /var/lib/progressor/core.sqlite3, root-only config/key
+/etc/progressor/core.env and /etc/progressor/signing.key. Public prefix /progressor/ only
+exposes health/ready, assets, subscribe and /api/v1/; /internal/ and /metrics stay private.

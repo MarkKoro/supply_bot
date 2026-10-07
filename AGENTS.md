@@ -17,3 +17,5 @@ This repository participates in the Progressor ecosystem. Before changing auth, 
 - Shared payment/cache/AI contract: read the updated integration document before editing premium checks, prompts, payment callbacks or user purge. Never overwrite native expiry with a bundle. After paid bundle orders exist, preserve financial compatibility during rollback. Synchronize canonical shared helper copies and test paid-source/target gating.
 
 - Source export: the native API owns its online backup worker; Core reads only private atomically published DELETE-journal copies. Preserve snapshot freshness rejection and keep export/cache tasks independent. Never widen Core permissions to live database directories.
+
+- Cross-context belongs to the verified personal account. Gym trainer/acting mode keeps Gym AI and must omit trainee Food/Supply data; a native trainer link grants no cross-product delegation.

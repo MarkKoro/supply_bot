@@ -2750,6 +2750,9 @@ async def is_premium_active(
     tg_user_id: int,
     now_utc: datetime | None = None,
 ) -> bool:
+    from progressor_client import bundle_until
+    from settings import get_settings
+    if bundle_until(get_settings().DB_PATH, tg_user_id): return True
     premium_until_iso = await get_premium_until(conn, tg_user_id)
     premium_until = _parse_utc_iso_dt(premium_until_iso)
     if premium_until is None:
@@ -2760,6 +2763,15 @@ async def is_premium_active(
     else:
         now = now.astimezone(timezone.utc)
     return premium_until > now
+
+async def get_effective_premium_until(conn: aiosqlite.Connection, tg_user_id: int) -> str | None:
+    """Display expiry; extending an individual plan must use get_premium_until."""
+    from progressor_client import bundle_until
+    from settings import get_settings
+    native = _parse_utc_iso_dt(await get_premium_until(conn, tg_user_id))
+    shared = bundle_until(get_settings().DB_PATH, tg_user_id)
+    effective = max(native, shared) if native and shared else native or shared
+    return _to_utc_iso(effective) if effective else None
 
 async def set_premium_until(
     conn: aiosqlite.Connection,

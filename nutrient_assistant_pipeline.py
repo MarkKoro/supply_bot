@@ -1010,6 +1010,9 @@ async def run_nutrient_assistant_compute_pipeline(
         ) or {}
         source_version = await db.assistant_input_version(conn, tg_user_id)
     conn = base_conn
+    from progressor_client import ai_context
+    shared_context = await ai_context("supply", tg_user_id)
+    if shared_context: llm_payload["progressor_context"] = shared_context
     assistant_model = (s.OPENAI_NUTRIENT_ASSISTANT_MODEL or "").strip() or s.OPENAI_MODEL
     cfg = OpenAIConfig(api_key=s.OPENAI_API_KEY, model=assistant_model)
     stage = "call_llm_attempt_1"
@@ -1113,6 +1116,8 @@ async def run_nutrient_assistant_compute_pipeline(
         assistant_catalog_by_code=assistant_catalog_by_code,
         labs_for_llm=labs_for_llm,
     )
+    if shared_context and not used_timeout_fallback:
+        parsed["summary_ru"] = str(parsed.get("summary_ru") or "") + "\nПри запросе ИИ использованы ваши данные из: " + ", ".join(x["source"] for x in shared_context["sources"]) + "."
     complete_labs, _ = _labs_review_coverage(parsed, labs_for_llm)
     if not complete_labs:
         stage = "merge_missing_labs_review"

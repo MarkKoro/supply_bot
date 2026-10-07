@@ -1125,6 +1125,7 @@ def premium_webapp_checkout_kb(payment_url: str) -> InlineKeyboardMarkup:
 def premium_upsell_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("⭐ Купить Premium", callback_data="menu:premium")],
+        [InlineKeyboardButton("Progressor · 3 продукта", callback_data="pg:menu")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")],
     ])
 

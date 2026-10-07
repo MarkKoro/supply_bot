@@ -1,3 +1,4 @@
+from progressor_bridge import current_claims, install_auth_bridge
 import hashlib
 import json
 import math
@@ -31,6 +32,9 @@ ASSETS_DIR = WEBAPP_DIR / "assets"
 ASSETS_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="ГУДы БАДы WebApp")
+install_auth_bridge(app, "supply")
+from progressor_client import install_cache_worker
+install_cache_worker(app, "supply", get_settings().DB_PATH)
 app.mount("/assets", StaticFiles(directory=str(ASSETS_DIR)), name="assets")
 
 
@@ -318,17 +322,22 @@ class NutrientAssistantDraftBody(BaseModel):
 
 
 async def _auth_user_id(init_data: str) -> int:
-    ok, parsed = verify_init_data(init_data, BOT_TOKEN)
-    if not ok:
-        raise HTTPException(status_code=401, detail="Invalid initData")
-    user_raw = parsed.get("user")
-    if not user_raw:
-        raise HTTPException(status_code=401, detail="Missing user in initData")
-    try:
-        user_obj = json.loads(user_raw)
-        tg_user_id = int(user_obj.get("id"))
-    except Exception as exc:
-        raise HTTPException(status_code=401, detail="Invalid user payload") from exc
+    shared = current_claims()
+    if shared:
+        user_obj = shared["user"]
+        tg_user_id = int(shared["sub"])
+    else:
+        ok, parsed = verify_init_data(init_data, BOT_TOKEN)
+        if not ok:
+            raise HTTPException(status_code=401, detail="Invalid initData")
+        user_raw = parsed.get("user")
+        if not user_raw:
+            raise HTTPException(status_code=401, detail="Missing user in initData")
+        try:
+            user_obj = json.loads(user_raw)
+            tg_user_id = int(user_obj.get("id"))
+        except Exception as exc:
+            raise HTTPException(status_code=401, detail="Invalid user payload") from exc
     conn = await db.connect(s.DB_PATH)
     try:
         await db.touch_user(
@@ -758,7 +767,7 @@ async def api_me(x_telegram_init_data: str = Header(default="", alias="X-Telegra
         onboarding_reached_starter_offer = onboarding_status == "done"
         premium = is_admin or premium_active
         webapp_access = is_admin or premium_active or starter_trial_active
-        premium_until = None if is_admin else await db.get_premium_until(conn, tg_user_id)
+        premium_until = None if is_admin else await db.get_effective_premium_until(conn, tg_user_id)
         status = await db.get_user_status(conn, tg_user_id)
         cosmetics = await db.get_user_cosmetics(conn, tg_user_id)
         receipt_email = await db.get_user_receipt_email(conn, tg_user_id)

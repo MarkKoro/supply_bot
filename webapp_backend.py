@@ -32,6 +32,11 @@ ASSETS_DIR = WEBAPP_DIR / "assets"
 ASSETS_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="ГУДы БАДы WebApp")
+
+@app.exception_handler(db.AssistantQuotaExceeded)
+async def assistant_limit_response(request, exc):
+    code='ASSISTANT_ATTEMPT_LIMIT' if str(exc)=='ASSISTANT_ATTEMPT_LIMIT' else 'ASSISTANT_MONTHLY_LIMIT_REACHED'
+    return JSONResponse({'ok':False,'code':code,'message':'Расчёты поступают слишком часто. Попробуйте позже.'},status_code=429)
 install_auth_bridge(app, "supply")
 from progressor_client import install_cache_worker
 install_cache_worker(app, "supply", get_settings().DB_PATH)
@@ -2494,8 +2499,8 @@ async def api_profile_nutrient_assistant_compute(
             job_id = await db.create_assistant_job(conn, tg_user_id, request_json=request_json, debug_id=debug_id, kind="nutrient_compute", monthly_limit=None if is_admin_unlimited else NUTRIENT_ASSISTANT_MONTHLY_LIMIT)
             log.info("nutrient assistant queued tg_user_id=%s job_id=%s debug_id=%s", tg_user_id, job_id, debug_id)
             return JSONResponse({"ok": True, "mode": "queued", "job_id": job_id, "status": "queued", "deduplicated": False})
-    except db.AssistantQuotaExceeded:
-        return JSONResponse({"ok": False, "code": "ASSISTANT_MONTHLY_LIMIT_REACHED"}, status_code=429)
+    except db.AssistantQuotaExceeded as exc:
+        return JSONResponse({"ok": False, "code": str(exc) if str(exc)=="ASSISTANT_ATTEMPT_LIMIT" else "ASSISTANT_MONTHLY_LIMIT_REACHED"}, status_code=429)
     except PipelineError as exc:
         return JSONResponse({"ok": False, "code": exc.code, "stage": exc.stage, "debug_id": debug_id, "message": exc.message}, status_code=503)
     except Exception as exc:

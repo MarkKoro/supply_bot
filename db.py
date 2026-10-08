@@ -10444,6 +10444,14 @@ async def create_assistant_job(
         if existing:
             return int(existing["id"])
         now = utc_now_iso()
+        from progressor_ai_guard import SCHEMA as ATTEMPT_SCHEMA
+        for statement in ATTEMPT_SCHEMA.split(';'):
+            if statement.strip(): await tx.execute(statement)
+        stamp=time.time()
+        await tx.execute('DELETE FROM progressor_ai_attempts WHERE started<? AND expires<?',(stamp-172800,stamp))
+        recent=await fetchall(tx,"SELECT started FROM progressor_ai_attempts WHERE subject=? AND scope='supply_jobs' AND started>=? ORDER BY started DESC",(str(tg_user_id),stamp-86400))
+        if len([r for r in recent if r[0]>stamp-3600])>=6 or len(recent)>=20 or (recent and stamp-recent[0][0]<15):
+            raise AssistantQuotaExceeded("ASSISTANT_ATTEMPT_LIMIT")
         reserved = int(kind == "nutrient_compute")
         if reserved:
             used = await assistant_usage_current_month(tx, tg_user_id)
@@ -10455,6 +10463,8 @@ async def create_assistant_job(
             tg_user_id,status,kind,request_json,debug_id,created_at_utc,updated_at_utc,quota_month,quota_reserved)
             VALUES(?,'queued',?,?,?,?,?,?,?)""",
             (int(tg_user_id),kind,str(request_json or "{}"),str(debug_id or ""),now,now,now[:7],reserved))
+        import uuid
+        await tx.execute("INSERT INTO progressor_ai_attempts(token,subject,scope,started,expires,finished) VALUES(?,?,?,?,?,?)",(uuid.uuid4().hex,str(tg_user_id),'supply_jobs',stamp,stamp,stamp))
         job_id = int(cur.lastrowid)
         await _append_assistant_job_event(tx,job_id,"created",{"status":"queued"})
         return job_id

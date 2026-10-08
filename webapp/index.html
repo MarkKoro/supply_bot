@@ -2859,6 +2859,7 @@
           </div>
           <div id="topbarActions" class="topbar-actions"></div>
         </header>
+        <div id="progressor-inline-host" hidden></div>
         <section id="tabContent" class="fade"></section>
       </div>
       ${renderTabs(false)}
@@ -3046,7 +3047,17 @@
     if (node) root.scrollTop += node.getBoundingClientRect().top - anchor.top;
   }
 
+  window.ProgressorDomain={version:1,
+    hintHost:()=>document.getElementById('progressor-inline-host'),
+    eligible:()=>state.activeTab==='today' && !!state.me,
+    perform:async action=>{
+      if(action.kind!=='supply_catalog' || !['железо','B12'].includes(action.query)) return false;
+      state.catalog.q=action.query; state.catalog.page=0; state.catalog.items=[]; state.catalog.hasMore=true;
+      activateTab('catalog'); await loadCatalog(true); return true;
+    }
+  };
   function renderActiveTab() {
+    window.Progressor?.refreshSurface?.();
     if (activeRenderPointers.size) { scheduleUiRender(renderActiveTab); return; }
     const target = document.getElementById("tabContent");
     if (!target) return;
@@ -6579,6 +6590,8 @@ function adminField(label, field, value, kind='input') {
           showToast('Лимит: после отмены доступен только 1 запрос в день');
         } else if (e.message === 'ASSISTANT_MONTHLY_LIMIT_REACHED') {
           showToast('Достигнут лимит: 5 запросов в месяц');
+        } else if (e.message === 'ASSISTANT_ATTEMPT_LIMIT') {
+          showToast('Слишком частые расчёты. Подождите и попробуйте позже.');
         } else if ((e.code || e.message) === 'ASSISTANT_COMPUTE_ERROR' && String(e.stage || '') === 'call_llm') {
           showToast('Не удалось запустить расчёт. Исправляем формат ответа модели.');
         } else if ((e.code || e.message) === 'ASSISTANT_UPSTREAM_TIMEOUT' || Number(e.httpStatus || 0) === 504 || String(e.message || '') === 'HTTP_504') {

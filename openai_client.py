@@ -676,7 +676,7 @@ def _build_openai_client(
     max_retries: int | None = None,
 ):
     from openai import OpenAI
-    params: dict[str, object] = {"api_key": cfg.api_key}
+    params: dict[str, object] = {"api_key": cfg.api_key, "max_retries": 0, "timeout": 60.0}
     if timeout_s is not None:
         params["timeout"] = timeout_s
     if max_retries is not None:

@@ -2092,6 +2092,35 @@ def _normalize_ai_checkin_extract(raw: dict, transcription: str) -> dict:
         "note": note_text,
     }
 
+from contextvars import ContextVar
+from functools import wraps
+from progressor_ai_guard import acquire as _ai_acquire, finish as _ai_finish, AttemptLimited
+_supply_ai_action=ContextVar('supply_ai_action',default=None)
+
+def _guard_supply_ai(*, text_only=False):
+    def decorate(function):
+        @wraps(function)
+        async def guarded(update,context,*args,**kwargs):
+            uid=update.effective_user.id
+            if text_only and context.user_data.get(WAITING_KEY) not in {'initial_pick_goal',AI_CHECKIN_TEXT_WAIT}:
+                return await function(update,context,*args,**kwargs)
+            if _supply_ai_action.get()==(uid,asyncio.current_task()):
+                return await function(update,context,*args,**kwargs)
+            settings=context.application.bot_data['settings']
+            try:
+                token=await asyncio.to_thread(_ai_acquire,settings.DB_PATH,uid,'supply_guidance',hourly=6,daily=20,cooldown=15)
+            except AttemptLimited as exc:
+                await show(update,context,str(exc),back(),route='menu:ai')
+                return
+            marker=_supply_ai_action.set((uid,asyncio.current_task()))
+            try: return await function(update,context,*args,**kwargs)
+            finally:
+                _supply_ai_action.reset(marker)
+                await asyncio.to_thread(_ai_finish,settings.DB_PATH,token)
+        return guarded
+    return decorate
+
+@_guard_supply_ai()
 async def _finalize_ai_checkin(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -7292,6 +7321,7 @@ async def _handle_lab_text(update, context) -> bool:
 
 
 
+@_guard_supply_ai(text_only=True)
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard_not_banned(update, context):
         return
@@ -8133,6 +8163,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await conn.close()
 
 
+@_guard_supply_ai()
 async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard_not_banned(update, context):
         return

@@ -4,7 +4,7 @@ This repository participates in the Progressor ecosystem. Before changing auth, 
 
 - Preserve the independent supply bot/API/database. Core downtime must not block native domain operations. Do not introduce synchronous Core calls into write transactions.
 - Identity: users.id -> users.tg_user_id; stack/profile/labs/supplement_day_state.user_id uses the INTERNAL id; API helpers convert Telegram ids before SQL. Keep canonical Telegram ids as positive decimal strings at integration boundaries, bounded below 2^63. Never join domains by a local id, name, username, or matching column name alone.
-- The temporary Core adapter is read-only. Changes to source columns/semantics also require reviewing `integrations/progressor_core/progressor_core/adapters.py` in MarkKoro/gym_diary_bot and its integration tests. Core must never write this domain DB.
+- The temporary Core adapter is read-only. Changes to source columns/semantics also require reviewing `progressor_core/adapters.py` in MarkKoro/progressor_core and its integration tests. Core must never write this domain DB.
 - Keep existing native Telegram proof verification and all domain permissions, bans, premium gates, and trainer delegation. The versioned `progressor_bridge.py` only supplies a verified identity; it does not grant domain capabilities.
 - `progressor_bridge.py` is a verbatim copy of Core `shared/domain_bridge.py`. Update the canonical file and all three copies together; test expiration, tampering, audience, user isolation and disabled/native fallback. Signing keys, bot tokens, launch proofs and assertions never belong in Git, URLs, or logs.
 - The shared navigation is served by Core at `/progressor/assets/navigation.v1.js`. Preserve its early launch-context capture and the fallback in this frontend. Do not send its header to another origin. Cross-domain navigation is enabled only after each API bridge is ready.
@@ -19,3 +19,8 @@ This repository participates in the Progressor ecosystem. Before changing auth, 
 - Source export: the native API owns its online backup worker; Core reads only private atomically published DELETE-journal copies. Preserve snapshot freshness rejection and keep export/cache tasks independent. Never widen Core permissions to live database directories.
 
 - Cross-context belongs to the verified personal account. Gym trainer/acting mode keeps Gym AI and must omit trainee Food/Supply data; a native trainer link grants no cross-product delegation.
+
+- Native guidance/AI controls: read [docs/PROGRESSOR_NATIVE.md](docs/PROGRESSOR_NATIVE.md) before editing hints, completion, duration, nutrient actions, providers or attempt limits. Deterministic views/actions must not call AI. Keep canonical ai_guard/workout_metrics copies synchronized; preserve unknown values, paid/consented/fresh gating and account-scoped dismissal. Never infer clinical deficiency, auto-dose or eat back exercise calories.
+
+
+Canonical Core source is now [MarkKoro/progressor_core](https://github.com/MarkKoro/progressor_core), published to main. Its production updater is `update-progressor` (`updatecore`). The former Gym integrations/progressor_core package has been removed. Core application code exists only in the separate Core repository; bots contain only their native adapters and owned data/UX logic. Bot-local shared helper copies still require synchronized bot main commits and native tests. Publish bot changes directly to main with a normal fast-forward update, as requested by the owner.

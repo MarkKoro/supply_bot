@@ -4,7 +4,7 @@ Status: deployed on 2026-10-08 Asia/Bangkok. Core, all three native bridges/cach
 
 ## Independent services and source ownership
 
-Gym, Food, Supply keep independent processes, APIs and databases. The new Core uses its own SQLite at /var/lib/progressor/core.sqlite3 and loopback 8040. Core source is an independently runnable package at `integrations/progressor_core/` in [MarkKoro/gym_diary_bot](https://github.com/MarkKoro/gym_diary_bot). Code is colocated for versioned delivery through the existing authorized repository; domain applications do not import Core, share its DB, or depend on its Python environment. It can later move to a fourth repository without changing contracts.
+Gym, Food, Supply keep independent processes, APIs and databases. The new Core uses its own SQLite at /var/lib/progressor/core.sqlite3 and loopback 8040. Core source is the independently runnable [MarkKoro/progressor_core](https://github.com/MarkKoro/progressor_core) repository, main. The former Gym integrations/progressor_core package is removed. Domain applications do not import Core, share its DB, or depend on its Python environment. The Core updater pulls only this fourth repository; each bot updater pulls its own main.
 
 This domain DB: `/srv/supply_bot/data/supply_bot.sqlite3`. Public routes: /supply/; API /supply/api/ -> 8030 with stripped /supply prefix. Identity: users.id -> users.tg_user_id; stack/profile/labs/supplement_day_state.user_id uses the INTERNAL id; API helpers convert Telegram ids before SQL.
 
@@ -197,3 +197,11 @@ delegated queries preserve native Gym AI but omit cross reads and source labels.
 AI helper defaults cross context off, requiring an explicit personal-scope decision. The shared
 Core panel always represents the launching user's own Telegram subject and is labelled personal
 context. Do not reinterpret a Gym trainer/admin permission as an ecosystem-wide delegation.
+
+
+## Native integration follow-up — 2026-10-08
+
+See [PROGRESSOR_NATIVE.md](PROGRESSOR_NATIVE.md) for owner metrics/duration/idempotency, source-gated inline guidance and actions, seven-day dismissal, scientific bounds and persistent AI attempt controls. The existing identity/auth/subscription/consent/financial rollback contracts remain mandatory. Model/source inputs are conditional; missing profile/time does not become invented calories. Browser emulation is distinct from a real Telegram/iPhone check.
+
+
+Canonical Core source is now [MarkKoro/progressor_core](https://github.com/MarkKoro/progressor_core), published to main. Its production updater is `update-progressor` (`updatecore`). The former Gym integrations/progressor_core package has been removed. Core application code exists only in the separate Core repository; bots contain only their native adapters and owned data/UX logic. Bot-local shared helper copies still require synchronized bot main commits and native tests. Publish bot changes directly to main with a normal fast-forward update, as requested by the owner.

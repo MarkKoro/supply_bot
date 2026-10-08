@@ -186,3 +186,14 @@ Targeted rollback state/code/config is /root/progressor-deployments/20261007-pro
 script /root/rollback_progressor_20261007.py defaults to disabling new features while preserving
 financial compatibility. Do not restore DBs for code rollback. Public HTML/JS must remain 0644
 and their static directories 0755 for Nginx; root-only recovery/config writes use private modes.
+
+
+## Personal-account scope and Gym trainer mode
+
+A native accepted Gym trainer link permits its existing Gym actions only. It does not
+authorize reading the trainee's Food/Supply subscriptions, diet, profile or supplement data.
+Gym AI passes cross context only for the verified personal account (ctx.is_acting is false);
+delegated queries preserve native Gym AI but omit cross reads and source labels. The internal
+AI helper defaults cross context off, requiring an explicit personal-scope decision. The shared
+Core panel always represents the launching user's own Telegram subject and is labelled personal
+context. Do not reinterpret a Gym trainer/admin permission as an ecosystem-wide delegation.

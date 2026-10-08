@@ -10,7 +10,7 @@ from telegram.ext import ApplicationHandlerStop
 import progressor_bot as module
 import progressor_client as client
 
-SOURCE={'food_bot':'food','gym_diary_bot':'gym','supply_bot':'supply'}[Path(__file__).resolve().parents[1].name]
+SOURCE='supply'  # Owner contract; deployment/worktree folder names are arbitrary.
 class NativeBundleHandlers(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tmp=tempfile.TemporaryDirectory(dir=os.getenv('PROGRESSOR_TEST_TMP_DIR'));self.path=str(Path(self.tmp.name)/'owner.db')

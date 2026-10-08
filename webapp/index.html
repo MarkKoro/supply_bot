@@ -2344,6 +2344,7 @@
           <div class="muted" style="margin-top:8px">Без подписки вам по-прежнему доступны бот и каталог внутри бота. В подписке: «Сегодня» • «Каталог» • «Карта органов» • ИИ-опрос • расширенный трекинг и напоминания.</div>
         </div>
 
+        <div id="progressor-inline-host" hidden></div>
         <div class="plans">${plansHtml || '<div class="card">Планы пока недоступны.</div>'}</div>
       </div>
       ${renderTabs(true)}
@@ -2352,6 +2353,7 @@
     appEl.querySelectorAll("[data-plan]").forEach((el) => {
       el.addEventListener("click", () => purchase(el.dataset.plan, el.dataset.method, el));
     });
+    window.Progressor?.refreshSurface?.();
     appEl.querySelectorAll("[data-open-bot-start]").forEach((el) => {
       el.addEventListener("click", () => {
         haptic();

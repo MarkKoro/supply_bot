@@ -33,7 +33,7 @@ Flag: `PROGRESSOR_AUTH_ENABLED=1`; key path: `PROGRESSOR_SIGNING_KEY_FILE=/etc/p
 1. Completed Gym workout -> Core -> Food current-day activity card, with source/day basis and missing duration/energy explanation. Food targets are not silently changed.
 2. Food history -> Core deterministic averages -> Supply context/recommendation comparing recorded protein with the user's current personal Food target. At least 3 logged completed days within 7; 80% is a display rule against a personal goal, not a medical threshold. Missing days are excluded, never interpreted as no food. Recommendations have rule version, provenance, calculation, coverage, uncertainty and stable history id.
 3. Food automatically estimated micronutrients/other nutrients -> Core aggregates by nutrient and recorded day -> shared Supply context. Missing observations remain unknown and unit/form ambiguity is rejected. There are no micronutrient deficiency claims or automatic supplement prescriptions.
-4. Supply stack/intake/lab metadata -> authenticated shared context in Gym/Food. Domain data is not mutually overwritten. No extra Telegram consumer or unsolicited notification sender exists; notification routing records webapp_only.
+4. Supply stack/intake/lab metadata -> authenticated shared context in Gym/Food. Domain data is not mutually overwritten. No extra Telegram consumer exists. The existing Food bot can send separately opted-in reminders with daily/weekly limits; the new contract is in NATIVE_GROWTH.md.
 
 ## Tests, diagnostics, migration and recovery
 
@@ -205,3 +205,6 @@ See [PROGRESSOR_NATIVE.md](PROGRESSOR_NATIVE.md) for owner metrics/duration/idem
 
 
 Canonical Core source is now [MarkKoro/progressor_core](https://github.com/MarkKoro/progressor_core), published to main. Its production updater is `update-progressor` (`updatecore`). The former Gym integrations/progressor_core package has been removed. Core application code exists only in the separate Core repository; bots contain only their native adapters and owned data/UX logic. Bot-local shared helper copies still require synchronized bot main commits and native tests. Publish bot changes directly to main with a normal fast-forward update, as requested by the owner.
+
+
+Native follow-up: [NATIVE_GROWTH.md](NATIVE_GROWTH.md). Profile/notification/offer tables are additive and owner-scoped; code rollback never replaces live DBs.

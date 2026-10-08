@@ -39,7 +39,7 @@ async def assistant_limit_response(request, exc):
     return JSONResponse({'ok':False,'code':code,'message':'Расчёты поступают слишком часто. Попробуйте позже.'},status_code=429)
 install_auth_bridge(app, "supply")
 from progressor_client import install_cache_worker
-install_cache_worker(app, "supply", get_settings().DB_PATH)
+install_cache_worker(app, "supply", get_settings().DB_PATH,lambda:{'RUB':get_settings().PREMIUM_PRICES_RUB['m1'],'XTR':get_settings().PREMIUM_PRICES_STARS['m1']})
 app.mount("/assets", StaticFiles(directory=str(ASSETS_DIR)), name="assets")
 
 

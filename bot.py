@@ -2688,6 +2688,30 @@ async def _show_premium_hub(
     )
     await show(update, context, text, premium_plans_kb(plans, s.WEBAPP_URL, back_cb=back_cb), route=route)
 
+async def _progressor_render(update,context,text,markup):
+    return await show(update,context,html.escape(text),markup,route='menu:home')
+
+async def _progressor_scheduled_send(application,user_id,text,markup):
+    from types import SimpleNamespace
+    from telegram.ext import CallbackContext
+    update=SimpleNamespace(effective_chat=SimpleNamespace(id=user_id,type='private'),effective_user=SimpleNamespace(id=user_id),callback_query=None)
+    context=CallbackContext(application,chat_id=user_id,user_id=user_id)
+    from progressor_bot import notification_preflight,NotificationDeferred
+    notification_preflight(application,user_id,'supply')
+    conn=await db.connect(application.bot_data['settings'].DB_PATH)
+    try:
+        _,screen,payload=await db.get_ui_state(conn,user_id)
+        if _progressor_input_route(screen,payload):raise NotificationDeferred
+    finally:await conn.close()
+    return await _progressor_render(update,context,text,markup)
+
+def _progressor_input_route(screen,payload=None):
+    try:data=json.loads(payload) if isinstance(payload,str) else payload or {}
+    except (ValueError,TypeError):data={}
+    if not isinstance(data,dict):data={}
+    if screen==AI_CHECKIN_ROUTE:return data.get('screen') not in ('results','selection')
+    return bool(screen) and ((screen.startswith('onboard:') and screen not in ('onboard:results','onboard:restart_confirm')) or screen.startswith(('my:setdose:','my:setnote:','my:settime:','mysupp:set_dose:','supplement:set_time:','supplement:set_override:','mysupp:addslot:newtime:','add:')) or screen in (AI_CHECKIN_VOICE_ROUTE,'checkin_voice'))
+
 async def _show_starter_trial_offer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     lines = [
         "🎁 <b>3 дня полного доступа</b>",
@@ -3216,7 +3240,10 @@ async def daily_rollover_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 updates,
             )
             await conn.commit()
-        expired_due = await db.list_users_with_access_expired_notice_due(conn, limit=300)
+        from progressor_client import configured
+        # Common financial events are coordinated by one sender. Never race the
+        # old native post-expiry sender against the common three-day warning.
+        if not configured():expired_due = await db.list_users_with_access_expired_notice_due(conn, limit=300)
     finally:
         await conn.close()
 
@@ -3261,6 +3288,12 @@ async def daily_rollover_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 async def reminder_fire_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     data = context.job.data or {}
     tg_user_id = int(data.get("tg_user_id"))
+    if data.get('deferred_day'):
+        conn=await db.connect(context.application.bot_data['settings'].DB_PATH)
+        try:
+            row=await db.fetchone(conn,'SELECT tz_name FROM users WHERE tg_user_id=?',(tg_user_id,))
+            if not row or db.get_user_local_date(row[0] or 'UTC')!=data['deferred_day']:return
+        finally:await conn.close()
     supplement_ids = data.get("supplement_ids")
     if isinstance(supplement_ids, list) and supplement_ids:
         await reminder_fire_batch(context, tg_user_id, supplement_ids, is_snooze=True)
@@ -3346,6 +3379,9 @@ async def reminder_fire_batch(
     supplement_ids: list[int],
     *,
     is_snooze: bool = False,
+    page: int = 0,
+    interactive_update=None,
+    interactive_context=None,
 ) -> None:
     s = context.application.bot_data["settings"]
     conn = await db.connect(s.DB_PATH)
@@ -3372,8 +3408,26 @@ async def reminder_fire_batch(
 
         previous_reminder_msg_id = int(payload_data.get("reminder_msg_id") or 0)
 
+        if interactive_update is None:
+            from progressor_bot import notification_preflight,NotificationDeferred
+            try:
+                notification_preflight(context.application,tg_user_id,'supply')
+                if _progressor_input_route(ui_screen,payload_data):raise NotificationDeferred
+            except NotificationDeferred:
+                # The existing queue owns the retry. No send or input state change.
+                if context.application.job_queue:
+                    name=f'progressor_deferred_reminder:{tg_user_id}'
+                    ids=list(supplement_ids)
+                    for job in context.application.job_queue.get_jobs_by_name(name):
+                        ids.extend((job.data or {}).get('supplement_ids',[]));job.schedule_removal()
+                    context.application.job_queue.run_once(reminder_fire_job,when=60,name=name,data={'tg_user_id':tg_user_id,'supplement_ids':list(dict.fromkeys(ids)),'deferred_day':db.get_user_local_date(user_row['tz_name'] or 'UTC')})
+                return
+
         entries: list[dict] = []
         day = db.get_user_local_date(user_row['tz_name'] or 'UTC')
+        if payload_data.get('reminder_day')==day:
+            pending=payload_data.get('reminder_all_ids') or []
+            supplement_ids=list(dict.fromkeys([*supplement_ids,*[int(v) for v in pending if str(v).isdigit()]]))
         slots = {str(slot['slot_id']): slot for slot in await db.get_user_slots(conn, int(user_row['id']))}
         schedules = await db.get_user_schedule_map(conn, int(user_row['id']))
         for supplement_id in dict.fromkeys(supplement_ids):
@@ -3403,23 +3457,37 @@ async def reminder_fire_batch(
 
         target_chat_id = int(user_row["last_chat_id"] or 0) or tg_user_id
         groups = _reminder_groups(entries, day)
-        new_messages = []
-        for index, group in enumerate(groups):
-            lines = ["⏰ <b>Напоминание</b>" + (f" · Часть {index + 1}/{len(groups)}" if len(groups) > 1 else ""), "Пора принять:"]
-            lines.extend(f"• <b>{_reminder_preview(item['name'], 200)}</b> — {_reminder_preview(item['dose'], 220)}" for item in group)
-            if any(len(_escaped_text_chunks(item['dose'], 220)) > 1 for item in group):
-                lines.append("\nПолная запись — по кнопке с названием добавки.")
-            msg = await context.bot.send_message(chat_id=target_chat_id, text='\n'.join(lines), reply_markup=_reminder_batch_actions([item['id'] for item in group], day=day, records=group), parse_mode="HTML", disable_web_page_preview=True)
-            new_messages.append({'message_id': int(msg.message_id), 'chat_id': target_chat_id})
+        page=max(0,min(int(page),len(groups)-1));group=groups[page]
+        lines=["⏰ <b>Напоминание</b>"+(f' · {page+1}/{len(groups)}' if len(groups)>1 else ''),'Пора принять:']
+        lines.extend(f"• <b>{_reminder_preview(item['name'],160)}</b> — {_reminder_preview(item['dose'],160)}" for item in group)
+        lines.append('\nПолная запись — по кнопке с названием добавки.')
+        buttons=[list(row) for row in _reminder_batch_actions([item['id'] for item in group],day=day,records=group).inline_keyboard]
+        if len(groups)>1:
+            nav=[]
+            if page:nav.append(InlineKeyboardButton('◀️',callback_data=f'rem:page:{page-1}:{day}'))
+            if page+1<len(groups):nav.append(InlineKeyboardButton('▶️',callback_data=f'rem:page:{page+1}:{day}'))
+            buttons.append(nav);lines.append('Отметки и перенос времени применяются к позициям на этой странице.')
+        from progressor_supply_hints import prepare
+        hint=await prepare(s.DB_PATH,tg_user_id) if page==0 else None
+        if hint:
+            lines.append(html.escape(hint['text']))
+            if hint['catalog']:buttons.append([InlineKeyboardButton('Уже принимаю — записать',callback_data='pgnut:'+hint['catalog'])])
+        buttons.append([InlineKeyboardButton('В меню',callback_data='menu:home')])
+        from types import SimpleNamespace
+        from telegram.ext import CallbackContext
+        scheduled_update=SimpleNamespace(effective_chat=SimpleNamespace(id=target_chat_id,type='private'),effective_user=SimpleNamespace(id=tg_user_id),callback_query=None)
+        owned_context=CallbackContext(context.application,chat_id=target_chat_id,user_id=tg_user_id)
+        msg=await show(interactive_update or scheduled_update,interactive_context or owned_context,'\n'.join(lines),InlineKeyboardMarkup(buttons),route='menu:home')
+        new_messages=[{'message_id':int(msg.message_id),'chat_id':target_chat_id}]
         previous_messages = payload_data.get('reminder_messages')
         if not isinstance(previous_messages, list):
             previous_messages = []
         if not previous_messages and previous_reminder_msg_id > 0:
             previous_messages = [{'message_id': previous_reminder_msg_id, 'chat_id': int(payload_data.get('reminder_chat_id') or 0) or target_chat_id}]
-        same_day = payload_data.get('reminder_day') == day
-        for previous in ([] if same_day else previous_messages):
+        for previous in previous_messages:
             if not isinstance(previous, dict) or not str(previous.get('message_id') or '').isdigit() or not str(previous.get('chat_id') or '').lstrip('-').isdigit():
                 continue
+            if int(previous['message_id'])==int(msg.message_id) and int(previous['chat_id'])==target_chat_id:continue
             try:
                 await context.bot.delete_message(chat_id=int(previous['chat_id']), message_id=int(previous['message_id']))
             except Exception:
@@ -3436,13 +3504,41 @@ async def reminder_fire_batch(
                 current_payload = {}
             current_payload['reminder_msg_id'] = int(msg.message_id)
             current_payload['reminder_chat_id'] = target_chat_id
-            current_payload['reminder_batch_ids'] = [item['id'] for item in groups[-1]]
-            current_messages = current_payload.get('reminder_messages') if current_payload.get('reminder_day') == day else []
-            current_payload['reminder_messages'] = (current_messages if isinstance(current_messages, list) else []) + new_messages
+            current_payload['reminder_batch_ids'] = [item['id'] for item in group]
+            current_payload['reminder_all_ids'] = [item['id'] for item in entries]
+            current_payload['reminder_page'] = page
+            current_payload['reminder_messages'] = new_messages
             current_payload['reminder_day'] = day
             await db.save_ui_state(tx, tg_user_id, current_message, current_screen, json.dumps(current_payload, ensure_ascii=False))
     finally:
         await conn.close()
+
+async def on_progressor_supply_action(update,context):
+    from telegram.ext import ApplicationHandlerStop
+    try:
+        q=update.callback_query
+        if not update.effective_chat or update.effective_chat.type!='private':return
+        if not await guard_not_banned(update,context):return
+        uid=update.effective_user.id;s=context.application.bot_data['settings']
+        conn=await db.connect(s.DB_PATH)
+        try:
+            if q.data.startswith('pgnut:'):
+                query={'iron':'железо','b12':'B12'}.get(q.data.split(':')[-1])
+                await q.answer()
+                if query:await render_search_results(update,context,conn,tg_uid=uid,query=query,page=0,return_page=0)
+                return
+            _,_,page,day=q.data.split(':');page=int(page)
+            message_id,_,raw=await db.get_ui_state(conn,uid);payload=json.loads(raw or '{}')
+            row=await db.fetchone(conn,'SELECT tz_name FROM users WHERE tg_user_id=?',(uid,))
+            today=db.get_user_local_date(row['tz_name'] or 'UTC') if row else None
+            if page<0 or not q.message or message_id!=q.message.message_id or payload.get('reminder_msg_id')!=q.message.message_id or payload.get('reminder_day')!=day or today!=day:
+                await q.answer('Это напоминание устарело. Откройте актуальный план дня.');return
+            ids=[int(v) for v in payload.get('reminder_all_ids',[]) if str(v).isdigit()]
+            await q.answer()
+        finally:await conn.close()
+        await reminder_fire_batch(context,uid,ids,page=page,interactive_update=update,interactive_context=context)
+    except (ValueError,KeyError,TypeError):return
+    finally:raise ApplicationHandlerStop
 
 async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard_not_banned(update, context):
@@ -6404,6 +6500,8 @@ async def on_reminder_action(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 payload_data = {}
             is_latest = message_id > 0 and message_id == int(payload_data.get('reminder_msg_id') or 0) and message_chat_id == int(payload_data.get('reminder_chat_id') or tg_uid)
             if is_latest:
+                if isinstance(payload_data.get('reminder_all_ids'),list):
+                    payload_data['reminder_all_ids']=[sid for sid in payload_data['reminder_all_ids'] if sid not in effective_batch_ids]
                 for key in ('reminder_msg_id', 'reminder_chat_id', 'reminder_batch_ids'):
                     payload_data.pop(key, None)
             pending_messages = payload_data.get('reminder_messages')
@@ -6413,6 +6511,10 @@ async def on_reminder_action(update: Update, context: ContextTypes.DEFAULT_TYPE)
     finally:
         await conn.close()
 
+    remaining=payload_data.get('reminder_all_ids') or []
+    if ui_screen=='menu:home' and is_latest and remaining:
+        await reminder_fire_batch(context,tg_uid,[int(sid) for sid in remaining if str(sid).isdigit()],page=int(payload_data.get('reminder_page') or 0),interactive_update=update,interactive_context=context)
+        return
     if q.message:
         try:
             await q.message.delete()
@@ -8818,7 +8920,8 @@ async def _bootstrap() -> Application:
     app.bot_data["render_route"] = _render_route
 
     from progressor_bot import install as install_progressor
-    install_progressor(app, "supply", s.DB_PATH)
+    install_progressor(app, "supply", s.DB_PATH,render=_progressor_render,back_callback='menu:home',notify=lambda uid,text,kb:_progressor_scheduled_send(app,uid,text,kb))
+    app.add_handler(CallbackQueryHandler(on_progressor_supply_action,pattern=r'^(rem:page:|pgnut:)'),group=-10)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler(['labs', 'analyses'], on_labs))
     app.add_handler(CommandHandler("premium", premium_command))

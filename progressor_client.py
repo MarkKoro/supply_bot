@@ -17,9 +17,11 @@ from contextlib import closing
 from datetime import datetime,timezone
 from pathlib import Path
 from urllib.parse import urlparse
-import httpx
+
+FINANCIAL_SCHEDULE = 2
 
 SCHEMA = '''CREATE TABLE IF NOT EXISTS progressor_bundle_cache(user_id TEXT PRIMARY KEY,expires_at TEXT NOT NULL,revision INTEGER NOT NULL,updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS progressor_bundle_schedules(user_id TEXT PRIMARY KEY,revision INTEGER NOT NULL,intervals TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS progressor_payment_outbox(receipt_id TEXT PRIMARY KEY,body TEXT NOT NULL,created_at TEXT NOT NULL,delivered INTEGER NOT NULL DEFAULT 0);'''
 
 def canonical(value): return json.dumps(value,sort_keys=True,separators=(',',':'),ensure_ascii=False,allow_nan=False)
@@ -47,6 +49,7 @@ def verify_control(token,path,body,key,now=None):
 def configured(): return os.getenv('PROGRESSOR_CLIENT_ENABLED','0')=='1'
 
 async def call(source,path,body,timeout=1.5):
+    import httpx
     if not configured(): raise RuntimeError('progressor_disabled')
     origin=os.getenv('PROGRESSOR_INTERNAL_URL','http://127.0.0.1:8040')
     parsed=urlparse(origin)
@@ -71,22 +74,38 @@ def bundle_until(db_path,user_id):
     if not configured(): return None
     try:
         with closing(sqlite3.connect(Path(db_path).resolve().as_uri()+'?mode=ro',uri=True,timeout=.5)) as conn:
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE name='progressor_bundle_schedules'").fetchone():
+                schedule=conn.execute('SELECT intervals,revision FROM progressor_bundle_schedules WHERE user_id=?',(str(user_id),)).fetchone()
+                cache=conn.execute('SELECT revision FROM progressor_bundle_cache WHERE user_id=?',(str(user_id),)).fetchone()
+                if schedule and cache and schedule[1]==cache[0]:
+                    now=datetime.now(timezone.utc)
+                    values=[parse_until(r['expires_at']) for r in json.loads(schedule[0]) if parse_until(r['starts_at'])<=now<parse_until(r['expires_at'])]
+                    return max(values) if values else None
             row=conn.execute('SELECT expires_at FROM progressor_bundle_cache WHERE user_id=?',(str(user_id),)).fetchone()
             value=parse_until(row[0]) if row else None
             return value if value and value>datetime.now(timezone.utc) else None
-    except sqlite3.Error: return None
+    except (sqlite3.Error,ValueError,TypeError,KeyError): return None
 
 def ensure_schema(db_path):
     with closing(sqlite3.connect(db_path,timeout=5)) as conn:
         conn.executescript(SCHEMA); conn.commit()
 
-def apply_grants(db_path,items):
+def apply_grants(db_path,items,source=None):
     with closing(sqlite3.connect(db_path,timeout=5)) as conn:
         with conn:
             for row in items:
                 if not str(row['user_id']).isdecimal() or not 0<int(row['user_id'])<2**63 or not parse_until(row['expires_at']) or type(row['revision']) is not int or row['revision']<1: raise ValueError('invalid_grant')
                 old=conn.execute('SELECT expires_at,revision FROM progressor_bundle_cache WHERE user_id=?',(str(row['user_id']),)).fetchone()
                 if old and old[1]==row['revision'] and old[0]!=row['expires_at']: raise ValueError('grant_revision_conflict')
+                if 'intervals' in row:
+                    if source and row.get('source')!=source:raise ValueError('grant_source_mismatch')
+                    intervals=row['intervals']
+                    if not isinstance(intervals,list) or len(intervals)>1000 or any(not parse_until(r.get('starts_at')) or not parse_until(r.get('expires_at')) or not parse_until(r['starts_at'])<parse_until(r['expires_at']) for r in intervals):raise ValueError('invalid_grant_schedule')
+                    value=canonical(intervals)
+                    previous=conn.execute('SELECT revision,intervals FROM progressor_bundle_schedules WHERE user_id=?',(str(row['user_id']),)).fetchone()
+                    if previous and previous[0]==row['revision'] and previous[1]!=value:raise ValueError('grant_revision_conflict')
+                    if not old or row['revision']>=old[1]:
+                        conn.execute('INSERT INTO progressor_bundle_schedules VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET revision=excluded.revision,intervals=excluded.intervals WHERE excluded.revision>progressor_bundle_schedules.revision',(str(row['user_id']),row['revision'],value))
                 conn.execute('INSERT INTO progressor_bundle_cache VALUES(?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET expires_at=excluded.expires_at,revision=excluded.revision,updated_at=excluded.updated_at WHERE excluded.revision>progressor_bundle_cache.revision',(str(row['user_id']),row['expires_at'],row['revision'],datetime.now(timezone.utc).isoformat()))
 
 def record_receipt(db_path,body):
@@ -104,7 +123,7 @@ async def sync(source,db_path):
     cursor=''
     while True:
         response=await call(source,'/internal/v1/grants',{'after':cursor})
-        await asyncio.to_thread(apply_grants,db_path,response['items'])
+        await asyncio.to_thread(apply_grants,db_path,response['items'],source)
         if not response.get('next'): break
         cursor=response['next']
 
@@ -138,13 +157,17 @@ def publish_source_snapshot(db_path,destination):
     finally:
         if temporary and temporary.exists():temporary.unlink()
 
-async def source_snapshot_worker(source,db_path,destination):
+async def source_snapshot_worker(source,db_path,destination,monthly_prices=None):
     while True:
-        try:await asyncio.to_thread(publish_source_snapshot,db_path,destination)
+        try:
+            if monthly_prices:
+                from progressor_native_subscription import prepare_metadata
+                await asyncio.to_thread(prepare_metadata,db_path,source,monthly_prices())
+            await asyncio.to_thread(publish_source_snapshot,db_path,destination)
         except Exception:logging.getLogger('progressor_client').warning('source_snapshot_unavailable source=%s',source)
         await asyncio.sleep(30)
 
-def install_cache_worker(app,source,db_path):
+def install_cache_worker(app,source,db_path,monthly_prices=None):
     if not configured(): return
     from contextlib import asynccontextmanager
     original=app.router.lifespan_context
@@ -163,7 +186,7 @@ def install_cache_worker(app,source,db_path):
                 if source not in ('gym','food','supply'):raise ValueError('invalid_snapshot_source')
                 root=Path('/var/lib/progressor-sources')
                 if root.is_symlink():raise ValueError('unsafe_snapshot_root')
-                snapshot_task=asyncio.create_task(source_snapshot_worker(source,db_path,root/source/'source.sqlite3'))
+                snapshot_task=asyncio.create_task(source_snapshot_worker(source,db_path,root/source/'source.sqlite3',monthly_prices))
             try: yield
             finally:
                 task.cancel()

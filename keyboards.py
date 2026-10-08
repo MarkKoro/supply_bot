@@ -1098,6 +1098,7 @@ def premium_plans_kb(
         else:
             rows.append([InlineKeyboardButton(title, callback_data=f"premium:buy:{plan_id}:yookassa")])
     rows.append([InlineKeyboardButton("⭐ Купить в звездах", callback_data="premium:stars_menu")])
+    rows.append([InlineKeyboardButton("Общая подписка · доплатить",callback_data="pg:menu")])
     if show_about:
         rows.append([InlineKeyboardButton("📦 Что входит", callback_data="premium:about")])
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=back_cb)])
@@ -1105,7 +1106,7 @@ def premium_plans_kb(
 
 
 def premium_stars_kb(plans: list[dict], back_cb: str = "menu:premium") -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = []
+    rows: list[list[InlineKeyboardButton]] = [[InlineKeyboardButton("Общая подписка · доплатить",callback_data="pg:menu")]]
     for plan in plans:
         plan_id = str(plan.get("plan_id") or "")
         stars = int(plan.get("stars") or 0)

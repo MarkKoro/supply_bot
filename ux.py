@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json
+import asyncio
 from telegram import Update, InlineKeyboardMarkup, Message
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
@@ -7,6 +8,7 @@ from telegram.ext import ContextTypes
 import db
 
 _last_screen: dict[int, int] = {}
+_screen_locks: dict[int,asyncio.Lock] = {}
 
 TODAY_STATUS_TAKEN = "✅ Отмечено: выпил(а) сегодня"
 TODAY_STATUS_SKIPPED = "✖️ Отмечено: не выпил(а) сегодня"
@@ -158,7 +160,7 @@ async def _persist_last_state(
                 except json.JSONDecodeError:
                     previous = {}
                 if isinstance(previous, dict):
-                    for key in ('reminder_msg_id', 'reminder_chat_id', 'reminder_batch_ids', 'reminder_messages', 'reminder_day'):
+                    for key in ('reminder_msg_id', 'reminder_chat_id', 'reminder_batch_ids', 'reminder_messages', 'reminder_day','reminder_all_ids','reminder_page'):
                         if key in previous:
                             payload_data[key] = previous[key]
                         else:
@@ -167,7 +169,13 @@ async def _persist_last_state(
     finally:
         await conn.close()
 
-async def show(
+async def show(update,context,text,kb=None,**kwargs):
+    chat_id=update.effective_chat.id if update.effective_chat else None
+    if chat_id is None:raise RuntimeError('No chat_id')
+    async with _screen_locks.setdefault(chat_id,asyncio.Lock()):
+        return await _show_unlocked(update,context,text,kb,**kwargs)
+
+async def _show_unlocked(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
     text: str,
@@ -182,9 +190,21 @@ async def show(
     chat_id = update.effective_chat.id if update.effective_chat else None
     if chat_id is None:
         raise RuntimeError("No chat_id")
+    if chat_id not in _last_screen and update.effective_user:
+        settings=context.application.bot_data.get('settings')
+        if settings:
+            conn=await db.connect(settings.DB_PATH)
+            try:
+                previous_chat,previous_message=await db.get_user_last_msg(conn,update.effective_user.id)
+                if previous_chat==chat_id and previous_message:_last_screen[chat_id]=previous_message
+            finally:await conn.close()
 
     target_chat = target_chat_id or chat_id
     target_message = target_message_id
+    q=update.callback_query
+    owned=_last_screen.get(chat_id)
+    if target_message is None and q and q.message and owned and q.message.message_id!=owned:
+        target_message=owned
 
     if target_message is not None:
         try:
@@ -255,10 +275,8 @@ async def show(
         message_id=msg.message_id,
     )
     if prev and prev != msg.message_id:
-        try:
-            await context.bot.delete_message(chat_id=chat_id, message_id=prev)
-        except Exception:
-            pass
+        from progressor_bot import retire_owned_menu
+        await retire_owned_menu(context.bot,chat_id,prev)
     return msg
 
 async def restore_last_screen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

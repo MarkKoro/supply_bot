@@ -2797,6 +2797,7 @@ async def extend_premium(
     months: int,
     source: str,
     plan_id: str,
+    paid_grant: dict | None = None,
 ) -> str:
     async with transaction(conn) as conn:
         if months <= 0:
@@ -2811,6 +2812,9 @@ async def extend_premium(
         if starter_until is not None and starter_until > now:
             starter_carryover = starter_until - now
         new_until = _add_months_utc(baseline, months)
+        if paid_grant:
+            from progressor_native_subscription import record_paid_async
+            await record_paid_async(conn,paid_grant['grant_id'],tg_user_id,baseline,new_until,paid_grant['currency'],paid_grant['amount'])
         if starter_carryover.total_seconds() > 0:
             new_until = new_until + starter_carryover
         until_value = await set_premium_until(conn, tg_user_id, new_until, source, plan_id)
@@ -3145,7 +3149,9 @@ async def activate_subscription_payment(
         )
         if not inserted:
             return False, await get_premium_until(tx, tg_user_id)
-        until = await extend_premium(tx, tg_user_id, months, source=provider, plan_id=plan_id)
+        proof=await fetchone(tx,"SELECT id,currency,amount FROM payments WHERE telegram_payment_charge_id=? OR provider_payment_charge_id=? ORDER BY id DESC LIMIT 1",(payment_fields.get('telegram_payment_charge_id'),payment_fields.get('provider_payment_charge_id')))
+        grant={'grant_id':'supply:'+str(proof['id']),'currency':proof['currency'],'amount':int(proof['amount'])} if proof else None
+        until = await extend_premium(tx, tg_user_id, months, source=provider, plan_id=plan_id,paid_grant=grant)
         return True, until
 
 

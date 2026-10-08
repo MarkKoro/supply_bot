@@ -208,3 +208,6 @@ Canonical Core source is now [MarkKoro/progressor_core](https://github.com/MarkK
 
 
 Native follow-up: [NATIVE_GROWTH.md](NATIVE_GROWTH.md). Profile/notification/offer tables are additive and owner-scoped; code rollback never replaces live DBs.
+
+
+Telegram follow-up: [BOT_NATIVE.md](BOT_NATIVE.md) documents personal remaining-period credit, source-local schedules, one expiry sender, native menu ownership and financial epoch recovery.

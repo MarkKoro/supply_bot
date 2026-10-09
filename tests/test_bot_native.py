@@ -33,6 +33,18 @@ class NativeBundleHandlers(unittest.IsolatedAsyncioTestCase):
         args=self.render.call_args.args;self.assertIn('зачтено 173',args[2]);self.assertIn('уже доступны',args[2])
         callbacks=[b.callback_data for row in args[3].inline_keyboard for b in row]
         self.assertIn('pg:buy:align',callbacks);self.assertNotIn('pg:buy:m3',callbacks);self.assertIn('owner:menu',callbacks)
+    async def test_rub_and_stars_pairs_show_own_access_and_personal_credit(self):
+        catalog={'rub_available':True,'website_url':'https://example.test/progressor/subscribe',
+                 'subscriptions':{'products':[{'name':'Food','state':'active','expires_at':'2030-01-01T00:00:00Z'},{'name':'Supply','state':'inactive'}]},
+                 'plans':[{'id':'m1','label':'30 дней','RUB':43000,'XTR':277,'prices':{'XTR':{'already_covered':False,'credit_amount':173},'RUB':{'already_covered':False,'credit_amount':26900}}}]}
+        with patch.object(client,'call',AsyncMock(return_value=catalog)):await self.invoke('callback')
+        text=self.render.call_args.args[2];keyboard=self.render.call_args.args[3]
+        self.assertIn('Food — ✓ Доступ активен',text);self.assertIn('Supply — Нет подписки',text)
+        self.assertIn('430 ₽ / 277 ⭐',text);self.assertIn('269 ₽ / 173 ⭐',text)
+        pair=keyboard.inline_keyboard[0];self.assertEqual(len(pair),2)
+        self.assertEqual(pair[0].url,'https://example.test/progressor/subscribe?source='+SOURCE+'&plan=m1')
+        self.assertEqual(pair[1].callback_data,'pg:buy:m1')
+        self.assertEqual(self.render.await_count,1)
     async def test_invoice_button_uses_actual_reserved_id_and_no_extra_invoice_message(self):
         self.q.data='pg:buy:m1'
         call=AsyncMock(side_effect=[self.order(),{'invoice_url':'https://t.me/$offline'}])

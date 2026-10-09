@@ -2315,7 +2315,7 @@
             <strong>${planLabel}</strong>
           </div>
           <div style="margin-top:8px; display:grid; gap:8px;">
-            ${p.rub_enabled ? `<button class="btn secondary" data-plan="${p.plan_id}" data-method="yookassa" data-source="paywall">${rub !== null ? `${rub} ₽` : 'Купить в рублях'}</button>` : ""}
+            ${p.rub_enabled ? `<button class="btn" data-plan="${p.plan_id}" data-method="yookassa" data-source="paywall">${rub !== null ? `${rub} ₽` : 'Купить в рублях'}</button>` : ""}
             ${p.stars_enabled ? `<button class="btn" data-plan="${p.plan_id}" data-method="stars">${p.price_stars || "—"} ⭐</button>` : ""}
           </div>
         </div>
@@ -3050,6 +3050,8 @@
   }
 
   window.ProgressorDomain={version:1,
+    subscriptionPlans:async()=>{if(!state.me)state.me=await api('api/me');return (state.me.plans||[]).map(p=>({id:p.plan_id,label:planNameRu(p.plan_id,p.months),RUB:p.rub_enabled?p.price_rub:0,XTR:p.stars_enabled?p.price_stars:0}));},
+    purchaseSubscription:(id,currency,button)=>purchase(id,currency==='XTR'?'stars':'yookassa',button),
     hintHost:()=>document.getElementById('progressor-inline-host'),
     eligible:()=>state.activeTab==='today' && !!state.me,
     perform:async action=>{

@@ -29,3 +29,5 @@ For native subscription examples, both exercise surfaces, profile reconciliation
 
 
 Native Telegram subscriptions and expiry: read [docs/BOT_NATIVE.md](docs/BOT_NATIVE.md) before payment grants/tariffs, source schedules, notifications or native menus. Canonical native_subscription helper requires synchronized all3 mirrors. After v2 gate/order, forbid Core protocol<2 or client schedule<2 rollback. Always preserve financial/user DB records; use native renderers and defer busy flows.
+
+Subscription screen and camera pipeline: read [docs/SUBSCRIPTIONS_AND_FOOD_PHOTOS.md](docs/SUBSCRIPTIONS_AND_FOOD_PHOTOS.md). Keep a single canonical shared UI in Core, equal RUB/Stars choices and existing external Redirect/provider verification. Ordinary Telegram photos must remain the primary one-step input; file upload is optional. Never remove historical human nutrient records when removing editor controls.

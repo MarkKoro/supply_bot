@@ -53,13 +53,33 @@ def install(app,source,db_path,*,render=None,back_callback=None,notify=None):
         except Exception:
             await show(update,context,'Персональная стоимость общей подписки сейчас недоступна. Текущий продукт продолжает работать. Попробуйте позже.');return
         rows=[];lines=[MENU_TEXT]
+        view=catalog.get('subscriptions')
+        if view:
+            lines.append('\nСейчас у вас:')
+            for product in view['products']:
+                state=product['state'];end=product.get('expires_at')
+                label={'active':'✓ Доступ активен','trial':'◷ Пробный доступ','free':'○ Бесплатный дневник','inactive':'Нет подписки','unknown':'Уточняем доступ'}[state]
+                if end:label+=' до '+end[:10]
+                lines.append(product['name']+' — '+label)
         for p in catalog['plans']:
             price=p['prices']['XTR'];label=p['label']
             if price['already_covered']:
                 lines.append('\n'+label+' — все три продукта уже доступны по оплаченным подпискам.');continue
-            suffix=f" · зачтено {price['credit_amount']} ⭐" if price['credit_amount'] else ''
-            lines.append(f"\n{label}: {p['XTR']} ⭐{suffix}")
-            rows.append([InlineKeyboardButton(f"Выбрать {label} · {p['XTR']} ⭐",callback_data='pg:buy:'+p['id'])])
+            rub=p.get('prices',{}).get('RUB',{})
+            amounts=[];credits=[]
+            if catalog.get('rub_available') and p.get('RUB'):
+                amounts.append(f"{p['RUB']/100:g} ₽")
+                if rub.get('credit_amount'):credits.append(f"{rub['credit_amount']/100:g} ₽")
+            amounts.append(f"{p['XTR']} ⭐")
+            if price['credit_amount']:credits.append(f"{price['credit_amount']} ⭐")
+            lines.append('\n'+label+': '+' / '.join(amounts)+(' · зачтено '+' / '.join(credits) if credits else ''))
+            pair=[]
+            if catalog.get('rub_available') and p.get('RUB'):
+                from urllib.parse import urlencode
+                url=catalog['website_url']+'?'+urlencode({'source':source,'plan':p['id']})
+                pair.append(InlineKeyboardButton(f"{p['RUB']/100:g} ₽ · {label}",url=url))
+            pair.append(InlineKeyboardButton(f"{p['XTR']} ⭐ · {label}",callback_data='pg:buy:'+p['id']))
+            rows.append(pair)
         pending=catalog.get('pending_order')
         if pending:
             lines.append('\nЕсть неоплаченный счёт. Чтобы выбрать другой срок или способ оплаты, сначала отмените его. Если деньги уже списаны, дождитесь подтверждения.')
@@ -100,6 +120,8 @@ def install(app,source,db_path,*,render=None,back_callback=None,notify=None):
 
     async def start(update,context):
         arg=context.args[0] if context.args else ''
+        if arg.startswith('pgplan_'):
+            await menu(update,context);raise ApplicationHandlerStop
         if not arg.startswith('pglogin_'):return
         challenge=arg.removeprefix('pglogin_')
         if not private(update) or len(challenge)!=32 or any(c not in '0123456789abcdef' for c in challenge):raise ApplicationHandlerStop

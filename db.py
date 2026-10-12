@@ -2699,6 +2699,8 @@ async def get_user_tz(conn: aiosqlite.Connection, tg_user_id: int) -> str | None
     return tz_name or None
 
 async def set_user_tz(conn: aiosqlite.Connection, tg_user_id: int, tz_name: str) -> None:
+    from progressor_timezone_history import record
+    await record(conn,tg_user_id,await get_user_tz(conn,tg_user_id) or 'UTC',tz_name)
     await conn.execute(
         "UPDATE users SET tz_name=? WHERE tg_user_id=?",
         (tz_name, tg_user_id),
@@ -3065,6 +3067,13 @@ async def _purge_user_content(conn, user_id: int, tg_user_id: int) -> int:
         await conn.execute(f"DELETE FROM {table} WHERE user_id=?", (user_id,))
     for table in ("reminders", "reminder_fires", "ui_state"):
         await conn.execute(f"DELETE FROM {table} WHERE user_id=?", (tg_user_id,))
+    for table in ('progressor_ai_cache','progressor_link_cache','progressor_owner_commands'):
+        if await fetchone(conn,'SELECT 1 FROM sqlite_master WHERE name=?',(table,)):
+            await conn.execute(f'DELETE FROM {table} WHERE user_id=?',(str(tg_user_id),))
+    if await fetchone(conn,"SELECT 1 FROM sqlite_master WHERE name='progressor_meal_anchors'"):
+        await conn.execute('DELETE FROM progressor_meal_anchors WHERE user_id=?',(tg_user_id,))
+    if await fetchone(conn,"SELECT 1 FROM sqlite_master WHERE name='progressor_supplement_composition'"):
+        await conn.execute('DELETE FROM progressor_supplement_composition WHERE user_id=?',(user_id,))
     # Retain the account ID, entitlement, trial-use flags, roles and payment
     # ledger so cleanup cannot erase paid access or replay an old payment.
     await conn.execute("""UPDATE users SET
@@ -11698,6 +11707,12 @@ async def process_due_nutrient_lifecycle(conn: aiosqlite.Connection, limit: int 
     supplement_updates = 0
     reminders_deleted = 0
     reminders_restored = 0
+    rest_filter=''
+    if await fetchone(conn,"SELECT 1 FROM sqlite_master WHERE name='progressor_link_cache'"):
+        rest_filter=""" AND NOT EXISTS(SELECT 1 FROM progressor_link_cache c JOIN users u
+          ON CAST(u.tg_user_id AS TEXT)=c.user_id WHERE u.id=nutrient_plan_runs.user_id
+          AND COALESCE(json_extract(c.body,'$.paused'),0)=1
+          AND (json_extract(c.body,'$.pause_until') IS NULL OR json_extract(c.body,'$.pause_until')>?) ) """
     rows = await fetchall(
         conn,
         """SELECT id, user_id, nutrient_code, supplement_id, lifecycle_status, recommend_action,
@@ -11706,12 +11721,13 @@ async def process_due_nutrient_lifecycle(conn: aiosqlite.Connection, limit: int 
            FROM nutrient_plan_runs
            WHERE is_active=1
              AND lifecycle_status IN ('active','review_required','retest_due','paused','frozen_by_user')
-           ORDER BY id ASC
-           LIMIT ?""",
-        (int(limit),),
+        """+rest_filter+""" ORDER BY id ASC LIMIT ?""",
+        (now_dt.timestamp(),int(limit)) if rest_filter else (int(limit),),
     )
     for row in rows:
         plan_id = int(row["id"])
+        # Rest suspends automatic adaptations, not just delivery. Native course
+        # dates stay intact; returning reevaluates the current course state.
         lifecycle_status = str(row["lifecycle_status"] or "")
         if int(row["frozen_by_user"] or 0) == 1 or lifecycle_status == "frozen_by_user":
             continue

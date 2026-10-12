@@ -160,6 +160,11 @@ def publish_source_snapshot(db_path,destination):
 async def source_snapshot_worker(source,db_path,destination,monthly_prices=None):
     while True:
         try:
+            if source=='gym':
+                try:
+                    from progressor_free_workout import expire
+                    await asyncio.to_thread(expire,db_path)
+                except Exception:logging.getLogger('progressor_client').warning('free_session_finish_unavailable')
             if monthly_prices:
                 from progressor_native_subscription import prepare_metadata
                 await asyncio.to_thread(prepare_metadata,db_path,source,monthly_prices())
@@ -175,10 +180,15 @@ def install_cache_worker(app,source,db_path,monthly_prices=None):
     async def lifespan(instance):
         async with original(instance):
             await asyncio.to_thread(ensure_schema,db_path)
+            from progressor_links import ensure_schema as ensure_links, sync as sync_links
+            await asyncio.to_thread(ensure_links,db_path)
             async def worker():
+                cursor=''
                 while True:
                     try: await sync(source,db_path)
                     except Exception: logging.getLogger('progressor_client').warning('bundle_sync_unavailable source=%s',source)
+                    try:cursor=await sync_links(source,db_path,cursor)
+                    except Exception:logging.getLogger('progressor_client').warning('connection_sync_unavailable source=%s',source)
                     await asyncio.sleep(15)
             task=asyncio.create_task(worker())
             snapshot_task=None

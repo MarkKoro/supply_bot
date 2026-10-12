@@ -26,6 +26,10 @@ async def retire_owned_menu(bot,chat_id,message_id):
         except TelegramError:pass
 
 def notification_preflight(application,user_id,source,*,ignore_recent=False):
+    path=application.bot_data.get('progressor_connection_db')
+    if path and not ignore_recent:
+        from progressor_links import notifications_allowed
+        if not notifications_allowed(path,user_id):raise NotificationDeferred
     data=application.user_data.get(user_id,{})
     if not ignore_recent and time.monotonic()-data.get('progressor_last_interaction',-1e9)<90:
         raise NotificationDeferred
@@ -40,12 +44,135 @@ MENU_TEXT='Progressor · тренировки, питание и БАДы\n\nО�
 def install(app,source,db_path,*,render=None,back_callback=None,notify=None):
     if not client.configured():return
     if render is None or not back_callback:raise ValueError('native_menu_renderer_required')
+    app.bot_data['progressor_connection_db']=db_path
     log=logging.getLogger('progressor_bot')
     def keyboard(rows):
         return InlineKeyboardMarkup([*rows,[InlineKeyboardButton('⬅️ В меню',callback_data=back_callback)]])
     async def show(update,context,text,rows=()):
         await render(update,context,text,keyboard(rows))
     def private(update):return update.effective_chat and update.effective_chat.type=='private'
+
+    async def account_menu(update,context):
+        uid=str(update.effective_user.id)
+        try:value=await client.call(source,'/internal/v1/connections/account',{'user_id':uid})
+        except Exception:
+            await show(update,context,'Связь продуктов временно недоступна. Записи и текущий продукт продолжают работать.');return
+        from progressor_links import ensure_schema,cache_settings
+        await asyncio.to_thread(ensure_schema,db_path)
+        await asyncio.to_thread(cache_settings,db_path,[{'user_id':uid,'preferences':value['preferences']}])
+        p=value['preferences'];context.user_data['progressor_connection_screen']=value
+        labels={'gym':'Gym Diary','food':'Food','supply':'Supply'}
+        rows=[[InlineKeyboardButton(('✓ ' if p['sources'][s] else '○ ')+labels[s],callback_data='pg:link:'+s)] for s in labels]
+        for field,label in [('hints','Подсказки'),('notifications','Обычные напоминания'),('weight_notifications','Новый вес → проверить цель Food'),('goal_links','Связанные действия после смены цели')]:
+            rows.append([InlineKeyboardButton(('✓ ' if p[field] else '○ ')+label,callback_data='pg:pref:'+field)])
+        rows.append([InlineKeyboardButton('Вернуться из отдыха' if p['rest_active'] else 'Отдохнуть от напоминаний',callback_data='pg:rest')])
+        rows.append([InlineKeyboardButton('Вес и источники',callback_data='pg:weights'),InlineKeyboardButton('Моя неделя',callback_data='pg:weekly')])
+        rows.append([InlineKeyboardButton(('✓ ' if p['weekly_plan'] else '○ ')+'План питания раз в неделю',callback_data='pg:pref:weekly_plan')])
+        rows.append([InlineKeyboardButton('Предпросмотр плана',callback_data='pg:weekly_plan'),InlineKeyboardButton('Ритм тренировок',callback_data='pg:rhythm')])
+        rows.append([InlineKeyboardButton('Питание для тренера',callback_data='pg:coach_permissions')])
+        rows.append([InlineKeyboardButton('Как всё работает',callback_data='pg:help')])
+        if source=='gym':rows.append([InlineKeyboardButton('Завершить свободную тренировку',callback_data='pg:free_finish')])
+        text='Связь продуктов\n\nВыбирайте, какие данные помогают друг другу. Напоминания и подсказки можно выключить. Данные не удаляются.\n\n'
+        text+=('Сейчас отдых. При возврате продолжатся следующие актуальные напоминания. ' if p['rest_active'] else '')+'На отдыхе оплаченный срок подписки продолжается.'
+        await show(update,context,text,rows)
+
+    async def account_action(update,context):
+        query=update.callback_query;parts=query.data.split(':');uid=str(query.from_user.id)
+        if parts[1]=='settings':await account_menu(update,context);return
+        if parts[1] in ('link','pref','rest'):
+            value=await client.call(source,'/internal/v1/connections/account',{'user_id':uid});p=value['preferences']
+            if parts[1]=='link':patch={'sources':{**p['sources'],parts[2]:not p['sources'][parts[2]]}}
+            elif parts[1]=='pref':
+                if parts[2] not in ('hints','notifications','weight_notifications','goal_links','weekly_plan','day_prompt'):return
+                patch={parts[2]:not p[parts[2]]}
+            else:patch={'paused':not p['rest_active'],'pause_until':None}
+            await client.call(source,'/internal/v1/connections/account',{'user_id':uid,'action':'preferences','patch':patch,'revision':p['revision']})
+            await account_menu(update,context);return
+        back=[[InlineKeyboardButton('⬅️ Связь продуктов',callback_data='pg:settings')]]
+        if parts[1]=='help':
+            value=await client.call(source,'/internal/v1/connections/account',{'user_id':uid})
+            await show(update,context,'Как всё работает\n\n'+'\n\n'.join(h['title']+'\n'+h['text'] for h in value['help']),back)
+        elif parts[1]=='weights':
+            value=await client.call(source,'/internal/v1/connections/account',{'user_id':uid});context.user_data['progressor_weight_choice']=value['weight']
+            rows=[[InlineKeyboardButton(f"{i['source'].title()}: {i['value']:g} кг — выбрать",callback_data='pg:weight:'+i['source'])] for i in value['weight']['items']]
+            await show(update,context,value['weight']['explanation'] if rows else 'Свежего разрешённого веса пока нет. Заполните свой профиль и включите нужные связи.',rows+back)
+        elif parts[1]=='weight':
+            value=context.user_data.get('progressor_weight_choice') or {}
+            item=next((i for i in value.get('items',[]) if i['source']==parts[2]),None)
+            if not item:await account_menu(update,context);return
+            await show(update,context,f"Использовать {item['value']:g} кг в выбранных профилях? История измерений и сохранённая цель питания останутся. Если профиль уже изменился, бот попросит новый выбор.",[[InlineKeyboardButton('Да, согласовать вес',callback_data='pg:weight_confirm:'+parts[2])]]+back)
+        elif parts[1]=='weight_confirm':
+            value=context.user_data.get('progressor_weight_choice') or {};item=next((i for i in value.get('items',[]) if i['source']==parts[2]),None)
+            if not item:await account_menu(update,context);return
+            result=await client.call(source,'/internal/v1/connections/account',{'user_id':uid,'action':'weight','event_id':item['event_id'],'fingerprint':value['fingerprint'],'operation_id':str(uuid.uuid4())})
+            context.user_data.pop('progressor_weight_choice',None)
+            await show(update,context,'Выбор сохранён. Владельцы профилей проверят свежесть и обновят вес. Обычно это занимает до минуты. Если одно значение успело измениться, оно сохранится для нового выбора.',back)
+        elif parts[1]=='weekly':
+            value=await client.call(source,'/internal/v1/connections/weekly',{'user_id':uid});lines=['Моя неделя']
+            n=value.get('nutrition');w=value.get('workouts');s=value.get('supply')
+            if n:
+                a=n['averages_on_logged_days'];lines.append(f"Food: {n['logged_days']} записанных дней из 7. Среднее по ним: {a['kcal']} ккал; Б {a['protein']}, Ж {a['fat']}, У {a['carbs']} г.")
+            if w:lines.append(f"Gym Diary: сессий {w['recorded_sessions']}, завершено {w['completed_sessions']}; рабочих подходов {w['working_sets']}.")
+            if s:lines.append(f"Supply: активных добавок {s['active_supplements']}; отметок приёма {s['recorded_intakes']}.")
+            lines.append(value['coverage']);await show(update,context,'\n\n'.join(lines),back)
+        elif parts[1]=='weekly_plan':
+            value=await client.call(source,'/internal/v1/connections/weekly-plan',{'user_id':uid})
+            await show(update,context,value['text']+'\n\nВремя сводки можно выбрать в приложении → Связь продуктов.',back)
+        elif parts[1]=='rhythm':
+            value=await client.call(source,'/internal/v1/connections/account',{'user_id':uid});context.user_data['progressor_rhythm']=value['rhythm'];r=value['rhythm'];rows=[];text=r['proposal']['message']
+            if r['active']:
+                text='Ритм подтверждён. Недельная сумма калорий сохранена. Точный план по дням — в приложении → Связь продуктов.'
+                rows.append([InlineKeyboardButton('Обычная одинаковая цель',callback_data='pg:rhythm_off')])
+            elif r['proposal']['status']=='proposal':
+                labels=('Пн','Вт','Ср','Чт','Пт','Сб','Вс');text+='\nДни: '+', '.join(labels[d] for d in r['proposal']['weekdays'])
+                for plan in r['proposal']['previews']:
+                    extra=plan['training_extra_kcal'];text+='\n\n'+('Без изменения КБЖУ' if extra==0 else f'В тренировочный день +{extra} ккал; в другие дни пропорционально меньше')+'\n'+' · '.join(labels[i]+': '+str(round(day['kcal'])) for i,day in enumerate(plan['days']))
+                    rows.append([InlineKeyboardButton('Подтвердить '+('без изменения КБЖУ' if extra==0 else f'+{extra} ккал в дни тренировок'),callback_data='pg:rhythm_confirm:'+str(extra))])
+            await show(update,context,text+'\n\nПодтверждение действует 28 дней. Смена цели или системы вернёт обычную цель. Это перераспределение вашей цели, а не измерение потраченных калорий.',rows+back)
+        elif parts[1]=='rhythm_confirm':
+            r=(context.user_data.get('progressor_rhythm') or {}).get('proposal')
+            if not r:await account_menu(update,context);return
+            await client.call(source,'/internal/v1/connections/account',{'user_id':uid,'action':'rhythm','fingerprint':r['fingerprint'],'base_goal_key':r['base_goal_key'],'extra':int(parts[2])})
+            context.user_data.pop('progressor_rhythm',None)
+            await show(update,context,'Ритм подтверждён. Food применит план после синхронизации, обычно в течение минуты. Недельная сумма сохранена.',back)
+        elif parts[1]=='rhythm_off':
+            await client.call(source,'/internal/v1/connections/account',{'user_id':uid,'action':'rhythm_off'})
+            await show(update,context,'После синхронизации Food вернётся к вашей одинаковой цели на каждый день.',back)
+        elif parts[1]=='coach_permissions':
+            value=await client.call(source,'/internal/v1/connections/account',{'user_id':uid});rows=[]
+            for item in value['coach']['items']:
+                rows.append([InlineKeyboardButton(('✓ ' if item['macros'] else '○ ')+'КБЖУ · '+item['label'],callback_data='pg:coach_macros:'+item['coach_id'])])
+                rows.append([InlineKeyboardButton(('✓ ' if item['top_dishes'] else '○ ')+'5 частых блюд',callback_data='pg:coach_dishes:'+item['coach_id'])])
+            await show(update,context,value['coach']['explanation']+'\n\nРазрешение из этого меню действует 30 дней. Срок 7/90 дней можно выбрать в приложении.' if rows else 'Сначала подтвердите связь с тренером в Gym Diary.',rows+back)
+        elif parts[1] in ('coach_macros','coach_dishes'):
+            value=await client.call(source,'/internal/v1/connections/account',{'user_id':uid});item=next((i for i in value['coach']['items'] if i['coach_id']==parts[2]),None)
+            if not item:await account_menu(update,context);return
+            macros=not item['macros'] if parts[1]=='coach_macros' else item['macros'];dishes=not item['top_dishes'] if parts[1]=='coach_dishes' else item['top_dishes']
+            if dishes and not macros:dishes=False
+            await client.call(source,'/internal/v1/connections/account',{'user_id':uid,'action':'coach','coach_id':item['coach_id'],'macros':macros,'top_dishes':macros and dishes,'days':30})
+            await account_menu(update,context)
+        elif parts[1]=='coach_view' and source=='gym':
+            def owner_link():
+                import sqlite3
+                from contextlib import closing
+                with closing(sqlite3.connect(db_path,timeout=2)) as db:
+                    return db.execute("SELECT pupil.tg_id FROM trainer_links l JOIN users coach ON coach.id=l.trainer_user_id JOIN users pupil ON pupil.id=l.trainee_user_id WHERE coach.tg_id=? AND coach.is_trainer=1 AND pupil.id=? AND l.status='accepted'",(int(uid),int(parts[2]))).fetchone()
+            link=await asyncio.to_thread(owner_link)
+            if not link:await show(update,context,'Подтверждённая связь с подопечным недоступна.',back);return
+            try:value=await client.call('gym','/internal/v1/connections/coach',{'coach_id':uid,'trainee_id':str(link[0])})
+            except Exception:
+                await show(update,context,'Питание не открыто. Подопечный сам включает КБЖУ в «Связь продуктов». Для связи нужны действующий доступ и свежие данные.',back);return
+            t=value['totals'];text='Питание подопечного · '+value['date']+'\n\n'
+            text+=(f"{t['kcal']:g} ккал; белки {t['protein']:g} г, жиры {t['fat']:g} г, углеводы {t['carbs']:g} г." if t else 'Записанных блюд за этот день пока нет.')
+            text+='\nТолько сохранённые КБЖУ; дневник может быть неполным.'
+            if value.get('top_dishes_enabled'):text+='\n\n5 частых блюд за 30 дней:\n'+'\n'.join(f"• {i['name']} — {i['logged_count']}" for i in value.get('top_dishes',[]))
+            await show(update,context,text,[[InlineKeyboardButton('⬅️ К подопечному',callback_data='trainer:view:'+parts[2])]])
+        elif parts[1]=='free_finish' and source=='gym':
+            from progressor_free_workout import current,finish
+            session=await asyncio.to_thread(current,db_path,int(uid))
+            if not session:await show(update,context,'Сегодня свободная тренировка ещё не записана.',back);return
+            result=await asyncio.to_thread(finish,db_path,session['user_id'],session['id'])
+            await show(update,context,'Свободная тренировка завершена. Записанные подходы учтены один раз.' if result['finished'] else 'Сначала сохраните выполненные подходы или кардио.',back)
 
     async def menu(update,context):
         if not private(update):return
@@ -94,6 +221,9 @@ def install(app,source,db_path,*,render=None,back_callback=None,notify=None):
         query=update.callback_query;await query.answer()
         if not private(update):raise ApplicationHandlerStop
         if query.data=='pg:menu':await menu(update,context)
+        elif query.data.split(':')[1] in ('settings','link','pref','rest','help','weights','weight','weight_confirm','weekly','weekly_plan','rhythm','rhythm_confirm','rhythm_off','coach_permissions','coach_macros','coach_dishes','coach_view','free_finish'):
+            try:await account_action(update,context)
+            except Exception:await show(update,context,'Данные изменились или связь временно недоступна. Обновите настройки.',[[InlineKeyboardButton('Связь продуктов',callback_data='pg:settings')]])
         elif query.data.startswith('pg:buy:'):
             order=None
             try:
@@ -120,6 +250,9 @@ def install(app,source,db_path,*,render=None,back_callback=None,notify=None):
 
     async def start(update,context):
         arg=context.args[0] if context.args else ''
+        if arg=='pgsettings':
+            if private(update):await account_menu(update,context)
+            raise ApplicationHandlerStop
         if arg.startswith('pgplan_'):
             await menu(update,context);raise ApplicationHandlerStop
         if not arg.startswith('pglogin_'):return
@@ -166,7 +299,9 @@ def install(app,source,db_path,*,render=None,back_callback=None,notify=None):
         text=('Общая подписка Progressor подтверждена. Доступ обновляется во всех трёх продуктах.' if completed else 'Платёж сохранён. Доступ обновится после восстановления связи; повторно оплачивать не нужно. /paysupport') if kind=='paid' else 'Возврат сохранён. Отзывается только период этой общей покупки; отдельные подписки и история сохраняются.'
         try:notification_preflight(context.application,update.effective_user.id,source,ignore_recent=True)
         except NotificationDeferred:raise ApplicationHandlerStop
-        await show(update,context,text,[[InlineKeyboardButton('Общая подписка',callback_data='pg:menu')]])
+        rows=[[InlineKeyboardButton('Общая подписка',callback_data='pg:menu')]]
+        if completed and kind=='paid':rows.insert(0,[InlineKeyboardButton('Настроить связь продуктов',callback_data='pg:settings')])
+        await show(update,context,text,rows)
         raise ApplicationHandlerStop
 
     async def support(update,context):

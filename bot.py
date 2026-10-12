@@ -1743,6 +1743,9 @@ async def _render_ai_checkin_results(
         summary,
         "",
     ]
+    from progressor_checkin import changes,summary as changes_summary
+    observations=await changes(update.effective_user.id,state.get('answers') or {})
+    if observations:lines.extend([changes_summary(observations),''])
     if actions:
         for idx, action in enumerate(actions, start=1):
             action_type = action.get("type")
@@ -2276,6 +2279,13 @@ async def _finalize_ai_checkin(
         target_day_state_payload,
     )
     cfg = OpenAIConfig(api_key=s.OPENAI_API_KEY, model=s.OPENAI_MODEL)
+    from progressor_client import ai_context
+    shared_context=await ai_context('supply',tg_uid)
+    if shared_context and shared_context.get('sources'):
+        messages.append({'role':'system','content':shared_context['instructions']})
+        messages.append({'role':'user','content':'Дополнительные согласованные записи: '+json.dumps(shared_context['data'],ensure_ascii=False)})
+    from progressor_ai_cache import key,get,put
+    request_key=key({'model':cfg.model,'messages':messages,'context':shared_context,'format':'supply.checkin.v2'})
     await show(
         update,
         context,
@@ -2287,7 +2297,9 @@ async def _finalize_ai_checkin(
     )
     raw = None
     try:
-        raw = await ai_checkin_json(cfg, messages, max_output_tokens=900, timeout_s=30)
+        raw = await asyncio.to_thread(get,s.DB_PATH,tg_uid,'supply_checkin',request_key)
+        cache_hit=raw is not None
+        if raw is None:raw = await ai_checkin_json(cfg, messages, max_output_tokens=900, timeout_s=30)
     except Exception:
         log.exception("OpenAI checkin request failed")
         await show(
@@ -2384,6 +2396,7 @@ async def _finalize_ai_checkin(
         "summary_ru": _truncate_text(data.get("summary_ru"), 600) or "Короткое резюме недоступно.",
         "disclaimer_ru": _truncate_text(data.get("disclaimer_ru"), 300),
     }
+    if not cache_hit:await asyncio.to_thread(put,s.DB_PATH,tg_uid,'supply_checkin',request_key,raw,3600)
     if not any(str(action.get("type") or "") == "add" for action in clean_actions):
         now_hhmm = db.local_now(tz_name or None).strftime("%H:00")
         fallback_adds = await db.build_goal_based_fallback_adds(
@@ -3172,9 +3185,15 @@ async def reminders_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         due = await db.list_due_reminders(conn)
         due += await db.list_retryable_reminder_fires(conn)
+        from meal_anchors import due as meal_due
+        anchored,cursor=await meal_due(conn,after=context.application.bot_data.get('meal_anchor_cursor',0))
+        context.application.bot_data['meal_anchor_cursor']=cursor
+        due+=anchored;meal_keys={(int(i['user_id']),str(i['time_local']),str(i['day'])) for i in anchored}
         batches: dict[tuple[int,str,str], set[int]] = {}
         for item in due:
             tg_user_id, supplement_id = int(item['user_id']), int(item['supplement_id'])
+            from progressor_links import notifications_allowed
+            if not await asyncio.to_thread(notifications_allowed,s.DB_PATH,tg_user_id):continue
             day, time_local = str(item['day']), str(item['time_local'])
             if await db.get_day_status(conn,tg_user_id,day,supplement_id) in {'taken','skipped'}:
                 continue
@@ -3185,6 +3204,8 @@ async def reminders_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
             for group in _reminder_groups([{'id': sid} for sid in sorted(ids)], key[2])
         )
         for (tg_user_id,time_local,day), supplement_ids in delivery_batches:
+            from progressor_links import notifications_allowed
+            if not await asyncio.to_thread(notifications_allowed,s.DB_PATH,tg_user_id):continue
             claims = {}
             for sid in sorted(supplement_ids):
                 token = await db.insert_reminder_fire(conn,tg_user_id,sid,day,time_local)
@@ -3194,7 +3215,7 @@ async def reminders_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
                 continue
             delivered, permanent = False, False
             try:
-                await reminder_fire_batch(context,tg_user_id,list(claims))
+                await reminder_fire_batch(context,tg_user_id,list(claims),meal_trigger=(tg_user_id,time_local,day) in meal_keys)
                 delivered = True
             except Forbidden:
                 permanent = True
@@ -3296,7 +3317,7 @@ async def reminder_fire_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         finally:await conn.close()
     supplement_ids = data.get("supplement_ids")
     if isinstance(supplement_ids, list) and supplement_ids:
-        await reminder_fire_batch(context, tg_user_id, supplement_ids, is_snooze=True)
+        await reminder_fire_batch(context, tg_user_id, supplement_ids, is_snooze=True,meal_trigger=bool(data.get('meal_trigger')))
         return
     supplement_id = int(data.get("supplement_id"))
     await reminder_fire(context, tg_user_id, supplement_id, is_snooze=True)
@@ -3382,6 +3403,7 @@ async def reminder_fire_batch(
     page: int = 0,
     interactive_update=None,
     interactive_context=None,
+    meal_trigger: bool = False,
 ) -> None:
     s = context.application.bot_data["settings"]
     conn = await db.connect(s.DB_PATH)
@@ -3410,6 +3432,8 @@ async def reminder_fire_batch(
 
         if interactive_update is None:
             from progressor_bot import notification_preflight,NotificationDeferred
+            from progressor_links import notifications_allowed
+            if not await asyncio.to_thread(notifications_allowed,s.DB_PATH,tg_user_id):return
             try:
                 notification_preflight(context.application,tg_user_id,'supply')
                 if _progressor_input_route(ui_screen,payload_data):raise NotificationDeferred
@@ -3420,12 +3444,14 @@ async def reminder_fire_batch(
                     ids=list(supplement_ids)
                     for job in context.application.job_queue.get_jobs_by_name(name):
                         ids.extend((job.data or {}).get('supplement_ids',[]));job.schedule_removal()
-                    context.application.job_queue.run_once(reminder_fire_job,when=60,name=name,data={'tg_user_id':tg_user_id,'supplement_ids':list(dict.fromkeys(ids)),'deferred_day':db.get_user_local_date(user_row['tz_name'] or 'UTC')})
+                    context.application.job_queue.run_once(reminder_fire_job,when=60,name=name,data={'tg_user_id':tg_user_id,'supplement_ids':list(dict.fromkeys(ids)),'deferred_day':db.get_user_local_date(user_row['tz_name'] or 'UTC'),'meal_trigger':meal_trigger})
                 return
 
         entries: list[dict] = []
         day = db.get_user_local_date(user_row['tz_name'] or 'UTC')
-        if payload_data.get('reminder_day')==day:
+        from progressor_links import settings as connection_settings
+        policy=await asyncio.to_thread(connection_settings,s.DB_PATH,tg_user_id)
+        if payload_data.get('reminder_day')==day and payload_data.get('reminder_created_at',0)>=policy.get('last_pause_started_at',0):
             pending=payload_data.get('reminder_all_ids') or []
             supplement_ids=list(dict.fromkeys([*supplement_ids,*[int(v) for v in pending if str(v).isdigit()]]))
         slots = {str(slot['slot_id']): slot for slot in await db.get_user_slots(conn, int(user_row['id']))}
@@ -3459,6 +3485,7 @@ async def reminder_fire_batch(
         groups = _reminder_groups(entries, day)
         page=max(0,min(int(page),len(groups)-1));group=groups[page]
         lines=["⏰ <b>Напоминание</b>"+(f' · {page+1}/{len(groups)}' if len(groups)>1 else ''),'Пора принять:']
+        if meal_trigger and policy.get('sources',{}).get('food',False):lines.insert(1,'В Food записан приём пищи — напоминание пришло раньше выбранного времени, по вашей настройке.')
         lines.extend(f"• <b>{_reminder_preview(item['name'],160)}</b> — {_reminder_preview(item['dose'],160)}" for item in group)
         lines.append('\nПолная запись — по кнопке с названием добавки.')
         buttons=[list(row) for row in _reminder_batch_actions([item['id'] for item in group],day=day,records=group).inline_keyboard]
@@ -3506,6 +3533,7 @@ async def reminder_fire_batch(
             current_payload['reminder_chat_id'] = target_chat_id
             current_payload['reminder_batch_ids'] = [item['id'] for item in group]
             current_payload['reminder_all_ids'] = [item['id'] for item in entries]
+            current_payload['reminder_created_at'] = time.time()
             current_payload['reminder_page'] = page
             current_payload['reminder_messages'] = new_messages
             current_payload['reminder_day'] = day
@@ -3538,6 +3566,125 @@ async def on_progressor_supply_action(update,context):
         finally:await conn.close()
         await reminder_fire_batch(context,uid,ids,page=page,interactive_update=update,interactive_context=context)
     except (ValueError,KeyError,TypeError):return
+    finally:raise ApplicationHandlerStop
+
+async def on_meal_anchor(update,context):
+    from telegram.ext import ApplicationHandlerStop
+    import meal_anchors
+    q=update.callback_query;await q.answer()
+    if not await guard_not_banned(update,context):raise ApplicationHandlerStop
+    uid=int(q.from_user.id);conn=await db.connect(context.application.bot_data['settings'].DB_PATH)
+    try:
+        if not await _has_ai_checkin_access(context,uid):raise ValueError('access_required')
+        parts=q.data.split(':');sid=int(parts[2]);value=await meal_anchors.get(conn,uid,sid)
+        back_rows=[[InlineKeyboardButton('К добавке',callback_data=f'mysupp:open:{sid}')]]
+        if parts[1]=='menu':
+            rows=[[InlineKeyboardButton(('✓ ' if i['enabled'] else '○ ')+i['time']+' · связь с едой',callback_data=f"meal:preview:{sid}:"+i['time'].replace(':','-'))] for i in value['slots']]
+            await show(update,context,'Привязка к записанной еде\n\n'+value['note']+'\n\nНужны доступ Food и Supply и включённая связь. Иначе работает обычное расписание.',InlineKeyboardMarkup(rows+back_rows),route=f'meal:menu:{sid}')
+        elif parts[1]=='preview':
+            local_time=parts[3].replace('-',':');slot=next(i for i in value['slots'] if i['time']==local_time)
+            context.user_data['meal_anchor_choice']={'sid':sid,'time':local_time,'enabled':not slot['enabled']}
+            label='Отключить связь с едой' if slot['enabled'] else 'Включить связь с едой'
+            await show(update,context,label+' для '+local_time+'?\n\n'+value['note'],InlineKeyboardMarkup([[InlineKeyboardButton(label,callback_data=f'meal:save:{sid}')],[InlineKeyboardButton('Назад',callback_data=f'meal:menu:{sid}')]]),route=f'meal:preview:{sid}')
+        elif parts[1]=='save':
+            choice=context.user_data.pop('meal_anchor_choice',{})
+            if choice.get('sid')!=sid:raise ValueError('selection_changed')
+            await meal_anchors.save(conn,uid,sid,choice['time'],choice['enabled'])
+            await show(update,context,'Настройка сохранена. Доза и обычное время приёма сохранены.',InlineKeyboardMarkup([[InlineKeyboardButton('Посмотреть настройку',callback_data=f'meal:menu:{sid}')]]+back_rows),route=f'meal:menu:{sid}')
+    except (ValueError,StopIteration,KeyError):
+        await show(update,context,'Выбор изменился или добавка недоступна. Откройте её заново.',InlineKeyboardMarkup([[InlineKeyboardButton('Мои БАДы',callback_data='mysupp:list:0')]]),route='mysupp:list:0')
+    finally:await conn.close()
+    raise ApplicationHandlerStop
+
+async def on_supplement_overlap(update,context):
+    from telegram.ext import ApplicationHandlerStop
+    from html import escape
+    import supplement_overlap as overlap
+    from progressor_food_sources import REGISTRY
+    q=update.callback_query;await q.answer()
+    if not await guard_not_banned(update,context):raise ApplicationHandlerStop
+    uid=int(q.from_user.id);conn=await db.connect(context.application.bot_data['settings'].DB_PATH)
+    try:
+        if not await _has_ai_checkin_access(context,uid):
+            await show(update,context,'Для управления добавками нужен доступ Supply.',back(),route='menu:home');raise ApplicationHandlerStop
+        parts=q.data.split(':');sid=int(parts[2]);c=await overlap.composition(conn,uid,sid)
+        back_rows=[[InlineKeyboardButton('К добавке',callback_data=f'mysupp:open:{sid}')]]
+        if parts[1]=='menu':
+            report=await overlap.check(conn,uid)
+            warnings=[w['message'] for w in report['warnings'] if w.get('supplement_id')==sid or any(p['supplement_id']==sid for p in w['products'])]
+            text='Состав и пересечения\n\n'+c['name']+'\n'+('\n'.join(warnings) if warnings else 'Подтверждённых пересечений в активном плане не найдено. Неизвестный состав не означает, что пересечений нет.')
+            names=[REGISTRY[e['code']]['name'] for e in c['entries']]
+            text+='\n\nНазванные вещества: '+(', '.join(names) if names else 'состав не подтверждён')+'\n\n'+c['note']
+            await show(update,context,escape(text),InlineKeyboardMarkup([[InlineKeyboardButton('Подтвердить состав по этикетке',callback_data=f'over:pick:{sid}:0')]]+back_rows),route=f'over:menu:{sid}')
+        elif parts[1]=='pick':
+            page=max(0,min(int(parts[3]),(len(REGISTRY)-1)//8));items=list(REGISTRY.items())[page*8:page*8+8]
+            rows=[[InlineKeyboardButton(v['name'],callback_data=f'over:choose:{sid}:{code}')] for code,v in items]
+            nav=[]
+            if page:nav.append(InlineKeyboardButton('Назад по списку',callback_data=f'over:pick:{sid}:{page-1}'))
+            if (page+1)*8<len(REGISTRY):nav.append(InlineKeyboardButton('Далее',callback_data=f'over:pick:{sid}:{page+1}'))
+            if nav:rows.append(nav)
+            await show(update,context,'Выберите вещество, указанное на этикетке именно вашей добавки. Форму и количество можно уточнить в приложении. Мы не угадываем состав комплекса.',InlineKeyboardMarkup(rows+[[InlineKeyboardButton('К составу',callback_data=f'over:menu:{sid}')]]),route=f'over:pick:{sid}:{page}')
+        elif parts[1]=='choose':
+            code=parts[3]
+            if code not in REGISTRY:raise ValueError('unknown_substance')
+            original=c['entries'] if c['confirmed_by_user'] else []
+            entries=[e for e in original if e['code']!=code] if any(e['code']==code for e in original) else original+[{'code':code}]
+            context.user_data['overlap_composition']={'sid':sid,'code':code,'revision':c['revision'],'entries':entries}
+            action='Убрать из состава' if len(entries)<len(original) else 'Подтвердить в составе'
+            await show(update,context,escape(action+': '+REGISTRY[code]['name']+'?\n\nПроверьте этикетку. Доза и расписание останутся прежними.'),InlineKeyboardMarkup([[InlineKeyboardButton(action,callback_data=f'over:save:{sid}:{code}')],[InlineKeyboardButton('К составу',callback_data=f'over:menu:{sid}')]]),route=f'over:choose:{sid}:{code}')
+        elif parts[1]=='save':
+            selected=context.user_data.pop('overlap_composition',{})
+            if selected.get('sid')!=sid or selected.get('code')!=parts[3]:raise ValueError('selection_changed')
+            await overlap.save(conn,uid,sid,selected['entries'],selected['revision'])
+            await show(update,context,'Состав подтверждён по вашей этикетке. Дозы и расписание не изменены.',InlineKeyboardMarkup([[InlineKeyboardButton('Проверить пересечения',callback_data=f'over:menu:{sid}')]]+back_rows),route=f'over:menu:{sid}')
+    except ValueError:
+        await show(update,context,'Выбор изменился или добавка недоступна. Откройте её заново.',InlineKeyboardMarkup([[InlineKeyboardButton('Мои БАДы',callback_data='mysupp:list:0')]]),route='mysupp:list:0')
+    finally:await conn.close()
+    raise ApplicationHandlerStop
+
+async def on_food_sources(update,context):
+    from telegram.ext import ApplicationHandlerStop
+    from progressor_food_sources import REGISTRY,examples,matches
+    from progressor_links import settings
+    try:
+        if not update.effective_chat or update.effective_chat.type!='private' or not await guard_not_banned(update,context):return
+        await update.callback_query.answer();parts=update.callback_query.data.split(':');sid=int(parts[2]);s=context.application.bot_data['settings'];uid=update.effective_user.id
+        conn=await db.connect(s.DB_PATH)
+        try:
+            row=await db.fetchone(conn,'SELECT name,name_ru FROM supplements WHERE id=? AND is_active=1',(sid,))
+            if parts[1]=='supp':
+                _,screen,_=await db.get_ui_state(conn,uid)
+                if isinstance(screen,str) and len(screen)<=64 and screen.startswith(('supp:','mysupp:','complex:','mycx:')):
+                    context.user_data['progressor_atlas_back']={'sid':sid,'route':screen}
+        finally:await conn.close()
+        if not row:return
+        policy=await asyncio.to_thread(settings,s.DB_PATH,uid)
+        origin=context.user_data.get('progressor_atlas_back',{})
+        route=origin.get('route') if origin.get('sid')==sid else None
+        route=route or f'supp:open:{sid}'
+        back=[InlineKeyboardButton('⬅️ К добавке',callback_data=route)]
+        if parts[1]=='item':
+            code=parts[3];page=int(parts[4]);value=examples(code,policy)
+            text=value['name']+' · Найти в еде\n\n'+'\n'.join('• '+i['name'] for i in value['items'])+'\n\n'+value['note']
+            rows=[[InlineKeyboardButton('Другой нутриент',callback_data=f'foods:list:{sid}:{page}')],back]
+        else:
+            page=int(parts[3]) if parts[1]=='list' else 0;codes=list(REGISTRY)
+            found=matches(row['name_ru'] or row['name'])
+            if parts[1]=='supp' and len(found)==1:
+                value=examples(found[0],policy);text=value['name']+' · Найти в еде\n\n'+'\n'.join('• '+i['name'] for i in value['items'])+'\n\n'+value['note']
+                rows=[[InlineKeyboardButton('Другой нутриент',callback_data=f'foods:list:{sid}:0')],back]
+            else:
+                if not 0<=page<(len(codes)+7)//8:return
+                text='Найти в еде\n\nВыберите нутриент. Для комплекса показываем источники отдельных веществ, состав комплекса не угадываем.'
+                rows=[[InlineKeyboardButton(REGISTRY[c]['name'],callback_data=f'foods:item:{sid}:{c}:{page}')] for c in codes[page*8:page*8+8]]
+                nav=[]
+                if page:nav.append(InlineKeyboardButton('⬅️',callback_data=f'foods:list:{sid}:{page-1}'))
+                if (page+1)*8<len(codes):nav.append(InlineKeyboardButton('➡️',callback_data=f'foods:list:{sid}:{page+1}'))
+                if nav:rows.append(nav)
+                rows.append(back)
+        rows.append([InlineKeyboardButton('Источник справки',url=value['source_url'])]) if 'value' in locals() else None
+        await show(update,context,html.escape(text),InlineKeyboardMarkup(rows),route=f'foods:list:{sid}:0')
+    except (ValueError,KeyError,IndexError):return
     finally:raise ApplicationHandlerStop
 
 async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -8922,6 +9069,9 @@ async def _bootstrap() -> Application:
     from progressor_bot import install as install_progressor
     install_progressor(app, "supply", s.DB_PATH,render=_progressor_render,back_callback='menu:home',notify=lambda uid,text,kb:_progressor_scheduled_send(app,uid,text,kb))
     app.add_handler(CallbackQueryHandler(on_progressor_supply_action,pattern=r'^(rem:page:|pgnut:)'),group=-10)
+    app.add_handler(CallbackQueryHandler(on_food_sources,pattern=r'^foods:'),group=-11)
+    app.add_handler(CallbackQueryHandler(on_supplement_overlap,pattern=r'^over:'),group=-12)
+    app.add_handler(CallbackQueryHandler(on_meal_anchor,pattern=r'^meal:'),group=-13)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler(['labs', 'analyses'], on_labs))
     app.add_handler(CommandHandler("premium", premium_command))

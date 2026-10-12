@@ -33,6 +33,7 @@ def main_menu(
     if is_admin:
         rows.append([InlineKeyboardButton("🛠 Админ-меню", callback_data="admin:home")])
     rows.append([InlineKeyboardButton("⚙️ Настройки", callback_data="menu:settings")])
+    rows.append([InlineKeyboardButton("Связь продуктов",callback_data="pg:settings")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -651,6 +652,7 @@ def supplement_page(
     back_route: str,
 ) -> InlineKeyboardMarkup:
     btns = []
+    btns.append([InlineKeyboardButton('Найти в еде',callback_data=f'foods:supp:{supplement_id}')])
     if in_stack:
         btns.append([InlineKeyboardButton("✅ Уже в моих — Управлять", callback_data=f"mysupp:open:{supplement_id}")])
     else:
@@ -714,6 +716,7 @@ def supp_tabs_kb(
     in_stack: bool = False,
 ) -> InlineKeyboardMarkup:
     btns: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton('Найти в еде',callback_data=f'foods:supp:{supplement_id}')],
         [
             InlineKeyboardButton("🧠 Как действует", callback_data=f"supp:tab:{supplement_id}:brief"),
             InlineKeyboardButton("💊 Как принимать", callback_data=f"supp:tab:{supplement_id}:dose"),
@@ -776,7 +779,9 @@ def my_supplement_hub(
     btns = [
         [InlineKeyboardButton("🧾 Доза", callback_data=f"mysupp:set_dose:{supplement_id}")],
         [InlineKeyboardButton("⏰ Время приёма", callback_data=f"supplement:set_time:{supplement_id}")],
+        [InlineKeyboardButton("Привязать напоминание к еде", callback_data=f"meal:menu:{supplement_id}")],
         [InlineKeyboardButton("📊 История приёма", callback_data=f"mysupp:hist:{supplement_id}:0")],
+        [InlineKeyboardButton("Состав и пересечения", callback_data=f"over:menu:{supplement_id}")],
         [InlineKeyboardButton("➗ Разделить приём", callback_data=f"mysupp:split:{supplement_id}")],
         [InlineKeyboardButton("🗑 Удалить из моих", callback_data=f"mysupp:remove:{supplement_id}")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="mysupp:list:0")],

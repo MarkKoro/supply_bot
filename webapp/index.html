@@ -3055,6 +3055,7 @@
     hintHost:()=>document.getElementById('progressor-inline-host'),
     eligible:()=>state.activeTab==='today' && !!state.me,
     perform:async action=>{
+      if(action.kind==='supply_plan'){activateTab('today');return true;}
       if(action.kind!=='supply_catalog' || !['железо','B12'].includes(action.query)) return false;
       state.catalog.q=action.query; state.catalog.page=0; state.catalog.items=[]; state.catalog.hasMore=true;
       activateTab('catalog'); await loadCatalog(true); return true;
@@ -3337,6 +3338,7 @@
     state.survey.view = 'wizard';
     state.survey.checkinId = null;
     state.survey.recommendations = [];
+    state.survey.observedChanges = [];
     state.survey.selected = {};
     state.survey.helpOpen = false;
     state.survey.limitReached = false;
@@ -3430,7 +3432,9 @@
         const removeTaken = r.action === 'remove' && takenSet.has(Number(r.supplement_id || 0));
         return `<div class="rec-card"><div class="row"><strong>${esc(r.name_ru || r.slug)}</strong><span class="badge ${r.action==='remove'?'minus':(r.action==='adjust'?'':'plus')}">${r.action==='add'?'+':(r.action==='remove'?'−':'≈')}</span></div><div class="muted" style="margin-top:6px">${esc(r.reason || '')}${removeTaken ? ' • уже выпито сегодня — убирать не нужно' : (already ? ' • уже в плане' : '')}</div></div>`;
       }).join('');
-      return `${dateNotice}${surveyLimitBanner}<div class="card fade survey-card"><button class="btn secondary survey-help-btn survey-help-corner" type="button" data-survey-help>?</button><div class="row survey-head"><div class="survey-title-wrap"><h3 style="margin:0">Рекомендации</h3></div><div class="survey-target-wrap"><span class="muted" style="font-size:12px">Рекомендация на:</span><div class="segmented" data-survey-target><button class="seg-btn ${sv.target==='today'?'active':''}" data-set-target="today">Сегодня</button><button class="seg-btn ${sv.target==='tomorrow'?'active':''}" data-set-target="tomorrow">Завтра</button></div></div></div>${sv.helpOpen ? surveyHelpHtml : ''}${rows || '<div class="muted">Нет рекомендаций</div>'}<div style="margin-top:10px"><button class="btn" id="applyAll" style="width:100%; font-weight:800" ${sv.applying ? 'disabled' : ''}>✅ Применить всё</button></div><div class="survey-actions"><button class="btn secondary" id="cancelSurvey" ${sv.applying ? 'disabled' : ''}>Отмена</button></div></div>`;
+      const observed=(sv.observedChanges||[]).map(v=>`<div class="muted">${esc(v)}</div>`).join('');
+      const changeNotice=observed?`<div class="card"><strong>Что изменилось в записях за неделю</strong>${observed}<small>Совпадение по времени не устанавливает причину самочувствия. Можно проверить записи и расписание.</small></div>`:'';
+      return `${dateNotice}${surveyLimitBanner}<div class="card fade survey-card"><button class="btn secondary survey-help-btn survey-help-corner" type="button" data-survey-help>?</button><div class="row survey-head"><div class="survey-title-wrap"><h3 style="margin:0">Рекомендации</h3></div><div class="survey-target-wrap"><span class="muted" style="font-size:12px">Рекомендация на:</span><div class="segmented" data-survey-target><button class="seg-btn ${sv.target==='today'?'active':''}" data-set-target="today">Сегодня</button><button class="seg-btn ${sv.target==='tomorrow'?'active':''}" data-set-target="tomorrow">Завтра</button></div></div></div>${sv.helpOpen ? surveyHelpHtml : ''}${changeNotice}${rows || '<div class="muted">Нет рекомендаций</div>'}<div style="margin-top:10px"><button class="btn" id="applyAll" style="width:100%; font-weight:800" ${sv.applying ? 'disabled' : ''}>✅ Применить всё</button></div><div class="survey-actions"><button class="btn secondary" id="cancelSurvey" ${sv.applying ? 'disabled' : ''}>Отмена</button></div></div>`;
     }
     const step = SURVEY_STEPS[sv.step];
     const p = Math.round(((sv.step+1)/SURVEY_STEPS.length)*100);
@@ -3486,6 +3490,7 @@
         state.survey.loading=false;
         state.survey.checkinId=res.checkin_id;
         state.survey.recommendations=res.recommendations||[];
+        state.survey.observedChanges=res.meta?.observed_changes||[];
         state.survey.selected=Object.fromEntries((state.survey.recommendations||[]).map((x)=>[x.supplement_id,true]));
         state.survey.limitReached = true;
         state.survey.view='review';

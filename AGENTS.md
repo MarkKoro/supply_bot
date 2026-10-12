@@ -18,7 +18,7 @@ This repository participates in the Progressor ecosystem. Before changing auth, 
 
 - Source export: the native API owns its online backup worker; Core reads only private atomically published DELETE-journal copies. Preserve snapshot freshness rejection and keep export/cache tasks independent. Never widen Core permissions to live database directories.
 
-- Cross-context belongs to the verified personal account. Gym trainer/acting mode keeps Gym AI and must omit trainee Food/Supply data; a native trainer link grants no cross-product delegation.
+- Cross-context belongs to the verified personal account. Gym trainer/acting mode keeps Gym AI and must omit trainee Food/Supply data; a native trainer link alone grants no cross-product delegation. Explicit separate pupil nutrition permissions allow only aggregate KBJU/top5 in the native Gym coach menu, never trainee Food/Supply AI context.
 
 - Native guidance/AI controls: read [docs/PROGRESSOR_NATIVE.md](docs/PROGRESSOR_NATIVE.md) before editing hints, completion, duration, nutrient actions, providers or attempt limits. Deterministic views/actions must not call AI. Keep canonical ai_guard/workout_metrics copies synchronized; preserve unknown values, paid/consented/fresh gating and account-scoped dismissal. Never infer clinical deficiency, auto-dose or eat back exercise calories.
 
@@ -31,3 +31,8 @@ For native subscription examples, both exercise surfaces, profile reconciliation
 Native Telegram subscriptions and expiry: read [docs/BOT_NATIVE.md](docs/BOT_NATIVE.md) before payment grants/tariffs, source schedules, notifications or native menus. Canonical native_subscription helper requires synchronized all3 mirrors. After v2 gate/order, forbid Core protocol<2 or client schedule<2 rollback. Always preserve financial/user DB records; use native renderers and defer busy flows.
 
 Subscription screen and camera pipeline: read [docs/SUBSCRIPTIONS_AND_FOOD_PHOTOS.md](docs/SUBSCRIPTIONS_AND_FOOD_PHOTOS.md). Keep a single canonical shared UI in Core, equal RUB/Stars choices and existing external Redirect/provider verification. Ordinary Telegram photos must remain the primary one-step input; file upload is optional. Never remove historical human nutrient records when removing editor controls.
+
+
+## Selected native connections
+
+Read [docs/SELECTED_FEATURES.md](docs/SELECTED_FEATURES.md) before changing shared profile commands, source-owned caches, reminders, day closure, food atlas/overlap, rhythm, timezone or coach permissions. Shared product_links/ai_cache/day_goal/food_sources/timezone_history are canonical in Core and mirrored together. Trainer aggregate nutrition is a narrow explicit consent exception; native trainer role/link alone never grants it or cross-product AI delegation. Keep source ownership, history/CAS/idempotence, no-replay rest, protocol2 and normal FF main4.

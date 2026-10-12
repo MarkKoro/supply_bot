@@ -1576,6 +1576,61 @@ async def api_admin_import_purchase_urls(
     return JSONResponse({"ok": True, **report})
 
 
+@app.get('/api/integrations/supplements')
+async def api_supplement_overlap(x_telegram_init_data: str = Header(default='',alias='X-Telegram-Init-Data')):
+    uid=await _auth_user_id(x_telegram_init_data)
+    if not await _premium_guard(uid):raise HTTPException(402,'Нужен доступ Supply')
+    import supplement_overlap as overlap
+    conn=await db.connect(s.DB_PATH)
+    try:return await overlap.check(conn,uid)
+    finally:await conn.close()
+
+@app.post('/api/integrations/supplements')
+async def api_supplement_composition(body:dict,x_telegram_init_data: str = Header(default='',alias='X-Telegram-Init-Data')):
+    uid=await _auth_user_id(x_telegram_init_data)
+    if not await _premium_guard(uid):raise HTTPException(402,'Нужен доступ Supply')
+    if set(body)!={'supplement_id','entries','revision'} or type(body['supplement_id']) is not int:raise HTTPException(422,'Проверьте состав')
+    import supplement_overlap as overlap
+    conn=await db.connect(s.DB_PATH)
+    try:return await overlap.save(conn,uid,body['supplement_id'],body['entries'],body['revision'])
+    except ValueError:raise HTTPException(409,'Выбор изменился или добавка недоступна')
+    finally:await conn.close()
+
+@app.get('/api/integrations/meal-anchors')
+async def api_meal_anchors(x_telegram_init_data: str = Header(default='',alias='X-Telegram-Init-Data')):
+    uid=await _auth_user_id(x_telegram_init_data)
+    if not await _premium_guard(uid):raise HTTPException(402,'Нужен доступ Supply')
+    import meal_anchors
+    conn=await db.connect(s.DB_PATH)
+    try:
+        rows=await db.get_user_supplements_with_enabled(conn,uid)
+        items=[]
+        for row in rows[:100]:
+            value=await meal_anchors.get(conn,uid,row['supplement_id'])
+            items.append({**value,'name':row['name']})
+        return {'items':items}
+    finally:await conn.close()
+
+@app.post('/api/integrations/timezone')
+async def api_timezone_preview(body:dict,x_telegram_init_data: str = Header(default='',alias='X-Telegram-Init-Data')):
+    uid=await _auth_user_id(x_telegram_init_data)
+    import progressor_timezone
+    conn=await db.connect(s.DB_PATH)
+    try:return await progressor_timezone.change(conn,uid,body)
+    except ValueError:raise HTTPException(409,'Пояс изменился или недоступен. Обновите предпросмотр.')
+    finally:await conn.close()
+
+@app.post('/api/integrations/meal-anchors')
+async def api_meal_anchor_save(body:dict,x_telegram_init_data: str = Header(default='',alias='X-Telegram-Init-Data')):
+    uid=await _auth_user_id(x_telegram_init_data)
+    if not await _premium_guard(uid):raise HTTPException(402,'Нужен доступ Supply')
+    if set(body)!={'supplement_id','time','enabled'} or type(body['supplement_id']) is not int:raise HTTPException(422,'Проверьте выбранный приём')
+    import meal_anchors
+    conn=await db.connect(s.DB_PATH)
+    try:return await meal_anchors.save(conn,uid,body['supplement_id'],body['time'],body['enabled'])
+    except ValueError:raise HTTPException(409,'Расписание изменилось. Выберите приём снова.')
+    finally:await conn.close()
+
 @app.get("/api/today")
 async def api_today(x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
     tg_user_id = await _auth_user_id(x_telegram_init_data)
@@ -3431,7 +3486,7 @@ def _prompt_hash(answers: dict, ctx: dict) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-async def _ai_recommendations(answers: dict, ctx: dict) -> tuple[list[dict], dict]:
+async def _ai_recommendations(answers: dict, ctx: dict, tg_id: int | None = None) -> tuple[list[dict], dict]:
     if not s.OPENAI_API_KEY:
         raise RuntimeError("AI_UNAVAILABLE")
     cfg = OpenAIConfig(api_key=s.OPENAI_API_KEY, model=s.OPENAI_MODEL or "gpt-4o-mini")
@@ -3453,11 +3508,21 @@ async def _ai_recommendations(answers: dict, ctx: dict) -> tuple[list[dict], dic
         "и нет явных противопоказаний в контексте, обязательно верни хотя бы один action=add."
     )
     prompt = json.dumps({"answers": answers, "context": ctx}, ensure_ascii=False)
-    text = await __import__('asyncio').to_thread(_sync_call, cfg, instructions=instructions, input_text=prompt, max_output_tokens=800, timeout_s=20)
+    from progressor_client import ai_context
+    shared=await ai_context('supply',tg_id) if tg_id is not None else None
+    if shared and shared.get('sources'):
+        instructions+='\n'+shared['instructions']
+        prompt+='\nДополнительные согласованные записи: '+json.dumps(shared['data'],ensure_ascii=False)
+    from progressor_ai_cache import key,get,put
+    request_key=key({'model':cfg.model,'instructions':instructions,'input':prompt,'context':shared,'format':'supply.web.checkin.v2'})
+    text=await __import__('asyncio').to_thread(get,s.DB_PATH,tg_id,'supply_web_checkin',request_key) if tg_id is not None else None
+    cache_hit=text is not None
+    if text is None:text = await __import__('asyncio').to_thread(_sync_call, cfg, instructions=instructions, input_text=prompt, max_output_tokens=800, timeout_s=20)
     data = json.loads(text)
     if not isinstance(data, list):
         raise RuntimeError("AI_BAD_FORMAT")
-    return data, {"model": cfg.model}
+    if tg_id is not None and not cache_hit:await __import__('asyncio').to_thread(put,s.DB_PATH,tg_id,'supply_web_checkin',request_key,text,3600)
+    return data, {"model": cfg.model,'cache_hit':cache_hit}
 
 
 async def _normalize_recommendations(
@@ -3643,7 +3708,9 @@ async def api_checkin(body: CheckinBody, x_telegram_init_data: str = Header(defa
             ctx["client_local_iso"] = body.client_local_iso
         p_hash = _prompt_hash(answers, ctx)
         try:
-            recs_raw, meta = await _ai_recommendations(answers, ctx)
+            recs_raw, meta = await _ai_recommendations(answers, ctx, tg_user_id)
+            from progressor_checkin import changes
+            meta['observed_changes']=await changes(tg_user_id,answers)
             stack_slugs = {
                 str(item.get("slug") or "").strip().lower()
                 for item in (ctx.get("stack") if isinstance(ctx.get("stack"), list) else [])

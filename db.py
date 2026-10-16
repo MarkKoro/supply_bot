@@ -11,6 +11,7 @@ import math
 import time
 import re
 import sqlite3
+import uuid
 from typing import Any
 import aiosqlite
 
@@ -169,6 +170,7 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
     "users_delete": {ROLE_OWNER, ROLE_ADMIN},
     "roles_manage": {ROLE_OWNER},
     "payments_view": {ROLE_OWNER, ROLE_ADMIN},
+    "premium_manage": {ROLE_OWNER, ROLE_ADMIN},
     "system_diag": {ROLE_OWNER, ROLE_ADMIN},
 }
 
@@ -677,6 +679,7 @@ async def init_db(db_path: str) -> None:
 
 async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     await _ensure_users_tz_name(conn)
+    await _ensure_users_timezone_confirmation(conn)
     await conn.execute("UPDATE users SET tz_name='UTC' WHERE tz_name IS NULL OR tz_name=''")
     await _ensure_column(conn, "users", "last_local_date", "TEXT NOT NULL DEFAULT ''")
     await _ensure_column(conn, "users", "last_view", "TEXT NOT NULL DEFAULT 'menu'")
@@ -826,6 +829,10 @@ async def _apply_migrations(conn: aiosqlite.Connection) -> None:
     await _ensure_reminder_fires(conn)
     await _ensure_reminder_delivery_state(conn)
     await _ensure_daily_checkins(conn)
+    await conn.execute("""CREATE TABLE IF NOT EXISTS daily_checkin_claims(
+        checkin_id INTEGER PRIMARY KEY REFERENCES daily_checkins(id) ON DELETE CASCADE,
+        token TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('processing','done','failed')),
+        lease_until REAL NOT NULL)""")
     await _ensure_day_plan_items(conn)
     await _ensure_intake_log_slots(conn)
     await _ensure_user_schedule_slots(conn)
@@ -1302,6 +1309,12 @@ async def _ensure_achievements_tables(conn: aiosqlite.Connection) -> None:
 async def bootstrap_achievements(conn: aiosqlite.Connection) -> None:
     from achievements import ACHIEVEMENTS
 
+    expected = sorted((str(a.get('key') or '').strip(),str(a.get('title_ru') or ''),str(a.get('desc_ru') or ''),str(a.get('category') or ''),str(a.get('rarity') or 'common'),int(a.get('points') or 0),json.dumps(a.get('reward') or {},ensure_ascii=False)) for a in ACHIEVEMENTS)
+    current = await fetchall(conn,'SELECT key,title_ru,desc_ru,category,rarity,points,reward_json FROM achievements')
+    if sorted(tuple(row) for row in current) == expected: return
+    if not isinstance(conn,_TransactionConnection):
+        async with transaction(conn) as tx: await bootstrap_achievements(tx)
+        return
     now = utc_now_iso()
     for ach in ACHIEVEMENTS:
         reward_json = json.dumps(ach.get("reward") or {}, ensure_ascii=False)
@@ -2105,10 +2118,17 @@ async def get_role(conn: aiosqlite.Connection, tg_user_id: int) -> str:
     return role if role in ALL_ROLES else ROLE_NONE
 
 
-async def set_role(conn: aiosqlite.Connection, owner_tg_id: int, target_tg_id: int, role: str, note: str = "") -> None:
+async def set_role(conn: aiosqlite.Connection, owner_tg_id: int, target_tg_id: int, role: str, note: str = "", *, _bootstrap: bool = False) -> None:
+    async with transaction(conn) as tx:
+        await _set_role_authorized(tx, owner_tg_id, target_tg_id, role, note, _bootstrap=_bootstrap)
+
+
+async def _set_role_authorized(conn, owner_tg_id: int, target_tg_id: int, role: str, note: str, *, _bootstrap: bool) -> None:
     safe_role = str(role or "").strip().lower()
     if safe_role not in ALL_ROLES or safe_role == ROLE_NONE:
         raise ValueError("invalid_role")
+    if not _bootstrap and await get_role(conn, owner_tg_id) != ROLE_OWNER:
+        raise PermissionError('roles_manage_required')
     now = utc_now_iso()
     await conn.execute(
         """INSERT INTO user_roles(tg_user_id, role, granted_by_tg_id, granted_at_utc, note)
@@ -2128,6 +2148,13 @@ async def set_role(conn: aiosqlite.Connection, owner_tg_id: int, target_tg_id: i
 
 
 async def remove_role(conn: aiosqlite.Connection, owner_tg_id: int, target_tg_id: int) -> None:
+    async with transaction(conn) as tx:
+        await _remove_role_authorized(tx, owner_tg_id, target_tg_id)
+
+
+async def _remove_role_authorized(conn, owner_tg_id: int, target_tg_id: int) -> None:
+    if await get_role(conn, owner_tg_id) != ROLE_OWNER:
+        raise PermissionError('roles_manage_required')
     prev = await get_role(conn, int(target_tg_id))
     await conn.execute("DELETE FROM user_roles WHERE tg_user_id=?", (int(target_tg_id),))
     now = utc_now_iso()
@@ -2142,7 +2169,7 @@ async def bootstrap_roles_from_settings(conn: aiosqlite.Connection, settings) ->
     owner_tg_id = int(getattr(settings, "OWNER_TG_ID", 0) or 0)
     admin_tg_ids = set(getattr(settings, "ADMIN_TG_IDS", set()) or set())
     if owner_tg_id > 0:
-        await set_role(conn, owner_tg_id, owner_tg_id, ROLE_OWNER, "bootstrap owner")
+        await set_role(conn, owner_tg_id, owner_tg_id, ROLE_OWNER, "bootstrap owner", _bootstrap=True)
     for admin_tg_id in admin_tg_ids:
         aid = int(admin_tg_id or 0)
         if aid <= 0:
@@ -2150,7 +2177,7 @@ async def bootstrap_roles_from_settings(conn: aiosqlite.Connection, settings) ->
         existing_role = await get_role(conn, aid)
         if existing_role == ROLE_NONE:
             actor = owner_tg_id if owner_tg_id > 0 else aid
-            await set_role(conn, actor, aid, ROLE_ADMIN, "bootstrap admin")
+            await set_role(conn, actor, aid, ROLE_ADMIN, "bootstrap admin", _bootstrap=True)
 
 
 async def _ensure_admin_audit(conn: aiosqlite.Connection) -> None:
@@ -2243,6 +2270,18 @@ async def _ensure_users_tz_name(conn: aiosqlite.Connection) -> None:
         return
     await conn.execute("ALTER TABLE users ADD COLUMN tz_name TEXT NOT NULL DEFAULT 'UTC'")
     _column_cache(conn)["users"] = set(cols) | {"tz_name"}
+
+async def _ensure_users_timezone_confirmation(conn):
+    cols = await _table_columns(conn, 'users')
+    if 'tz_confirmed' in cols: return
+    await _ensure_column(conn, 'users', 'tz_confirmed', 'INTEGER NOT NULL DEFAULT 0')
+    # A historical default UTC is ambiguous. Keep onboarding for that case;
+    # preserve a known non-default zone or a recorded explicit UTC transition.
+    await conn.execute("UPDATE users SET tz_confirmed=1 WHERE upper(tz_name) NOT IN ('UTC','GMT','')")
+    if await fetchone(conn, "SELECT 1 FROM sqlite_master WHERE name='progressor_timezone_history'"):
+        await conn.execute("""UPDATE users SET tz_confirmed=1 WHERE EXISTS(
+            SELECT 1 FROM progressor_timezone_history h WHERE h.user_id=CAST(users.tg_user_id AS TEXT)
+            AND h.after_zone=users.tz_name)""")
 
 async def _backfill_alias_raw(conn: aiosqlite.Connection) -> None:
     cols = await fetchall(conn, "PRAGMA table_info(supplement_aliases)")
@@ -2698,11 +2737,16 @@ async def get_user_tz(conn: aiosqlite.Connection, tg_user_id: int) -> str | None
     tz_name = str(row["tz_name"] or "").strip()
     return tz_name or None
 
+async def is_user_timezone_configured(conn, tg_user_id):
+    row = await fetchone(conn, 'SELECT tz_name,tz_confirmed FROM users WHERE tg_user_id=?', (tg_user_id,))
+    if not row or not is_valid_timezone_name(row['tz_name']): return False
+    return bool(row['tz_confirmed']) or str(row['tz_name']).upper() not in {'UTC', 'GMT'}
+
 async def set_user_tz(conn: aiosqlite.Connection, tg_user_id: int, tz_name: str) -> None:
     from progressor_timezone_history import record
     await record(conn,tg_user_id,await get_user_tz(conn,tg_user_id) or 'UTC',tz_name)
     await conn.execute(
-        "UPDATE users SET tz_name=? WHERE tg_user_id=?",
+        "UPDATE users SET tz_name=?,tz_confirmed=1 WHERE tg_user_id=?",
         (tz_name, tg_user_id),
     )
     await conn.commit()
@@ -2956,29 +3000,53 @@ async def is_starter_trial_active(
     return until_dt > now
 
 
+async def adjust_manual_premium(conn, actor_tg_id, target_tg_id, days, *, configured_admin=False):
+    """Authorize and adjust native access in one transaction, without touching bundles."""
+    if type(days) is not int or days == 0 or abs(days) > 3650:
+        raise ValueError('invalid_days')
+    async with transaction(conn) as tx:
+        role = await get_role(tx, actor_tg_id)
+        if not configured_admin and not role_has(role, 'premium_manage'):
+            raise PermissionError('premium_manage_required')
+        await get_or_create_user(tx, target_tg_id)
+        now = datetime.now(timezone.utc)
+        current = _parse_utc_iso_dt(await get_premium_until(tx, target_tg_id))
+        base = max(current, now) if current else now
+        until = max(now, base + timedelta(days=days))
+        action = 'grant' if days > 0 else 'degrant'
+        return await set_premium_until(tx, target_tg_id, until, source=f'{action}:{actor_tg_id}',
+                                       plan_id=f'{action}_{abs(days)}d')
+
+
 async def start_starter_trial(
     conn: aiosqlite.Connection,
     tg_user_id: int,
     days: int = 3,
     source: str = "onboarding",
-) -> str:
+) -> str | None:
     if days <= 0:
         raise ValueError("days must be > 0")
     await get_or_create_user(conn, tg_user_id)
     now = datetime.now(timezone.utc)
     until = now + timedelta(days=int(days))
     until_iso = _to_utc_iso(until)
-    await conn.execute(
+    cursor = await conn.execute(
         """UPDATE users
            SET starter_trial_used=1,
                starter_trial_started_at_utc=?,
                starter_trial_until_utc=?,
                starter_trial_source=?
-           WHERE tg_user_id=?""",
+           WHERE tg_user_id=? AND COALESCE(starter_trial_used,0)=0""",
         (utc_now_iso(), until_iso, str(source or ""), int(tg_user_id)),
     )
     await conn.commit()
-    return until_iso
+    if cursor.rowcount:
+        return until_iso
+    # A repeated click can reopen a still-active trial, never extend or renew it.
+    if await is_starter_trial_active(conn, tg_user_id):
+        row = await fetchone(conn, "SELECT starter_trial_until_utc FROM users WHERE tg_user_id=?", (tg_user_id,))
+        return str(row['starter_trial_until_utc']) if row else None
+    return None
 
 
 async def has_any_webapp_access(conn: aiosqlite.Connection, tg_user_id: int) -> bool:
@@ -7393,8 +7461,9 @@ async def set_day_state(
     snapshot = existing["dose_snapshot_json"] if existing and existing["status"] == "taken" else None
     if status == "taken" and snapshot is None:
         # Read only this item; a large complex must not rebuild every plan for every mark.
-        rows = await fetchall(conn, """SELECT dose_text AS dose FROM day_plan_items
-            WHERE user_id=? AND supplement_id=? AND date_local=? AND action='add'""", (user_id, supplement_id, local_date))
+        rows = await fetchall(conn, """SELECT uss.dose_text AS dose FROM day_plan_items dpi
+            LEFT JOIN user_supp_settings uss ON uss.user_id=dpi.user_id AND uss.supplement_id=dpi.supplement_id
+            WHERE dpi.user_id=? AND dpi.supplement_id=? AND dpi.date_local=? AND dpi.action='add'""", (user_id, supplement_id, local_date))
         if local_date == get_user_local_date(await get_user_tz(conn, tg_user_id)):
             complex_rows = await fetchall(conn, """SELECT ci.dose_override AS dose FROM user_complex_items ci
                 JOIN user_complexes c ON c.id=ci.complex_id
@@ -7415,7 +7484,10 @@ async def set_day_state(
     await conn.execute(
         """INSERT INTO supplement_day_state(user_id, day, supplement_id, status,dose_snapshot_json)
            VALUES(?,?,?,?,?)
-           ON CONFLICT(user_id, supplement_id, day) DO UPDATE SET status=excluded.status,dose_snapshot_json=excluded.dose_snapshot_json""",
+           ON CONFLICT(user_id, supplement_id, day) DO UPDATE SET status=excluded.status,
+             dose_snapshot_json=CASE WHEN excluded.status='taken' AND supplement_day_state.status='taken'
+               THEN COALESCE(supplement_day_state.dose_snapshot_json,excluded.dose_snapshot_json)
+               ELSE excluded.dose_snapshot_json END""",
         (user_id, local_date, supplement_id, status, snapshot if status == "taken" else None),
     )
     await conn.commit()
@@ -7483,6 +7555,13 @@ async def clear_today_status(
 ) -> None:
     day = await ensure_daily_rollover(conn, tg_user_id)
     await set_day_status(conn, tg_user_id, day, supplement_id, None)
+
+async def trusted_label_dose(conn, user_id, supplement_id):
+    """AI plans may reuse only a dose explicitly entered in the owner's settings."""
+    row = await fetchone(conn, 'SELECT dose_text FROM user_supp_settings WHERE user_id=? AND supplement_id=?',
+                         (user_id, supplement_id))
+    return str(row['dose_text'] or '').strip() if row else ''
+
 
 async def get_user_supp_settings(conn: aiosqlite.Connection, user_id: int, supplement_id: int) -> dict:
     row = await fetchone(
@@ -7622,46 +7701,80 @@ async def get_user_by_tg_id(conn: aiosqlite.Connection, tg_id: int) -> dict | No
     row = await fetchone(conn, "SELECT * FROM users WHERE tg_user_id=?", (tg_id,))
     return dict(row) if row else None
 
-async def upsert_daily_checkin(conn: aiosqlite.Connection, tg_user_id: int, local_date: str, answers: dict) -> int:
-    user_id = await get_or_create_user(conn, int(tg_user_id))
-    tz_name = await get_user_tz(conn, int(tg_user_id)) or "UTC"
-    now = utc_now_iso()
-    await conn.execute(
-        """INSERT INTO daily_checkins(user_id, date_local, tz_name, answers_json, created_at_utc)
-           VALUES(?,?,?,?,?)
-           ON CONFLICT(user_id, date_local) DO UPDATE SET
-             tz_name=excluded.tz_name,
-             answers_json=excluded.answers_json,
-             created_at_utc=excluded.created_at_utc""",
-        (user_id, local_date, tz_name, json.dumps(answers, ensure_ascii=False), now),
-    )
-    row = await fetchone(
-        conn,
-        "SELECT id FROM daily_checkins WHERE user_id=? AND date_local=?",
-        (user_id, local_date),
-    )
-    await conn.commit()
-    return int(row["id"]) if row else 0
+async def daily_checkin_status(conn, row, *, now=None):
+    """Observe state without extending a lease or starting another calculation."""
+    stamp = time.time() if now is None else now
+    claim = await fetchone(conn, 'SELECT status,lease_until FROM daily_checkin_claims WHERE checkin_id=?', (row['id'],))
+    if claim:
+        return 'failed' if claim['status'] == 'processing' and claim['lease_until'] <= stamp else claim['status']
+    raw = _decode_json_or_default(row.get('ai_raw_json'), None)
+    if isinstance(raw, list): return 'done'
+    if isinstance(raw, dict) and raw.get('error'): return 'failed'
+    created = _parse_utc_iso_dt(row.get('created_at_utc'))
+    return 'failed' if created and created.timestamp() + 900 <= stamp else 'processing'
 
 
+async def reserve_daily_checkin(conn, tg_user_id, local_date, answers, *, token=None,
+                                prompt_hash='', now=None, lease_seconds=900):
+    """One bot/Web calculation per owned day; no transaction spans a provider call.
 
-async def save_ai_result(
-    conn: aiosqlite.Connection,
-    checkin_id: int,
-    ai_raw_json: dict | list,
-    prompt_hash: str,
-) -> None:
-    await conn.execute(
-        """UPDATE daily_checkins
-           SET ai_raw_json=?, ai_prompt_hash=?
-           WHERE id=?""",
-        (
-            json.dumps(ai_raw_json, ensure_ascii=False),
-            (prompt_hash or "").strip(),
-            int(checkin_id),
-        ),
-    )
-    await conn.commit()
+    A failed or abandoned attempt can retry only its original answers. Completed
+    records, applied actions and the initial observation time are never replaced.
+    """
+    stamp = time.time() if now is None else now
+    token = token or uuid.uuid4().hex
+    async with transaction(conn) as tx:
+        user_id = await get_or_create_user(tx, int(tg_user_id))
+        tz_name = await get_user_tz(tx, int(tg_user_id)) or 'UTC'
+        old = await get_today_checkin(tx, tg_user_id, local_date)
+        if old:
+            claim = await fetchone(tx, 'SELECT * FROM daily_checkin_claims WHERE checkin_id=?', (old['id'],))
+            old['processing_status'] = await daily_checkin_status(tx, old, now=stamp)
+            raw = _decode_json_or_default(old.get('ai_raw_json'), None)
+            same_answers = _decode_json_or_default(old.get('answers_json'), {}) == answers
+            retryable = (claim and (claim['status'] == 'failed' or
+                         (claim['status'] == 'processing' and claim['lease_until'] <= stamp)))
+            # Historical errors or process exits before this migration are also
+            # recoverable, without interpreting a valid empty result as failure.
+            if not claim:
+                created = _parse_utc_iso_dt(old.get('created_at_utc'))
+                abandoned = raw is None and created and created.timestamp() + lease_seconds <= stamp
+                retryable = (isinstance(raw, dict) and bool(raw.get('error'))) or abandoned
+                old['processing_status'] = 'done' if isinstance(raw, list) else 'failed' if retryable else 'processing'
+            if not retryable or not same_answers or old.get('applied_json'):
+                return old, None
+            checkin_id = int(old['id'])
+        else:
+            cur = await tx.execute(
+                """INSERT INTO daily_checkins(user_id,date_local,tz_name,answers_json,created_at_utc)
+                   VALUES(?,?,?,?,?)""",
+                (user_id, local_date, tz_name, json.dumps(answers, ensure_ascii=False),
+                 datetime.fromtimestamp(stamp, timezone.utc).isoformat()))
+            checkin_id = int(cur.lastrowid)
+        await tx.execute("""INSERT INTO daily_checkin_claims(checkin_id,token,status,lease_until)
+            VALUES(?,?,'processing',?) ON CONFLICT(checkin_id) DO UPDATE SET
+            token=excluded.token,status=excluded.status,lease_until=excluded.lease_until""",
+            (checkin_id, token, stamp + lease_seconds))
+        await tx.execute('UPDATE daily_checkins SET ai_prompt_hash=? WHERE id=? AND user_id=?',
+                         (prompt_hash, checkin_id, user_id))
+        row = await get_daily_checkin_by_id(tx, checkin_id, tg_user_id)
+        row['processing_status'] = 'processing'
+        return row, token
+
+
+async def finish_daily_checkin(conn, tg_user_id, checkin_id, token, result, *, prompt_hash=None, failed=False):
+    """A late worker cannot replace a newer attempt or an already saved result."""
+    async with transaction(conn) as tx:
+        row = await get_daily_checkin_by_id(tx, checkin_id, tg_user_id)
+        if not row: return False
+        cur = await tx.execute("""UPDATE daily_checkin_claims SET status=?,lease_until=0
+            WHERE checkin_id=? AND token=? AND status='processing'""",
+            ('failed' if failed else 'done', checkin_id, token))
+        if cur.rowcount != 1: return False
+        await tx.execute("""UPDATE daily_checkins SET ai_raw_json=?,ai_prompt_hash=COALESCE(?,ai_prompt_hash)
+            WHERE id=? AND user_id=?""",
+            (json.dumps(result, ensure_ascii=False), prompt_hash, checkin_id, row['user_id']))
+        return True
 
 
 async def apply_recommendations_to_today(
@@ -7913,7 +8026,8 @@ async def build_ai_context_compact(conn: aiosqlite.Connection, tg_user_id: int, 
         )
         complexes.append({"name": str(row["name"] or ""), "slugs": [str(x["slug"] or "") for x in items if str(x["slug"] or "").strip()]})
 
-    stats = await build_stats_compact(conn, tg_user_id, local_date)
+    window = await _adherence_window(conn,tg_user_id,local_date,90)
+    stats = await build_stats_compact(conn, tg_user_id, local_date, _window=window)
     return {
         "date": local_date,
         "stack": stack,
@@ -8180,13 +8294,15 @@ async def get_today_plan_groups(conn: aiosqlite.Connection, tg_user_id: int, loc
     ai_rows = await fetchall(
         conn,
         """SELECT dpi.supplement_id,
-                  COALESCE(NULLIF(dpi.dose_text,''), '') AS dose_text,
+                  COALESCE(uss.dose_text, '') AS dose_text,
                   COALESCE(NULLIF(dpi.slot_id,''), NULLIF(dpi.time_local,''), NULLIF(dpi.time_hint,''), 'morning') AS slot_or_time,
                   COALESCE(NULLIF(dpi.time_local,''), NULLIF(dpi.time_hint,''), '') AS time_local,
                   s.slug,
                   COALESCE(NULLIF(s.name_ru,''), NULLIF(s.name_en,''), s.name) AS name_ru
            FROM day_plan_items dpi
            JOIN supplements s ON s.id=dpi.supplement_id
+           LEFT JOIN user_supp_settings uss
+             ON uss.user_id=dpi.user_id AND uss.supplement_id=dpi.supplement_id
            WHERE dpi.user_id=? AND dpi.date_local=? AND dpi.action='add'""",
         (user_id, local_date),
     )
@@ -8666,37 +8782,66 @@ async def get_taken_supplement_ids(conn: aiosqlite.Connection, tg_user_id: int, 
     return {int(r["supplement_id"] or 0) for r in rows if int(r["supplement_id"] or 0) > 0}
 
 
-async def get_daily_adherence(conn: aiosqlite.Connection, tg_user_id: int, local_date: str) -> dict:
-    expected_ids = await get_expected_supplement_ids(conn, tg_user_id, local_date)
-    taken_ids = await get_taken_supplement_ids(conn, tg_user_id, local_date)
-    expected = len(expected_ids)
-    taken = len(expected_ids & taken_ids)
-    adherence = int(round((100 * taken) / expected)) if expected > 0 else None
-    return {"expected": expected, "taken": taken, "adherence": adherence}
+async def _adherence_window(conn, tg_user_id: int, end_date: str, days: int = 90) -> dict:
+    """One bounded snapshot of the same current-stack + saved-day-plan semantics.
+
+    A blocked assistant removal stays in the visible plan, so it also stays in
+    the denominator, as in get_today_supplement_ids. Unknown days are not added.
+    """
+    user_id = await get_or_create_user(conn, int(tg_user_id))
+    end = date.fromisoformat(end_date)
+    dates = [(end - timedelta(days=i)).isoformat() for i in range(max(1, min(int(days), 90)))]
+    base = await fetchall(conn, """SELECT us.supplement_id FROM user_supplements us
+        JOIN supplements s ON s.id=us.supplement_id
+        WHERE us.user_id=? AND us.is_active=1 AND us.enabled=1
+        UNION SELECT ci.supplement_id FROM user_complex_schedules cs
+        JOIN user_complexes c ON c.id=cs.complex_id JOIN user_complex_items ci ON ci.complex_id=c.id
+        JOIN supplements s ON s.id=ci.supplement_id
+        WHERE cs.user_id=? AND c.user_id=? AND cs.is_enabled=1""", (user_id,user_id,user_id))
+    base_ids = {int(r['supplement_id']) for r in base if int(r['supplement_id']) > 0}
+    expected = {day:set(base_ids) for day in dates}
+    added = await fetchall(conn, """SELECT p.date_local,p.supplement_id FROM day_plan_items p
+        JOIN supplements s ON s.id=p.supplement_id
+        WHERE p.user_id=? AND p.date_local>=? AND p.date_local<=? AND p.action='add'""", (user_id,dates[-1],dates[0]))
+    for row in added:
+        if row['date_local'] in expected: expected[row['date_local']].add(int(row['supplement_id']))
+    taken = {day:set() for day in dates}
+    rows = await fetchall(conn, """SELECT day,supplement_id FROM supplement_day_state
+        WHERE user_id=? AND day>=? AND day<=? AND status='taken'""", (user_id,dates[-1],dates[0]))
+    for row in rows:
+        if row['day'] in taken: taken[row['day']].add(int(row['supplement_id']))
+    return {'expected':expected,'taken':taken}
 
 
-async def get_range_adherence(conn: aiosqlite.Connection, tg_user_id: int, end_date: str, days: int) -> dict:
+def _window_day(window: dict, day: str) -> dict:
+    expected_ids = window['expected'].get(day,set())
+    taken_ids = window['taken'].get(day,set())
+    expected,taken = len(expected_ids),len(expected_ids & taken_ids)
+    return {'expected':expected,'taken':taken,'adherence':int(round(100*taken/expected)) if expected else None}
+
+
+async def get_daily_adherence(conn: aiosqlite.Connection, tg_user_id: int, local_date: str, *, _window=None) -> dict:
+    window = _window if _window is not None else await _adherence_window(conn,tg_user_id,local_date,1)
+    return _window_day(window,local_date)
+
+
+async def get_range_adherence(conn: aiosqlite.Connection, tg_user_id: int, end_date: str, days: int, *, _window=None) -> dict:
+    safe_days=max(1,min(int(days or 1),30));end=date.fromisoformat(end_date)
+    window=_window if _window is not None else await _adherence_window(conn,tg_user_id,end_date,safe_days)
+    rows=[_window_day(window,(end-timedelta(days=i)).isoformat()) for i in range(safe_days)]
+    expected=sum(r['expected'] for r in rows);taken=sum(r['taken'] for r in rows)
+    return {'days':safe_days,'expected_total':expected,'taken_total':taken,'adherence':int(round(100*taken/expected)) if expected else None}
+
+
+async def get_top_misses(conn: aiosqlite.Connection, tg_user_id: int, end_date: str, days: int, limit: int = 10, *, _window=None) -> list[dict]:
     safe_days = max(1, min(int(days or 1), 30))
     end = datetime.strptime(end_date, "%Y-%m-%d").date()
-    expected_total = 0
-    taken_total = 0
-    for offset in range(safe_days):
-        day = (end - timedelta(days=offset)).isoformat()
-        daily = await get_daily_adherence(conn, tg_user_id, day)
-        expected_total += int(daily.get("expected") or 0)
-        taken_total += int(daily.get("taken") or 0)
-    adherence = int(round((100 * taken_total) / expected_total)) if expected_total > 0 else None
-    return {"days": safe_days, "expected_total": expected_total, "taken_total": taken_total, "adherence": adherence}
-
-
-async def get_top_misses(conn: aiosqlite.Connection, tg_user_id: int, end_date: str, days: int, limit: int = 10) -> list[dict]:
-    safe_days = max(1, min(int(days or 1), 30))
-    end = datetime.strptime(end_date, "%Y-%m-%d").date()
+    window = _window if _window is not None else await _adherence_window(conn,tg_user_id,end_date,safe_days)
     misses: dict[int, int] = {}
     for offset in range(safe_days):
         day = (end - timedelta(days=offset)).isoformat()
-        expected_ids = await get_expected_supplement_ids(conn, tg_user_id, day)
-        taken_ids = await get_taken_supplement_ids(conn, tg_user_id, day)
+        expected_ids = window['expected'].get(day,set())
+        taken_ids = window['taken'].get(day,set())
         for sid in (expected_ids - taken_ids):
             misses[sid] = misses.get(sid, 0) + 1
     if not misses:
@@ -8750,33 +8895,23 @@ async def get_streaks(
     as_of_date: str,
     supplement_ids: set[int],
     max_back: int = 90,
+    *, _window=None,
 ) -> list[dict]:
     if not supplement_ids:
         return []
-    max_days = max(1, int(max_back or 1))
+    max_days = max(1, min(int(max_back or 1),90))
     end = datetime.strptime(as_of_date, "%Y-%m-%d").date()
-    expected_cache: dict[str, set[int]] = {}
-    taken_cache: dict[str, set[int]] = {}
-
-    async def _expected(day: str) -> set[int]:
-        if day not in expected_cache:
-            expected_cache[day] = await get_expected_supplement_ids(conn, tg_user_id, day)
-        return expected_cache[day]
-
-    async def _taken(day: str) -> set[int]:
-        if day not in taken_cache:
-            taken_cache[day] = await get_taken_supplement_ids(conn, tg_user_id, day)
-        return taken_cache[day]
+    window = _window if _window is not None else await _adherence_window(conn,tg_user_id,as_of_date,max_days)
 
     streak_map: dict[int, int] = {}
     for sid in sorted(supplement_ids):
         streak = 0
         for offset in range(max_days):
             day = (end - timedelta(days=offset)).isoformat()
-            expected_ids = await _expected(day)
+            expected_ids = window['expected'].get(day,set())
             if sid not in expected_ids:
                 continue
-            if sid in await _taken(day):
+            if sid in window['taken'].get(day,set()):
                 streak += 1
                 continue
             break
@@ -8808,13 +8943,14 @@ async def get_streaks(
     return out
 
 
-async def build_stats_compact(conn: aiosqlite.Connection, tg_user_id: int, local_date: str) -> dict:
-    today = await get_daily_adherence(conn, tg_user_id, local_date)
-    last7 = await get_range_adherence(conn, tg_user_id, local_date, 7)
-    last30 = await get_range_adherence(conn, tg_user_id, local_date, 30)
-    misses7 = await get_top_misses(conn, tg_user_id, local_date, 7, limit=5)
+async def build_stats_compact(conn: aiosqlite.Connection, tg_user_id: int, local_date: str, *, _window=None) -> dict:
+    window = _window if _window is not None else await _adherence_window(conn,tg_user_id,local_date,90)
+    today = await get_daily_adherence(conn, tg_user_id, local_date, _window=window)
+    last7 = await get_range_adherence(conn, tg_user_id, local_date, 7, _window=window)
+    last30 = await get_range_adherence(conn, tg_user_id, local_date, 30, _window=window)
+    misses7 = await get_top_misses(conn, tg_user_id, local_date, 7, limit=5, _window=window)
     stack_ids = await get_user_stack_supplement_ids(conn, tg_user_id)
-    streaks = await get_streaks(conn, tg_user_id, local_date, stack_ids, max_back=90)
+    streaks = await get_streaks(conn, tg_user_id, local_date, stack_ids, max_back=90, _window=window)
     return {
         "today": today,
         "last7": {
@@ -8842,7 +8978,8 @@ def _hhmm_to_int(value: str | None) -> int:
 
 async def get_user_metrics(conn: aiosqlite.Connection, tg_user_id: int, local_date: str) -> dict:
     user_id = await get_or_create_user(conn, int(tg_user_id))
-    stats = await build_stats_compact(conn, tg_user_id, local_date)
+    window = await _adherence_window(conn,tg_user_id,local_date,90)
+    stats = await build_stats_compact(conn, tg_user_id, local_date, _window=window)
 
     metrics = {
         "today_adherence": int(stats.get("today", {}).get("adherence") or 0),
@@ -8857,7 +8994,7 @@ async def get_user_metrics(conn: aiosqlite.Connection, tg_user_id: int, local_da
     cursor = date.fromisoformat(local_date)
     perfect_streak = 0
     for _ in range(30):
-        daily = await get_daily_adherence(conn, tg_user_id, cursor.isoformat())
+        daily = _window_day(window, cursor.isoformat())
         expected = int(daily.get("expected") or 0)
         adherence = daily.get("adherence")
         if expected >= 3 and adherence == 100:
@@ -9186,8 +9323,8 @@ def describe_rewards_ru(reward_json: dict | str | None, catalogs_from_achievemen
 async def evaluate_and_unlock_achievements(conn, tg_user_id: int, local_date: str) -> list[str]:
     from achievements import ACHIEVEMENTS
 
-    await bootstrap_achievements(conn)
     metrics = await get_user_metrics(conn, tg_user_id, local_date)
+    await bootstrap_achievements(conn)
     user_id = await get_or_create_user(conn, int(tg_user_id))
     now = utc_now_iso()
     newly: list[str] = []
@@ -9982,6 +10119,7 @@ async def _apply_day_plan_actions(
             supplement_id = int(row["id"]) if row else None
         if not supplement_id:
             continue
+        dose_text = await trusted_label_dose(conn, user_id, int(supplement_id))
         await conn.execute(
             """INSERT OR IGNORE INTO day_plan_items(
                    user_id, date_local, supplement_id, action, dose_text, time_hint, reason, source, created_at_utc
@@ -9991,7 +10129,7 @@ async def _apply_day_plan_actions(
                 date_local,
                 int(supplement_id),
                 str(action.get("type") or "").strip(),
-                str(action.get("dose_text") or "").strip() or None,
+                dose_text or None,
                 str(action.get("time_hint") or "").strip() or None,
                 str(action.get("reason_short_ru") or "").strip() or None,
                 "ai",

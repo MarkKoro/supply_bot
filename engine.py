@@ -223,6 +223,13 @@ async def apply_day_plan_actions_with_slots(
     picked = [item for item in picked if int(item.get("supplement_id") or 0) > 0]
     if not picked:
         return 0
+    protected = {int(r[0]) for r in await db.fetchall(conn, '''SELECT DISTINCT i.supplement_id
+        FROM user_complex_items i JOIN user_complexes c ON c.id=i.complex_id WHERE c.user_id=?''', (user_id,))}
+    taken = await db.get_day_status_map(conn, tg_user_id, date_local)
+    for item in picked:
+        sid = int(item['supplement_id'])
+        if sid in protected: raise ValueError('complex_plan_changed')
+        if item['action'] in {'remove','adjust'} and taken.get(sid) == 'taken': raise ValueError('already_taken')
     for item in picked:
         item["type"] = item["action"]
     await db.clear_day_plan(conn, user_id, date_local)
@@ -246,6 +253,9 @@ async def apply_day_plan_actions_with_slots(
             supplement_id = int(row["id"]) if row else 0
         if supplement_id <= 0:
             continue
+        # Generated and historical AI payloads cannot set a dose. The owner-local
+        # label entry is the only authority, including when applying old results.
+        dose_text = await db.trusted_label_dose(conn, user_id, supplement_id)
         hhmm = db._normalize_hhmm(str(action.get("suggested_time") or "").strip())
         cur = await conn.execute(
             """INSERT OR IGNORE INTO day_plan_items(
@@ -256,7 +266,7 @@ async def apply_day_plan_actions_with_slots(
                 date_local,
                 supplement_id,
                 str(action.get("type") or "").strip() or "add",
-                str(action.get("dose_text") or "").strip() or None,
+                dose_text or None,
                 hhmm,
                 str(action.get("suggested_slot_id") or "").strip() or None,
                 hhmm,

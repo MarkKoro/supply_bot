@@ -28,11 +28,11 @@ class NativeBundleHandlers(unittest.IsolatedAsyncioTestCase):
     def order(self):return {'id':'actual-reserved-id','amount':277,'pricing_json':json.dumps({'label':'30 дней','credit_amount':173})}
     async def test_catalog_uses_owner_menu_and_shows_credit_align_and_already_covered(self):
         price=lambda n:{'already_covered':n==0,'credit_amount':450-n}
-        catalog={'plans':[{'id':'align','label':'До 28.10','XTR':200,'prices':{'XTR':price(200)}},{'id':'m1','label':'30 дней','XTR':277,'prices':{'XTR':price(277)}},{'id':'m3','label':'90 дней','XTR':0,'prices':{'XTR':price(0)}}]}
+        catalog={'plans':[{'id':'align','label':'До 28.10','XTR':200,'prices':{'XTR':price(200)}},{'id':'m1','label':'30 дней','XTR':277,'prices':{'XTR':price(277)}},{'id':'m6','label':'180 дней','XTR':0,'prices':{'XTR':price(0)}}]}
         with patch.object(client,'call',AsyncMock(return_value=catalog)):await self.invoke('callback')
         args=self.render.call_args.args;self.assertIn('зачтено 173',args[2]);self.assertIn('уже доступны',args[2])
         callbacks=[b.callback_data for row in args[3].inline_keyboard for b in row]
-        self.assertIn('pg:buy:align',callbacks);self.assertNotIn('pg:buy:m3',callbacks);self.assertIn('owner:menu',callbacks)
+        self.assertIn('pg:buy:align',callbacks);self.assertNotIn('pg:buy:m6',callbacks);self.assertIn('owner:menu',callbacks)
     async def test_rub_and_stars_pairs_show_own_access_and_personal_credit(self):
         catalog={'rub_available':True,'website_url':'https://example.test/progressor/subscribe',
                  'subscriptions':{'products':[{'name':'Food','state':'active','expires_at':'2030-01-01T00:00:00Z'},{'name':'Supply','state':'inactive'}]},
@@ -45,6 +45,24 @@ class NativeBundleHandlers(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(pair[0].url,'https://example.test/progressor/subscribe?source='+SOURCE+'&plan=m1')
         self.assertEqual(pair[1].callback_data,'pg:buy:m1')
         self.assertEqual(self.render.await_count,1)
+    async def test_primary_periods_extra_and_back_use_equal_currencies_without_creating_order(self):
+        plans=[]
+        for plan in ('m1','m3','m6','y1'):
+            plans.append({'id':plan,'label':plan,'RUB':59900,'XTR':450,'prices':{'RUB':{'already_covered':False,'credit_amount':0},'XTR':{'already_covered':False,'credit_amount':0}}})
+        catalog={'rub_available':True,'website_url':'https://example.test/progressor/subscribe','plans':plans}
+        call=AsyncMock(return_value=catalog)
+        with patch.object(client,'call',call):
+            for route,expected in [('pg:menu',['m1','m6','y1']),('pg:periods',['m3']),('pg:menu',['m1','m6','y1'])]:
+                self.q.data=route;await self.invoke('callback')
+                rows=self.render.call_args.args[3].inline_keyboard
+                pairs=[row for row in rows if len(row)==2]
+                self.assertEqual([row[1].callback_data for row in pairs],['pg:buy:'+p for p in expected])
+                for row,plan in zip(pairs,expected):
+                    self.assertEqual(row[0].url,'https://example.test/progressor/subscribe?source='+SOURCE+'&plan='+plan)
+                self.assertIn('owner:menu',[b.callback_data for row in rows for b in row])
+        self.assertEqual(call.await_count,3)
+        self.assertTrue(all(args.args[1]=='/internal/v1/bundle/catalog' for args in call.call_args_list))
+
     async def test_invoice_button_uses_actual_reserved_id_and_no_extra_invoice_message(self):
         self.q.data='pg:buy:m1'
         call=AsyncMock(side_effect=[self.order(),{'invoice_url':'https://t.me/$offline'}])

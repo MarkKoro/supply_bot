@@ -174,7 +174,7 @@ def install(app,source,db_path,*,render=None,back_callback=None,notify=None):
             result=await asyncio.to_thread(finish,db_path,session['user_id'],session['id'])
             await show(update,context,'Свободная тренировка завершена. Записанные подходы учтены один раз.' if result['finished'] else 'Сначала сохраните выполненные подходы или кардио.',back)
 
-    async def menu(update,context):
+    async def menu(update,context,*,other_periods=False):
         if not private(update):return
         try:catalog=await client.call(source,'/internal/v1/bundle/catalog',{'user_id':str(update.effective_user.id)})
         except Exception:
@@ -189,6 +189,9 @@ def install(app,source,db_path,*,render=None,back_callback=None,notify=None):
                 if end:label+=' до '+end[:10]
                 lines.append(product['name']+' — '+label)
         for p in catalog['plans']:
+            if p['id'] != 'align' and (p['id'] in {'m1','m6','y1'}) == other_periods:
+                continue
+            if other_periods and p['id'] == 'align':continue
             price=p['prices']['XTR'];label=p['label']
             if price['already_covered']:
                 lines.append('\n'+label+' — все три продукта уже доступны по оплаченным подпискам.');continue
@@ -207,6 +210,8 @@ def install(app,source,db_path,*,render=None,back_callback=None,notify=None):
                 pair.append(InlineKeyboardButton(f"{p['RUB']/100:g} ₽ · {label}",url=url))
             pair.append(InlineKeyboardButton(f"{p['XTR']} ⭐ · {label}",callback_data='pg:buy:'+p['id']))
             rows.append(pair)
+        if other_periods or any(p['id'] not in {'m1','m6','y1','align'} for p in catalog['plans']):
+            rows.append([InlineKeyboardButton('Основные сроки' if other_periods else 'Другие сроки',callback_data='pg:menu' if other_periods else 'pg:periods')])
         pending=catalog.get('pending_order')
         if pending:
             lines.append('\nЕсть неоплаченный счёт. Чтобы выбрать другой срок или способ оплаты, сначала отмените его. Если деньги уже списаны, дождитесь подтверждения.')
@@ -221,6 +226,7 @@ def install(app,source,db_path,*,render=None,back_callback=None,notify=None):
         query=update.callback_query;await query.answer()
         if not private(update):raise ApplicationHandlerStop
         if query.data=='pg:menu':await menu(update,context)
+        elif query.data=='pg:periods':await menu(update,context,other_periods=True)
         elif query.data.split(':')[1] in ('settings','link','pref','rest','help','weights','weight','weight_confirm','weekly','weekly_plan','rhythm','rhythm_confirm','rhythm_off','coach_permissions','coach_macros','coach_dishes','coach_view','free_finish'):
             try:await account_action(update,context)
             except Exception:await show(update,context,'Данные изменились или связь временно недоступна. Обновите настройки.',[[InlineKeyboardButton('Связь продуктов',callback_data='pg:settings')]])

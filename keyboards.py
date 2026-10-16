@@ -1091,18 +1091,29 @@ def premium_plans_kb(
     *,
     back_cb: str = "menu:home",
     show_about: bool = True,
+    other_periods: bool = False,
 ) -> InlineKeyboardMarkup:
     clean = str(webapp_base_url or "").rstrip("/")
     rows: list[list[InlineKeyboardButton]] = []
+    main = {str(p.get('plan_id')) for p in plans if int(p.get('months') or 0) in {1, 6, 12}}
+    if not main:
+        main = {str(p.get('plan_id')) for p in plans[:3]}
     for plan in plans:
         plan_id = str(plan.get("plan_id") or "")
+        if (plan_id in main) == other_periods:
+            continue
         title = str(plan.get("title") or plan_id)
+        pair = []
         if clean:
             url = f"{clean}/?screen=payment&kind=subscription&plan_id={plan_id}&source=bot_premium"
-            rows.append([InlineKeyboardButton(title, web_app=WebAppInfo(url=url))])
+            pair.append(InlineKeyboardButton(title, web_app=WebAppInfo(url=url)))
         else:
-            rows.append([InlineKeyboardButton(title, callback_data=f"premium:buy:{plan_id}:yookassa")])
-    rows.append([InlineKeyboardButton("⭐ Купить в звездах", callback_data="premium:stars_menu")])
+            pair.append(InlineKeyboardButton(title, callback_data=f"premium:buy:{plan_id}:yookassa"))
+        if int(plan.get('stars') or 0) > 0:
+            pair.append(InlineKeyboardButton(str(plan.get('stars_title') or f'{plan_id} · {plan["stars"]} ⭐'), callback_data=f"premium:buy:{plan_id}:stars"))
+        rows.append(pair)
+    if other_periods or any(str(p.get('plan_id')) not in main for p in plans):
+        rows.append([InlineKeyboardButton('Основные сроки' if other_periods else 'Другие сроки', callback_data='premium:main_periods' if other_periods else 'premium:other_periods')])
     rows.append([InlineKeyboardButton("Общая подписка · доплатить",callback_data="pg:menu")])
     if show_about:
         rows.append([InlineKeyboardButton("📦 Что входит", callback_data="premium:about")])

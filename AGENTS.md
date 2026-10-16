@@ -36,3 +36,10 @@ Subscription screen and camera pipeline: read [docs/SUBSCRIPTIONS_AND_FOOD_PHOTO
 ## Selected native connections
 
 Read [docs/SELECTED_FEATURES.md](docs/SELECTED_FEATURES.md) before changing shared profile commands, source-owned caches, reminders, day closure, food atlas/overlap, rhythm, timezone or coach permissions. Shared product_links/ai_cache/day_goal/food_sources/timezone_history are canonical in Core and mirrored together. Trainer aggregate nutrition is a narrow explicit consent exception; native trainer role/link alone never grants it or cross-product AI delegation. Keep source ownership, history/CAS/idempotence, no-replay rest, protocol2 and normal FF main4.
+
+
+## Quality program — 2026-10-16
+
+Read [docs/QUALITY_PROGRAM.md](docs/QUALITY_PROGRAM.md) before storage, access, AI, native UI or deployment changes. Preserve the request-owned context projection, source-owned doses, read-only GET behavior, durable AI attempts and explicit native readiness. Install declared requirements/constraints into a fresh runtime; retain the old runtime for rollback. Match the change to meaningful tests and record exact source/evidence; no extra consumers or real paid tests.
+
+Critical launch mirror: `webapp/assets/progressor-bootstrap.v1.js` must exactly match Core `shared/bootstrap.v1.js`. Keep native own-proof requests independent of Core, preserve original-source identity across SDK deliveries, and prevent cross-navigation when its assertions cannot be transferred. The complete shared UI and backend remain canonical in Core.

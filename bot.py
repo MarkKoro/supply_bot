@@ -5,6 +5,7 @@ import calendar
 import csv
 import html
 import json
+import math
 import logging
 import os
 import re
@@ -425,10 +426,6 @@ async def _admin_import_seed_objects(items: list[dict]) -> list[str]:
 
 CHECKIN_VOICE_MAX_SECONDS = 90
 CHECKIN_VOICE_MAX_BYTES = 10 * 1024 * 1024
-
-def _is_tz_unset(tz_name: str | None) -> bool:
-    return not tz_name or str(tz_name).strip().upper() in {"UTC", "GMT"}
-
 
 def _parse_user_time_input(raw: str) -> str | None:
     value = (raw or "").strip()
@@ -1073,7 +1070,7 @@ async def ensure_timezone_or_redirect(update: Update, context: ContextTypes.DEFA
     try:
         await db.get_or_create_user(conn, tg_user.id, tz_name="")
         tz_name = await db.get_user_tz(conn, tg_user.id)
-        if _is_tz_unset(tz_name):
+        if not await db.is_user_timezone_configured(conn, tg_user.id):
             context.user_data.pop("tz_back_data", None)
             context.user_data["onboarding"] = "tz"
             await _show_timezone_picker(update, context, 0)
@@ -1160,6 +1157,20 @@ async def _render_ai_checkin_entry(
     target_message_id: int | None = None,
 ) -> None:
     target_day = _get_ai_checkin_target_day(context)
+    s = context.application.bot_data['settings']
+    conn = await db.connect(s.DB_PATH)
+    try:
+        zone = await db.get_user_tz(conn, update.effective_user.id) or 'UTC'
+        day = db.local_now(zone).date()
+        if target_day == 'tomorrow': day += timedelta(days=1)
+        saved = await db.get_today_checkin(conn, update.effective_user.id, day.isoformat())
+        if saved: saved['processing_status'] = await db.daily_checkin_status(conn, saved)
+    finally:
+        await conn.close()
+    if saved:
+        await _show_saved_ai_checkin(update, context, saved, _get_ai_checkin_state(context),
+                                    target_chat_id=target_chat_id, target_message_id=target_message_id)
+        return
     target_label = _ai_checkin_target_day_label(target_day)
     text = (
         "📝 <b>Ежедневный опрос</b>\n\n"
@@ -1444,7 +1455,7 @@ def build_ai_checkin_prompt(
         "Ты — осторожный помощник по добавкам. "
         "Никаких диагнозов и назначений. "
         "Рекомендации только по предоставленным данным. "
-        "Тебе передан полный контекст: текущий чек-ин, история приема за 14 дней, "
+        "Тебе переданы доступные записи: текущий чек-ин, история приема за 14 дней, "
         "история AI-предложений и ответы в прошлых чек-инах. "
         "Обязательно анализируй динамику в прогрессии, что помогало и что не соблюдалось, "
         f"и на этой основе давай адаптированные предложения только на {target_day_ru}. "
@@ -1454,8 +1465,9 @@ def build_ai_checkin_prompt(
         "Если в today_checkin.target_day_state есть статус taken, значит добавка уже принята за целевой день: "
         "для таких добавок запрещены remove/adjust. "
         "Нельзя предлагать добавки вне списка кандидатов и текущего стека. "
-        "Если пользователь явно просит рекомендации (особенно по энергии/силе/тренировке) "
-        "и нет противопоказаний в контексте, обязательно дай минимум 1 безопасное действие add из catalog_candidates. "
+        "Пустой список действий допустим. Не добавляй БАД только ради рекомендации. "
+        "Неполные записи питания не доказывают дефицит. Не назначай дозы: dose_text всегда пустая строка; "
+        "пользователь сам указывает дозировку с упаковки. adjust меняет только время, не дозу. "
         "Не предлагай рецептурные препараты. "
         "Будь консервативным, максимум 6 действий. "
         "Если уверенность низкая — явно скажи. "
@@ -1482,7 +1494,7 @@ def build_ai_checkin_prompt(
       "id": "a1",
       "type": "add" | "remove" | "adjust",
       "slug": "caffeine",
-      "dose_text": "200 mg",
+      "dose_text": "",
       "suggested_time": "08:00",
       "prefer_existing_time": true,
       "confidence": 0.0,
@@ -1754,17 +1766,14 @@ async def _render_ai_checkin_results(
             type_map = {"add": "ДОБАВИТЬ", "remove": "УБРАТЬ", "adjust": "ИЗМЕНИТЬ"}
             label = type_map.get(action_type, "ИЗМЕНИТЬ")
             details = []
-            dose_text = str(action.get("dose_text") or "").strip()
             time_hint = str(action.get("suggested_time") or action.get("time_hint") or "").strip()
-            if dose_text:
-                details.append(dose_text)
             if time_hint:
                 details.append(time_hint)
             detail_text = f" — {', '.join(details)}" if details else ""
             confidence = action.get("confidence")
             confidence_text = ""
-            if isinstance(confidence, (float, int)):
-                confidence_text = f" (уверенность {confidence:.2f})"
+            if type(confidence) in (float, int) and math.isfinite(confidence) and confidence < .5:
+                confidence_text = " (нужны уточнения)"
             lines.append(f"{idx}) {label}: {ru_name} ({slug}){detail_text}{confidence_text}")
             reason = str(action.get("reason_short_ru") or "").strip()
             safety = str(action.get("safety_ru") or "").strip()
@@ -1782,12 +1791,14 @@ async def _render_ai_checkin_results(
     if disclaimer:
         lines.extend(["", disclaimer])
 
+    if any(a.get('type') == 'add' for a in actions):
+        lines.extend(['', 'Дозировку укажите с упаковки в «Мои БАДы» перед приёмом.'])
     kb = InlineKeyboardMarkup(
-        [
+        ([
             [InlineKeyboardButton("✅ Применить всё", callback_data=_ai_checkin_callback(state, "aicheck:apply:all"))],
             [InlineKeyboardButton("🎯 Выбрать точечно", callback_data=_ai_checkin_callback(state, "aicheck:select"))],
             [InlineKeyboardButton("❌ Не применять", callback_data=_ai_checkin_callback(state, "aicheck:deny"))],
-        ]
+        ] if actions else [[InlineKeyboardButton('В меню', callback_data='menu:ai')]])
     )
     await show(
         update,
@@ -2123,6 +2134,64 @@ def _guard_supply_ai(*, text_only=False):
         return guarded
     return decorate
 
+async def _show_saved_ai_checkin(update, context, row, state, *, target_chat_id=None, target_message_id=None):
+    """Reopening is a read. Never replace another surface's answers or result."""
+    raw = db._decode_json_or_default(row.get('ai_raw_json'), None)
+    token = str(row.get('ai_prompt_hash') or '')
+    if isinstance(raw, list) and token.startswith('bot:') and not row.get('applied_json') and row.get('processing_status') == 'done':
+        payload = {'summary_ru': 'Сохранённые рекомендации. Новый расчёт не запускался.', 'actions': raw}
+        state.update(answers=db._decode_json_or_default(row.get('answers_json'), {}),
+                     last_checkin_id=int(row['id']), last_result_token=token[4:],
+                     last_ai_actions_json=json.dumps(payload, ensure_ascii=False),
+                     last_date_local=row['date_local'], selected_action_ids=[])
+        _set_ai_checkin_state(context, state)
+        await _render_ai_checkin_results(update, context, date_local=row['date_local'], payload=payload,
+                                        target_chat_id=target_chat_id, target_message_id=target_message_id)
+        return
+    status = row.get('processing_status')
+    message = ('Опрос за этот день уже обрабатывается. Дождитесь результата.' if status == 'processing' else
+               'Расчёт не завершён. Ответы сохранены, можно повторить с ними же.' if status == 'failed' else
+               'Опрос за этот день уже сохранён. Результат и применённые изменения сохранены в приложении.')
+    rows = []
+    if status == 'failed' and token.startswith('bot:') and not row.get('applied_json'):
+        rows.append([InlineKeyboardButton('Повторить с сохранёнными ответами', callback_data=f"aicheck:retry:{row['id']}")])
+    if status == 'processing':
+        rows.append([InlineKeyboardButton('Обновить результат', callback_data='aicheck:entry')])
+    url = build_webapp_entry_url(context.application.bot_data['settings'].WEBAPP_URL)
+    if url and is_http_url(url):
+        rows.append([InlineKeyboardButton('Открыть приложение', web_app=WebAppInfo(url=url))])
+    rows.append([InlineKeyboardButton('Сегодня', callback_data='aicheck:target:today'),
+                 InlineKeyboardButton('Завтра', callback_data='aicheck:target:tomorrow')])
+    rows.append([InlineKeyboardButton('В меню', callback_data='menu:ai')])
+    await show(update, context, message, InlineKeyboardMarkup(rows), route=AI_CHECKIN_ROUTE,
+               target_chat_id=target_chat_id, target_message_id=target_message_id)
+
+
+async def _retry_saved_ai_checkin(update, context, checkin_id):
+    """An explicit retry uses the owner's original day/answers, never callback data."""
+    conn = await db.connect(context.application.bot_data['settings'].DB_PATH)
+    try:
+        tg_uid = update.effective_user.id
+        row = await db.get_daily_checkin_by_id(conn, checkin_id, tg_uid)
+        zone = await db.get_user_tz(conn, tg_uid) or 'UTC'
+        today = db.local_now(zone).date()
+        dates = {today.isoformat(): 'today', (today + timedelta(days=1)).isoformat(): 'tomorrow'}
+        if not row or row['date_local'] not in dates or not str(row.get('ai_prompt_hash') or '').startswith('bot:'):
+            await _render_ai_checkin_entry(update, context)
+            return
+        row['processing_status'] = await db.daily_checkin_status(conn, row)
+        state = _get_ai_checkin_state(context)
+        if row['processing_status'] != 'failed' or row.get('applied_json'):
+            await _show_saved_ai_checkin(update, context, row, state)
+            return
+        state.update(target_day=dates[row['date_local']], answers=db._decode_json_or_default(row.get('answers_json'), {}))
+        _set_ai_checkin_target_day(context, state['target_day'])
+        _set_ai_checkin_state(context, state)
+        await _finalize_ai_checkin(update, context, conn, tg_uid=tg_uid, user_id=row['user_id'], tz_name=zone, state=state)
+    finally:
+        await conn.close()
+
+
 @_guard_supply_ai()
 async def _finalize_ai_checkin(
     update: Update,
@@ -2161,304 +2230,275 @@ async def _finalize_ai_checkin(
         "target_day": state.get("target_day") or "today",
     }
     result_token = secrets.token_hex(6)
-    state["last_ai_actions_json"] = ""
-    state["selected_action_ids"] = []
-    state["last_result_token"] = result_token
-    _set_ai_checkin_state(context, state)
-    async with db.transaction(conn) as tx:
-        checkin_id = await db.upsert_daily_checkin(
-            tx, tg_uid, day,
-            {
+    row, claim_token = await db.reserve_daily_checkin(
+            conn, tg_uid, day, {
                 "sleep_range": answers.get("sleep_range"),
                 "energy": answers.get("energy"),
                 "stress": answers.get("stress"),
                 "training": answers.get("training"),
                 "goals": goals,
                 "note": _truncate_text(answers.get("note"), 500),
-            },
-        )
-        await tx.execute(
-            "UPDATE daily_checkins SET ai_prompt_hash=?, ai_raw_json=NULL, applied_json=NULL WHERE id=? AND user_id=?",
-            (f"bot:{result_token}", checkin_id, user_id),
-        )
-
-    s = context.application.bot_data["settings"]
-    if not s.OPENAI_API_KEY:
-        await show(
-            update,
-            context,
-            "AI отключен: добавь OPENAI_API_KEY в .env.",
-            back(),
-            route=AI_CHECKIN_ROUTE,
-            target_chat_id=target_chat_id,
-            target_message_id=target_message_id,
-        )
+            }, token=result_token, prompt_hash=f'bot:{result_token}')
+    if not claim_token:
+        await _show_saved_ai_checkin(update, context, row, state,
+                                    target_chat_id=target_chat_id, target_message_id=target_message_id)
         return
+    checkin_id = int(row['id'])
+    state["last_ai_actions_json"] = ""
+    state["selected_action_ids"] = []
+    state["last_result_token"] = result_token
+    _set_ai_checkin_state(context, state)
 
-    stack = await db.get_user_base_stack(conn, user_id)
-    supplement_ids = [int(item.get("supplement_id") or 0) for item in stack if item.get("supplement_id")]
-    days_range = []
     try:
-        day_value = datetime.strptime(day, "%Y-%m-%d").date()
-        days_range = [(day_value - timedelta(days=delta)).isoformat() for delta in range(6, -1, -1)]
-    except ValueError:
-        days_range = [day]
-    status_rows = []
-    if supplement_ids:
-        status_rows = await db.list_supplement_day_states(
-            conn,
-            tg_uid,
-            supplement_ids,
-            days_range[0],
-            days_range[-1],
-        )
-    adherence_payload = _build_adherence_payload(stack, status_rows, days_range)
-    target_day_status_rows = []
-    if supplement_ids:
-        target_day_status_rows = await db.list_supplement_day_states(conn, tg_uid, supplement_ids, day, day)
-    target_day_state_payload = []
-    locked_taken_slugs: set[str] = set()
-    supplement_slug_by_id: dict[int, str] = {}
-    for item in stack:
-        supplement_id = int(item.get("supplement_id") or 0)
-        slug = str(item.get("slug") or "").strip()
-        if supplement_id and slug:
-            supplement_slug_by_id[supplement_id] = slug
-    for row in target_day_status_rows:
-        supplement_id = int(row["supplement_id"] or 0)
-        status = str(row["status"] or "").strip().lower()
-        slug = supplement_slug_by_id.get(supplement_id, "")
-        if not slug:
-            continue
-        target_day_state_payload.append({"slug": slug, "status": status})
-        if status == "taken":
-            locked_taken_slugs.add(slug)
-    start_14d = days_range[0]
-    end_14d = days_range[-1]
-    recent_checkins_rows = await db.list_recent_checkins_window(conn, user_id, start_14d, end_14d, limit=14)
-    ai_plan_history_rows = await db.list_day_plan_history(conn, user_id, start_14d, end_14d, limit=120)
+        s = context.application.bot_data["settings"]
+        if not s.OPENAI_API_KEY:
+            await show(
+                update,
+                context,
+                "AI отключен: добавь OPENAI_API_KEY в .env.",
+                back(),
+                route=AI_CHECKIN_ROUTE,
+                target_chat_id=target_chat_id,
+                target_message_id=target_message_id,
+            )
+            return
 
-    recent_checkins_payload = []
-    for row in recent_checkins_rows:
-        raw_answers = str(row["answers_json"] or "{}").strip()
+        stack = await db.get_user_base_stack(conn, user_id)
+        # A model must not offer a separate dose/change for a complex member.
+        # The apply transaction repeats this check against current membership.
+        protected_ids = {int(r[0]) for r in await db.fetchall(conn, '''SELECT DISTINCT i.supplement_id
+            FROM user_complex_items i JOIN user_complexes c ON c.id=i.complex_id WHERE c.user_id=?''', (user_id,))}
+        supplement_ids = [int(item.get("supplement_id") or 0) for item in stack if item.get("supplement_id")]
+        days_range = []
         try:
-            previous_answers = json.loads(raw_answers) if raw_answers else {}
-        except json.JSONDecodeError:
-            previous_answers = {}
-        recent_checkins_payload.append({"date_local": str(row["date_local"]), "answers": previous_answers if isinstance(previous_answers, dict) else {}})
+            day_value = datetime.strptime(day, "%Y-%m-%d").date()
+            days_range = [(day_value - timedelta(days=delta)).isoformat() for delta in range(6, -1, -1)]
+        except ValueError:
+            days_range = [day]
+        status_rows = []
+        if supplement_ids:
+            status_rows = await db.list_supplement_day_states(
+                conn,
+                tg_uid,
+                supplement_ids,
+                days_range[0],
+                days_range[-1],
+            )
+        adherence_payload = _build_adherence_payload(stack, status_rows, days_range)
+        target_day_status_rows = []
+        if supplement_ids:
+            target_day_status_rows = await db.list_supplement_day_states(conn, tg_uid, supplement_ids, day, day)
+        target_day_state_payload = []
+        locked_taken_slugs: set[str] = set()
+        supplement_slug_by_id: dict[int, str] = {}
+        for item in stack:
+            supplement_id = int(item.get("supplement_id") or 0)
+            slug = str(item.get("slug") or "").strip()
+            if supplement_id and slug:
+                supplement_slug_by_id[supplement_id] = slug
+        for row in target_day_status_rows:
+            supplement_id = int(row["supplement_id"] or 0)
+            status = str(row["status"] or "").strip().lower()
+            slug = supplement_slug_by_id.get(supplement_id, "")
+            if not slug:
+                continue
+            target_day_state_payload.append({"slug": slug, "status": status})
+            if status == "taken":
+                locked_taken_slugs.add(slug)
+        start_14d = days_range[0]
+        end_14d = days_range[-1]
+        recent_checkins_rows = await db.list_recent_checkins_window(conn, user_id, start_14d, end_14d, limit=14)
+        ai_plan_history_rows = await db.list_day_plan_history(conn, user_id, start_14d, end_14d, limit=120)
 
-    ai_plan_history_payload = []
-    for row in ai_plan_history_rows:
-        ai_plan_history_payload.append(
-            {
-                "date_local": str(row["date_local"]),
-                "supplement_id": int(row["supplement_id"]),
-                "slug": str(row["slug"] or ""),
-                "ru_name": str(row["name_ru"] or row["name_en"] or row["name"] or ""),
-                "action": str(row["action"] or ""),
-                "dose_text": str(row["dose_text"] or ""),
-                "time_hint": str(row["time_hint"] or ""),
-                "status": str(row["status"] or ""),
-            }
+        recent_checkins_payload = []
+        for row in recent_checkins_rows:
+            raw_answers = str(row["answers_json"] or "{}").strip()
+            try:
+                previous_answers = json.loads(raw_answers) if raw_answers else {}
+            except json.JSONDecodeError:
+                previous_answers = {}
+            recent_checkins_payload.append({"date_local": str(row["date_local"]), "answers": previous_answers if isinstance(previous_answers, dict) else {}})
+
+        ai_plan_history_payload = []
+        for row in ai_plan_history_rows:
+            ai_plan_history_payload.append(
+                {
+                    "date_local": str(row["date_local"]),
+                    "supplement_id": int(row["supplement_id"]),
+                    "slug": str(row["slug"] or ""),
+                    "ru_name": str(row["name_ru"] or row["name_en"] or row["name"] or ""),
+                    "action": str(row["action"] or ""),
+                    "dose_text": await db.trusted_label_dose(conn, user_id, int(row["supplement_id"])),
+                    "time_hint": str(row["time_hint"] or ""),
+                    "status": str(row["status"] or ""),
+                }
+            )
+
+        inferred_goals = db.infer_goals_from_text(str(answers.get("note") or ""))
+        merged_goals: list[str] = []
+        for goal in goals + inferred_goals:
+            if goal and goal not in merged_goals:
+                merged_goals.append(goal)
+        candidates = await db.get_catalog_candidates(conn, merged_goals, limit=60)
+        messages = build_ai_checkin_prompt(
+            {"tz_name": tz_name},
+            stack,
+            checkin_payload,
+            candidates,
+            adherence_payload,
+            recent_checkins_payload,
+            ai_plan_history_payload,
+            target_day_state_payload,
         )
-
-    inferred_goals = db.infer_goals_from_text(str(answers.get("note") or ""))
-    merged_goals: list[str] = []
-    for goal in goals + inferred_goals:
-        if goal and goal not in merged_goals:
-            merged_goals.append(goal)
-    candidates = await db.get_catalog_candidates(conn, merged_goals, limit=60)
-    messages = build_ai_checkin_prompt(
-        {"tz_name": tz_name},
-        stack,
-        checkin_payload,
-        candidates,
-        adherence_payload,
-        recent_checkins_payload,
-        ai_plan_history_payload,
-        target_day_state_payload,
-    )
-    cfg = OpenAIConfig(api_key=s.OPENAI_API_KEY, model=s.OPENAI_MODEL)
-    from progressor_client import ai_context
-    shared_context=await ai_context('supply',tg_uid)
-    if shared_context and shared_context.get('sources'):
-        messages.append({'role':'system','content':shared_context['instructions']})
-        messages.append({'role':'user','content':'Дополнительные согласованные записи: '+json.dumps(shared_context['data'],ensure_ascii=False)})
-    from progressor_ai_cache import key,get,put
-    request_key=key({'model':cfg.model,'messages':messages,'context':shared_context,'format':'supply.checkin.v2'})
-    await show(
-        update,
-        context,
-        "🤖 Думаю… (AI)",
-        None,
-        route=AI_CHECKIN_ROUTE,
-        target_chat_id=target_chat_id,
-        target_message_id=target_message_id,
-    )
-    raw = None
-    try:
-        raw = await asyncio.to_thread(get,s.DB_PATH,tg_uid,'supply_checkin',request_key)
-        cache_hit=raw is not None
-        if raw is None:raw = await ai_checkin_json(cfg, messages, max_output_tokens=900, timeout_s=30)
-    except Exception:
-        log.exception("OpenAI checkin request failed")
+        cfg = OpenAIConfig(api_key=s.OPENAI_API_KEY, model=s.OPENAI_MODEL)
+        from progressor_client import ai_context
+        shared_context=await ai_context('supply',tg_uid)
+        if shared_context and shared_context.get('sources'):
+            messages.append({'role':'system','content':shared_context['instructions']})
+            messages.append({'role':'user','content':'Дополнительные согласованные записи: '+json.dumps(shared_context['data'],ensure_ascii=False)})
+        from progressor_ai_cache import key,get,put
+        request_key=key({'model':cfg.model,'messages':messages,'context':shared_context,'format':'supply.checkin.v2'})
         await show(
             update,
             context,
-            "AI временно недоступен.",
-            back(),
+            "🤖 Думаю… (AI)",
+            None,
             route=AI_CHECKIN_ROUTE,
             target_chat_id=target_chat_id,
             target_message_id=target_message_id,
         )
-        return
+        raw = None
+        try:
+            raw = await asyncio.to_thread(get,s.DB_PATH,tg_uid,'supply_checkin',request_key)
+            cache_hit=raw is not None
+            if raw is None:raw = await ai_checkin_json(cfg, messages, max_output_tokens=900, timeout_s=30)
+        except Exception:
+            log.exception("OpenAI checkin request failed")
+            await show(
+                update,
+                context,
+                "AI временно недоступен.",
+                back(),
+                route=AI_CHECKIN_ROUTE,
+                target_chat_id=target_chat_id,
+                target_message_id=target_message_id,
+            )
+            return
 
-    data = _parse_ai_json(raw or "")
-    if not isinstance(data, dict):
-        await show(
-            update,
-            context,
-            "AI вернул неожиданный формат. Попробуй ещё раз.",
-            back(),
-            route=AI_CHECKIN_ROUTE,
-            target_chat_id=target_chat_id,
-            target_message_id=target_message_id,
-        )
-        return
+        data = _parse_ai_json(raw or "")
+        if not isinstance(data, dict):
+            await show(
+                update,
+                context,
+                "AI вернул неожиданный формат. Попробуй ещё раз.",
+                back(),
+                route=AI_CHECKIN_ROUTE,
+                target_chat_id=target_chat_id,
+                target_message_id=target_message_id,
+            )
+            return
 
-    stack_slugs = {str(item.get("slug") or "").strip() for item in stack}
-    stack_slugs = {slug for slug in stack_slugs if slug}
-    candidate_slugs = {str(item.get("slug") or "").strip() for item in candidates}
-    candidate_slugs = {slug for slug in candidate_slugs if slug}
-    actions = data.get("actions") if isinstance(data.get("actions"), list) else []
-    clean_actions = []
-    seen_action_keys: set[tuple[str, str]] = set()
-    missing_count = 0
-    for idx, action in enumerate(actions, start=1):
-        if len(clean_actions) >= 6:
-            break
-        if not isinstance(action, dict):
-            continue
-        action_type = str(action.get("type") or "").strip()
-        if action_type not in {"add", "remove", "adjust"}:
-            continue
-        raw_slug = str(action.get("slug") or "").strip()
-        raw_name = str(action.get("ru_name") or action.get("name_ru") or action.get("name_en") or "").strip()
-        if not raw_slug and not raw_name:
-            missing_count += 1
-            continue
-        row = await db.find_supplement_by_slug_or_name(conn, raw_slug or None, raw_name or None)
-        if not row:
-            missing_count += 1
-            continue
-        slug = str(row["slug"] or "").strip()
-        if not slug:
-            missing_count += 1
-            continue
-        is_valid_action = False
-        if action_type == "add":
-            is_valid_action = slug not in stack_slugs
-        elif action_type in {"remove", "adjust"}:
-            is_valid_action = slug in stack_slugs
-            if is_valid_action and slug in locked_taken_slugs:
-                is_valid_action = False
-        if not is_valid_action:
-            missing_count += 1
-            continue
-        dedup_key = (action_type, slug)
-        if dedup_key in seen_action_keys:
-            continue
-        ru_name = (row["name_ru"] or row["name_en"] or row["name"] or "").strip()
-        action_id = f"a{idx}"
-        confidence = action.get("confidence")
-        if not isinstance(confidence, (float, int)) or confidence < 0 or confidence > 1:
-            confidence = None
-        clean_actions.append(
-            {
-                "id": action_id,
-                "type": action_type,
-                "slug": slug,
-                "supplement_id": int(row["id"]),
-                "ru_name": ru_name,
-                "dose_text": _truncate_text(action.get("dose_text"), 80),
-                "suggested_time": db._normalize_hhmm(str(action.get("suggested_time") or "").strip()),
-                "prefer_existing_time": True,
-                "time_hint": _truncate_text(action.get("time_hint"), 60),
-                "confidence": confidence,
-                "reason_short_ru": _truncate_text(action.get("reason_short_ru"), 200),
-                "safety_ru": _truncate_text(action.get("safety_ru"), 160),
-            }
-        )
-        seen_action_keys.add(dedup_key)
-
-    payload = {
-        "actions": clean_actions,
-        "summary_ru": _truncate_text(data.get("summary_ru"), 600) or "Короткое резюме недоступно.",
-        "disclaimer_ru": _truncate_text(data.get("disclaimer_ru"), 300),
-    }
-    if not cache_hit:await asyncio.to_thread(put,s.DB_PATH,tg_uid,'supply_checkin',request_key,raw,3600)
-    if not any(str(action.get("type") or "") == "add" for action in clean_actions):
-        now_hhmm = db.local_now(tz_name or None).strftime("%H:00")
-        fallback_adds = await db.build_goal_based_fallback_adds(
-            conn,
-            base_stack_slugs=stack_slugs,
-            goals=merged_goals,
-            note_text=str(answers.get("note") or ""),
-            now_hhmm=now_hhmm,
-            limit=2,
-        )
-        for item in fallback_adds:
+        stack_slugs = {str(item.get("slug") or "").strip() for item in stack}
+        stack_slugs = {slug for slug in stack_slugs if slug}
+        candidate_slugs = {str(item.get("slug") or "").strip() for item in candidates}
+        candidate_slugs = {slug for slug in candidate_slugs if slug}
+        actions = data.get("actions") if isinstance(data.get("actions"), list) else []
+        clean_actions = []
+        seen_action_keys: set[tuple[str, str]] = set()
+        missing_count = 0
+        for idx, action in enumerate(actions, start=1):
             if len(clean_actions) >= 6:
                 break
-            dedup_key = ("add", str(item.get("slug") or ""))
+            if not isinstance(action, dict):
+                continue
+            action_type = str(action.get("type") or "").strip()
+            if action_type not in {"add", "remove", "adjust"}:
+                continue
+            raw_slug = str(action.get("slug") or "").strip()
+            raw_name = str(action.get("ru_name") or action.get("name_ru") or action.get("name_en") or "").strip()
+            if not raw_slug and not raw_name:
+                missing_count += 1
+                continue
+            row = await db.find_supplement_by_slug_or_name(conn, raw_slug or None, raw_name or None)
+            if not row:
+                missing_count += 1
+                continue
+            if int(row['id']) in protected_ids:
+                continue
+            slug = str(row["slug"] or "").strip()
+            if not slug:
+                missing_count += 1
+                continue
+            is_valid_action = False
+            if action_type == "add":
+                is_valid_action = slug in candidate_slugs and slug not in stack_slugs
+            elif action_type in {"remove", "adjust"}:
+                is_valid_action = slug in stack_slugs
+                if is_valid_action and slug in locked_taken_slugs:
+                    is_valid_action = False
+            if not is_valid_action:
+                missing_count += 1
+                continue
+            dedup_key = (action_type, slug)
             if dedup_key in seen_action_keys:
                 continue
+            ru_name = (row["name_ru"] or row["name_en"] or row["name"] or "").strip()
+            action_id = f"a{idx}"
+            confidence = action.get("confidence")
+            if type(confidence) not in (float, int) or not math.isfinite(confidence) or confidence < 0 or confidence > 1:
+                confidence = None
             clean_actions.append(
                 {
-                    "id": f"fb_{len(clean_actions) + 1}",
-                    "type": "add",
-                    "slug": str(item.get("slug") or ""),
-                    "supplement_id": int(item.get("supplement_id") or 0),
-                    "ru_name": str(item.get("name_ru") or ""),
+                    "id": action_id,
+                    "type": action_type,
+                    "slug": slug,
+                    "supplement_id": int(row["id"]),
+                    "ru_name": ru_name,
                     "dose_text": "",
-                    "suggested_time": str(item.get("suggested_time") or "12:00"),
+                    "suggested_time": db._normalize_hhmm(str(action.get("suggested_time") or "").strip()),
                     "prefer_existing_time": True,
-                    "time_hint": "",
-                    "confidence": 0.55,
-                    "reason_short_ru": str(item.get("reason") or "Подобрано fallback по цели из чек-ина"),
-                    "safety_ru": "Начинай с базовой дозы и оцени самочувствие.",
+                    "time_hint": _truncate_text(action.get("time_hint"), 60),
+                    "confidence": confidence,
+                    "reason_short_ru": _truncate_text(action.get("reason_short_ru"), 200),
+                    "safety_ru": _truncate_text(action.get("safety_ru"), 160),
                 }
             )
             seen_action_keys.add(dedup_key)
-        payload["actions"] = clean_actions
-    current_state = _get_ai_checkin_state(context)
-    if current_state.get("last_result_token") != result_token:
-        return
-    stored_actions = [
-        {**action, "action": action["type"], "name_ru": action["ru_name"]}
-        for action in clean_actions
-    ]
-    cur = await conn.execute(
-        "UPDATE daily_checkins SET ai_raw_json=? WHERE id=? AND user_id=? AND ai_prompt_hash=?",
-        (json.dumps(stored_actions, ensure_ascii=False), checkin_id, user_id, f"bot:{result_token}"),
-    )
-    await conn.commit()
-    if not cur.rowcount or _get_ai_checkin_state(context).get("last_result_token") != result_token:
-        return
-    state["last_checkin_id"] = checkin_id
-    state["last_ai_actions_json"] = json.dumps(payload, ensure_ascii=False)
-    state["selected_action_ids"] = []
-    state["last_date_local"] = day
-    _set_ai_checkin_state(context, state)
-    await _render_ai_checkin_results(
-        update,
-        context,
-        date_local=day,
-        payload=payload,
-        missing_count=missing_count,
-        target_chat_id=target_chat_id,
-        target_message_id=target_message_id,
-    )
+
+        payload = {
+            "actions": clean_actions,
+            "summary_ru": _truncate_text(data.get("summary_ru"), 600) or "Короткое резюме недоступно.",
+            "disclaimer_ru": _truncate_text(data.get("disclaimer_ru"), 300),
+        }
+        if not cache_hit:await asyncio.to_thread(put,s.DB_PATH,tg_uid,'supply_checkin',request_key,raw,3600)
+        current_state = _get_ai_checkin_state(context)
+        if current_state.get("last_result_token") != result_token:
+            return
+        stored_actions = [
+            {**action, "action": action["type"], "name_ru": action["ru_name"]}
+            for action in clean_actions
+        ]
+        saved = await db.finish_daily_checkin(conn, tg_uid, checkin_id, claim_token, stored_actions)
+        if not saved or _get_ai_checkin_state(context).get("last_result_token") != result_token:
+            return
+        state["last_checkin_id"] = checkin_id
+        state["last_ai_actions_json"] = json.dumps(payload, ensure_ascii=False)
+        state["selected_action_ids"] = []
+        state["last_date_local"] = day
+        _set_ai_checkin_state(context, state)
+        await _render_ai_checkin_results(
+            update,
+            context,
+            date_local=day,
+            payload=payload,
+            missing_count=missing_count,
+            target_chat_id=target_chat_id,
+            target_message_id=target_message_id,
+        )
+    finally:
+        await db.finish_daily_checkin(conn, tg_uid, checkin_id, claim_token,
+                                     {'error': 'AI_UNAVAILABLE'}, failed=True)
+
 
 async def _show_today_plan(
     update: Update,
@@ -2479,11 +2519,11 @@ async def _show_today_plan(
             timing = row["time_hhmm"] or ""
             bits = []
             if dose:
-                bits.append(f"доза: {dose}")
+                bits.append(f"доза: {html.escape(str(dose))}")
             if timing:
-                bits.append(f"время: {timing}")
+                bits.append(f"время: {html.escape(str(timing))}")
             detail = " · ".join(bits)
-            line = f"{idx}) <b>{row['name']}</b>"
+            line = f"{idx}) <b>{html.escape(str(row['name']))}</b>"
             if detail:
                 line = f"{line} — {detail}"
             lines.append(line)
@@ -2499,14 +2539,14 @@ async def _show_today_plan(
             type_map = {"add": "ДОБАВИТЬ", "remove": "УБРАТЬ", "adjust": "ИЗМЕНИТЬ"}
             label = type_map.get(action_type, "ИЗМЕНИТЬ")
             details = []
-            dose_text = str(item.get("dose_text") or "").strip()
+            dose_text = await db.trusted_label_dose(conn, user_id, int(item['supplement_id']))
             time_hint = str(item.get("time_hint") or "").strip()
             if dose_text:
-                details.append(dose_text)
+                details.append(html.escape(dose_text))
             if time_hint:
-                details.append(time_hint)
+                details.append(html.escape(time_hint))
             detail_text = f" — {', '.join(details)}" if details else ""
-            lines.append(f"{idx}) {label}: <b>{ru_name}</b>{detail_text}")
+            lines.append(f"{idx}) {label}: <b>{html.escape(str(ru_name))}</b>{detail_text}")
     else:
         lines.append("")
         lines.append("AI-изменения на сегодня: нет.")
@@ -2590,11 +2630,8 @@ async def home(
     )
 
 def _stars_amount_for_plan(s, plan_id: str) -> int:
-    price_minor = int(s.PREMIUM_PRICES_RUB.get(plan_id, 0) or 0)
-    if price_minor <= 0:
-        return 0
-    rub = round(price_minor / 100)
-    return max(1, round(rub / 1.5))
+    from native_billing import stars_amount_for_plan
+    return stars_amount_for_plan(s, plan_id)
 
 
 def _premium_plans_payload(s) -> list[dict]:
@@ -2691,15 +2728,16 @@ async def _show_premium_hub(
     *,
     back_cb: str = "menu:home",
     route: str = "menu:premium",
+    other_periods: bool = False,
 ) -> None:
     s = context.application.bot_data["settings"]
     plans = _premium_plans_payload(s)
     text = (
         "⭐ <b>Premium</b>\n\n"
         "С Premium открывается полный WebApp: удобный Today, карта органов, AI check-in и гибкая настройка напоминаний.\n\n"
-        "Выберите срок — кнопка сразу откроет оплату в WebApp."
+        "Выберите срок и удобный способ: рубли — на внешней странице ЮKassa через WebApp, Stars — внутри Telegram."
     )
-    await show(update, context, text, premium_plans_kb(plans, s.WEBAPP_URL, back_cb=back_cb), route=route)
+    await show(update, context, text, premium_plans_kb(plans, s.WEBAPP_URL, back_cb=back_cb, other_periods=other_periods), route=route)
 
 async def _progressor_render(update,context,text,markup):
     return await show(update,context,html.escape(text),markup,route='menu:home')
@@ -3097,7 +3135,7 @@ async def _continue_after_consent(
     tg_uid: int,
 ) -> None:
     tz = await db.get_user_tz(conn, tg_uid)
-    if _is_tz_unset(tz):
+    if not await db.is_user_timezone_configured(conn, tg_uid):
         context.user_data.pop("tz_back_data", None)
         context.user_data["onboarding"] = "tz"
         await _show_timezone_picker(
@@ -3734,7 +3772,7 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
 
         tz_name = await db.get_user_tz(conn, tg_uid)
-        if _is_tz_unset(tz_name):
+        if not await db.is_user_timezone_configured(conn, tg_uid):
             context.user_data.pop("tz_back_data", None)
             context.user_data["onboarding"] = "tz"
             await _show_timezone_picker(update, context, 0)
@@ -3795,6 +3833,13 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             has_premium = await db.is_premium_active(conn, tg_uid)
             if not has_premium:
                 until_iso = await db.start_starter_trial(conn, tg_uid, days=3, source="onboarding_finish")
+                if until_iso is None:
+                    await show(update, context,
+                        "Пробный период уже завершён. Ваши записи сохранены. Доступ можно продлить в разделе подписки.",
+                        InlineKeyboardMarkup([[InlineKeyboardButton("Подписка", callback_data="menu:premium")],
+                                              [InlineKeyboardButton("🏠 В меню", callback_data="menu:home")]]),
+                        route="menu:premium")
+                    return
                 s_cfg = context.application.bot_data["settings"]
                 rows = []
                 if s_cfg.WEBAPP_URL:
@@ -3914,26 +3959,20 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 route="menu:premium",
             )
             return
-        if data == "premium:stars_menu":
-            s_cfg = context.application.bot_data["settings"]
-            plans = _premium_plans_payload(s_cfg)
+        if data in {"premium:stars_menu", "premium:main_periods", "premium:other_periods"}:
             current_route = str(context.user_data.get("last_route") or "")
             stars_back = "menu:premium"
             stars_route = "menu:premium"
             if current_route == "premium:from_expired":
                 stars_back = "premium:expired:notice"
                 stars_route = "premium:from_expired"
-            await show(
-                update,
-                context,
-                "⭐ <b>Оплата в звёздах</b>\n\nВыберите срок подписки:",
-                premium_stars_kb(plans, back_cb=stars_back),
-                route=stars_route,
-            )
+            await _show_premium_hub(update, context, back_cb=stars_back, route=stars_route, other_periods=data == 'premium:other_periods')
             return
         if data.startswith("premium:buy:"):
             _, _, plan_id, method = data.split(":", 3)
             await _send_subscription_invoice(update, context, plan_id, method)
+            return
+        if data.startswith('cx:') and not await require_premium_or_upsell(update, context, 'Комплексы'):
             return
         if data == "menu:complexes":
             context.user_data[COMPLEXES_BACK_ROUTE_KEY] = "mysupp:list:0"
@@ -4369,6 +4408,17 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             diag = await db.run_diagnostics(conn, apply=True)
             await show(update, context, _render_diag_summary(diag), admin_diag_kb(), route="admin:diag")
             return
+
+        if data.startswith("admin:roles"):
+            role = await db.get_role(conn, tg_uid)
+            if not db.role_perms(role).get('roles_manage', False):
+                context.user_data.pop('owner_target_tg_id', None)
+                if context.user_data.get(WAITING_KEY) == 'owner_wait_target_tg_id':
+                    context.user_data.pop(WAITING_KEY, None)
+                await show(update, context, "Нет доступа к управлению ролями.",
+                    InlineKeyboardMarkup([[InlineKeyboardButton("🏠 В меню", callback_data="menu:home")]]),
+                    route="menu:home")
+                return
 
         if data == "admin:roles":
             context.user_data[WAITING_KEY] = "owner_wait_target_tg_id"
@@ -6160,6 +6210,12 @@ async def on_ai_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await _render_ai_checkin_entry(update, context)
         return
 
+    if data.startswith('aicheck:retry:'):
+        try: checkin_id = int(data.rsplit(':', 1)[1])
+        except (ValueError, TypeError): return
+        await _retry_saved_ai_checkin(update, context, checkin_id)
+        return
+
     if data == "aicheck:voice":
         context.user_data.pop(WAITING_KEY, None)
         await _render_ai_checkin_voice_prompt(update, context)
@@ -6259,7 +6315,7 @@ async def on_ai_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         conn = await db.connect(s.DB_PATH)
         try:
             tz_name = await db.get_user_tz(conn, tg_uid)
-            if _is_tz_unset(tz_name):
+            if not await db.is_user_timezone_configured(conn, tg_uid):
                 context.user_data.pop("tz_back_data", None)
                 context.user_data["onboarding"] = "tz"
                 await _show_timezone_picker(update, context, 0)
@@ -8225,12 +8281,15 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
         tz_name = await db.get_user_tz(conn, tg_uid)
-        if _is_tz_unset(tz_name):
+        if not await db.is_user_timezone_configured(conn, tg_uid):
             context.user_data.pop("tz_back_data", None)
             context.user_data["onboarding"] = "tz"
             await _show_timezone_picker(update, context, 0)
             return
 
+        if waiting.startswith('cx:') and not await require_premium_or_upsell(update, context, 'Комплексы'):
+            context.user_data.pop(WAITING_KEY, None)
+            return
         if waiting == "cx:create":
             name = txt.strip()[:120]
             if not name:
@@ -8384,7 +8443,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 _set_ai_checkin_state(context, state)
                 user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
                 tz_name = await db.get_user_tz(conn, tg_uid)
-                if _is_tz_unset(tz_name):
+                if not await db.is_user_timezone_configured(conn, tg_uid):
                     context.user_data.pop("tz_back_data", None)
                     context.user_data["onboarding"] = "tz"
                     await _show_timezone_picker(update, context, 0)
@@ -8566,7 +8625,7 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             try:
                 user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
                 tz_name = await db.get_user_tz(conn, tg_uid)
-                if _is_tz_unset(tz_name):
+                if not await db.is_user_timezone_configured(conn, tg_uid):
                     context.user_data.pop("tz_back_data", None)
                     context.user_data["onboarding"] = "tz"
                     await _show_timezone_picker(
@@ -8618,7 +8677,7 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
         tz_name = await db.get_user_tz(conn, tg_uid)
-        if _is_tz_unset(tz_name):
+        if not await db.is_user_timezone_configured(conn, tg_uid):
             context.user_data.pop("tz_back_data", None)
             context.user_data["onboarding"] = "tz"
             await _show_timezone_picker(update, context, 0)
@@ -8883,14 +8942,14 @@ async def _admin_dashboard_text(conn) -> str:
     return "📊 <b>Admin Stats</b>\n<pre>" + _fixed_rows(rows) + "</pre>"
 
 
-async def _ensure_admin_for_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+async def _ensure_admin_for_command(update: Update, context: ContextTypes.DEFAULT_TYPE, *, manage_subscription=False) -> bool:
     user = update.effective_user
     if not user:
         return False
     if _is_admin(user.id):
         return True
-    role, _ = await _get_role_perms_ctx(context, user.id)
-    if role != db.ROLE_NONE:
+    role, perms = await _get_role_perms_ctx(context, user.id)
+    if role != db.ROLE_NONE and (not manage_subscription or perms.get('premium_manage', False)):
         return True
     await (update.effective_message or update.message).reply_text("Эта команда доступна только администратору.")
     return False
@@ -8932,7 +8991,7 @@ async def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def grant_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard_not_banned(update, context):
         return
-    if not await _ensure_admin_for_command(update, context):
+    if not await _ensure_admin_for_command(update, context, manage_subscription=True):
         return
     args = list(context.args or [])
     if len(args) != 2 or (not args[0].isdigit()) or (not args[1].isdigit()):
@@ -8947,13 +9006,11 @@ async def grant_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     s = context.application.bot_data["settings"]
     conn = await db.connect(s.DB_PATH)
     try:
-        await db.get_or_create_user(conn, target_tg_id)
-        current_iso = await db.get_premium_until(conn, target_tg_id)
-        now = datetime.utcnow()
-        current_dt = _parse_utc_iso(current_iso)
-        base = current_dt if current_dt and current_dt > now else now
-        new_until = base + timedelta(days=days)
-        until_iso = await db.set_premium_until(conn, target_tg_id, new_until, source=f"grant:{update.effective_user.id}", plan_id=f"grant_{days}d")
+        until_iso = await db.adjust_manual_premium(conn, update.effective_user.id, target_tg_id, days,
+                                                  configured_admin=_is_admin(update.effective_user.id))
+    except PermissionError:
+        await (update.effective_message or update.message).reply_text('Права управления подпиской изменились. Откройте меню заново.')
+        return
     finally:
         await conn.close()
 
@@ -8965,7 +9022,7 @@ async def grant_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def degrant_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard_not_banned(update, context):
         return
-    if not await _ensure_admin_for_command(update, context):
+    if not await _ensure_admin_for_command(update, context, manage_subscription=True):
         return
     args = list(context.args or [])
     if len(args) != 2 or (not args[0].isdigit()) or (not args[1].isdigit()):
@@ -8980,17 +9037,11 @@ async def degrant_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     s = context.application.bot_data["settings"]
     conn = await db.connect(s.DB_PATH)
     try:
-        await db.get_or_create_user(conn, target_tg_id)
-        current_iso = await db.get_premium_until(conn, target_tg_id)
-        now = datetime.utcnow()
-        current_dt = _parse_utc_iso(current_iso)
-        if not current_dt or current_dt <= now:
-            until_iso = await db.set_premium_until(conn, target_tg_id, now, source=f"degrant:{update.effective_user.id}", plan_id="manual_zero")
-        else:
-            new_until = current_dt - timedelta(days=days)
-            if new_until < now:
-                new_until = now
-            until_iso = await db.set_premium_until(conn, target_tg_id, new_until, source=f"degrant:{update.effective_user.id}", plan_id=f"degrant_{days}d")
+        until_iso = await db.adjust_manual_premium(conn, update.effective_user.id, target_tg_id, -days,
+                                                  configured_admin=_is_admin(update.effective_user.id))
+    except PermissionError:
+        await (update.effective_message or update.message).reply_text('Права управления подпиской изменились. Откройте меню заново.')
+        return
     finally:
         await conn.close()
 

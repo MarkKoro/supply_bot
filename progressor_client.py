@@ -90,13 +90,27 @@ def ensure_schema(db_path):
     with closing(sqlite3.connect(db_path,timeout=5)) as conn:
         conn.executescript(SCHEMA); conn.commit()
 
+def _known_schedule_projection(row,old,previous,value,intervals):
+    """Heal a legacy clock-only summary at an unchanged immutable schedule.
+
+    Earlier Core versions could retire the summary without incrementing revision.
+    Local authorization already checks the versioned intervals against real time;
+    this exception cannot add an interval or invent an expiry. Keep the cached
+    summary unchanged and let the next actual revision replace it normally.
+    """
+    if not previous or previous[0]!=row['revision'] or previous[1]!=value:
+        return False
+    ends={parse_until(r['expires_at']) for r in intervals}
+    ends.add(datetime(1970,1,1,tzinfo=timezone.utc))
+    return parse_until(old[0]) in ends and parse_until(row['expires_at']) in ends
+
 def apply_grants(db_path,items,source=None):
     with closing(sqlite3.connect(db_path,timeout=5)) as conn:
         with conn:
             for row in items:
                 if not str(row['user_id']).isdecimal() or not 0<int(row['user_id'])<2**63 or not parse_until(row['expires_at']) or type(row['revision']) is not int or row['revision']<1: raise ValueError('invalid_grant')
                 old=conn.execute('SELECT expires_at,revision FROM progressor_bundle_cache WHERE user_id=?',(str(row['user_id']),)).fetchone()
-                if old and old[1]==row['revision'] and old[0]!=row['expires_at']: raise ValueError('grant_revision_conflict')
+                expiry_conflict=bool(old and old[1]==row['revision'] and old[0]!=row['expires_at'])
                 if 'intervals' in row:
                     if source and row.get('source')!=source:raise ValueError('grant_source_mismatch')
                     intervals=row['intervals']
@@ -104,8 +118,12 @@ def apply_grants(db_path,items,source=None):
                     value=canonical(intervals)
                     previous=conn.execute('SELECT revision,intervals FROM progressor_bundle_schedules WHERE user_id=?',(str(row['user_id']),)).fetchone()
                     if previous and previous[0]==row['revision'] and previous[1]!=value:raise ValueError('grant_revision_conflict')
+                    if expiry_conflict and not _known_schedule_projection(row,old,previous,value,intervals):
+                        raise ValueError('grant_revision_conflict')
                     if not old or row['revision']>=old[1]:
                         conn.execute('INSERT INTO progressor_bundle_schedules VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET revision=excluded.revision,intervals=excluded.intervals WHERE excluded.revision>progressor_bundle_schedules.revision',(str(row['user_id']),row['revision'],value))
+                elif expiry_conflict:
+                    raise ValueError('grant_revision_conflict')
                 conn.execute('INSERT INTO progressor_bundle_cache VALUES(?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET expires_at=excluded.expires_at,revision=excluded.revision,updated_at=excluded.updated_at WHERE excluded.revision>progressor_bundle_cache.revision',(str(row['user_id']),row['expires_at'],row['revision'],datetime.now(timezone.utc).isoformat()))
 
 def record_receipt(db_path,body):

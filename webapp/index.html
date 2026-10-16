@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="ru">
 <head>
-  <script data-progressor-source="supply" src="/progressor/assets/navigation.v1.js"></script>
+  <script data-progressor-source="supply" src="./assets/progressor-bootstrap.v1.js"></script>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
   <title>ГУДы БАДы WebApp</title>
@@ -2112,6 +2112,8 @@
   }
 
   function maybeStartGuide(name) {
+    if (name === GUIDE_KEYS.survey && (state.survey.reading || state.survey.readError || state.survey.checkinId)) return;
+    if (document.querySelector('#progressor-context:not([hidden]),#progressor-connections[open]')) return;
     if (hasOpenModal()) return;
     if (state.guide.active) { syncGuideOverlay(); return; }
     if (hasSeenGuide(name)) return;
@@ -2119,6 +2121,11 @@
     if (!steps.length) return;
     startGuide(name, steps);
   }
+
+  document.addEventListener('progressor:overlay-open',()=>{
+    // Pause the tour without recording a user decision to skip it.
+    if(state.guide.active){state.guide={active:null,step:0,steps:[],rect:null,card:null,arrow:null};syncGuideOverlay();}
+  });
 
   function bindGuideEvents() {
     document.querySelector('[data-guide-skip]')?.addEventListener('click', () => { haptic(); closeGuide(); });
@@ -3050,10 +3057,11 @@
   }
 
   window.ProgressorDomain={version:1,
+    isReady:()=>!!state.me && (!state.me.webapp_access || (!!state.today && !state.loadingToday)),
     subscriptionPlans:async()=>{if(!state.me)state.me=await api('api/me');return (state.me.plans||[]).map(p=>({id:p.plan_id,label:planNameRu(p.plan_id,p.months),RUB:p.rub_enabled?p.price_rub:0,XTR:p.stars_enabled?p.price_stars:0}));},
     purchaseSubscription:(id,currency,button)=>purchase(id,currency==='XTR'?'stars':'yookassa',button),
     hintHost:()=>document.getElementById('progressor-inline-host'),
-    eligible:()=>state.activeTab==='today' && !!state.me,
+    eligible:()=>state.activeTab==='today' && !!state.me?.webapp_access && !!state.today && !state.loadingToday,
     perform:async action=>{
       if(action.kind==='supply_plan'){activateTab('today');return true;}
       if(action.kind!=='supply_catalog' || !['железо','B12'].includes(action.query)) return false;
@@ -3330,7 +3338,28 @@
     const answers = (checkin.answers && typeof checkin.answers === 'object') ? checkin.answers : {};
     const recommendations = Array.isArray(checkin.recommendations) ? checkin.recommendations : [];
     const applied = (checkin.applied && typeof checkin.applied === 'object') ? checkin.applied : null;
-    return { id, answers, recommendations, applied };
+    const processingStatus = ['processing', 'failed', 'done'].includes(checkin.processing_status) ? checkin.processing_status : 'done';
+    const answerSource = checkin.answer_source === 'bot' ? 'bot' : 'web';
+    const retryInBotUrl = /^https:\/\/t\.me\/[A-Za-z0-9_]{5,32}$/.test(checkin.retry_in_bot_url || '') ? checkin.retry_in_bot_url : '';
+    return { id, answers, recommendations, applied, processingStatus, answerSource, retryInBotUrl };
+  }
+
+  function restoreSurveyCheckin(value) {
+    const checkin = normalizeSurveyCheckinPayload(value);
+    if (!checkin) return false;
+    const sv = state.survey;
+    sv.checkinId = checkin.id;
+    sv.answers = {...sv.answers, ...checkin.answers};
+    sv.recommendations = checkin.recommendations;
+    sv.appliedNotice = checkin.applied;
+    sv.processingStatus = checkin.processingStatus;
+    sv.answerSource = checkin.answerSource;
+    sv.retryInBotUrl = checkin.retryInBotUrl;
+    sv.limitReached = checkin.processingStatus !== 'failed';
+    sv.selected = Object.fromEntries(checkin.recommendations.map(x => [x.supplement_id, true]));
+    sv.view = ['processing', 'failed'].includes(checkin.processingStatus) ? checkin.processingStatus : 'review';
+    if (checkin.applied) { try { localStorage.removeItem(surveyStorageKey()); } catch {} }
+    return true;
   }
 
   function resetSurveyDraftForCurrentTarget({ clearStorage = true } = {}) {
@@ -3342,6 +3371,9 @@
     state.survey.selected = {};
     state.survey.helpOpen = false;
     state.survey.limitReached = false;
+    state.survey.processingStatus = '';
+    state.survey.answerSource = 'web';
+    state.survey.retryInBotUrl = '';
     state.survey.answers = { energy:"", sleep:"", stress:"", training:"", goals:[], note:"" };
     if (clearStorage) {
       try { localStorage.removeItem(surveyStorageKey()); } catch {}
@@ -3370,37 +3402,44 @@
       } else state.survey.dateNotice = '';
     }
     const current = () => version === surveyLoadVersion && key === `${state.survey.target}:${surveyTargetDateISO(state.survey.target)}`;
+    state.survey.reading=true;
+    state.survey.readError=false;
+    if(state.activeTab==='survey')renderActiveTab();
     try {
       const data = await api(`./api/checkin/today?target=${target}`);
       if (!current()) return;
-      const normalizedCheckin = normalizeSurveyCheckinPayload(data?.checkin);
-      if (normalizedCheckin) {
-        state.survey.limitReached = true;
-        if (normalizedCheckin.applied) {
-          state.survey.appliedNotice = normalizedCheckin.applied;
-          try { localStorage.removeItem(surveyStorageKey()); } catch {}
-        } else {
-          const savedDraft = readSurveyDraftFromStorage();
-          if (savedDraft) state.survey.answers = { ...state.survey.answers, ...savedDraft };
-          state.survey.checkinId = normalizedCheckin.id;
-          state.survey.answers = { ...state.survey.answers, ...normalizedCheckin.answers };
-          state.survey.recommendations = normalizedCheckin.recommendations;
-          state.survey.selected = Object.fromEntries((state.survey.recommendations || []).map((x) => [x.supplement_id, true]));
-          if (state.survey.recommendations.length) state.survey.view = 'review';
-        }
-      }
+      restoreSurveyCheckin(data?.checkin);
       state.survey.loadedKey = key;
     } catch {
-      if (current()) showToast('Не удалось обновить опрос. Введённые ответы сохранены на экране.');
+      if (current()) state.survey.readError=true;
+    } finally {
+      if(current()){
+        state.survey.reading=false;
+        if(state.activeTab==='survey')renderActiveTab();
+      }
     }
   }
 
   function renderSurvey() {
     initSurveyTarget();
     const sv = state.survey;
-    const dateNotice = sv.dateNotice ? `<div class="card muted" role="status">${esc(sv.dateNotice)}</div>` : '';
-    const surveyHelpHtml = `<div class="survey-help muted"><div><strong>Что это за раздел:</strong> здесь мы собираем ваш короткий чек-ин и на его основе корректируем план БАДов: можем предложить добавить новые позиции, изменить дозировки или убрать лишнее.</div><div style="margin-top:8px"><strong>Если выбрать «Сегодня»:</strong> мы посмотрим, что вы уже выпили за текущий день, что пропущено, и подскажем, что добавить или убрать сегодня с учётом ваших целей и запроса.</div><div style="margin-top:8px"><strong>Если выбрать «Завтра»:</strong> мы учтём ваш обычный средний паттерн приёма и цели, чтобы заранее предложить, что добавить или убрать в плане на завтра.</div></div>`;
+    if(!sv.checkinId && (sv.reading || sv.readError)){
+      const title=sv.reading?'Загружаем ответы…':'Не удалось загрузить опрос';
+      const message=sv.reading?'Проверяем сохранённые ответы и результат.':'Ответы остаются сохранёнными. Проверьте соединение и попробуйте загрузить их снова.';
+      return `<div class="card survey-card" role="status"><h3>${title}</h3><p>${message}</p><div class="segmented"><button class="seg-btn ${sv.target==='today'?'active':''}" data-set-target="today">Сегодня</button><button class="seg-btn ${sv.target==='tomorrow'?'active':''}" data-set-target="tomorrow">Завтра</button></div>${sv.readError?`<button class="btn" id="surveyRefresh" ${sv.refreshing?'disabled':''}>Загрузить сохранённое</button>`:''}</div>`;
+    }
+    const readNotice = sv.readError ? '<div class="card" role="status"><strong>Не удалось обновить результат</strong><p>Показаны сохранённые данные. Сначала загрузите актуальное состояние, чтобы продолжить.</p><button class="btn" id="surveyReload">Обновить сохранённое</button></div>' : '';
+    const dateNotice = readNotice + (sv.dateNotice ? `<div class="card muted" role="status">${esc(sv.dateNotice)}</div>` : '');
+    const surveyHelpHtml = `<div class="survey-help muted"><div><strong>Что это за раздел:</strong> здесь мы собираем ваш короткий чек-ин и на его основе предлагаем изменения расписания: новые позиции для рассмотрения, перенос времени или исключение позиции на выбранный день. Дозировку вы указываете с упаковки сами.</div><div style="margin-top:8px"><strong>Если выбрать «Сегодня»:</strong> мы посмотрим, что вы уже выпили за текущий день, что пропущено, и подскажем, что добавить или убрать сегодня с учётом ваших целей и запроса.</div><div style="margin-top:8px"><strong>Если выбрать «Завтра»:</strong> мы учтём ваш обычный средний паттерн приёма и цели, чтобы заранее предложить, что добавить или убрать в плане на завтра.</div></div>`;
     if (sv.loading) return `<div class="card">⏳ анализ…</div>`;
+    if (sv.processingStatus === 'processing' || sv.processingStatus === 'failed') {
+      const processing = sv.processingStatus === 'processing';
+      const nativeRetry = !processing && sv.answerSource === 'bot';
+      const title = processing ? 'Расчёт ещё идёт' : 'Не удалось завершить расчёт';
+      const text = processing ? 'Ответы сохранены. Повторный запрос не запускается — можно обновить результат.' : nativeRetry ? 'Ответы сохранены в боте Supply. Продолжите расчёт в том же чате.' : 'Ответы сохранены. Можно повторить расчёт с этими же ответами; повтор ограничен общим лимитом попыток.';
+      const retry = !processing && !nativeRetry ? `<button class="btn" id="surveyRetry" ${sv.reading || sv.readError ? 'disabled' : ''}>Повторить с сохранёнными ответами</button>` : nativeRetry && sv.retryInBotUrl ? `<a class="btn" href="${esc(sv.retryInBotUrl)}" target="_blank" rel="noopener">Открыть бот Supply</a>` : '';
+      return `${dateNotice}<div class="card survey-card" role="status"><h3>${title}</h3><p>${text}</p><div class="segmented"><button class="seg-btn ${sv.target==='today'?'active':''}" data-set-target="today">Сегодня</button><button class="seg-btn ${sv.target==='tomorrow'?'active':''}" data-set-target="tomorrow">Завтра</button></div><div class="survey-actions">${retry}<button class="btn secondary" id="surveyRefresh" ${sv.refreshing ? 'disabled' : ''}>${sv.refreshing ? 'Обновляем…' : 'Обновить результат'}</button></div></div>`;
+    }
     const appliedItems = Array.isArray(sv.appliedNotice?.items) ? sv.appliedNotice.items : [];
     const appliedNames = appliedItems
       .map((x) => String(x?.name_ru || x?.name || x?.slug || '').trim())
@@ -3434,7 +3473,7 @@
       }).join('');
       const observed=(sv.observedChanges||[]).map(v=>`<div class="muted">${esc(v)}</div>`).join('');
       const changeNotice=observed?`<div class="card"><strong>Что изменилось в записях за неделю</strong>${observed}<small>Совпадение по времени не устанавливает причину самочувствия. Можно проверить записи и расписание.</small></div>`:'';
-      return `${dateNotice}${surveyLimitBanner}<div class="card fade survey-card"><button class="btn secondary survey-help-btn survey-help-corner" type="button" data-survey-help>?</button><div class="row survey-head"><div class="survey-title-wrap"><h3 style="margin:0">Рекомендации</h3></div><div class="survey-target-wrap"><span class="muted" style="font-size:12px">Рекомендация на:</span><div class="segmented" data-survey-target><button class="seg-btn ${sv.target==='today'?'active':''}" data-set-target="today">Сегодня</button><button class="seg-btn ${sv.target==='tomorrow'?'active':''}" data-set-target="tomorrow">Завтра</button></div></div></div>${sv.helpOpen ? surveyHelpHtml : ''}${changeNotice}${rows || '<div class="muted">Нет рекомендаций</div>'}<div style="margin-top:10px"><button class="btn" id="applyAll" style="width:100%; font-weight:800" ${sv.applying ? 'disabled' : ''}>✅ Применить всё</button></div><div class="survey-actions"><button class="btn secondary" id="cancelSurvey" ${sv.applying ? 'disabled' : ''}>Отмена</button></div></div>`;
+      return `${dateNotice}${surveyLimitBanner}<div class="card fade survey-card"><button class="btn secondary survey-help-btn survey-help-corner" type="button" data-survey-help>?</button><div class="row survey-head"><div class="survey-title-wrap"><h3 style="margin:0">Рекомендации</h3></div><div class="survey-target-wrap"><span class="muted" style="font-size:12px">Рекомендация на:</span><div class="segmented" data-survey-target><button class="seg-btn ${sv.target==='today'?'active':''}" data-set-target="today">Сегодня</button><button class="seg-btn ${sv.target==='tomorrow'?'active':''}" data-set-target="tomorrow">Завтра</button></div></div></div>${sv.helpOpen ? surveyHelpHtml : ''}${changeNotice}${rows || '<div class="muted">Пока нет обоснованных изменений. Текущий план сохранён.</div>'}<div style="margin-top:10px"><button class="btn" id="applyAll" style="width:100%; font-weight:800" ${sv.applying || sv.reading || sv.readError || sv.appliedNotice || !sv.recommendations.length ? 'disabled' : ''}>✅ Применить всё</button></div><div class="survey-actions"><button class="btn secondary" id="cancelSurvey" ${sv.applying ? 'disabled' : ''}>Отмена</button></div></div>`;
     }
     const step = SURVEY_STEPS[sv.step];
     const p = Math.round(((sv.step+1)/SURVEY_STEPS.length)*100);
@@ -3468,10 +3507,11 @@
     document.getElementById('surveyNote')?.addEventListener('input', (e)=>{ state.survey.answers.note=String(e.target.value||'').slice(0,180); saveSurveyDraft(); const noteLen = e.target.parentElement?.querySelector('.muted'); if (noteLen) noteLen.textContent = `${state.survey.answers.note.length}/180`; });
     document.getElementById('surveyBack')?.addEventListener('click', ()=>{ haptic(); state.survey.step=Math.max(0,state.survey.step-1); renderActiveTab(); });
 
-    document.getElementById('surveyNext')?.addEventListener('click', async ()=>{
-      if (!await ensureSurveyDay() || state.survey.loading || state.survey.applying) return;
+    const submitSurvey = async (retry=false)=>{
+      if (!await ensureSurveyDay() || state.survey.loading || state.survey.applying || state.survey.reading || state.survey.readError) return;
+      if (retry && (state.survey.processingStatus !== 'failed' || state.survey.answerSource === 'bot')) return;
       haptic();
-      if (state.survey.step < SURVEY_STEPS.length-1) {
+      if (!retry && state.survey.step < SURVEY_STEPS.length-1) {
         state.survey.step += 1;
         renderActiveTab();
         return;
@@ -3493,6 +3533,8 @@
         state.survey.observedChanges=res.meta?.observed_changes||[];
         state.survey.selected=Object.fromEntries((state.survey.recommendations||[]).map((x)=>[x.supplement_id,true]));
         state.survey.limitReached = true;
+        state.survey.processingStatus = 'done';
+        state.survey.answerSource = 'web';
         state.survey.view='review';
         renderActiveTab();
       } catch(e){
@@ -3509,33 +3551,30 @@
           return;
         }
         if (e?.code === 'CHECKIN_LIMIT_REACHED') {
-          const limitCheckin = normalizeSurveyCheckinPayload(e?.checkin || e?.payload?.checkin || null);
-          if (limitCheckin?.applied) {
-            state.survey.appliedNotice = limitCheckin.applied;
-            resetSurveyDraftForCurrentTarget();
-            state.survey.limitReached = true;
-          } else if (limitCheckin) {
-            state.survey.appliedNotice = null;
-            state.survey.limitReached = true;
-            state.survey.checkinId = limitCheckin.id;
-            state.survey.recommendations = limitCheckin.recommendations || [];
-            state.survey.answers = { ...state.survey.answers, ...(limitCheckin.answers || {}) };
-            state.survey.selected = Object.fromEntries((state.survey.recommendations||[]).map((x)=>[x.supplement_id,true]));
-            state.survey.view = state.survey.recommendations.length ? 'review' : 'wizard';
-          } else {
-            state.survey.limitReached = true;
-          }
-          showToast('Лимит: 1 опрос на выбранный день');
+          if (!restoreSurveyCheckin(e?.checkin || e?.payload?.checkin || null)) await loadSurveyForTarget(true);
+          showToast(state.survey.processingStatus === 'processing' ? 'Ответы сохранены, расчёт ещё идёт' : 'Открыт сохранённый опрос на выбранный день');
           renderActiveTab();
           return;
         }
-        showToast('AI временно недоступен, попробуйте ещё раз');
+        // A lost HTTP response does not mean that the server lost the result.
+        // Read the shared record before offering a retry; this never calls AI.
+        await loadSurveyForTarget(true);
+        showToast('Не удалось получить результат. Ответы сохранены; проверьте состояние расчёта.');
         renderActiveTab();
       }
-    });
+    };
+    document.getElementById('surveyNext')?.addEventListener('click', ()=>submitSurvey());
+    document.getElementById('surveyRetry')?.addEventListener('click', ()=>submitSurvey(true));
+    appEl.querySelectorAll('#surveyRefresh, #surveyReload').forEach(el=>el.addEventListener('click', async ()=>{
+      if (state.survey.refreshing || state.survey.loading || state.survey.applying) return;
+      state.survey.refreshing = true;
+      renderActiveTab();
+      try { await loadSurveyForTarget(true); }
+      finally { state.survey.refreshing = false; renderActiveTab(); }
+    }));
 
     document.getElementById('applyAll')?.addEventListener('click', async ()=>{
-      if (!await ensureSurveyDay() || state.survey.applying || state.survey.loading) return;
+      if (!await ensureSurveyDay() || state.survey.applying || state.survey.loading || state.survey.reading || state.survey.readError || state.survey.appliedNotice || !state.survey.recommendations.length || state.survey.processingStatus !== 'done') return;
       haptic();
       const checkinId = state.survey.checkinId;
       const contextKey = state.survey.contextKey || `${state.survey.target}:${surveyTargetDateISO(state.survey.target)}`;
@@ -3596,7 +3635,7 @@
       ...filters.targets.map((v) => ({ key: 'targets', value: v, label: `Куда/зачем: ${TARGET_LABELS_RU[v] || v}` }))
     ];
     const itemsHtml = c.items.map((item) => `
-      <button type="button" class="card item-row" data-catalog-open="${item.slug}" style="display:block; width:100%; margin-top:0;">
+      <button type="button" class="card item-row" data-catalog-open="${esc(item.slug)}" style="display:block; width:100%; margin-top:0;">
         <div class="row catalog-item-head"><strong class="supp-name">${esc(item.name_ru || item.name_en)}</strong><span>${item.has_purchase ? '🛒' : ''}</span></div>
         <div class="muted" style="margin-top:6px">${esc(evidenceUserLabel(item.evidence_grade))} • ${esc(confidenceUserLabel(item.confidence))} ${item.in_stack ? '• ✅ добавлено' : ''}</div>
       </button>`).join('');

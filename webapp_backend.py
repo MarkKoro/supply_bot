@@ -1,5 +1,6 @@
 from progressor_bridge import current_claims, install_auth_bridge
 import hashlib
+import asyncio
 import json
 import math
 import logging
@@ -19,8 +20,10 @@ from pydantic import BaseModel, model_validator
 
 from telegram_webapp_auth import verify_init_data
 import db
+from progressor_ai_guard import acquire as acquire_ai_attempt, finish as finish_ai_attempt, AttemptLimited
 import engine
 from settings import get_settings
+from native_billing import stars_amount_for_plan, monthly_tariffs
 from openai_client import OpenAIConfig, _sync_call, LAB_FILE_LIMIT, lab_label_key, read_lab_document
 from nutrient_assistant_pipeline import NutrientAssistantPipelineError as PipelineError
 import nutrient_assistant_pipeline as nutrient_pipeline
@@ -39,7 +42,7 @@ async def assistant_limit_response(request, exc):
     return JSONResponse({'ok':False,'code':code,'message':'Расчёты поступают слишком часто. Попробуйте позже.'},status_code=429)
 install_auth_bridge(app, "supply")
 from progressor_client import install_cache_worker
-install_cache_worker(app, "supply", get_settings().DB_PATH,lambda:{'RUB':get_settings().PREMIUM_PRICES_RUB['m1'],'XTR':get_settings().PREMIUM_PRICES_STARS['m1']})
+install_cache_worker(app, "supply", get_settings().DB_PATH,lambda:monthly_tariffs(get_settings()))
 app.mount("/assets", StaticFiles(directory=str(ASSETS_DIR)), name="assets")
 
 
@@ -501,11 +504,7 @@ app.add_exception_handler(HTTPException, supply_http_exception_handler)
 
 
 def _stars_amount_for_plan(plan_id: str) -> int:
-    price_minor = int(s.PREMIUM_PRICES_RUB.get(plan_id, 0) or 0)
-    if price_minor <= 0:
-        return 0
-    rub = round(price_minor / 100)
-    return max(1, round(rub / 1.5))
+    return stars_amount_for_plan(s, plan_id)
 
 
 def _plans_payload() -> list[dict]:
@@ -3504,8 +3503,9 @@ async def _ai_recommendations(answers: dict, ctx: dict, tg_id: int | None = None
         "Добавки, входящие в любые комплексы пользователя (context.complexes), не предлагай ни для add, ни для remove/adjust: комплексы в этом сценарии не меняем. "
         "Добавки со статусом taken в context.target_day_state уже приняты за целевой день: "
         "их запрещено предлагать для remove/adjust. "
-        "Если пользователь просит рекомендации по энергии/силе/тренировке в answers.goals или answers.note, "
-        "и нет явных противопоказаний в контексте, обязательно верни хотя бы один action=add."
+        "Пустой список допустим: не добавляй БАД ради количества рекомендаций. "
+        "Неполный дневник питания не доказывает дефицит. Не назначай дозировки и не обещай лечение. "
+        "adjust меняет только время; дозу человек указывает с упаковки самостоятельно."
     )
     prompt = json.dumps({"answers": answers, "context": ctx}, ensure_ascii=False)
     from progressor_client import ai_context
@@ -3517,7 +3517,15 @@ async def _ai_recommendations(answers: dict, ctx: dict, tg_id: int | None = None
     request_key=key({'model':cfg.model,'instructions':instructions,'input':prompt,'context':shared,'format':'supply.web.checkin.v2'})
     text=await __import__('asyncio').to_thread(get,s.DB_PATH,tg_id,'supply_web_checkin',request_key) if tg_id is not None else None
     cache_hit=text is not None
-    if text is None:text = await __import__('asyncio').to_thread(_sync_call, cfg, instructions=instructions, input_text=prompt, max_output_tokens=800, timeout_s=20)
+    if text is None:
+        if tg_id is None: raise ValueError('verified_subject_required')
+        attempt_token = await asyncio.to_thread(acquire_ai_attempt, s.DB_PATH, tg_id,
+                                               'supply_guidance', hourly=6, daily=20, cooldown=15)
+        try:
+            text = await asyncio.to_thread(_sync_call, cfg, instructions=instructions,
+                                           input_text=prompt, max_output_tokens=800, timeout_s=20)
+        finally:
+            await asyncio.to_thread(finish_ai_attempt, s.DB_PATH, attempt_token)
     data = json.loads(text)
     if not isinstance(data, list):
         raise RuntimeError("AI_BAD_FORMAT")
@@ -3539,6 +3547,7 @@ async def _normalize_recommendations(
     locked = {str(x or "").strip().lower() for x in list(locked_taken_slugs or set()) if str(x or "").strip()}
     protected = {str(x or "").strip().lower() for x in list(complex_protected_slugs or set()) if str(x or "").strip()}
     for item in recs:
+        if not isinstance(item, dict): continue
         slug = str(item.get("slug") or "").strip().lower()
         if not slug:
             continue
@@ -3547,9 +3556,9 @@ async def _normalize_recommendations(
         row = await db.fetchone(conn, "SELECT id, COALESCE(NULLIF(name_ru,''), NULLIF(name_en,''), name) AS name_ru, slug FROM supplements WHERE slug=?", (slug,))
         if not row:
             continue
-        action = str(item.get("action") or "add").strip().lower()
+        action = str(item.get("action") or "").strip().lower()
         if action not in {"add", "remove", "adjust"}:
-            action = "add"
+            continue
         is_valid_action = False
         if action == "add":
             is_valid_action = slug in candidate_slugs and slug not in stack_slugs
@@ -3564,12 +3573,14 @@ async def _normalize_recommendations(
             continue
         suggested_time = db._normalize_hhmm(str(item.get("suggested_time") or "").strip())
         suggested_slot_id = str(item.get("suggested_slot_id") or "").strip() or None
+        try: priority = int(item.get('priority') or 2)
+        except (ValueError, TypeError, OverflowError): priority = 2
         out.append({
             "action": action,
             "slug": str(row["slug"]),
-            "name_ru": str(item.get("name_ru") or row["name_ru"] or ""),
+            "name_ru": str(row["name_ru"] or ""),
             "reason": str(item.get("reason_ru") or "").strip(),
-            "priority": min(3, max(1, int(item.get("priority") or 2))),
+            "priority": min(3, max(1, priority)),
             "suggested_time": suggested_time,
             "suggested_slot_id": suggested_slot_id,
             "prefer_existing_time": True,
@@ -3615,6 +3626,13 @@ def _target_day_from_local_date(local_date: str, today_local: str) -> str | None
     return None
 
 
+def _checkin_origin(row):
+    native = str(row.get('ai_prompt_hash') or '').startswith('bot:')
+    username = str(getattr(s, 'BOT_USERNAME', '') or '').lstrip('@')
+    return {'answer_source': 'bot' if native else 'web',
+            'retry_in_bot_url': 'https://t.me/' + username if native and re.fullmatch(r'[A-Za-z0-9_]{5,32}', username) else None}
+
+
 @app.post("/api/checkin")
 async def api_checkin(body: CheckinBody, x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
     tg_user_id = await _auth_user_id(x_telegram_init_data)
@@ -3623,14 +3641,16 @@ async def api_checkin(body: CheckinBody, x_telegram_init_data: str = Header(defa
 
     answers = _validate_answers(body.answers or {})
     conn = await db.connect(s.DB_PATH)
+    claim_token = None
+    checkin_id = 0
     try:
         tz_name = await db.get_user_tz(conn, tg_user_id)
         target_raw = body.target_day if body.target_day is not None else body.target
         target, local_date, now_local = _resolve_target_day(tz_name, target_raw)
         if body.expected_date is not None and body.expected_date != local_date:
             return JSONResponse({"ok": False, "code": "DAY_CHANGED", "date_local": local_date}, status_code=409)
-        existing = await db.get_today_checkin(conn, tg_user_id, local_date)
-        if existing:
+        existing, claim_token = await db.reserve_daily_checkin(conn, tg_user_id, local_date, answers)
+        if not claim_token:
             existing_recs = []
             existing_applied = None
             try:
@@ -3661,13 +3681,15 @@ async def api_checkin(body: CheckinBody, x_telegram_init_data: str = Header(defa
                         "answers": existing_answers,
                         "recommendations": existing_recs,
                         "applied": existing_applied,
+                        "processing_status": existing.get('processing_status', 'done'),
+                        **_checkin_origin(existing),
                     },
                     "date_local": local_date,
                     "target": target,
                 },
                 status_code=409,
             )
-        checkin_id = await db.upsert_daily_checkin(conn, tg_user_id, local_date, answers)
+        checkin_id = int(existing['id'])
         ctx = await db.build_ai_context_compact(conn, tg_user_id, local_date)
         complex_protected_slugs = {
             str(slug or "").strip().lower()
@@ -3734,28 +3756,26 @@ async def api_checkin(body: CheckinBody, x_telegram_init_data: str = Header(defa
                 },
             )
 
-            # safeguard: always provide at least one add suggestion when user asks for goals/energy in note
-            if (merged_goals or str(answers.get("note") or "").strip()) and not any(str(r.get("action") or "") == "add" for r in recs):
-                fallback_adds = await db.build_goal_based_fallback_adds(
-                    conn,
-                    base_stack_slugs=stack_slugs,
-                    goals=merged_goals,
-                    note_text=str(answers.get("note") or ""),
-                    now_hhmm=now_local.strftime("%H:00"),
-                    limit=2,
-                )
-                recs.extend([
-                    x for x in fallback_adds
-                    if str(x.get("slug") or "").strip().lower() not in complex_protected_slugs
-                ])
-
-            await db.save_ai_result(conn, checkin_id, recs, p_hash)
+            if not await db.finish_daily_checkin(conn, tg_user_id, checkin_id, claim_token, recs, prompt_hash=p_hash):
+                return JSONResponse({'ok': False, 'code': 'CHECKIN_CHANGED'}, status_code=409)
             return JSONResponse({"ok": True, "checkin_id": checkin_id, "recommendations": recs, "meta": meta, "date_local": local_date, "target": target})
+        except AttemptLimited as exc:
+            await db.finish_daily_checkin(conn, tg_user_id, checkin_id, claim_token,
+                                         {'error': 'ATTEMPT_LIMITED'}, failed=True)
+            return JSONResponse({'ok': False, 'code': 'ATTEMPT_LIMITED', 'message': str(exc),
+                                 'retry_after': exc.retry_after}, status_code=429,
+                                headers={'Retry-After': str(exc.retry_after)})
         except Exception:
-            await db.save_ai_result(conn, checkin_id, {"error": "AI_UNAVAILABLE"}, p_hash)
-            return JSONResponse({"ok": False, "checkin_id": checkin_id, "error": "AI_UNAVAILABLE"})
+            await db.finish_daily_checkin(conn, tg_user_id, checkin_id, claim_token,
+                                         {"error": "AI_UNAVAILABLE"}, failed=True)
+            return JSONResponse({"ok": False, "checkin_id": checkin_id, "error": "AI_UNAVAILABLE"}, status_code=503)
     finally:
-        await conn.close()
+        try:
+            if claim_token:
+                await db.finish_daily_checkin(conn, tg_user_id, checkin_id, claim_token,
+                                             {'error': 'AI_UNAVAILABLE'}, failed=True)
+        finally:
+            await conn.close()
 
 
 @app.post("/api/checkin/apply")
@@ -3961,6 +3981,8 @@ async def api_checkin_today(target: str | None = None, x_telegram_init_data: str
         tz_name = await db.get_user_tz(conn, tg_user_id)
         resolved_target, local_date, _ = _resolve_target_day(tz_name, target)
         row = await db.get_today_checkin(conn, tg_user_id, local_date)
+        if row:
+            row['processing_status'] = await db.daily_checkin_status(conn, row)
     finally:
         await conn.close()
     if not row:
@@ -3983,7 +4005,9 @@ async def api_checkin_today(target: str | None = None, x_telegram_init_data: str
             applied = parsed_applied
     except Exception:
         pass
-    return JSONResponse({"ok": True, "checkin": {"id": int(row.get("id") or 0), "answers": answers, "recommendations": recs, "applied": applied}, "date_local": local_date, "target": resolved_target})
+    return JSONResponse({"ok": True, "checkin": {"id": int(row.get("id") or 0), "answers": answers, "recommendations": recs, "applied": applied,
+                                               'processing_status': row['processing_status'], **_checkin_origin(row)},
+                         "date_local": local_date, "target": resolved_target})
 
 
 @app.post("/api/admin/diagnostics/run")

@@ -1,3 +1,5 @@
+# Exact tested dependency versions: see docs/QUALITY_PROGRAM.md.
+-c constraints.txt
 # Direct dependencies from the offline audit environment (Python 3.12).
 # Upgrade deliberately, then run init_db.py --self-test and API/UI regressions.
 python-telegram-bot[job-queue]==21.11.1
@@ -11,3 +13,4 @@ httpx==0.28.1
 python-multipart==0.0.32
 pypdf==6.19.0
 Pillow==12.3.0
+pip==26.2.1

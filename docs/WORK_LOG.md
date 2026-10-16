@@ -26,3 +26,13 @@ Fresh pre-release archive `20261012T070557Z-pre-selected-features.tar.gz`, SHA25
 Selected behavior and next-agent contracts: [SELECTED_FEATURES.md](SELECTED_FEATURES.md). User-facing release guide: [canonical Core guide](https://github.com/MarkKoro/progressor_core/blob/main/docs/SELECTED_RELEASE.md). P20 shopping lists remain excluded by the user. P2/P4/P18 follow the later approved choices; P36 pauses hints/reminders while paid terms continue. Source-local dates, nullable nutrient estimates and explicit aggregate coach consent remain as documented.
 
 These closing changes update documentation only. Runtime files retain the tested bytes. Future work must read current main and these contracts, preserve native ownership/consent/freshness, synchronize canonical shared helpers and use update-all for coordinated changes. Historical prepared/paused records above remain dated evidence, not outstanding blockers.
+
+
+## Quality program — 2026-10-16
+
+Technical and UI review rules, repaired failure patterns and next-agent constraints are documented in [QUALITY_PROGRAM.md](QUALITY_PROGRAM.md). The quality release is checked on synthetic SQLite databases, isolated providers, clean declared dependencies and actual HTML/API browser emulation. Operational deployment revisions, consistent backup/restore receipts and source-specific verification results are retained in the private action journal. This entry does not assert a physical Telegram/device test or a completed production switch.
+
+
+### Проверенный состав выпуска качества
+
+Финальная серверная прогонка: 640/640, без ошибок и пропусков; этот компонент — 62 тестов. Финальная прогонка HTML/API — 153 сценария в 13 группах. Копия до обновления скачана с сервера и восстановлена вне сервера для всех четырёх баз. Фактическое переключение и последующая проверка фиксируются отдельно; эта запись не утверждает завершение рабочего развёртывания. [Состав и ограничения выпуска](https://github.com/MarkKoro/progressor_core/blob/main/docs/QUALITY_RELEASE.md).

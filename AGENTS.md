@@ -43,3 +43,8 @@ Read [docs/SELECTED_FEATURES.md](docs/SELECTED_FEATURES.md) before changing shar
 Read [docs/QUALITY_PROGRAM.md](docs/QUALITY_PROGRAM.md) before storage, access, AI, native UI or deployment changes. Preserve the request-owned context projection, source-owned doses, read-only GET behavior, durable AI attempts and explicit native readiness. Install declared requirements/constraints into a fresh runtime; retain the old runtime for rollback. Match the change to meaningful tests and record exact source/evidence; no extra consumers or real paid tests.
 
 Critical launch mirror: `webapp/assets/progressor-bootstrap.v1.js` must exactly match Core `shared/bootstrap.v1.js`. Keep native own-proof requests independent of Core, preserve original-source identity across SDK deliveries, and prevent cross-navigation when its assertions cannot be transferred. The complete shared UI and backend remain canonical in Core.
+
+
+## Native ecosystem journeys — 2026-10-17
+
+Read docs/ECOSYSTEM_CONNECTIONS.md before changing daily summaries, source-health explanations, workout/meal completion or preferences-aware hints. Keep own-account/source+target access, freshness, Supply consent and explicit unknowns. New daily reads must stay small/read-only; never replace them with full history/AI generation. Shared progressor_bot.py stays canonical in Core with identical all3 mirrors. Sleep remains a documented future native connector, not a live source or Telegram permission.

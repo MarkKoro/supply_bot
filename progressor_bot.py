@@ -67,6 +67,7 @@ def install(app,source,db_path,*,render=None,back_callback=None,notify=None):
             rows.append([InlineKeyboardButton(('✓ ' if p[field] else '○ ')+label,callback_data='pg:pref:'+field)])
         rows.append([InlineKeyboardButton('Вернуться из отдыха' if p['rest_active'] else 'Отдохнуть от напоминаний',callback_data='pg:rest')])
         rows.append([InlineKeyboardButton('Вес и источники',callback_data='pg:weights'),InlineKeyboardButton('Моя неделя',callback_data='pg:weekly')])
+        rows.append([InlineKeyboardButton('Сегодня вместе',callback_data='pg:today')])
         rows.append([InlineKeyboardButton(('✓ ' if p['weekly_plan'] else '○ ')+'План питания раз в неделю',callback_data='pg:pref:weekly_plan')])
         rows.append([InlineKeyboardButton('Предпросмотр плана',callback_data='pg:weekly_plan'),InlineKeyboardButton('Ритм тренировок',callback_data='pg:rhythm')])
         rows.append([InlineKeyboardButton('Питание для тренера',callback_data='pg:coach_permissions')])
@@ -107,6 +108,14 @@ def install(app,source,db_path,*,render=None,back_callback=None,notify=None):
             result=await client.call(source,'/internal/v1/connections/account',{'user_id':uid,'action':'weight','event_id':item['event_id'],'fingerprint':value['fingerprint'],'operation_id':str(uuid.uuid4())})
             context.user_data.pop('progressor_weight_choice',None)
             await show(update,context,'Выбор сохранён. Владельцы профилей проверят свежесть и обновят вес. Обычно это занимает до минуты. Если одно значение успело измениться, оно сохранится для нового выбора.',back)
+        elif parts[1]=='today':
+            value=await client.call(source,'/internal/v1/connections/today',{'user_id':uid})
+            lines=[value['title']]
+            lines += [item['name']+'\n'+item['text']+ ('\n'+item['day']+' · '+item['timezone'] if item['source']=='supply' else '') for item in value['sections']]
+            if value.get('relationship'):lines.append(value['relationship'])
+            lines.append('Что сейчас связано\n'+'\n'.join(item['name']+' — '+item['label'] for item in value['health']['items']))
+            lines.extend([value['day_label'],value['coverage']])
+            await show(update,context,'\n\n'.join(lines),[[InlineKeyboardButton('Обновить обзор',callback_data='pg:today')]]+back)
         elif parts[1]=='weekly':
             value=await client.call(source,'/internal/v1/connections/weekly',{'user_id':uid});lines=['Моя неделя']
             n=value.get('nutrition');w=value.get('workouts');s=value.get('supply')
@@ -227,7 +236,7 @@ def install(app,source,db_path,*,render=None,back_callback=None,notify=None):
         if not private(update):raise ApplicationHandlerStop
         if query.data=='pg:menu':await menu(update,context)
         elif query.data=='pg:periods':await menu(update,context,other_periods=True)
-        elif query.data.split(':')[1] in ('settings','link','pref','rest','help','weights','weight','weight_confirm','weekly','weekly_plan','rhythm','rhythm_confirm','rhythm_off','coach_permissions','coach_macros','coach_dishes','coach_view','free_finish'):
+        elif query.data.split(':')[1] in ('settings','link','pref','rest','help','weights','weight','weight_confirm','today','weekly','weekly_plan','rhythm','rhythm_confirm','rhythm_off','coach_permissions','coach_macros','coach_dishes','coach_view','free_finish'):
             try:await account_action(update,context)
             except Exception:await show(update,context,'Данные изменились или связь временно недоступна. Обновите настройки.',[[InlineKeyboardButton('Связь продуктов',callback_data='pg:settings')]])
         elif query.data.startswith('pg:buy:'):

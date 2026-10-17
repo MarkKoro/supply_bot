@@ -36,3 +36,10 @@ Technical and UI review rules, repaired failure patterns and next-agent constrai
 ### Проверенный состав выпуска качества
 
 Финальная серверная прогонка: 640/640, без ошибок и пропусков; этот компонент — 62 тестов. Финальная прогонка HTML/API — 153 сценария в 13 группах. Копия до обновления скачана с сервера и восстановлена вне сервера для всех четырёх баз. Фактическое переключение и последующая проверка фиксируются отдельно; эта запись не утверждает завершение рабочего развёртывания. [Состав и ограничения выпуска](https://github.com/MarkKoro/progressor_core/blob/main/docs/QUALITY_RELEASE.md).
+
+
+## 2026-10-17 — factual cross-product journeys
+
+Added Today Together in existing native menus and canonical shared WebApp, explainable source states and completion-aware workout→Food follow-up. Existing single-menu renderers, paid gates, quiet hours, ownership and financial protocol2 remain. Core owns light daily projection, source metadata and preferences-filtered food hints; Food saved replies acknowledge the current meal. Full isolated Linux candidate: 656 passing tests, zero skips, external network denied; source archive SHA256 9e791ad555c84be0d0a7bc3a37833b53cc50733dd214a5d9e759ca309051d7b4. Browser source/evidence and current rollout revisions are recorded in the durable local ecosystem journal. No real payment, paid AI or physical Telegram test. See docs/ECOSYSTEM_CONNECTIONS.md; future sleep support is design-only.
+
+Final validation: Core258 on indexed checks3 snapshot SHA256 88f8a5dc9797e410b3135d9f4529ee3a4cc7ca6a59f7efc9bec57339bd44888c; unchanged native code/tests byte-identical to checks2 (Gym222/Food113/Supply63). 656 passed total, zero skips. Final frontend154 scenarios/10 groups, plus24 interactive diagram states. New day p95 small35.274ms/large79.472ms; full large context876.958ms, no budget relaxation. Pre-deploy checkpoint153280387B SHA256 3f99619b5cf7817da2c79eefc3de8e113a0b24fc153f9c800fff769014bd6f69 restored off-server4/4.

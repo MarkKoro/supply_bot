@@ -26,6 +26,21 @@ class NativeBundleHandlers(unittest.IsolatedAsyncioTestCase):
         try:await handler.callback(update or self.update,self.ctx)
         except ApplicationHandlerStop:pass
     def order(self):return {'id':'actual-reserved-id','amount':277,'pricing_json':json.dumps({'label':'30 дней','credit_amount':173})}
+
+    async def test_today_journey_uses_existing_owner_menu_and_no_outbound_notification(self):
+        self.q.data='pg:today'
+        value={'title':'Сегодня вместе','sections':[{'source':'food','name':'Food','text':'Записано 2 блюда.','day':'2026-10-17','timezone':'Europe/Moscow'}],
+               'relationship':'После тренировки еда уже записана.', 'health':{'items':[{'name':'Supply','label':'Связь выключена вами'}]},
+               'day_label':'День питания: Москва.','coverage':'Только сохранённые записи.'}
+        call=AsyncMock(return_value=value)
+        with patch.object(client,'call',call):await self.invoke('callback')
+        self.assertEqual(call.await_count,1)
+        self.assertEqual(call.call_args.args,(SOURCE,'/internal/v1/connections/today',{'user_id':'123'}))
+        self.assertEqual(self.render.await_count,1);self.notify.assert_not_awaited()
+        text=self.render.call_args.args[2];self.assertIn('Сегодня вместе',text);self.assertIn('еда уже записана',text)
+        callbacks=[b.callback_data for row in self.render.call_args.args[3].inline_keyboard for b in row]
+        self.assertIn('pg:today',callbacks);self.assertIn('pg:settings',callbacks);self.assertIn('owner:menu',callbacks)
+
     async def test_catalog_uses_owner_menu_and_shows_credit_align_and_already_covered(self):
         price=lambda n:{'already_covered':n==0,'credit_amount':450-n}
         catalog={'plans':[{'id':'align','label':'До 28.10','XTR':200,'prices':{'XTR':price(200)}},{'id':'m1','label':'30 дней','XTR':277,'prices':{'XTR':price(277)}},{'id':'m6','label':'180 дней','XTR':0,'prices':{'XTR':price(0)}}]}

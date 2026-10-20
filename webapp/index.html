@@ -3062,8 +3062,17 @@
     purchaseSubscription:(id,currency,button)=>purchase(id,currency==='XTR'?'stars':'yookassa',button),
     hintHost:()=>document.getElementById('progressor-inline-host'),
     eligible:()=>state.activeTab==='today' && !!state.me?.webapp_access && !!state.today && !state.loadingToday,
+    captureView:()=>isEditing() || state.mySupplements.open ? null : ['today','catalog','profile','achievements'].includes(state.activeTab) ? state.activeTab : null,
+    restoreView:view=>{if(!state.me?.webapp_access || isEditing() || !['today','catalog','profile','achievements'].includes(view))return false;activateTab(view);return true;},
     perform:async action=>{
-      if(action.kind==='supply_plan'){activateTab('today');return true;}
+      if(!state.me?.webapp_access || state.me.banned || isEditing())return false;
+      if(action.kind==='supply_plan'){
+        const revision=window.Progressor?.interactionRevision?.();
+        activateTab('today');await openMySupplements();
+        if(state.activeTab!=='today' || !state.mySupplements.open || (revision!==undefined && revision!==window.Progressor?.interactionRevision?.()))return false;
+        const target=document.querySelector('button[data-my-supp-close]') || document.getElementById('tabContent');
+        if(target && target.tagName!=='BUTTON')target.setAttribute('tabindex','-1');target?.focus({preventScroll:true});return true;
+      }
       if(action.kind!=='supply_catalog' || !['железо','B12'].includes(action.query)) return false;
       state.catalog.q=action.query; state.catalog.page=0; state.catalog.items=[]; state.catalog.hasMore=true;
       activateTab('catalog'); await loadCatalog(true); return true;

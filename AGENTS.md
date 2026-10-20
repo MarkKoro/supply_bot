@@ -48,3 +48,7 @@ Critical launch mirror: `webapp/assets/progressor-bootstrap.v1.js` must exactly 
 ## Native ecosystem journeys — 2026-10-17
 
 Read docs/ECOSYSTEM_CONNECTIONS.md before changing daily summaries, source-health explanations, workout/meal completion or preferences-aware hints. Keep own-account/source+target access, freshness, Supply consent and explicit unknowns. New daily reads must stay small/read-only; never replace them with full history/AI generation. Shared progressor_bot.py stays canonical in Core with identical all3 mirrors. Sleep remains a documented future native connector, not a live source or Telegram permission.
+
+## Bounded journey handoffs — 2026-10-19
+
+Read the canonical [journey contract](https://github.com/MarkKoro/progressor_core/blob/main/docs/JOURNEY_HANDOFFS.md) before changing purpose routing, return, change-goal review or Food goal confirmation. Keep the single Core UI, native owned actions, account/proof binding and read-only navigation. A saved workout/intake does not prove plan review; explicit scoped review is separate from seen/dismissal. Food apply must reference its server preview and preserve concurrent owner edits; see Food docs/GOAL_PREVIEWS.md. Use the frozen JQ-v1 in Core docs/JOURNEY_QUALITY_RUBRIC.md for matched tasks, separate concept and observed evidence. Do not replace agreed 90-minute free-workout completion, Moscow Food day, meal-anchor parameters or native financial/consent contracts as a side effect.

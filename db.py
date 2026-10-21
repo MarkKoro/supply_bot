@@ -2623,11 +2623,9 @@ async def has_required_consent(
     )
     if not row:
         return False
-    return (
-        int(row["consent_given"] or 0) == 1
-        and str(row["consent_offer_version"] or "") == str(offer_version or "")
-        and str(row["consent_privacy_version"] or "") == str(privacy_version or "")
-    )
+    from legal_consent import decision,policy
+    try:return decision(row,policy(offer_version,privacy_version))['current']
+    except ValueError:return False
 
 
 async def save_user_consent(
@@ -7188,14 +7186,29 @@ async def _ensure_reminder_delivery_state(conn) -> None:
     await _ensure_column(conn, 'reminder_fires', 'retry_at_utc', "TEXT NOT NULL DEFAULT ''")
     await _ensure_column(conn, 'reminder_fires', 'lease_until_utc', "TEXT NOT NULL DEFAULT ''")
     await _ensure_column(conn, 'reminder_fires', 'attempts', 'INTEGER NOT NULL DEFAULT 0')
+    await _ensure_column(conn, 'reminder_fires', 'delivery_version', 'INTEGER NOT NULL DEFAULT 0')
+    await _ensure_column(conn, 'reminder_fires', 'first_reserved_at', 'REAL NOT NULL DEFAULT 0')
+    # Legacy pending did not distinguish explicit rejection from unknown
+    # acceptance. Preserve it as unknown; never replay it during this migration.
+    await conn.execute("""UPDATE reminder_fires SET delivery_status='uncertain',claim_token='',
+        lease_until_utc='',retry_at_utc='' WHERE delivery_status='pending' AND delivery_version=0""")
+    await conn.execute("""CREATE INDEX IF NOT EXISTS idx_reminder_delivery_state
+        ON reminder_fires(delivery_status, lease_until_utc, retry_at_utc)""")
 
 
 async def list_retryable_reminder_fires(conn) -> list[dict]:
+    # A crashed sender may already have reached Telegram. Expiry releases its
+    # reservation into an unknown outcome, never into an automatic new send.
+    await conn.execute("""UPDATE reminder_fires SET delivery_status='uncertain',claim_token='',
+        lease_until_utc='',retry_at_utc='' WHERE delivery_status='sending' AND lease_until_utc<=?""", (utc_now_iso(),))
+    await conn.execute("""UPDATE reminder_fires SET delivery_status='uncertain',claim_token='',
+        lease_until_utc='',retry_at_utc='' WHERE delivery_status='pending' AND delivery_version=0""")
+    await conn.commit()
     rows = await fetchall(conn, """SELECT rf.*,u.tz_name FROM reminder_fires rf
         JOIN users u ON u.tg_user_id=rf.user_id
         JOIN user_supplements us ON us.user_id=u.id AND us.supplement_id=rf.supplement_id
         LEFT JOIN user_notification_prefs np ON np.user_id=u.id
-        WHERE rf.delivery_status IN ('pending','sending') AND COALESCE(np.reminders_enabled,1)=1
+        WHERE rf.delivery_status='pending' AND COALESCE(np.reminders_enabled,1)=1
           AND us.enabled=1 AND us.is_active=1 AND COALESCE(us.user_frozen,0)=0
           AND COALESCE(u.is_banned,0)=0 AND COALESCE(u.deleted_at_utc,'')=''
           AND rf.retry_at_utc<=? AND rf.lease_until_utc<=?""", (utc_now_iso(),utc_now_iso()))
@@ -7203,30 +7216,47 @@ async def list_retryable_reminder_fires(conn) -> list[dict]:
 
 
 async def finish_reminder_fire(conn, user_id: int, supplement_id: int, day: str, time_local: str,
-                               token: str, *, delivered: bool, permanent: bool = False) -> None:
-    status = 'delivered' if delivered else ('failed' if permanent else 'pending')
-    retry_at = _to_utc_iso(datetime.now(timezone.utc) + timedelta(seconds=60)) if status == 'pending' else ''
+                               token: str, *, delivered: bool = False, permanent: bool = False,
+                               status: str | None = None, retry_after: float = 60, attempted: bool = True) -> None:
+    status = status or ('delivered' if delivered else ('failed' if permanent else 'pending'))
+    if status not in {'delivered','failed','pending','uncertain','deferred','suppressed'}:raise ValueError('invalid_delivery_status')
+    delivered = status == 'delivered'
+    retry_at = _to_utc_iso(datetime.now(timezone.utc) + timedelta(seconds=max(60,retry_after)+1)) if status == 'pending' else ''
     await conn.execute("""UPDATE reminder_fires SET delivery_status=?,claim_token='',lease_until_utc='',
-        retry_at_utc=?,fired_at=? WHERE user_id=? AND supplement_id=? AND day=? AND time_local=? AND claim_token=?""",
-        (status,retry_at,utc_now_iso() if delivered else '',user_id,supplement_id,day,time_local,token))
+        retry_at_utc=?,fired_at=?,attempts=max(0,attempts-?)
+        WHERE user_id=? AND supplement_id=? AND day=? AND time_local=? AND claim_token=?""",
+        (status,retry_at,utc_now_iso() if delivered else '',int(not attempted),user_id,supplement_id,day,time_local,token))
     await conn.commit()
 
 
 async def insert_reminder_fire(
     conn: aiosqlite.Connection, user_id: int, supplement_id: int, day: str, time_local: str,
+    *, allow_deferred: bool = False, pause_cutoff: float = 0,
 ) -> str | None:
     import uuid
     token = str(uuid.uuid4())
     now = utc_now_iso()
     lease = _to_utc_iso(datetime.now(timezone.utc) + timedelta(minutes=5))
+    if type(pause_cutoff) not in (int,float) or not math.isfinite(pause_cutoff) or pause_cutoff<0:
+        pause_cutoff=0
     async with transaction(conn) as tx:
-        await tx.execute("""INSERT INTO reminder_fires(user_id,supplement_id,day,time_local,fired_at,delivery_status)
-            VALUES(?,?,?,?,'','pending') ON CONFLICT(user_id,supplement_id,day,time_local) DO NOTHING""",
-            (user_id,supplement_id,day,time_local))
+        await tx.execute("""UPDATE reminder_fires SET delivery_status='uncertain',claim_token='',lease_until_utc='',retry_at_utc=''
+            WHERE user_id=? AND supplement_id=? AND day=? AND time_local=?
+            AND delivery_status='sending' AND lease_until_utc<=?""",(user_id,supplement_id,day,time_local,now))
+        await tx.execute("""UPDATE reminder_fires SET delivery_status='uncertain',claim_token='',lease_until_utc='',retry_at_utc=''
+            WHERE user_id=? AND supplement_id=? AND day=? AND time_local=?
+            AND delivery_status='pending' AND delivery_version=0""",(user_id,supplement_id,day,time_local))
+        await tx.execute("""UPDATE reminder_fires SET delivery_status='suppressed',claim_token='',lease_until_utc='',retry_at_utc=''
+            WHERE user_id=? AND supplement_id=? AND day=? AND time_local=?
+            AND delivery_status IN ('pending','deferred') AND ? > 0 AND first_reserved_at<=?""",
+            (user_id,supplement_id,day,time_local,pause_cutoff,pause_cutoff))
+        await tx.execute("""INSERT INTO reminder_fires(user_id,supplement_id,day,time_local,fired_at,delivery_status,delivery_version,first_reserved_at)
+            VALUES(?,?,?,?,'','pending',1,?) ON CONFLICT(user_id,supplement_id,day,time_local) DO NOTHING""",
+            (user_id,supplement_id,day,time_local,time.time()))
         cur = await tx.execute("""UPDATE reminder_fires SET delivery_status='sending',claim_token=?,lease_until_utc=?,attempts=attempts+1
             WHERE user_id=? AND supplement_id=? AND day=? AND time_local=?
-              AND delivery_status IN ('pending','sending') AND retry_at_utc<=? AND lease_until_utc<=?""",
-            (token,lease,user_id,supplement_id,day,time_local,now,now))
+              AND delivery_version=1 AND (delivery_status='pending' OR (? AND delivery_status='deferred')) AND retry_at_utc<=? AND lease_until_utc<=?""",
+            (token,lease,user_id,supplement_id,day,time_local,int(allow_deferred),now,now))
         return token if cur.rowcount == 1 else None
 
 async def save_ui_state(

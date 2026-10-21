@@ -3217,7 +3217,6 @@ async def payments_reconcile_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def reminders_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
-    from telegram.error import Forbidden
     s = context.application.bot_data["settings"]
     conn = await db.connect(s.DB_PATH)
     try:
@@ -3244,26 +3243,46 @@ async def reminders_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
         for (tg_user_id,time_local,day), supplement_ids in delivery_batches:
             from progressor_links import notifications_allowed
             if not await asyncio.to_thread(notifications_allowed,s.DB_PATH,tg_user_id):continue
-            claims = {}
-            for sid in sorted(supplement_ids):
-                token = await db.insert_reminder_fire(conn,tg_user_id,sid,day,time_local)
-                if token:
-                    claims[sid] = token
-            if not claims:
-                continue
-            delivered, permanent = False, False
-            try:
-                await reminder_fire_batch(context,tg_user_id,list(claims),meal_trigger=(tg_user_id,time_local,day) in meal_keys)
-                delivered = True
-            except Forbidden:
-                permanent = True
-            except Exception as exc:
-                log.warning('Reminder delivery postponed user=%s error=%s',tg_user_id,type(exc).__name__)
-            async with db.transaction(conn) as tx:
-                for sid,token in claims.items():
-                    await db.finish_reminder_fire(tx,tg_user_id,sid,day,time_local,token,delivered=delivered,permanent=permanent)
+            refs=[{'supplement_id':sid,'day':day,'time_local':time_local} for sid in sorted(supplement_ids)]
+            await _dispatch_reminder_claims(context,conn,tg_user_id,refs,meal_trigger=(tg_user_id,time_local,day) in meal_keys)
     finally:
         await conn.close()
+
+
+async def _dispatch_reminder_claims(context,conn,tg_user_id,refs,*,meal_trigger=False,deferred=False,extra_ids=()):
+    from telegram.error import BadRequest,Forbidden,RetryAfter
+    from ux import DeliveryAttempt
+    from progressor_links import settings as connection_settings
+    policy=await asyncio.to_thread(connection_settings,context.application.bot_data['settings'].DB_PATH,tg_user_id)
+    pause_cutoff=policy.get('last_pause_started_at',0)
+    claims=[]
+    for ref in refs:
+        sid,day,slot=int(ref['supplement_id']),str(ref['day']),str(ref['time_local'])
+        token=await db.insert_reminder_fire(conn,tg_user_id,sid,day,slot,allow_deferred=deferred,pause_cutoff=pause_cutoff)
+        if token:claims.append((sid,day,slot,token))
+    if not claims:return
+    attempt=DeliveryAttempt();status='suppressed';retry_after=60
+    claimed_refs=[{'supplement_id':sid,'day':day,'time_local':slot} for sid,day,slot,_ in claims]
+    referenced_ids={int(ref['supplement_id']) for ref in refs}
+    extra_ids=[sid for sid in extra_ids if int(sid) not in referenced_ids]
+    try:
+        outcome=await reminder_fire_batch(context,tg_user_id,list(dict.fromkeys([*[c[0] for c in claims],*extra_ids])),
+            meal_trigger=meal_trigger,delivery_attempt=attempt,delivery_refs=claimed_refs)
+        status='delivered' if attempt.acknowledged else 'deferred' if outcome=='deferred' else 'suppressed'
+    except BaseException as exc:
+        if attempt.acknowledged:status='delivered'
+        elif attempt.send_error is exc and isinstance(exc,RetryAfter):
+            status='pending';wait=exc.retry_after
+            retry_after=wait.total_seconds() if isinstance(wait,timedelta) else float(wait)
+        elif attempt.send_error is exc and isinstance(exc,(Forbidden,BadRequest)):status='failed'
+        else:status='uncertain' if attempt.started else 'pending'
+        log.warning('Reminder delivery state=%s user=%s error=%s',status,tg_user_id,type(exc).__name__)
+        if not isinstance(exc,Exception):raise
+    finally:
+        async with db.transaction(conn) as tx:
+            for sid,day,slot,token in claims:
+                await db.finish_reminder_fire(tx,tg_user_id,sid,day,slot,token,status=status,
+                    retry_after=retry_after,attempted=attempt.started)
 
 
 async def nutrient_lifecycle_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3355,6 +3374,13 @@ async def reminder_fire_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         finally:await conn.close()
     supplement_ids = data.get("supplement_ids")
     if isinstance(supplement_ids, list) and supplement_ids:
+        if data.get('delivery_refs'):
+            conn=await db.connect(context.application.bot_data['settings'].DB_PATH)
+            try:
+                await _dispatch_reminder_claims(context,conn,tg_user_id,data['delivery_refs'],
+                    meal_trigger=bool(data.get('meal_trigger')),deferred=True,extra_ids=supplement_ids)
+            finally:await conn.close()
+            return
         await reminder_fire_batch(context, tg_user_id, supplement_ids, is_snooze=True,meal_trigger=bool(data.get('meal_trigger')))
         return
     supplement_id = int(data.get("supplement_id"))
@@ -3442,6 +3468,8 @@ async def reminder_fire_batch(
     interactive_update=None,
     interactive_context=None,
     meal_trigger: bool = False,
+    delivery_attempt=None,
+    delivery_refs=None,
 ) -> None:
     s = context.application.bot_data["settings"]
     conn = await db.connect(s.DB_PATH)
@@ -3480,9 +3508,16 @@ async def reminder_fire_batch(
                 if context.application.job_queue:
                     name=f'progressor_deferred_reminder:{tg_user_id}'
                     ids=list(supplement_ids)
+                    refs=list(delivery_refs or [])
                     for job in context.application.job_queue.get_jobs_by_name(name):
-                        ids.extend((job.data or {}).get('supplement_ids',[]));job.schedule_removal()
-                    context.application.job_queue.run_once(reminder_fire_job,when=60,name=name,data={'tg_user_id':tg_user_id,'supplement_ids':list(dict.fromkeys(ids)),'deferred_day':db.get_user_local_date(user_row['tz_name'] or 'UTC'),'meal_trigger':meal_trigger})
+                        previous=job.data or {}
+                        ids.extend(previous.get('supplement_ids',[]))
+                        refs.extend(previous.get('delivery_refs',[]))
+                        meal_trigger=meal_trigger or bool(previous.get('meal_trigger'))
+                        job.schedule_removal()
+                    refs=list({(r['supplement_id'],r['day'],r['time_local']):r for r in refs}.values())
+                    context.application.job_queue.run_once(reminder_fire_job,when=60,name=name,data={'tg_user_id':tg_user_id,'supplement_ids':list(dict.fromkeys(ids)),'deferred_day':db.get_user_local_date(user_row['tz_name'] or 'UTC'),'meal_trigger':meal_trigger,'delivery_refs':refs})
+                    return 'deferred'
                 return
 
         entries: list[dict] = []
@@ -3523,7 +3558,7 @@ async def reminder_fire_batch(
         groups = _reminder_groups(entries, day)
         page=max(0,min(int(page),len(groups)-1));group=groups[page]
         lines=["⏰ <b>Напоминание</b>"+(f' · {page+1}/{len(groups)}' if len(groups)>1 else ''),'Пора принять:']
-        if meal_trigger and policy.get('sources',{}).get('food',False):lines.insert(1,'В Food записан приём пищи — напоминание пришло раньше выбранного времени, по вашей настройке.')
+        if meal_trigger and policy.get('sources',{}).get('food',False):lines.insert(1,'В Food записан приём пищи — напоминание связано с ним по вашей настройке.')
         lines.extend(f"• <b>{_reminder_preview(item['name'],160)}</b> — {_reminder_preview(item['dose'],160)}" for item in group)
         lines.append('\nПолная запись — по кнопке с названием добавки.')
         buttons=[list(row) for row in _reminder_batch_actions([item['id'] for item in group],day=day,records=group).inline_keyboard]
@@ -3542,7 +3577,7 @@ async def reminder_fire_batch(
         from telegram.ext import CallbackContext
         scheduled_update=SimpleNamespace(effective_chat=SimpleNamespace(id=target_chat_id,type='private'),effective_user=SimpleNamespace(id=tg_user_id),callback_query=None)
         owned_context=CallbackContext(context.application,chat_id=target_chat_id,user_id=tg_user_id)
-        msg=await show(interactive_update or scheduled_update,interactive_context or owned_context,'\n'.join(lines),InlineKeyboardMarkup(buttons),route='menu:home')
+        msg=await show(interactive_update or scheduled_update,interactive_context or owned_context,'\n'.join(lines),InlineKeyboardMarkup(buttons),route='menu:home',delivery_attempt=delivery_attempt)
         new_messages=[{'message_id':int(msg.message_id),'chat_id':target_chat_id}]
         previous_messages = payload_data.get('reminder_messages')
         if not isinstance(previous_messages, list):

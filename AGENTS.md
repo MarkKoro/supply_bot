@@ -30,6 +30,8 @@ For native subscription examples, both exercise surfaces, profile reconciliation
 
 Native Telegram subscriptions and expiry: read [docs/BOT_NATIVE.md](docs/BOT_NATIVE.md) before payment grants/tariffs, source schedules, notifications or native menus. Canonical native_subscription helper requires synchronized all3 mirrors. After v2 gate/order, forbid Core protocol<2 or client schedule<2 rollback. Always preserve financial/user DB records; use native renderers and defer busy flows.
 
+Supply reminder delivery: read [docs/REMINDER_DELIVERY.md](docs/REMINDER_DELIVERY.md) before changing send retries, leases or deferred jobs. A started request with unknown acceptance and an expired sender lease become durable `uncertain`, never an automatic resend. Only an explicit send rejection is retryable/permanent; an acknowledged message remains delivered if later local persistence fails. Preserve original meal/scheduled slot keys, native one-menu cleanup and later independent slots.
+
 Subscription screen and camera pipeline: read [docs/SUBSCRIPTIONS_AND_FOOD_PHOTOS.md](docs/SUBSCRIPTIONS_AND_FOOD_PHOTOS.md). Keep a single canonical shared UI in Core, equal RUB/Stars choices and existing external Redirect/provider verification. Ordinary Telegram photos must remain the primary one-step input; file upload is optional. Never remove historical human nutrient records when removing editor controls.
 
 
@@ -52,3 +54,10 @@ Read docs/ECOSYSTEM_CONNECTIONS.md before changing daily summaries, source-healt
 ## Bounded journey handoffs — 2026-10-19
 
 Read the canonical [journey contract](https://github.com/MarkKoro/progressor_core/blob/main/docs/JOURNEY_HANDOFFS.md) before changing purpose routing, return, change-goal review or Food goal confirmation. Keep the single Core UI, native owned actions, account/proof binding and read-only navigation. A saved workout/intake does not prove plan review; explicit scoped review is separate from seen/dismissal. Food apply must reference its server preview and preserve concurrent owner edits; see Food docs/GOAL_PREVIEWS.md. Use the frozen JQ-v1 in Core docs/JOURNEY_QUALITY_RUBRIC.md for matched tasks, separate concept and observed evidence. Do not replace agreed 90-minute free-workout completion, Moscow Food day, meal-anchor parameters or native financial/consent contracts as a side effect.
+
+
+## Verified second journey package — 2026-10-21
+
+Keep the canonical owner-policy boundary and synchronized progressor_client mirrors; read Core docs/SUPPLY_OWNER_POLICY.md before changing source metadata, legal eligibility or updater recovery. The persistent owner-consent-v1-ready gate is independent from financial protocol2 and must survive ordinary code rollback. Supply keeps its single native consent predicate; Core reads only private owner snapshots.
+
+Preserve operation-key retries in Gym /set/add_once (no legacy fallback after an uncertain response), explicit saved-time provenance in Food, and Supply uncertain-delivery suppression (an unknown Telegram response must never trigger a blind retry). Keep native functions available during Core outages.

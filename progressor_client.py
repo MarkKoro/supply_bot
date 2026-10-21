@@ -145,7 +145,7 @@ async def sync(source,db_path):
         if not response.get('next'): break
         cursor=response['next']
 
-def publish_source_snapshot(db_path,destination):
+def publish_source_snapshot(db_path,destination,metadata_writer=None):
     """Owner-produced online SQLite backup, atomically published without touching live rows.
 
     Core reads this DELETE-journal copy in a read-only mount. The owner alone opens its
@@ -168,14 +168,19 @@ def publish_source_snapshot(db_path,destination):
             with closing(sqlite3.connect(temporary,timeout=1)) as copy:
                 original.backup(copy,pages=256,progress=progress,sleep=.02)
                 copy.execute('PRAGMA journal_mode=DELETE')
+                copy.set_progress_handler(lambda:int(time.monotonic()>deadline),1000)
+                if metadata_writer is not None:metadata_writer(copy)
+                if time.monotonic()>deadline:raise TimeoutError('source_snapshot_deadline')
                 if copy.execute('PRAGMA quick_check').fetchone()[0]!='ok':
                     raise ValueError('invalid_source_snapshot')
-        with temporary.open('rb') as stream:os.fsync(stream.fileno())
+        # A writable descriptor also supports Windows FlushFileBuffers; this
+        # private owner-produced file is unchanged by the durability flush.
+        with temporary.open('r+b') as stream:os.fsync(stream.fileno())
         temporary.replace(target)
     finally:
         if temporary and temporary.exists():temporary.unlink()
 
-async def source_snapshot_worker(source,db_path,destination,monthly_prices=None):
+async def source_snapshot_worker(source,db_path,destination,monthly_prices=None,metadata_factory=None):
     while True:
         try:
             if source=='gym':
@@ -186,11 +191,12 @@ async def source_snapshot_worker(source,db_path,destination,monthly_prices=None)
             if monthly_prices:
                 from progressor_native_subscription import prepare_metadata
                 await asyncio.to_thread(prepare_metadata,db_path,source,monthly_prices())
-            await asyncio.to_thread(publish_source_snapshot,db_path,destination)
+            writer=metadata_factory() if metadata_factory is not None else None
+            await asyncio.to_thread(publish_source_snapshot,db_path,destination,writer)
         except Exception:logging.getLogger('progressor_client').warning('source_snapshot_unavailable source=%s',source)
         await asyncio.sleep(30)
 
-def install_cache_worker(app,source,db_path,monthly_prices=None):
+def install_cache_worker(app,source,db_path,monthly_prices=None,metadata_factory=None):
     if not configured(): return
     from contextlib import asynccontextmanager
     original=app.router.lifespan_context
@@ -214,7 +220,7 @@ def install_cache_worker(app,source,db_path,monthly_prices=None):
                 if source not in ('gym','food','supply'):raise ValueError('invalid_snapshot_source')
                 root=Path('/var/lib/progressor-sources')
                 if root.is_symlink():raise ValueError('unsafe_snapshot_root')
-                snapshot_task=asyncio.create_task(source_snapshot_worker(source,db_path,root/source/'source.sqlite3',monthly_prices))
+                snapshot_task=asyncio.create_task(source_snapshot_worker(source,db_path,root/source/'source.sqlite3',monthly_prices,metadata_factory))
             try: yield
             finally:
                 task.cancel()

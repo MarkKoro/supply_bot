@@ -10,6 +10,13 @@ import db
 _last_screen: dict[int, int] = {}
 _screen_locks: dict[int,asyncio.Lock] = {}
 
+class DeliveryAttempt:
+    """One native send boundary; an exception afterwards cannot justify resend."""
+    def __init__(self):
+        self.started = False
+        self.acknowledged = False
+        self.send_error = None
+
 TODAY_STATUS_TAKEN = "✅ Отмечено: выпил(а) сегодня"
 TODAY_STATUS_SKIPPED = "✖️ Отмечено: не выпил(а) сегодня"
 TODAY_STATUS_ALREADY_MARKED = "Сегодня уже отмечено"
@@ -186,6 +193,7 @@ async def _show_unlocked(
     payload: dict | None = None,
     target_chat_id: int | None = None,
     target_message_id: int | None = None,
+    delivery_attempt: DeliveryAttempt | None = None,
 ) -> Message:
     chat_id = update.effective_chat.id if update.effective_chat else None
     if chat_id is None:
@@ -256,27 +264,37 @@ async def _show_unlocked(
                 await _persist_last_state(update, context, route=route, payload=payload, chat_id=chat_id, message_id=q.message.message_id)
                 return q.message
 
-    msg = await context.bot.send_message(
-        chat_id=chat_id,
-        text=text,
-        reply_markup=kb,
-        parse_mode=parse_mode,
-        disable_web_page_preview=True,
-    )
+    if delivery_attempt is not None:delivery_attempt.started = True
+    try:
+        msg = await context.bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            reply_markup=kb,
+            parse_mode=parse_mode,
+            disable_web_page_preview=True,
+        )
+    except BaseException as exc:
+        if delivery_attempt is not None:delivery_attempt.send_error = exc
+        raise
+    if delivery_attempt is not None:delivery_attempt.acknowledged = True
     prev = _last_screen.get(chat_id)
     _last_screen[chat_id] = msg.message_id
     _set_last_menu(context, route=route, payload=payload, chat_id=chat_id, message_id=msg.message_id)
-    await _persist_last_state(
-        update,
-        context,
-        route=route,
-        payload=payload,
-        chat_id=chat_id,
-        message_id=msg.message_id,
-    )
-    if prev and prev != msg.message_id:
-        from progressor_bot import retire_owned_menu
-        await retire_owned_menu(context.bot,chat_id,prev)
+    try:
+        await _persist_last_state(
+            update,
+            context,
+            route=route,
+            payload=payload,
+            chat_id=chat_id,
+            message_id=msg.message_id,
+        )
+    finally:
+        # The new menu already exists. A local persistence failure must neither
+        # authorize a duplicate send nor leave the previous owned menu active.
+        if prev and prev != msg.message_id:
+            from progressor_bot import retire_owned_menu
+            await retire_owned_menu(context.bot,chat_id,prev)
     return msg
 
 async def restore_last_screen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

@@ -42,7 +42,11 @@ async def assistant_limit_response(request, exc):
     return JSONResponse({'ok':False,'code':code,'message':'Расчёты поступают слишком часто. Попробуйте позже.'},status_code=429)
 install_auth_bridge(app, "supply")
 from progressor_client import install_cache_worker
-install_cache_worker(app, "supply", get_settings().DB_PATH,lambda:monthly_tariffs(get_settings()))
+from legal_consent import metadata_writer as owner_consent_metadata
+def _owner_consent_metadata():
+    settings=get_settings()
+    return owner_consent_metadata(settings.OFFER_VERSION,settings.PRIVACY_VERSION)
+install_cache_worker(app, "supply", get_settings().DB_PATH,lambda:monthly_tariffs(get_settings()),metadata_factory=_owner_consent_metadata)
 app.mount("/assets", StaticFiles(directory=str(ASSETS_DIR)), name="assets")
 
 

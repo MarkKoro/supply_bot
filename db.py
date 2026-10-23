@@ -6157,7 +6157,9 @@ async def _split_user_supplement_intake(conn: aiosqlite.Connection, tg_user_id: 
         (user_id, base_supplement_id),
     )
     next_order = int(max_order_row["max_order"] or 1) + 1
-    clone_slug = f"{str(base_row['slug'] or 'supp')}_u{user_id}_i{next_order}_{int(time.time())}"
+    # Canceled copies retain their catalog rows. Recreating the same order in
+    # one second must get a new identity without altering the previous record.
+    clone_slug = f"{str(base_row['slug'] or 'supp')}_u{user_id}_i{next_order}_{uuid.uuid4().hex}"
     now = utc_now_iso()
     cur = await conn.execute(
         """INSERT INTO supplements(

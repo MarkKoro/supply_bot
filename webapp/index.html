@@ -7395,6 +7395,8 @@ function adminField(label, field, value, kind='input') {
             </div>
           `}
           ${canCreateSlot ? `<div style="margin-top:8px"><button class="btn secondary" data-schedule-add-slot>Создать отдельный слот на ${esc(normTime)}</button></div>` : ''}
+          <div class="muted" data-reminder-day-note style="margin-top:10px; overflow-wrap:anywhere">Отметка «Принято» или «Пропуск» закрывает напоминания этой позиции на сегодня. Для отдельных приёмов используйте «Разделить приём».</div>
+          ${!hub.splitDraft ? `<div style="margin-top:8px"><button class="btn secondary" type="button" data-my-supp-split ${hub.actionBusy || hub.saving ? 'disabled' : ''}>Разделить приём</button></div>` : ''}
           <div style="margin-top:12px" class="row" >
             <button class="btn" data-supp-hub-save ${hub.saving ? 'disabled' : ''}>${hub.saving ? 'Сохраняем...' : 'Сохранить'}</button>
             <button class="btn secondary" type="button" data-supp-hub-history>${hub.historyOpen ? 'Скрыть историю' : 'Открыть историю'}</button>
@@ -7412,7 +7414,6 @@ function adminField(label, field, value, kind='input') {
               <button class="btn" type="button" data-split-apply ${hub.actionBusy || hub.saving ? 'disabled' : ''}>Оставить второй приём</button>
               <button class="btn secondary" type="button" data-split-cancel ${hub.actionBusy || hub.saving ? 'disabled' : ''}>Отменить второй приём</button>
             ` : `
-              <button class="btn secondary" type="button" data-my-supp-split ${hub.actionBusy || hub.saving ? 'disabled' : ''}>Разделить приём</button>
               <button class="btn secondary" type="button" data-my-supp-delete ${hub.actionBusy || hub.saving ? 'disabled' : ''}>${hub.deleting ? 'Удаляем…' : 'Удалить из моих БАДов'}</button>
             `}
           </div>

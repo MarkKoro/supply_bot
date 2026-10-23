@@ -67,3 +67,25 @@ Candidate D06 delivery outcomes, D07 idempotent set writes, D08 owner metadata/r
 The initial full run exposed an outdated historical-day fixture; its old failure is retained and the corrected Core suite passed. Browser recovery corrected test-only Windows SQLite replacement waiting and an async condition wait; prior negative reports remain preserved. Only Markdown release notes and own-account Food/Gym control-plane scope clarification changed after freeze. The native save timestamp is not claimed to be consumption time.
 
 Publication and controlled rollout are separate from these completed gates. Install owner metadata and protocol1 reader/updater in bounded shadow, verify the compatible new current/fallback, private fresh exports and backup restore, then activate owner gate under both updater locks; preserve financial2 and user writes. Capture and off-server restore-test a post-activation backup containing both persistent gates. Do not use a pre-protocol Core fallback after activation. D05 next-meal choices and optional tour coordination remain a separate third package.
+
+
+## 2026-10-23 — fourth journey reminder clarity and split retry
+
+Native and WebApp time settings explain that several times on one position
+repeat a single daily reminder; taken/skipped closes that position for the day.
+The existing explicit split action stays next to time settings. Split-cancel-
+split identifiers now use UUIDs rather than wall-clock seconds, preserving
+historical rows and doses. The exact86-file candidate passed94 local tests and
+a separate10-case browser check, without real Telegram/provider calls.
+
+A new self-contained regression exercises actual due selection, claim ledger,
+single-menu rendering and next two reminders over Berlin's fall clock fold and
+automatic end of rest. The old pending reminder stays suppressed, repeated
+02:30 is not a new occurrence, and03:30/04:30 each deliver once; history and paid
+expiry stay unchanged. The first Linux holdout failed only because its initial
+fixture omitted native default slot bootstrap; raw failure was retained and
+native get_user_slots initialized before the corrected baseline. No reminder
+runtime change was needed. This one scenario does not close the entire
+calendar/timezone/DST matrix. The coordinated cache mirror preserves default
+Supply behavior; other purge races are not claimed fixed. Final assembled
+Linux results and backed-up normal main update-all rollout are journaled.

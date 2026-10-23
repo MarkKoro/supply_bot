@@ -28,7 +28,13 @@ def get(path,user_id,scope,request_key,now=None):
         return json.loads(row[0]) if row else None
     except (sqlite3.Error,ValueError,TypeError):return None
 
-def put(path,user_id,scope,request_key,result,ttl=3600,now=None):
+def put(path,user_id,scope,request_key,result,ttl=3600,now=None,*,publish_if=None):
+    """Optionally fence publication by a trusted owner predicate in this write.
+
+    The predicate reads this same connection under BEGIN IMMEDIATE, before
+    expiry cleanup/eviction/insertion. It must be local, synchronous and free
+    of writes or network calls. Existing callers without it keep their path.
+    """
     stamp=time.time() if now is None else now
     if not 60<=ttl<=21600 or len(request_key)!=64:raise ValueError('invalid_cache_entry')
     body=json.dumps(result,ensure_ascii=False,separators=(',',':'),allow_nan=False)
@@ -36,6 +42,7 @@ def put(path,user_id,scope,request_key,result,ttl=3600,now=None):
     try:
         with closing(sqlite3.connect(path,timeout=2)) as db,db:
             db.executescript(SCHEMA);db.execute('BEGIN IMMEDIATE')
+            if publish_if is not None and not publish_if(db):return False
             db.execute('DELETE FROM progressor_ai_cache WHERE expires_at<=?',(stamp,))
             db.execute('INSERT OR REPLACE INTO progressor_ai_cache VALUES(?,?,?,?,?,?)',(str(user_id),scope,request_key,body,stamp,stamp+ttl))
             db.execute('DELETE FROM progressor_ai_cache WHERE rowid IN (SELECT rowid FROM progressor_ai_cache WHERE user_id=? ORDER BY created_at DESC LIMIT -1 OFFSET 12)',(str(user_id),))

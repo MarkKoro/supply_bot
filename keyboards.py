@@ -819,6 +819,8 @@ def my_supplement_reminders(
     per_page = max(1, per_page)
     page = min(max(page, 0), max(0, (len(reminders) - 1) // per_page))
     btns.append([InlineKeyboardButton("➕ Добавить своё время", callback_data=f"mysupp:rem:add:{supplement_id}")])
+    if len(reminders) > 1:
+        btns.append([InlineKeyboardButton("Разделить приём", callback_data=f"mysupp:split:{supplement_id}")])
     for time_local in reminders[page * per_page:(page + 1) * per_page]:
         key = time_local.replace(":", "-")
         btns.append([InlineKeyboardButton(f"🗑 {time_local}", callback_data=f"mysupp:rem:del:{supplement_id}:{key}:{page}")])

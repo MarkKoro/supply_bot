@@ -211,3 +211,29 @@ Native follow-up: [NATIVE_GROWTH.md](NATIVE_GROWTH.md). Profile/notification/off
 
 
 Telegram follow-up: [BOT_NATIVE.md](BOT_NATIVE.md) documents personal remaining-period credit, source-local schedules, one expiry sender, native menu ownership and financial epoch recovery.
+
+
+## Native active-card opening ownership — 2026-11-06
+
+A queued active-card opening belongs to the current native parent key and tab.
+Parent Close/reopen, tab departure (including direct tab rendering) or canonical
+Core overlay opening retires only that intention. A late owner-save reply must
+not reveal the obsolete card. A fresh opening with its current parent remains
+available. An already-sent save may still complete, and an already-open card's
+schedule read retains its existing ownership. Closing UI is not server request
+cancellation, rollback or permission to replay a save/read.
+
+Native focus synchronization and document key handling yield while the canonical
+Core settings dialog is open, so native Tab/Escape handling does not steal
+that dialog's focus or close a hidden native parent. Existing same-origin launch/auth,
+owner consent/permissions, payments and provider verification remain intact.
+Core is still the single shared UI source; no new shared helper/mirror is added.
+
+The standalone Node CJS suite has 25 source-extracted cases using shipped code
+with invented DOM/transport. Retained receipts report 25 candidate passes and
+12 baseline failures; they are separate from Python suites and were not rerun
+for composition. Root's accepted synthetic browser routes remain separate
+observations, not extra unique tests, physical Telegram/device proof, real
+persistence/payment/provider evidence, users or a quality score. This composed
+source package alone does not claim publication or deployment; root owns the
+remaining package acceptance and operational decisions.

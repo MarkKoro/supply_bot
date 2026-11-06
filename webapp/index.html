@@ -2123,6 +2123,7 @@
   }
 
   document.addEventListener('progressor:overlay-open',()=>{
+    cancelSupplementHubOpening();
     // Pause the tour without recording a user decision to skip it.
     if(state.guide.active){state.guide={active:null,step:0,steps:[],rect:null,card:null,arrow:null};syncGuideOverlay();}
   });
@@ -2891,6 +2892,7 @@
 
   function activateTab(tab) {
     if (!tab || state.activeTab === tab) return;
+    cancelSupplementHubOpening();
     closeGuide();
     state.activeTab = tab;
     saveNavigation();
@@ -3079,6 +3081,7 @@
     }
   };
   function renderActiveTab() {
+    if (state.suppHub.opening && state.activeTab !== state.suppHub.opening.tab) cancelSupplementHubOpening();
     window.Progressor?.refreshSurface?.();
     if (activeRenderPointers.size) { scheduleUiRender(renderActiveTab); return; }
     const target = document.getElementById("tabContent");
@@ -8067,6 +8070,10 @@ function adminField(label, field, value, kind='input') {
     return '<span class="status-pill-icon">◻</span><span class="status-pill-label">Не отмечено</span>';
   }
 
+  function cancelSupplementHubOpening() {
+    state.suppHub.opening = null;
+  }
+
   async function openSupplementHub(supplementId) {
     const sid = Number(supplementId);
     if (!sid) return;
@@ -8074,8 +8081,16 @@ function adminField(label, field, value, kind='input') {
     if (!findItem()) return;
     const hub = state.suppHub;
     const version = hub.loadVersion = (hub.loadVersion || 0) + 1;
-    if (hub.savePromise) await hub.savePromise;
-    if (version !== hub.loadVersion) return;
+    // Waiting for an already-sent save must not outlive this navigation choice.
+    const opening = {tab:state.activeTab, parent:state.mySupplements.open ? 'mySupplements' : state.complexHub.open ? 'complexHub' : hub.open ? 'suppHub' : null};
+    hub.opening = opening;
+    try { if (hub.savePromise) await hub.savePromise; }
+    catch { if (hub.opening === opening) hub.opening = null; return; }
+    const ownsOpening = hub.opening === opening && version === hub.loadVersion
+      && state.activeTab === opening.tab && (!opening.parent || state[opening.parent].open)
+      && !document.querySelector('#progressor-context:not([hidden]),#progressor-connections[open]');
+    if (hub.opening === opening) hub.opening = null;
+    if (!ownsOpening) return;
     const item = findItem();
     if (!item) { hub.open = false; renderActiveTab(); return; }
     const current = () => hub.open && hub.loadVersion === version && hub.item === item;
@@ -8173,6 +8188,7 @@ function adminField(label, field, value, kind='input') {
   }
 
   function openMySupplements() {
+    cancelSupplementHubOpening();
     state.mySupplements.open = true;
     state.mySupplements.tab = "active";
     renderActiveTab();
@@ -8180,6 +8196,7 @@ function adminField(label, field, value, kind='input') {
   }
 
   function openComplexHub() {
+    cancelSupplementHubOpening();
     state.complexHub.open = true;
     renderActiveTab();
     return loadComplexHubMeta(true);
@@ -8355,6 +8372,7 @@ function adminField(label, field, value, kind='input') {
 
     unboundDetailControls('[data-complex-hub-close]').forEach((el) => {
       el.addEventListener('click', () => {
+        cancelSupplementHubOpening();
         state.complexHub.open = false;
         renderActiveTab();
       });
@@ -8566,6 +8584,7 @@ function adminField(label, field, value, kind='input') {
 
     unboundDetailControls("[data-my-supp-close]").forEach((el) => {
       el.addEventListener("click", () => {
+        cancelSupplementHubOpening();
         state.mySupplements.open = false;
         renderActiveTab();
       });
@@ -8605,6 +8624,7 @@ function adminField(label, field, value, kind='input') {
 
     unboundDetailControls('[data-supp-hub-close]').forEach((el) => {
       el.addEventListener('click', () => {
+        cancelSupplementHubOpening();
         state.suppHub.open = false;
         state.suppHub.loadVersion = (state.suppHub.loadVersion || 0) + 1;
         renderActiveTab();
@@ -8893,6 +8913,7 @@ function adminField(label, field, value, kind='input') {
     return false;
   }
   function syncNativeNavigation() {
+    if(document.querySelector('#progressor-connections[open]'))return;
     const dialog=nativeTopDialog(),key=dialog?modalKey(dialog):'';
     if(key&&!nativeDialogKey){
       nativeReturnFocus=document.activeElement;
@@ -8915,6 +8936,7 @@ function adminField(label, field, value, kind='input') {
   new MutationObserver(()=>{cancelAnimationFrame(nativeNavFrame);nativeNavFrame=requestAnimationFrame(syncNativeNavigation);}).observe(appEl,{childList:true,subtree:true});
   tg?.BackButton?.onClick?.(nativeBack);
   document.addEventListener('keydown',event=>{
+    if(document.querySelector('#progressor-connections[open]'))return;
     if(event.key==='Escape'&&nativeBack()){event.preventDefault();return;}
     if(event.key!=='Tab')return;
     const dialog=nativeTopDialog();if(!dialog)return;

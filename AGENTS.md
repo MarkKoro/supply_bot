@@ -61,3 +61,16 @@ Read the canonical [journey contract](https://github.com/MarkKoro/progressor_cor
 Keep the canonical owner-policy boundary and synchronized progressor_client mirrors; read Core docs/SUPPLY_OWNER_POLICY.md before changing source metadata, legal eligibility or updater recovery. The persistent owner-consent-v1-ready gate is independent from financial protocol2 and must survive ordinary code rollback. Supply keeps its single native consent predicate; Core reads only private owner snapshots.
 
 Preserve operation-key retries in Gym /set/add_once (no legacy fallback after an uncertain response), explicit saved-time provenance in Food, and Supply uncertain-delivery suppression (an unknown Telegram response must never trigger a blind retry). Keep native functions available during Core outages.
+
+
+## Native UI opening ownership — 2026-11-06
+
+Keep a queued active-card opening owned by its current native parent and tab.
+Parent Close/reopen, tab departure or a canonical Core overlay cancels only
+that opening intention. An already-sent owner save and an opened card's read
+may complete under their existing ownership; do not abort, replay or claim
+server rollback. Native focus synchronization and document key handling yield
+while the canonical Core settings dialog is open. Preserve same-origin launch/auth,
+consent, native permissions and all payment/provider checks. Core remains the single
+shared UI; this change adds no shared helper or mirror. See
+docs/PROGRESSOR_INTEGRATION.md for standalone CJS and browser/Python boundaries.

@@ -237,3 +237,43 @@ observations, not extra unique tests, physical Telegram/device proof, real
 persistence/payment/provider evidence, users or a quality score. This composed
 source package alone does not claim publication or deployment; root owns the
 remaining package acceptance and operational decisions.
+
+
+## Check-in cache publication ownership — 2026-11-06
+
+Native and Web check-in result caches remain Supply-owned. Each new cache
+publication passes the exact reserved internal user id, verified Telegram id,
+check-in id and storage claim token to `db.daily_checkin_cache_publishable`.
+The synchronous predicate reads only the cache writer's SQLite connection under
+the existing `BEGIN IMMEDIATE`; it joins the current owner/check-in/claim and
+requires the same token with `status='processing'`. It does not open another
+connection, write, contact Core or impose a new lease-deadline rule. An expired
+but unreclaimed processing token retains the existing finish-CAS semantics.
+
+Both native `_finalize_ai_checkin` and Web `_ai_recommendations` keep their
+publication position before the real finish CAS. Web's sole API caller must
+supply required keyword-only claim fields from its actual reservation; never
+add an unfenced compatibility default. Purge committing first rejects old
+publication before cache cleanup/eviction/insertion; publication committing
+first is subsequently removed by the real owner purge. A separately opened
+preflight read or moving an unconditional cache write after finish CAS leaves
+a race and does not satisfy this contract. Reclaiming the same check-in id
+requires the new token; an intentional new action after completed purge works
+normally. No provider await is held inside the writer transaction.
+
+Existing premium checks, durable attempt limits, cache key/scope/TTL, JSON
+validation, owner CAS and late-result response/render behavior remain in their
+native paths. An optional cache decline does not retry a provider, refund an
+attempt or recreate check-in state. Account identity, paid/trial fields, roles,
+payment ledger, other owners and later writes are retained by purge and code
+rollback. No schema migration, historical cache sweep or live DB restore belongs
+to this change. Core's canonical cache helper and all mirrors stay byte-identical;
+Supply owns this predicate and does not query another domain database.
+
+`tests/test_checkin_cache_publication.py` defines isolated SQLite owner/token,
+reclaim/status, false-publication metadata, both committed writer orders and
+native/Web dummy-provider controls for normal, own purge, other-owner purge and
+new action after purge. Fixtures use distinct internal/Telegram ids and exact
+paid ledger joins. Source authoring alone is not a passing test or release claim:
+root records actual test, source-bound persistence and rollout evidence separately.
+No fixture substitutes for real Telegram/device, provider or payment testing.

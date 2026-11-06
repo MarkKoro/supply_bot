@@ -2470,7 +2470,14 @@ async def _finalize_ai_checkin(
             "summary_ru": _truncate_text(data.get("summary_ru"), 600) or "Короткое резюме недоступно.",
             "disclaimer_ru": _truncate_text(data.get("disclaimer_ru"), 300),
         }
-        if not cache_hit:await asyncio.to_thread(put,s.DB_PATH,tg_uid,'supply_checkin',request_key,raw,3600)
+        if not cache_hit:
+            await asyncio.to_thread(
+                put, s.DB_PATH, tg_uid, 'supply_checkin', request_key, raw, 3600,
+                publish_if=lambda cache_conn: db.daily_checkin_cache_publishable(
+                    cache_conn, tg_user_id=tg_uid, user_id=user_id,
+                    checkin_id=checkin_id, claim_token=claim_token,
+                ),
+            )
         current_state = _get_ai_checkin_state(context)
         if current_state.get("last_result_token") != result_token:
             return

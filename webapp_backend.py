@@ -3489,7 +3489,10 @@ def _prompt_hash(answers: dict, ctx: dict) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-async def _ai_recommendations(answers: dict, ctx: dict, tg_id: int | None = None) -> tuple[list[dict], dict]:
+async def _ai_recommendations(
+    answers: dict, ctx: dict, tg_id: int | None = None, *,
+    checkin_user_id: int, checkin_id: int, claim_token: str,
+) -> tuple[list[dict], dict]:
     if not s.OPENAI_API_KEY:
         raise RuntimeError("AI_UNAVAILABLE")
     cfg = OpenAIConfig(api_key=s.OPENAI_API_KEY, model=s.OPENAI_MODEL or "gpt-4o-mini")
@@ -3533,7 +3536,14 @@ async def _ai_recommendations(answers: dict, ctx: dict, tg_id: int | None = None
     data = json.loads(text)
     if not isinstance(data, list):
         raise RuntimeError("AI_BAD_FORMAT")
-    if tg_id is not None and not cache_hit:await __import__('asyncio').to_thread(put,s.DB_PATH,tg_id,'supply_web_checkin',request_key,text,3600)
+    if tg_id is not None and not cache_hit:
+        await asyncio.to_thread(
+            put, s.DB_PATH, tg_id, 'supply_web_checkin', request_key, text, 3600,
+            publish_if=lambda cache_conn: db.daily_checkin_cache_publishable(
+                cache_conn, tg_user_id=tg_id, user_id=checkin_user_id,
+                checkin_id=checkin_id, claim_token=claim_token,
+            ),
+        )
     return data, {"model": cfg.model,'cache_hit':cache_hit}
 
 
@@ -3734,7 +3744,10 @@ async def api_checkin(body: CheckinBody, x_telegram_init_data: str = Header(defa
             ctx["client_local_iso"] = body.client_local_iso
         p_hash = _prompt_hash(answers, ctx)
         try:
-            recs_raw, meta = await _ai_recommendations(answers, ctx, tg_user_id)
+            recs_raw, meta = await _ai_recommendations(
+                answers, ctx, tg_user_id, checkin_user_id=int(existing['user_id']),
+                checkin_id=checkin_id, claim_token=claim_token,
+            )
             from progressor_checkin import changes
             meta['observed_changes']=await changes(tg_user_id,answers)
             stack_slugs = {

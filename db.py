@@ -7794,6 +7794,29 @@ async def reserve_daily_checkin(conn, tg_user_id, local_date, answers, *, token=
         return row, token
 
 
+def daily_checkin_cache_publishable(
+    cache_conn: sqlite3.Connection, *, tg_user_id: int, user_id: int,
+    checkin_id: int, claim_token: str,
+) -> bool:
+    """Read the current owned claim inside the cache writer's transaction.
+
+    Do not open another connection or check a separate lease deadline here:
+    publication and the owner purge must serialize on this same SQLite writer.
+    The current storage token/status intentionally matches finish_daily_checkin.
+    """
+    if not claim_token:
+        return False
+    return cache_conn.execute(
+        """SELECT 1
+           FROM daily_checkins AS d
+           JOIN users AS u ON u.id=d.user_id
+           JOIN daily_checkin_claims AS c ON c.checkin_id=d.id
+           WHERE d.id=? AND d.user_id=? AND u.tg_user_id=?
+             AND c.token=? AND c.status='processing'""",
+        (int(checkin_id), int(user_id), int(tg_user_id), claim_token),
+    ).fetchone() is not None
+
+
 async def finish_daily_checkin(conn, tg_user_id, checkin_id, token, result, *, prompt_hash=None, failed=False):
     """A late worker cannot replace a newer attempt or an already saved result."""
     async with transaction(conn) as tx:

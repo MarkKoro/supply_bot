@@ -7,6 +7,7 @@
   <meta name="robots" content="noindex" />
   <title>ГУДы БАДы WebApp</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script>try{if(localStorage.getItem('progressor.ui')==='2')document.documentElement.dataset.pgUi='2';}catch(e){}</script>
   <style>
     @property --bg-1 { syntax:"<color>"; inherits:true; initial-value:#070b1a; }
     @property --bg-2 { syntax:"<color>"; inherits:true; initial-value:#101a44; }
@@ -1114,6 +1115,7 @@
   .lab-result-row label{display:block;margin-top:6px}
   .lab-series .ios-content{padding-top:8px}
 </style>
+<link rel="stylesheet" href="./assets/ui2.v1.css" />
 </head>
 <body>
   <div id="app"></div>
@@ -7426,8 +7428,54 @@ function adminField(label, field, value, kind='input') {
     `;
   }
 
+  // Shared Progressor look: the same day data and the same toggles, arranged as a focus tile and slot tiles.
+  const ui2On = () => document.documentElement.dataset.pgUi === '2';
+  let ui2OpenSlot = null;
+  const ui2SnoozeKey = 'supply.ui2.snooze';
+  function ui2Snoozed(slotId) {
+    try { const saved = JSON.parse(localStorage.getItem(ui2SnoozeKey) || '{}'); return saved.day === state.today?.day && Number(saved.slots?.[slotId]) > Date.now() ? Number(saved.slots[slotId]) : 0; } catch { return 0; }
+  }
+  function ui2Snooze(slotId) {
+    try { const saved = JSON.parse(localStorage.getItem(ui2SnoozeKey) || '{}'); const slots = saved.day === state.today?.day ? saved.slots || {} : {}; slots[slotId] = Date.now() + 3600000; localStorage.setItem(ui2SnoozeKey, JSON.stringify({day: state.today?.day, slots})); } catch {}
+  }
+  function ui2Units(slot) {
+    const units = [];
+    for (const c of slot.complexes || []) units.push({kind: 'complex', id: c.complex_id, name: c.name || 'Комплекс', sub: `комплекс · ${Number(c.taken_count || 0)} из ${Number(c.total_count || 0)}`, done: c.status === 'taken', pending: c.status !== 'taken', count: Number(c.total_count || 0) || 1, taken: Number(c.taken_count || 0), busy: todayActionBusy(c.items), next: c.status === 'taken' ? 'none' : 'taken'});
+    for (const i of slot.items || []) units.push({kind: 'item', id: i.supplement_id, name: i.name || '', sub: i.blocked ? 'сегодня не пить' + (i.blocked_reason ? ': ' + i.blocked_reason : '') : i.status === 'skipped' ? 'пропущено' : (i.source === 'ai' && i.action === 'add' ? 'добавлено помощником' : ''), done: i.status === 'taken', skipped: i.status === 'skipped', pending: i.status === 'none' && !i.blocked, blocked: !!i.blocked, count: i.blocked ? 0 : 1, taken: i.status === 'taken' ? 1 : 0, busy: todayActionBusy([i]), next: i.status === 'taken' ? 'none' : 'taken'});
+    return units;
+  }
+  function ui2Check(unit) {
+    const target = unit.kind === 'complex' ? `data-complex-toggle="${esc(unit.id)}"` : `data-item="${esc(unit.id)}"`;
+    return `<button type="button" class="u2-check" ${target} data-next="${unit.next}" aria-pressed="${unit.done}" ${unit.blocked || unit.busy ? 'disabled' : ''}><span><b>${esc(unit.name)}</b>${unit.sub ? `<small>${esc(unit.sub)}</small>` : ''}</span><i class="u2-box ${unit.done ? 'on' : unit.skipped || unit.blocked ? 'skip' : ''}" aria-hidden="true"></i></button>`;
+  }
+  function renderTodayV2(slots) {
+    const now = new Date(), clock = String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0');
+    const rows = slots.map(slot => { const units = ui2Units(slot); return {slot, units, pending: units.filter(u => u.pending), total: units.reduce((n, u) => n + u.count, 0), taken: units.reduce((n, u) => n + u.taken, 0), busy: todayActionBusy(todayItems(slot)), past: /^\d\d:\d\d$/.test(slot.time_local || '') && slot.time_local < clock}; }).filter(row => row.units.length);
+    const total = rows.reduce((n, r) => n + r.total, 0), taken = rows.reduce((n, r) => n + r.taken, 0);
+    const waiting = rows.filter(r => r.pending.length);
+    const focus = waiting.find(r => !ui2Snoozed(r.slot.slot_id)) || null;
+    const head = `<div class="u2-sum"><h1>БАДы</h1><span class="u2-count">${taken} из ${total}</span></div>`;
+    const hero = focus ? `<article class="u2-hero" data-slot="${esc(focus.slot.slot_id)}">
+        <div class="u2-hero-top"><strong>${esc(focus.slot.title || 'Приём')}</strong><span>${focus.past ? 'не отмечено · было в ' : 'далее · '}${esc(focus.slot.time_local || '')}</span></div>
+        ${focus.units.map(ui2Check).join('')}
+        <button type="button" class="u2-main" data-slot-action="all-taken" data-slot-id="${esc(focus.slot.slot_id)}" ${focus.busy ? 'disabled' : ''}>Принял ${focus.pending.length > 1 ? 'все · ' + focus.pending.length : ''}</button>
+        <div class="u2-two"><button type="button" data-u2-snooze="${esc(focus.slot.slot_id)}">На час позже</button><button type="button" data-u2-skip="${esc(focus.slot.slot_id)}" ${focus.busy ? 'disabled' : ''}>Пропустил</button></div>
+      </article>` : (total && !waiting.length ? '<div class="u2-alldone">Все приёмы на сегодня отмечены</div>' : '');
+    const tiles = rows.filter(r => r !== focus).map(r => {
+      const id = esc(r.slot.slot_id), done = !r.pending.length, open = ui2OpenSlot === String(r.slot.slot_id), until = ui2Snoozed(r.slot.slot_id);
+      const line = done ? `${r.taken} из ${r.total} · готово` : until ? `отложено до ${new Date(until).toLocaleTimeString('ru-RU', {hour: '2-digit', minute: '2-digit'})}` : `${esc(r.slot.time_local || '')} · ${r.pending.length} шт`;
+      return `<article class="u2-tile ${done ? 'done' : ''} ${open ? 'open' : ''}" data-slot="${id}" data-u2-open="${id}" role="button" tabindex="0" aria-expanded="${open}">
+        <div class="u2-tile-top"><strong>${esc(r.slot.title || 'Приём')}</strong>${done ? '<i class="u2-box on" aria-hidden="true"></i>' : ''}</div><p>${line}</p>
+        ${open ? r.units.map(ui2Check).join('') : ''}
+        ${!done ? `<button type="button" class="u2-quick" data-slot-action="all-taken" data-slot-id="${id}" ${r.busy ? 'disabled' : ''}>Принял</button>` : open ? `<button type="button" class="u2-quick" data-slot-action="reset" data-slot-id="${id}" ${r.busy ? 'disabled' : ''}>Снять отметки</button>` : ''}
+      </article>`;
+    }).join('');
+    return `${head}${hero}<div class="u2-grid">${tiles}</div>`;
+  }
+
   function renderToday() {
     const slots = state.today?.slots || [];
+    if (ui2On() && slots.length) return renderTodayV2(slots);
     if (!slots.length) {
       return `
         <div class="card">На сегодня приёмов не найдено.</div>
@@ -8361,9 +8409,32 @@ function adminField(label, field, value, kind='input') {
       });
     });
 
+    unboundDetailControls('[data-u2-open]').forEach((tile) => {
+      const flip = (e) => {
+        if (e.target.closest('button')) return;
+        ui2OpenSlot = ui2OpenSlot === tile.dataset.u2Open ? null : tile.dataset.u2Open;
+        renderActiveTab();
+      };
+      tile.addEventListener('click', flip);
+      tile.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); flip(e); } });
+    });
+    unboundDetailControls('[data-u2-snooze]').forEach((btn) => {
+      btn.addEventListener('click', (e) => { e.preventDefault(); ui2Snooze(btn.dataset.u2Snooze); renderActiveTab(); });
+    });
+    unboundDetailControls('[data-u2-skip]').forEach((btn) => {
+      btn.addEventListener('click', async (e) => {
+        e.preventDefault();
+        // A complex has no "skipped" state on the server; only plain unmarked intakes are skipped.
+        const slot = (state.today?.slots || []).find(s => String(s.slot_id) === String(btn.dataset.u2Skip));
+        const operations = (slot?.items || []).filter(i => i.status === 'none' && !i.blocked).map(i => ({ids: [Number(i.supplement_id)], status: 'skipped', path: './api/today/toggle', body: {supplement_id: Number(i.supplement_id), status: 'skipped'}}));
+        if (operations.length) await updateTodayIntakes(operations);
+      });
+    });
+
     unboundDetailControls("[data-slot-action]").forEach((btn) => {
       btn.addEventListener("click", async (e) => {
         e.preventDefault();
+        e.stopPropagation();
         const slotId = btn.dataset.slotId;
         const action = btn.dataset.slotAction;
         const status = action === "all-taken" ? "taken" : "none";
@@ -9000,6 +9071,15 @@ function adminField(label, field, value, kind='input') {
     if (document.visibilityState === 'visible') refreshOnResume();
     else saveNavigation();
   });
+
+  // The server decides per account whether the shared look is on; an unavailable Core keeps the last choice.
+  Promise.resolve(window.Progressor?.ready).then((session) => {
+    if (!session) return;
+    const on = session.home === true, was = ui2On();
+    try { if (on) localStorage.setItem('progressor.ui', '2'); else localStorage.removeItem('progressor.ui'); } catch {}
+    if (on) document.documentElement.dataset.pgUi = '2'; else delete document.documentElement.dataset.pgUi;
+    if (on !== was && state.me) renderActiveTab();
+  }).catch(() => {});
 
   boot();
 })();

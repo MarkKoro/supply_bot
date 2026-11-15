@@ -71,7 +71,6 @@ html[data-pg-ui="2"] .u2-tile .u2-quick{margin-top:10px;background:#6FB6FF;color
 html[data-pg-ui="2"] .u2-tile.open .u2-quick{background:var(--pg-raise,#fff);color:var(--pg-text,#10131A);box-shadow:inset 0 0 0 1.5px var(--pg-line,#E6E9EF)}
 html[data-pg-ui="2"] .u2-note{font-size:13px;color:var(--pg-muted,#6B7585);margin:2px 0 6px}
 html[data-pg-ui="2"] .u2-alldone{border-radius:20px;padding:16px;background:var(--pg-tint-supply,#DEEBFF);color:var(--pg-tint-supply-text,#06254A);font-weight:600;margin-bottom:16px}
-html[data-pg-ui="2"] .u2-hero,html[data-pg-ui="2"] .u2-tile{transform-style:preserve-3d;will-change:transform}
 /* Small labels that were light text on the old dark surface. */
 html[data-pg-ui="2"] .chip{border-color:var(--pg-line,#E6E9EF);background:var(--pg-raise,#fff)}
 html[data-pg-ui="2"] .seg-btn.active{color:var(--pg-on-ink,#fff);background:var(--pg-ink,#10131A)}

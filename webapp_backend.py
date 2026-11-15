@@ -2,6 +2,7 @@ from progressor_bridge import current_claims, install_auth_bridge
 import hashlib
 import asyncio
 import json
+import time
 import math
 import logging
 import re
@@ -1431,13 +1432,16 @@ async def _today_payload(tg_user_id: int) -> dict:
                     sid = int(ci.get("supplement_id") or 0)
                     c_items.append({"supplement_id": sid, "name": str(ci.get("name_ru") or ci.get("slug") or ""), "slug": str(ci.get("slug") or ""), "status": status_map.get(sid, "none")})
                 taken = sum(1 for ci in c_items if ci.get("status") == "taken")
+                skipped = sum(1 for ci in c_items if ci.get("status") == "skipped")
                 total = len(c_items)
-                c_status = "none" if taken == 0 else ("taken" if taken == total and total > 0 else "partial")
+                # "skipped" only when the whole complex was skipped; older clients read it as not taken.
+                c_status = "taken" if taken == total and total > 0 else "skipped" if skipped == total and total > 0 else "none" if taken == 0 else "partial"
                 complexes.append({
                     "complex_id": int(c.get("complex_id") or 0),
                     "name": str(c.get("name") or ""),
                     "status": c_status,
                     "taken_count": taken,
+                    "skipped_count": skipped,
                     "total_count": total,
                     "items": c_items,
                 })
@@ -1674,8 +1678,8 @@ async def api_today_toggle_complex(body: TodayToggleComplexBody, x_telegram_init
     tg_user_id = await _auth_user_id(x_telegram_init_data)
     if not await _premium_guard(tg_user_id):
         return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
-    if body.status not in {"taken", "none"}:
-        raise HTTPException(status_code=400, detail="status must be taken/none")
+    if body.status not in {"taken", "skipped", "none"}:
+        raise HTTPException(status_code=400, detail="status must be taken/skipped/none")
     conn = await db.connect(s.DB_PATH)
     try:
         tz_name = await db.get_user_tz(conn, tg_user_id)
@@ -1692,6 +1696,40 @@ async def api_today_toggle_complex(body: TodayToggleComplexBody, x_telegram_init
     finally:
         await conn.close()
     return JSONResponse({"ok": True, "newly_unlocked": newly, "newly_unlocked_details": newly_unlocked_details})
+
+
+class TodaySnoozeBody(BaseModel):
+    slot_id: str
+    day: str | None = None
+
+
+@app.post("/api/today/snooze")
+async def api_today_snooze(body: TodaySnoozeBody, x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
+    """Ask the bot to remind about the still unmarked intakes of one slot in an hour."""
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    if not await _premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "code": "PREMIUM_REQUIRED"}, status_code=402)
+    conn = await db.connect(s.DB_PATH)
+    try:
+        tz_name = await db.get_user_tz(conn, tg_user_id)
+        day = db.get_user_local_date(tz_name or None)
+        if body.day is not None and body.day != day:
+            raise HTTPException(status_code=409, detail="TODAY_CHANGED")
+        groups = await db.get_today_plan_groups(conn, tg_user_id, day)
+        group = next((g for g in groups if str(g.get("slot_id") or "") == str(body.slot_id)), None)
+        if group is None:
+            raise HTTPException(status_code=404, detail="SLOT_NOT_IN_PLAN")
+        status_map = await db.get_day_status_map(conn, tg_user_id, day)
+        ids = {int(i.get("supplement_id") or 0) for i in group.get("items") or [] if not i.get("blocked")}
+        ids |= {int(ci.get("supplement_id") or 0) for c in group.get("complexes") or [] for ci in c.get("items") or []}
+        pending = sorted(i for i in ids if i > 0 and status_map.get(i, "none") == "none")
+        if not pending:
+            return JSONResponse({"ok": True, "scheduled": False})
+        fire_at = time.time() + 3600
+        await db.add_web_snooze(conn, tg_user_id, day, str(body.slot_id), pending, fire_at)
+    finally:
+        await conn.close()
+    return JSONResponse({"ok": True, "scheduled": True, "fire_at": int(fire_at), "count": len(pending)})
 
 
 @app.get("/api/complexes")

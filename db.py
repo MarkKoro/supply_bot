@@ -360,6 +360,11 @@ CREATE TABLE IF NOT EXISTS ui_state (
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS web_snoozes (
+  tg_user_id INTEGER NOT NULL, day TEXT NOT NULL, slot_id TEXT NOT NULL,
+  supplement_ids TEXT NOT NULL, fire_at REAL NOT NULL, claimed_at REAL,
+  PRIMARY KEY (tg_user_id, day, slot_id));
+
 CREATE TABLE IF NOT EXISTS reminder_fires (
   user_id INTEGER NOT NULL,
   supplement_id INTEGER NOT NULL,
@@ -8788,8 +8793,8 @@ async def toggle_complex_for_day(conn: aiosqlite.Connection, tg_user_id: int, lo
 
 
 async def _toggle_complex_for_day(conn, tg_user_id: int, local_date: str, complex_id: int, status: str) -> None:
-    if status not in {"taken", "none"}:
-        raise ValueError("status must be taken|none")
+    if status not in {"taken", "skipped", "none"}:
+        raise ValueError("status must be taken|skipped|none")
     user_id = await get_or_create_user(conn, int(tg_user_id))
     owner = await fetchone(conn, "SELECT 1 FROM user_complexes WHERE id=? AND user_id=?", (int(complex_id), user_id))
     if not owner:
@@ -8805,8 +8810,41 @@ async def _toggle_complex_for_day(conn, tg_user_id: int, local_date: str, comple
                 (user_id, local_date, sid),
             )
         else:
-            await set_day_status(conn, tg_user_id, local_date, sid, "taken")
+            await set_day_status(conn, tg_user_id, local_date, sid, status)
     await conn.commit()
+
+
+# A reminder postponed from the Mini App. The web process only records the request; the
+# single bot consumer claims it once, so a doubtful send is never repeated.
+WEB_SNOOZE_SCHEMA = """CREATE TABLE IF NOT EXISTS web_snoozes (
+  tg_user_id INTEGER NOT NULL, day TEXT NOT NULL, slot_id TEXT NOT NULL,
+  supplement_ids TEXT NOT NULL, fire_at REAL NOT NULL, claimed_at REAL,
+  PRIMARY KEY (tg_user_id, day, slot_id))"""
+
+
+async def add_web_snooze(conn, tg_user_id: int, day: str, slot_id: str, supplement_ids: list[int], fire_at: float) -> None:
+    await conn.execute(WEB_SNOOZE_SCHEMA)
+    await conn.execute(
+        "INSERT INTO web_snoozes(tg_user_id,day,slot_id,supplement_ids,fire_at,claimed_at) VALUES(?,?,?,?,?,NULL) "
+        "ON CONFLICT(tg_user_id,day,slot_id) DO UPDATE SET supplement_ids=excluded.supplement_ids,fire_at=excluded.fire_at,claimed_at=NULL",
+        (int(tg_user_id), str(day), str(slot_id), json.dumps(sorted({int(i) for i in supplement_ids})), float(fire_at)))
+    await conn.commit()
+
+
+async def claim_due_web_snoozes(conn, now: float, limit: int = 50) -> list[dict]:
+    # The scheduler tick never creates schema; startup and the web request do.
+    if not await _table_exists(conn, "web_snoozes"):
+        return []
+    claimed = []
+    async with transaction(conn) as tx:
+        rows = await fetchall(tx, "SELECT tg_user_id,day,slot_id,supplement_ids FROM web_snoozes WHERE claimed_at IS NULL AND fire_at<=? ORDER BY fire_at LIMIT ?", (float(now), int(limit)))
+        for row in rows:
+            await tx.execute("UPDATE web_snoozes SET claimed_at=? WHERE tg_user_id=? AND day=? AND slot_id=? AND claimed_at IS NULL", (float(now), row[0], row[1], row[2]))
+            try: ids = [int(i) for i in json.loads(row[3])]
+            except (ValueError, TypeError): ids = []
+            claimed.append({"tg_user_id": int(row[0]), "day": str(row[1]), "slot_id": str(row[2]), "supplement_ids": ids})
+        await tx.execute("DELETE FROM web_snoozes WHERE fire_at<?", (float(now) - 172800,))
+    return claimed
 
 async def get_today_supplement_ids(conn: aiosqlite.Connection, tg_user_id: int, local_date: str) -> list[int]:
     groups = await get_today_plan_groups(conn, tg_user_id, local_date)

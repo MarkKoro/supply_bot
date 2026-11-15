@@ -3223,8 +3223,38 @@ async def payments_reconcile_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
     await reconcile_redirect_payments()
 
 
+async def web_snoozes_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Send reminders postponed from the Mini App. Claimed before sending: never replayed."""
+    s = context.application.bot_data["settings"]
+    conn = await db.connect(s.DB_PATH)
+    try:
+        claimed = await db.claim_due_web_snoozes(conn, time.time())
+        jobs = []
+        for item in claimed:
+            tz_name = await db.get_user_tz(conn, item["tg_user_id"])
+            if db.get_user_local_date(tz_name or None) != item["day"]:
+                continue
+            pending = [sid for sid in item["supplement_ids"] if await db.get_day_status(conn, item["tg_user_id"], item["day"], sid) not in {"taken", "skipped"}]
+            if pending:
+                jobs.append((item["tg_user_id"], pending))
+    finally:
+        await conn.close()
+    for tg_user_id, pending in jobs:
+        from progressor_links import notifications_allowed
+        if not await asyncio.to_thread(notifications_allowed, s.DB_PATH, tg_user_id):
+            continue
+        try:
+            await reminder_fire_batch(context, tg_user_id, pending, is_snooze=True)
+        except Exception:
+            logging.exception("web snooze reminder failed")
+
+
 async def reminders_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
     s = context.application.bot_data["settings"]
+    try:
+        await web_snoozes_tick(context)
+    except Exception:
+        logging.exception("web snoozes tick failed")
     conn = await db.connect(s.DB_PATH)
     try:
         due = await db.list_due_reminders(conn)

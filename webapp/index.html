@@ -7440,7 +7440,7 @@ function adminField(label, field, value, kind='input') {
   }
   function ui2Units(slot) {
     const units = [];
-    for (const c of slot.complexes || []) units.push({kind: 'complex', id: c.complex_id, name: c.name || 'Комплекс', sub: `комплекс · ${Number(c.taken_count || 0)} из ${Number(c.total_count || 0)}`, done: c.status === 'taken', pending: c.status !== 'taken', count: Number(c.total_count || 0) || 1, taken: Number(c.taken_count || 0), busy: todayActionBusy(c.items), next: c.status === 'taken' ? 'none' : 'taken'});
+    for (const c of slot.complexes || []) units.push({kind: 'complex', id: c.complex_id, name: c.name || 'Комплекс', sub: c.status === 'skipped' ? 'комплекс · пропущен' : `комплекс · ${Number(c.taken_count || 0)} из ${Number(c.total_count || 0)}`, done: c.status === 'taken', skipped: c.status === 'skipped', pending: c.status !== 'taken' && c.status !== 'skipped', count: Number(c.total_count || 0) || 1, taken: Number(c.taken_count || 0), busy: todayActionBusy(c.items), next: c.status === 'taken' ? 'none' : 'taken'});
     for (const i of slot.items || []) units.push({kind: 'item', id: i.supplement_id, name: i.name || '', sub: i.blocked ? 'сегодня не пить' + (i.blocked_reason ? ': ' + i.blocked_reason : '') : i.status === 'skipped' ? 'пропущено' : (i.source === 'ai' && i.action === 'add' ? 'добавлено помощником' : ''), done: i.status === 'taken', skipped: i.status === 'skipped', pending: i.status === 'none' && !i.blocked, blocked: !!i.blocked, count: i.blocked ? 0 : 1, taken: i.status === 'taken' ? 1 : 0, busy: todayActionBusy([i]), next: i.status === 'taken' ? 'none' : 'taken'});
     return units;
   }
@@ -8419,14 +8419,22 @@ function adminField(label, field, value, kind='input') {
       tile.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); flip(e); } });
     });
     unboundDetailControls('[data-u2-snooze]').forEach((btn) => {
-      btn.addEventListener('click', (e) => { e.preventDefault(); ui2Snooze(btn.dataset.u2Snooze); renderActiveTab(); });
+      btn.addEventListener('click', async (e) => {
+        e.preventDefault();
+        const slotId = btn.dataset.u2Snooze;
+        ui2Snooze(slotId); renderActiveTab();
+        // The bot sends the reminder in an hour; the highlight above is deferred either way.
+        try { const out = await api('./api/today/snooze', {method: 'POST', body: {slot_id: slotId, day: state.today?.day}}); showToast(out?.scheduled ? 'Напомню в Telegram через час' : 'Отложено на час'); }
+        catch { showToast('Отложено на этом устройстве. Напоминание в Telegram не перенесено.'); }
+      });
     });
     unboundDetailControls('[data-u2-skip]').forEach((btn) => {
       btn.addEventListener('click', async (e) => {
         e.preventDefault();
-        // A complex has no "skipped" state on the server; only plain unmarked intakes are skipped.
         const slot = (state.today?.slots || []).find(s => String(s.slot_id) === String(btn.dataset.u2Skip));
-        const operations = (slot?.items || []).filter(i => i.status === 'none' && !i.blocked).map(i => ({ids: [Number(i.supplement_id)], status: 'skipped', path: './api/today/toggle', body: {supplement_id: Number(i.supplement_id), status: 'skipped'}}));
+        const complexOps = (slot?.complexes || []).filter(c => c.status !== 'taken' && c.status !== 'skipped').map(c => ({ids: (c.items || []).filter(i => i.status === 'none').map(i => Number(i.supplement_id)), status: 'skipped', path: './api/today/toggle_complex', body: {complex_id: Number(c.complex_id), status: 'skipped'}}));
+        const inComplex = new Set(complexOps.flatMap(op => op.ids));
+        const operations = complexOps.concat((slot?.items || []).filter(i => !inComplex.has(Number(i.supplement_id))).filter(i => i.status === 'none' && !i.blocked).map(i => ({ids: [Number(i.supplement_id)], status: 'skipped', path: './api/today/toggle', body: {supplement_id: Number(i.supplement_id), status: 'skipped'}})));
         if (operations.length) await updateTodayIntakes(operations);
       });
     });

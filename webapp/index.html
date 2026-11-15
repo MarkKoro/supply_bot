@@ -7,7 +7,7 @@
   <meta name="robots" content="noindex" />
   <title>ГУДы БАДы WebApp</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
-  <script>try{if(localStorage.getItem('progressor.ui')==='2')document.documentElement.dataset.pgUi='2';}catch(e){}</script>
+  <script>try{var d=document.documentElement,l=localStorage;if(l.getItem('progressor.ui')==='2')d.dataset.pgUi='2';var t=l.getItem('progressor.theme');if(t)d.dataset.pgTheme=t;var s=l.getItem('progressor.scheme');if(s)d.dataset.pgScheme=s;}catch(e){}</script>
   <style>
     @property --bg-1 { syntax:"<color>"; inherits:true; initial-value:#070b1a; }
     @property --bg-2 { syntax:"<color>"; inherits:true; initial-value:#101a44; }

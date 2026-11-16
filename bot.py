@@ -3249,12 +3249,36 @@ async def web_snoozes_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
             logging.exception("web snooze reminder failed")
 
 
+async def stock_low_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """One message when a jar with a stated count is down to a few days."""
+    import stock
+    s = context.application.bot_data["settings"]
+    conn = await db.connect(s.DB_PATH)
+    try:
+        notices = await stock.claim_low_notices(conn)
+    finally:
+        await conn.close()
+    for tg_user_id, items in notices.items():
+        from progressor_links import notifications_allowed
+        if not await asyncio.to_thread(notifications_allowed, s.DB_PATH, tg_user_id):
+            continue
+        lines = [f"• {name}: " + (f"осталось примерно на {days} дн." if days > 0 else "по записям закончилась") for name, days in items[:10]]
+        try:
+            await context.bot.send_message(chat_id=tg_user_id, text="Заканчиваются добавки:\n" + "\n".join(lines) + "\n\nКогда купите новую банку, обновите остаток в карточке добавки.")
+        except Exception:
+            logging.exception("stock notice failed")
+
+
 async def reminders_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
     s = context.application.bot_data["settings"]
     try:
         await web_snoozes_tick(context)
     except Exception:
         logging.exception("web snoozes tick failed")
+    try:
+        await stock_low_tick(context)
+    except Exception:
+        logging.exception("stock low tick failed")
     conn = await db.connect(s.DB_PATH)
     try:
         due = await db.list_due_reminders(conn)

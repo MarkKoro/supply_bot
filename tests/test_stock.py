@@ -49,4 +49,14 @@ class Stock(unittest.IsolatedAsyncioTestCase):
         for units,per in ((-1,1),(10,0),(10,101),(100001,1)):
             with self.assertRaises(ValueError):await stock.set_stock(self.conn,USER,1,units,per,'2026-11-10')
 
+    async def test_low_notice_is_claimed_once_and_again_only_after_a_new_count(self):
+        self.assertEqual(await stock.claim_low_notices(self.conn),{})
+        await stock.set_stock(self.conn,USER,1,30,1,'2026-11-10')
+        self.assertEqual(await stock.claim_low_notices(self.conn),{})
+        await stock.set_stock(self.conn,USER,1,4,1,'2026-11-10')
+        self.assertEqual(await stock.claim_low_notices(self.conn),{USER:[('N1',4)]})
+        self.assertEqual(await stock.claim_low_notices(self.conn),{})
+        await stock.set_stock(self.conn,USER,1,2,1,'2026-11-10')
+        self.assertEqual(await stock.claim_low_notices(self.conn),{USER:[('N1',2)]})
+
 if __name__=='__main__':unittest.main()

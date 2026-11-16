@@ -109,3 +109,6 @@ no decrement writer exists and undo is safe. `/api/today` gains `low_stock`
 (five days or fewer) and per-item `stock`; the supplement card has the input and
 the ui2 Today view a "Заканчивается" block. No Telegram notice yet. Evidence:
 `tests/test_stock.py`, full local suite, desktop browser against canned answers.
+
+Later the same day: `stock.claim_low_notices` and `bot.stock_low_tick` send one Telegram
+message per stated count when a jar is down to five days; a new count re-arms it.

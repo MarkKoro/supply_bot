@@ -1446,7 +1446,16 @@ async def _today_payload(tg_user_id: int) -> dict:
                     "items": c_items,
                 })
             data_slots.append({"slot_id": str(group.get("slot_id") or ""), "title": str(group.get("title") or "Слот"), "time_local": str(group.get("time") or "--:--"), "complexes": complexes, "items": items})
-        return {"day": day, "slots": data_slots}
+        import stock
+        stocks = await stock.stock_map(conn, tg_user_id)
+        names = {}
+        for slot in data_slots:
+            for entry in slot["items"] + [ci for c in slot["complexes"] for ci in c["items"]]:
+                names[entry["supplement_id"]] = entry["name"]
+                if entry["supplement_id"] in stocks:
+                    entry["stock"] = stocks[entry["supplement_id"]]
+        low = sorted(({"supplement_id": sid, "name": names[sid], **value} for sid, value in stocks.items() if value["low"] and sid in names), key=lambda x: x["days_left"])
+        return {"day": day, "slots": data_slots, "low_stock": low}
     finally:
         await conn.close()
 
@@ -3174,8 +3183,13 @@ async def api_my_supplements(
     conn = await db.connect(s.DB_PATH)
     try:
         items = await db.get_user_supplements_with_enabled(conn, tg_user_id)
+        import stock
+        stocks = await stock.stock_map(conn, tg_user_id)
     finally:
         await conn.close()
+    for item in items:
+        if int(item.get("supplement_id") or 0) in stocks:
+            item["stock"] = stocks[int(item["supplement_id"])]
 
     active = [x for x in items if not bool(x.get("is_frozen"))]
     frozen = [x for x in items if bool(x.get("is_frozen"))]
@@ -3249,6 +3263,34 @@ async def api_my_supplements_update(
     if not updated:
         return JSONResponse({"ok": False, "error": "NOT_FOUND"}, status_code=404)
     return JSONResponse({"ok": True})
+
+
+class MySuppStockBody(BaseModel):
+    supplement_id: int
+    units: float | None = None
+    per_day: float = 1
+
+
+@app.post("/api/my_supplements/stock")
+async def api_my_supplements_stock(body: MySuppStockBody, x_telegram_init_data: str = Header(default="", alias="X-Telegram-Init-Data")):
+    """State how many units are in the jar; units=null forgets the count."""
+    tg_user_id = await _auth_user_id(x_telegram_init_data)
+    if not await _premium_guard(tg_user_id):
+        return JSONResponse({"ok": False, "error": "PREMIUM_REQUIRED", "code": "PREMIUM_REQUIRED"}, status_code=402)
+    import stock
+    conn = await db.connect(s.DB_PATH)
+    try:
+        tz_name = await db.get_user_tz(conn, tg_user_id)
+        try:
+            found = await stock.set_stock(conn, tg_user_id, int(body.supplement_id), body.units, body.per_day, db.get_user_local_date(tz_name or None))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="INVALID_STOCK")
+        stocks = await stock.stock_map(conn, tg_user_id)
+    finally:
+        await conn.close()
+    if not found:
+        return JSONResponse({"ok": False, "error": "NOT_FOUND"}, status_code=404)
+    return JSONResponse({"ok": True, "stock": stocks.get(int(body.supplement_id))})
 
 
 @app.get("/api/reminders/for_supplement")

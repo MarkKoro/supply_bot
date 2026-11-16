@@ -7368,6 +7368,15 @@ function adminField(label, field, value, kind='input') {
             <label class="hub-label">Доза</label>
             <input id="hubDose" class="input" value="${esc(hub.doseText || '')}" placeholder="например, 1 капсула" />
           </div>
+          <div style="margin-top:10px">
+            <label class="hub-label" for="hubStockUnits">Запас в банке</label>
+            <div class="row" style="gap:8px;align-items:center">
+              <input id="hubStockUnits" class="input" inputmode="decimal" style="flex:1;min-width:0" value="${item.stock ? esc(String(item.stock.units_left)) : ''}" placeholder="сколько осталось, шт" aria-label="Сколько штук осталось в банке" />
+              <input id="hubStockPerDay" class="input" inputmode="decimal" style="width:88px" value="${esc(String(item.stock?.per_day ?? 1))}" aria-label="Сколько штук в день" />
+              <button type="button" class="btn secondary" data-hub-stock-save>Сохранить</button>
+            </div>
+            <div class="muted" style="margin-top:4px">${item.stock ? `Хватит примерно на ${Number(item.stock.days_left)} дн. Остаток уменьшается сам, когда вы отмечаете приём.` : 'Укажите остаток и сколько штук уходит в день — предупредим, когда банка будет заканчиваться.'}</div>
+          </div>
           <div style="margin-top:8px">
             <label class="hub-label">Заметка</label>
             <textarea id="hubNote" class="textarea" placeholder="заметки по приёму">${esc(hub.noteText || '')}</textarea>
@@ -7470,7 +7479,9 @@ function adminField(label, field, value, kind='input') {
         ${!done ? `<button type="button" class="u2-quick" data-slot-action="all-taken" data-slot-id="${id}" ${r.busy ? 'disabled' : ''}>Принял</button>` : open ? `<button type="button" class="u2-quick" data-slot-action="reset" data-slot-id="${id}" ${r.busy ? 'disabled' : ''}>Снять отметки</button>` : ''}
       </article>`;
     }).join('');
-    return `${head}${hero}<div class="u2-grid">${tiles}</div>`;
+    const low = (state.today?.low_stock || []).slice(0, 3);
+    const lowNote = low.length ? `<div class="u2-low" role="status"><strong>Заканчивается</strong>${low.map(x => `<span>${esc(x.name)} · ${x.days_left > 0 ? 'на ' + Number(x.days_left) + ' дн.' : 'закончилось'}</span>`).join('')}</div>` : '';
+    return `${head}${hero}<div class="u2-grid">${tiles}</div>${lowNote}`;
   }
 
   function renderToday() {
@@ -8714,6 +8725,20 @@ function adminField(label, field, value, kind='input') {
     unboundDetailControls('[data-supp-hub-retry]')[0]?.addEventListener('click', () => openSupplementHub(state.suppHub.item?.supplement_id));
 
     unboundDetailControls('#hubDose')[0]?.addEventListener('input', (e) => { state.suppHub.doseText = e.target.value || ''; });
+    unboundDetailControls('[data-hub-stock-save]')[0]?.addEventListener('click', async (e) => {
+      const sid = Number(state.suppHub.item?.supplement_id), raw = String(document.getElementById('hubStockUnits')?.value || '').replace(',', '.').trim();
+      const perDay = Number(String(document.getElementById('hubStockPerDay')?.value || '1').replace(',', '.'));
+      const units = raw === '' ? null : Number(raw);
+      if ((units !== null && !(units >= 0 && units <= 100000)) || !(perDay > 0 && perDay <= 100)) { showToast('Введите остаток и количество в день числами'); return; }
+      e.currentTarget.disabled = true;
+      try {
+        const saved = await api('./api/my_supplements/stock', {method:'POST', body:{supplement_id:sid, units, per_day:perDay}});
+        if (state.suppHub.item && Number(state.suppHub.item.supplement_id) === sid) state.suppHub.item.stock = saved?.stock || null;
+        await Promise.all([loadMySupplements(true), loadToday(true)]);
+        showToast(units === null ? 'Запас больше не отслеживается' : 'Запас сохранён');
+      } catch { showToast('Не удалось сохранить запас. Повторите.'); }
+      renderActiveTab();
+    });
     unboundDetailControls('#hubNote')[0]?.addEventListener('input', (e) => { state.suppHub.noteText = e.target.value || ''; });
     unboundDetailControls('[data-hub-slot-choice]').forEach((el) => {
       el.addEventListener('click', async () => {

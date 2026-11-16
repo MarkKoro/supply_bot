@@ -83,3 +83,6 @@ html[data-pg-ui="2"]:not([data-pg-scheme="dark"]) .legend-mixed,html[data-pg-ui=
 html[data-pg-ui="2"]:not([data-pg-scheme="dark"]) .today-ai-pill{color:#1D5FBF}
 html[data-pg-ui="2"]:not([data-pg-scheme="dark"]) .today-item-row.blocked .status-pill{color:#4A5160}
 html[data-pg-ui="2"]:not([data-pg-scheme="dark"]) .hub-slot-item .muted,html[data-pg-ui="2"]:not([data-pg-scheme="dark"]) .organ-text .muted{color:var(--pg-muted,#6B7585)}
+
+html[data-pg-ui="2"] .u2-low{border-radius:20px;padding:14px 16px;background:var(--pg-surface,#F3F4F7);color:var(--pg-text,#10131A);margin-top:12px;font-size:14px}
+html[data-pg-ui="2"] .u2-low strong{display:block;margin-bottom:4px}html[data-pg-ui="2"] .u2-low span{display:block;color:var(--pg-muted,#6B7585)}

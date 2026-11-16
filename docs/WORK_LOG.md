@@ -100,3 +100,12 @@ Evidence and limits are in the commit messages: Node suites and a desktop
 browser against canned answers only; Playwright, Linux Python suites on a
 workstation and physical Telegram devices were not run by the author. The
 coordinated updater ran each repository's own checks before switching.
+
+## 2026-11-16 — Jar stock derived from the intake diary
+
+`stock.py` + `POST /api/my_supplements/stock`: the owner states units left and
+units per day; the remainder is that count minus days marked "taken" since, so
+no decrement writer exists and undo is safe. `/api/today` gains `low_stock`
+(five days or fewer) and per-item `stock`; the supplement card has the input and
+the ui2 Today view a "Заканчивается" block. No Telegram notice yet. Evidence:
+`tests/test_stock.py`, full local suite, desktop browser against canned answers.

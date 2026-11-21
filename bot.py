@@ -640,7 +640,7 @@ async def _show_today_home(update: Update, context: ContextTypes.DEFAULT_TYPE, c
         action_label = {"add": "добавить", "remove": "убрать", "adjust": "изменить"}.get(action, action)
         ai_lines.append(f"• {name} — {action_label}, {time_part}")
     if ai_lines:
-        lines.extend(["", "<b>🤖 Предложения AI на сегодня:</b>", *ai_lines[:6]])
+        lines.extend(["", "<b>🤖 Предложения ИИ на сегодня:</b>", *ai_lines[:6]])
         if len(ai_lines) > 6:
             lines.append(f"…и ещё {len(ai_lines) - 6}.")
     await show(
@@ -1042,7 +1042,7 @@ async def _show_gift_hub(update: Update, context: ContextTypes.DEFAULT_TYPE, tg_
     is_admin = _is_admin(tg_uid)
     text = (
         "🎁 <b>Подарочный код</b>\n\n"
-        "Отправьте код отдельным сообщением, чтобы активировать Premium.\n"
+        "Отправьте код отдельным сообщением, чтобы активировать Премиум.\n"
         "Мы удалим сообщение с кодом автоматически."
     )
     if is_admin:
@@ -1471,7 +1471,7 @@ def build_ai_checkin_prompt(
         "Не предлагай рецептурные препараты. "
         "Будь консервативным, максимум 6 действий. "
         "Если уверенность низкая — явно скажи. "
-        "Для каждого действия suggested_time обязателен и строго в формате HH:MM. "
+        "Для каждого действия suggested_time обязателен и строго в формате ЧЧ:ММ. "
         "prefer_existing_time всегда true: выбирай из уже существующих слотов пользователя, если возможно. "
         "Верни строго JSON без Markdown."
     )
@@ -1918,7 +1918,7 @@ async def _render_ai_suggestions(
             "",
         ]
         if fallback_mode:
-            lines.append("⚠️ Ответ AI восстановлен из каталога (резервный режим).")
+            lines.append("⚠️ Ответ ИИ восстановлен из каталога (резервный режим).")
             lines.append("")
 
         all_found_items: list[dict] = []
@@ -2036,11 +2036,11 @@ async def _show_ai_used_upsell(update: Update, context: ContextTypes.DEFAULT_TYP
     lines = [
         "✨ <b>Стартовый подбор уже использован</b>",
         "",
-        "Ты уже получил бесплатные стартовые рекомендации. Дальше можно пользоваться каталогом бесплатно или открыть Premium для AI-сценариев и WebApp.",
+        "Ты уже получил бесплатные стартовые рекомендации. Дальше можно пользоваться каталогом бесплатно или открыть Премиум для ИИ-сценариев и приложения.",
     ]
     kb = InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("⭐ Premium", callback_data="menu:premium")],
+            [InlineKeyboardButton("⭐ Премиум", callback_data="menu:premium")],
             [InlineKeyboardButton("💊 Мои БАДы", callback_data="menu:my")],
             [InlineKeyboardButton("📚 Каталог", callback_data="menu:catalog")],
             [InlineKeyboardButton("🏠 Меню", callback_data="menu:home")],
@@ -2255,7 +2255,7 @@ async def _finalize_ai_checkin(
             await show(
                 update,
                 context,
-                "AI отключен: добавь OPENAI_API_KEY в .env.",
+                "ИИ временно отключён.",
                 back(),
                 route=AI_CHECKIN_ROUTE,
                 target_chat_id=target_chat_id,
@@ -2361,7 +2361,7 @@ async def _finalize_ai_checkin(
         await show(
             update,
             context,
-            "🤖 Думаю… (AI)",
+            "🤖 Думаю… (ИИ)",
             None,
             route=AI_CHECKIN_ROUTE,
             target_chat_id=target_chat_id,
@@ -2377,7 +2377,7 @@ async def _finalize_ai_checkin(
             await show(
                 update,
                 context,
-                "AI временно недоступен.",
+                "ИИ временно недоступен.",
                 back(),
                 route=AI_CHECKIN_ROUTE,
                 target_chat_id=target_chat_id,
@@ -2390,7 +2390,7 @@ async def _finalize_ai_checkin(
             await show(
                 update,
                 context,
-                "AI вернул неожиданный формат. Попробуй ещё раз.",
+                "ИИ вернул неожиданный формат. Попробуй ещё раз.",
                 back(),
                 route=AI_CHECKIN_ROUTE,
                 target_chat_id=target_chat_id,
@@ -2666,7 +2666,7 @@ def _premium_plans_payload(s) -> list[dict]:
 async def _show_complexes_hub(update: Update, context: ContextTypes.DEFAULT_TYPE, conn, tg_uid: int, page: int = 0, *, target_chat_id: int | None = None, target_message_id: int | None = None) -> None:
     active = tg_uid in context.application.bot_data["settings"].ADMIN_IDS or await db.has_any_webapp_access(conn, tg_uid)
     if not active:
-        await show(update, context, "Комплексы доступны при активном Premium или Starter.", premium_upsell_kb(), route="menu:premium", target_chat_id=target_chat_id, target_message_id=target_message_id)
+        await show(update, context, "Комплексы доступны при активном Премиуме или стартовом доступе.", premium_upsell_kb(), route="menu:premium", target_chat_id=target_chat_id, target_message_id=target_message_id)
         return
     back_cb = str(context.user_data.get(COMPLEXES_BACK_ROUTE_KEY) or "menu:settings")
     items = await db.list_complexes(conn, tg_uid)
@@ -2740,9 +2740,9 @@ async def _show_premium_hub(
     s = context.application.bot_data["settings"]
     plans = _premium_plans_payload(s)
     text = (
-        "⭐ <b>Premium</b>\n\n"
-        "С Premium открывается полный WebApp: удобный Today, карта органов, AI check-in и гибкая настройка напоминаний.\n\n"
-        "Выберите срок и удобный способ: рубли — на внешней странице ЮKassa через WebApp, Stars — внутри Telegram."
+        "⭐ <b>Премиум</b>\n\n"
+        "С Премиумом открывается полное приложение: удобный экран «Сегодня», карта органов, ИИ-чек-ин и гибкая настройка напоминаний.\n\n"
+        "Выберите срок и удобный способ: рубли — на внешней странице ЮKassa через приложение, звёзды — внутри Telegram."
     )
     await show(update, context, text, premium_plans_kb(plans, s.WEBAPP_URL, back_cb=back_cb, other_periods=other_periods), route=route)
 
@@ -2776,13 +2776,13 @@ async def _show_starter_trial_offer(update: Update, context: ContextTypes.DEFAUL
         "",
         "Ты уже получил стартовый подбор.",
         "",
-        "Теперь можно 3 дня бесплатно пользоваться WebApp: отмечать приём, смотреть карту, настраивать стек и проверить, как это ощущается в жизни.",
+        "Теперь можно 3 дня бесплатно пользоваться приложением: отмечать приём, смотреть карту, настраивать стек и проверить, как это ощущается в жизни.",
     ]
     kb = InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("🎁 Активировать 3 дня", callback_data="starter:activate")],
             [InlineKeyboardButton("📚 Остаться в боте", callback_data="starter:stay")],
-            [InlineKeyboardButton("⭐ Что даёт Premium", callback_data="starter:premium_about")],
+            [InlineKeyboardButton("⭐ Что даёт Премиум", callback_data="starter:premium_about")],
         ]
     )
     await show(update, context, "\n".join(lines), kb, route="starter:offer")
@@ -2833,7 +2833,7 @@ async def require_premium_or_upsell(update: Update, context: ContextTypes.DEFAUL
     await show(
         update,
         context,
-        f"🔒 <b>{feature_name}</b> доступно только с активным доступом (Premium или Starter).",
+        f"🔒 <b>{feature_name}</b> доступно только с активным доступом (Премиум или стартовый доступ).",
         premium_upsell_kb(),
         route="menu:premium_required",
     )
@@ -2866,13 +2866,13 @@ async def _send_subscription_invoice(update: Update, context: ContextTypes.DEFAU
     payload = f"sub:{plan_id}:{method}:{nonce}"
     if method == "stars":
         if not s.BILLING_ENABLED_STARS:
-            await show(update, context, "Оплата Stars сейчас недоступна.", premium_upsell_kb(), route="menu:premium")
+            await show(update, context, "Оплата звёздами сейчас недоступна.", premium_upsell_kb(), route="menu:premium")
             return
         amount = _stars_amount_for_plan(s, plan_id)
         await context.bot.send_invoice(
             chat_id=chat_id,
-            title="Premium подписка",
-            description="Доступ к WebApp + AI + расширенным функциям",
+            title="Подписка Премиум",
+            description="Доступ к приложению, ИИ и расширенным функциям",
             payload=payload,
             provider_token="",
             currency="XTR",
@@ -2892,7 +2892,7 @@ async def _send_subscription_invoice(update: Update, context: ContextTypes.DEFAU
         await show(
             update,
             context,
-            "Оплата в рублях откроется в WebApp, а затем переведёт на безопасную внешнюю страницу YooKassa.",
+            "Оплата в рублях откроется в приложении, а затем переведёт на безопасную внешнюю страницу ЮKassa.",
             premium_webapp_checkout_kb(payment_url),
             route="menu:premium",
         )
@@ -2916,7 +2916,7 @@ async def on_precheckout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     payload = str(query.invoice_payload or "")
     parts = payload.split(":")
     if len(parts) < 4 or parts[0] != "sub":
-        await query.answer(ok=False, error_message="Некорректный payload")
+        await query.answer(ok=False, error_message="Некорректные данные платежа")
         return
 
     plan_id = str(parts[1] or "")
@@ -2985,14 +2985,14 @@ async def on_success_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if starter_active_before_purchase:
         await msg.reply_text(
-            "Оплата прошла успешно! Premium активирован сразу, "
-            "а оставшиеся дни Starter добавлены к сроку.\n"
+            "Оплата прошла успешно! Премиум активирован сразу, "
+            "а оставшиеся дни стартового доступа добавлены к сроку.\n"
             f"Подписка активна до: {until_iso}"
         )
     else:
         await msg.reply_text(
             "Оплата прошла успешно!\n"
-            f"Premium активен до: {until_iso}"
+            f"Премиум активен до: {until_iso}"
         )
     context.user_data["home_entry_reason"] = "premium_activated"
     await home(update, context)
@@ -3013,7 +3013,7 @@ def _home_text(
     elif onboarding_done:
         next_step = "Дальше: добавь БАДы в свой список и настрой время приёма."
     if starter_active:
-        next_step = "Открой WebApp — там удобнее отмечать приём и смотреть план."
+        next_step = "Открой приложение — там удобнее отмечать приём и смотреть план."
     contextual_lines: list[str] = []
     if entry_reason == "onboarding_completed":
         contextual_lines = [
@@ -3027,7 +3027,7 @@ def _home_text(
     elif entry_reason == "premium_activated":
         contextual_lines = [
             "",
-            "🎉 <b>Premium активирован.</b>",
+            "🎉 <b>Премиум активирован.</b>",
             "Теперь тебе доступно:",
             "• полное веб-приложение с расширенным трекингом и планом на день;",
             "• ИИ-опрос и персональные подсказки;",
@@ -3035,7 +3035,7 @@ def _home_text(
         ]
     next_step_block = f"Следующий шаг: {next_step}" if show_next_step_hint else "Открой нужный раздел в меню ниже."
     return (
-        "💊 <b>Supply Bot</b>\n\n"
+        "💊 <b>ГУДы БАДы</b>\n\n"
         "• Каталог: быстро найди добавку и проверь совместимость.\n"
         "• Мои БАДы: собери свой список и настрой напоминания.\n"
         "• ИИ и веб-приложение: стартовый подбор и удобный ежедневный трекинг.\n\n"
@@ -3065,7 +3065,7 @@ def _subscription_expired_text() -> str:
         "Что временно недоступно без подписки:\n"
         "• ежедневный ИИ-опрос;\n"
         "• комплексы;\n"
-        "• расширенные автоматические напоминания и Premium-функции.\n\n"
+        "• расширенные автоматические напоминания и функции Премиум.\n\n"
         "Продлите подписку, чтобы снова включить полный режим в веб-приложении.\n\n"
         "Бот и каталог внутри бота продолжают работать без подписки."
     )
@@ -3619,7 +3619,7 @@ async def reminder_fire_batch(
         groups = _reminder_groups(entries, day)
         page=max(0,min(int(page),len(groups)-1));group=groups[page]
         lines=["⏰ <b>Напоминание</b>"+(f' · {page+1}/{len(groups)}' if len(groups)>1 else ''),'Пора принять:']
-        if meal_trigger and policy.get('sources',{}).get('food',False):lines.insert(1,'В Food записан приём пищи — напоминание связано с ним по вашей настройке.')
+        if meal_trigger and policy.get('sources',{}).get('food',False):lines.insert(1,'В разделе «Еда» записан приём пищи — напоминание связано с ним по вашей настройке.')
         lines.extend(f"• <b>{_reminder_preview(item['name'],160)}</b> — {_reminder_preview(item['dose'],160)}" for item in group)
         lines.append('\nПолная запись — по кнопке с названием добавки.')
         buttons=[list(row) for row in _reminder_batch_actions([item['id'] for item in group],day=day,records=group).inline_keyboard]
@@ -3714,7 +3714,7 @@ async def on_meal_anchor(update,context):
         back_rows=[[InlineKeyboardButton('К добавке',callback_data=f'mysupp:open:{sid}')]]
         if parts[1]=='menu':
             rows=[[InlineKeyboardButton(('✓ ' if i['enabled'] else '○ ')+i['time']+' · связь с едой',callback_data=f"meal:preview:{sid}:"+i['time'].replace(':','-'))] for i in value['slots']]
-            await show(update,context,'Привязка к записанной еде\n\n'+value['note']+'\n\nНужны доступ Food и Supply и включённая связь. Иначе работает обычное расписание.',InlineKeyboardMarkup(rows+back_rows),route=f'meal:menu:{sid}')
+            await show(update,context,'Привязка к записанной еде\n\n'+value['note']+'\n\nНужны доступ к разделам «Еда» и «БАДы» и включённая связь. Иначе работает обычное расписание.',InlineKeyboardMarkup(rows+back_rows),route=f'meal:menu:{sid}')
         elif parts[1]=='preview':
             local_time=parts[3].replace('-',':');slot=next(i for i in value['slots'] if i['time']==local_time)
             context.user_data['meal_anchor_choice']={'sid':sid,'time':local_time,'enabled':not slot['enabled']}
@@ -3740,7 +3740,7 @@ async def on_supplement_overlap(update,context):
     uid=int(q.from_user.id);conn=await db.connect(context.application.bot_data['settings'].DB_PATH)
     try:
         if not await _has_ai_checkin_access(context,uid):
-            await show(update,context,'Для управления добавками нужен доступ Supply.',back(),route='menu:home');raise ApplicationHandlerStop
+            await show(update,context,'Для управления добавками нужен доступ к разделу «БАДы».',back(),route='menu:home');raise ApplicationHandlerStop
         parts=q.data.split(':');sid=int(parts[2]);c=await overlap.composition(conn,uid,sid)
         back_rows=[[InlineKeyboardButton('К добавке',callback_data=f'mysupp:open:{sid}')]]
         if parts[1]=='menu':
@@ -4226,9 +4226,9 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await show(
                 update,
                 context,
-                "Открой WebApp для расширенного режима и дополнительных функций.",
+                "Открой приложение для расширенного режима и дополнительных функций.",
                 InlineKeyboardMarkup([
-                    [InlineKeyboardButton("⭐ Купить Premium", callback_data="menu:premium")],
+                    [InlineKeyboardButton("⭐ Купить Премиум", callback_data="menu:premium")],
                     [InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")],
                 ]),
                 route="menu:webapp",
@@ -4284,7 +4284,7 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await show(
                 update,
                 context,
-                "Введите количество дней Premium для нового кода (целое число).",
+                "Введите количество дней Премиума для нового кода (целое число).",
                 InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="settings:gift")]]),
                 route="gift:admin:create_wait",
             )
@@ -4346,11 +4346,11 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if data.startswith("schedule:slot_time_set:"):
             slot_id = data.split(":", 2)[2]
             context.user_data[WAITING_KEY] = f"schedule:slot_time_set:{slot_id}"
-            await show(update, context, "Введи время в формате HH:MM", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="settings:notifications")]]), route=f"schedule:slot_time_set:{slot_id}")
+            await show(update, context, "Введи время в формате ЧЧ:ММ", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="settings:notifications")]]), route=f"schedule:slot_time_set:{slot_id}")
             return
         if data == "schedule:add_custom":
             context.user_data[WAITING_KEY] = "schedule:add_custom"
-            await show(update, context, "Введи время в формате HH:MM", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="settings:notifications")]]), route="schedule:add_custom")
+            await show(update, context, "Введи время в формате ЧЧ:ММ", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="settings:notifications")]]), route="schedule:add_custom")
             return
         if data == "schedule:delete_pick":
             user_id = await db.get_or_create_user(conn, tg_uid, tz_name="")
@@ -4410,7 +4410,7 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
 
         if data == "admin:bulk_stub":
-            await show(update, context, "Bulk-операции доступны в WebApp разделе Admin.", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="admin:home")]]), route="admin:home")
+            await show(update, context, "Массовые операции доступны в приложении, в разделе «Админ».", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="admin:home")]]), route="admin:home")
             return
 
         if data == "admin:seed_patch":
@@ -4434,7 +4434,7 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
 
         if data == "admin:users_stub":
-            await show(update, context, "Модерация пользователей доступна в WebApp разделе Admin.", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="admin:home")]]), route="admin:home")
+            await show(update, context, "Модерация пользователей доступна в приложении, в разделе «Админ».", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="admin:home")]]), route="admin:home")
             return
 
         if data == "admin:paychecks":
@@ -4578,7 +4578,7 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await show(
                 update,
                 context,
-                "Введи название/часть названия (RU/EN) или slug:",
+                "Введи название, часть названия (рус./англ.) или код добавки:",
                 InlineKeyboardMarkup([[InlineKeyboardButton("↩️ В админ-меню", callback_data="admin:home")]]),
                 route="admin_wait_query",
                 payload={"admin_query": "", "offset": 0},
@@ -4626,7 +4626,7 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await show(
                 update,
                 context,
-                "Отправь URL (https://...)",
+                "Отправь ссылку (https://...)",
                 InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Назад", callback_data=f"admin:supp_open:{supplement_id}")]]),
                 route="admin_wait_link",
                 payload={"supplement_id": supplement_id, "admin_query": str(payload_data.get("admin_query") or ""), "offset": int(payload_data.get("offset") or 0)},
@@ -5029,13 +5029,13 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             slots = await db.get_user_slots(conn, user_id)
             rows = [[InlineKeyboardButton(f"{slot.get('title_ru', 'Слот')} · {slot.get('time_local', '--:--')}", callback_data=f"rem:set:{slot.get('slot_id','')}")] for slot in slots]
             rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="rem:home")])
-            await show(update, context, "Выбери слот и отправь время в формате HH:MM.", InlineKeyboardMarkup(rows), route="rem:edit")
+            await show(update, context, "Выбери слот и отправь время в формате ЧЧ:ММ.", InlineKeyboardMarkup(rows), route="rem:edit")
             return
 
         if data.startswith("rem:set:"):
             slot_id = data.split(":", 2)[2]
             context.user_data[WAITING_KEY] = f"rem:set:{slot_id}"
-            await show(update, context, "Напиши новое время в формате HH:MM.", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="rem:home")]]), route=f"rem:set:{slot_id}")
+            await show(update, context, "Напиши новое время в формате ЧЧ:ММ.", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="rem:home")]]), route=f"rem:set:{slot_id}")
             return
 
         if data.startswith("rem:toggle:"):
@@ -5877,7 +5877,7 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 await show(
                     update,
                     context,
-                    "Введите время нового слота в формате HH:MM.",
+                    "Введите время нового слота в формате ЧЧ:ММ.",
                     InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=back_cb)]]),
                     route=f"mysupp:addslot:newtime:{supplement_id}",
                 )
@@ -5947,7 +5947,7 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if data.startswith("supplement:set_override:"):
             supplement_id = int(data.split(":", 2)[2])
             context.user_data[WAITING_KEY] = f"supplement:set_override:{supplement_id}"
-            await show(update, context, "Введи время в формате HH:MM", my_hub_back(supplement_id), route=f"supplement:set_override:{supplement_id}")
+            await show(update, context, "Введи время в формате ЧЧ:ММ", my_hub_back(supplement_id), route=f"supplement:set_override:{supplement_id}")
             return
 
         if data.startswith("supplement:clear_override:"):
@@ -6933,13 +6933,13 @@ async def _render_route(
         context.user_data[WAITING_KEY] = saved_waiting
         prompt, back_cb = None, None
         if route.startswith(("schedule:slot_time_set:", "schedule:add_custom")):
-            prompt, back_cb = "Введи время в формате HH:MM", "settings:notifications"
+            prompt, back_cb = "Введи время в формате ЧЧ:ММ", "settings:notifications"
         elif route.startswith("rem:set:"):
-            prompt, back_cb = "Напиши новое время в формате HH:MM.", "rem:home"
+            prompt, back_cb = "Напиши новое время в формате ЧЧ:ММ.", "rem:home"
         elif route.startswith("supplement:set_override:"):
-            prompt, back_cb = "Введи время в формате HH:MM", f"mysupp:open:{route.split(':')[-1]}"
+            prompt, back_cb = "Введи время в формате ЧЧ:ММ", f"mysupp:open:{route.split(':')[-1]}"
         elif route.startswith("mysupp:addslot:newtime:"):
-            prompt, back_cb = "Введите время нового слота в формате HH:MM.", f"mysupp:addslot:{route.split(':')[-1]}"
+            prompt, back_cb = "Введите время нового слота в формате ЧЧ:ММ.", f"mysupp:addslot:{route.split(':')[-1]}"
         elif route == "cx:create":
             prompt, back_cb = "Введи название нового комплекса.", "cx:list"
         elif route.startswith("cx:rename:"):
@@ -7836,7 +7836,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await show(
                 update,
                 context,
-                f"✅ Код создан.\nДней Premium: <b>{days}</b>\nКод для копирования:\n<code>{code}</code>",
+                f"✅ Код создан.\nДней Премиума: <b>{days}</b>\nКод для копирования:\n<code>{code}</code>",
                 InlineKeyboardMarkup([
                     [InlineKeyboardButton("➕ Создать ещё", callback_data="gift:admin:create")],
                     [InlineKeyboardButton("📋 Коды", callback_data="gift:admin:codes")],
@@ -7850,7 +7850,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if status == "ok":
                 context.user_data["home_entry_reason"] = "premium_activated"
                 context.user_data["home_entry_extra"] = (
-                    f"🎁 Подарочный код активирован: +{days} дн. Premium до {_format_until_ru(until_iso)}."
+                    f"🎁 Подарочный код активирован: +{days} дн. Премиума, до {_format_until_ru(until_iso)}."
                 )
                 await home(update, context)
                 return
@@ -7967,7 +7967,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 await show(
                     update,
                     context,
-                    "Некорректный URL. Отправь ссылку, начинающуюся с http:// или https://",
+                    "Некорректная ссылка. Отправь ссылку, начинающуюся с http:// или https://",
                     InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Назад", callback_data=f"admin:supp_open:{supplement_id}")]]),
                     route="admin_wait_link",
                     payload={"supplement_id": supplement_id, "admin_query": str(payload_data.get("admin_query") or ""), "offset": int(payload_data.get("offset") or 0)},
@@ -8005,7 +8005,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 elif err in {"invalid_json", "json_array_required", "json_strings_required"}:
                     hint = "Ожидается JSON-массив строк, например [\"brain\",\"gut\"]."
                 elif err == "invalid_url":
-                    hint = "URL должен начинаться с http:// или https://"
+                    hint = "Ссылка должна начинаться с http:// или https://"
                 await show(
                     update,
                     context,
@@ -8511,7 +8511,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 await show(
                     update,
                     context,
-                    "AI отключен: добавь OPENAI_API_KEY в .env.",
+                    "ИИ временно отключён.",
                     back(),
                     route=AI_CHECKIN_ROUTE,
                 )
@@ -8625,7 +8625,7 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await show(
                 update,
                 context,
-                "AI отключен: добавь OPENAI_API_KEY в .env.",
+                "ИИ временно отключён.",
                 ai_checkin_voice_kb(),
                 route=AI_CHECKIN_VOICE_ROUTE,
                 payload=payload_data or _ai_checkin_voice_payload(),
@@ -8925,14 +8925,14 @@ async def _show_admin_paychecks(update: Update, context: ContextTypes.DEFAULT_TY
     receipt_status = str(row.get("receipt_status") or "pending")
     provider_pid = str(row.get("provider_payment_charge_id") or "") or "—"
     lines = [
-        "💳 <b>Чек / успешный RUB-платёж</b>",
+        "💳 <b>Чек / успешный платёж в рублях</b>",
         f"#{safe_index + 1} из {total}",
         f"Оплачен: <code>{paid_at or '—'}</code>",
-        f"Payment record id: <code>{int(row.get('id') or 0)}</code>",
-        f"Provider payment id: <code>{provider_pid}</code>",
+        f"Номер записи платежа: <code>{int(row.get('id') or 0)}</code>",
+        f"Номер платежа у провайдера: <code>{provider_pid}</code>",
         f"Сумма: <b>{amount_rub:.2f}</b> {str(row.get('currency') or 'RUB')}",
         f"Что куплено: {html.escape(subject)}",
-        f"product_kind: <code>{html.escape(kind)}</code>",
+        f"Тип покупки: <code>{html.escape(kind)}</code>",
         f"Пользователь: {_payment_user_line(row)}",
         f"Email: <code>{html.escape(email)}</code>",
         f"email_status: <code>{html.escape(email_status)}</code>",
@@ -9019,23 +9019,23 @@ async def _admin_dashboard_text(conn) -> str:
     top_plan = max(by_plan.items(), key=lambda x: x[1])[0] if by_plan else "—"
 
     rows = [
-        ("Users total", str(int(base.get("users_total") or 0))),
-        ("Active 1d/7d/30d", f"{int(base.get('active_1d') or 0)} / {int(base.get('active_7d') or 0)} / {int(base.get('active_30d') or 0)}"),
-        ("Premium active", str(premium_active)),
-        ("Starter trial active", str(starter_active)),
-        ("WebApp access now", str(webapp_access)),
-        ("Avg active supplements", _fmt_avg(avg_stack)),
-        ("Avg reminders", _fmt_avg(base.get("avg_enabled_reminders"))),
-        ("Check-ins 30d", str(int(base.get("checkins_30d_total") or 0))),
-        ("Intakes 30d", str(int(base.get("intake_30d_total") or 0))),
-        ("Top supplement in stacks", f"{top_stack_name} ({top_stack_count})"),
-        ("Top taken supplement 30d", f"{top_taken_name} ({top_taken_count})"),
-        ("Paid subscriptions total", str(total_paid)),
-        ("Paid by top plan", top_plan),
-        ("Revenue RUB", f"{paid_rub_kop / 100:.2f} ₽"),
-        ("Revenue Stars", f"{paid_stars} ⭐"),
+        ("Всего пользователей", str(int(base.get("users_total") or 0))),
+        ("Активны 1/7/30 дн.", f"{int(base.get('active_1d') or 0)} / {int(base.get('active_7d') or 0)} / {int(base.get('active_30d') or 0)}"),
+        ("Активный Премиум", str(premium_active)),
+        ("Активный стартовый доступ", str(starter_active)),
+        ("Доступ к приложению сейчас", str(webapp_access)),
+        ("Среднее число активных добавок", _fmt_avg(avg_stack)),
+        ("Среднее число напоминаний", _fmt_avg(base.get("avg_enabled_reminders"))),
+        ("Чек-инов за 30 дн.", str(int(base.get("checkins_30d_total") or 0))),
+        ("Приёмов за 30 дн.", str(int(base.get("intake_30d_total") or 0))),
+        ("Самая частая добавка в стеках", f"{top_stack_name} ({top_stack_count})"),
+        ("Самая принимаемая за 30 дн.", f"{top_taken_name} ({top_taken_count})"),
+        ("Оплаченных подписок всего", str(total_paid)),
+        ("Самый популярный тариф", top_plan),
+        ("Выручка, ₽", f"{paid_rub_kop / 100:.2f} ₽"),
+        ("Выручка, звёзды", f"{paid_stars} ⭐"),
     ]
-    return "📊 <b>Admin Stats</b>\n<pre>" + _fixed_rows(rows) + "</pre>"
+    return "📊 <b>Статистика</b>\n<pre>" + _fixed_rows(rows) + "</pre>"
 
 
 async def _ensure_admin_for_command(update: Update, context: ContextTypes.DEFAULT_TYPE, *, manage_subscription=False) -> bool:
@@ -9096,7 +9096,7 @@ async def grant_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     target_tg_id = int(args[0])
     days = int(args[1])
     if days <= 0 or days > 3650:
-        await (update.effective_message or update.message).reply_text("days должен быть в диапазоне 1..3650")
+        await (update.effective_message or update.message).reply_text("Количество дней должно быть от 1 до 3650")
         return
 
     s = context.application.bot_data["settings"]
@@ -9111,7 +9111,7 @@ async def grant_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await conn.close()
 
     await (update.effective_message or update.message).reply_text(
-        f"✅ Premium выдан пользователю {target_tg_id} на {days} дн.\nАктивен до: {until_iso}"
+        f"✅ Премиум выдан пользователю {target_tg_id} на {days} дн.\nАктивен до: {until_iso}"
     )
 
 
@@ -9127,7 +9127,7 @@ async def degrant_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     target_tg_id = int(args[0])
     days = int(args[1])
     if days <= 0 or days > 3650:
-        await (update.effective_message or update.message).reply_text("days должен быть в диапазоне 1..3650")
+        await (update.effective_message or update.message).reply_text("Количество дней должно быть от 1 до 3650")
         return
 
     s = context.application.bot_data["settings"]
@@ -9142,7 +9142,7 @@ async def degrant_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await conn.close()
 
     await (update.effective_message or update.message).reply_text(
-        f"✅ Premium скорректирован для {target_tg_id}.\nНовый срок: {until_iso}"
+        f"✅ Премиум скорректирован для {target_tg_id}.\nНовый срок: {until_iso}"
     )
 
 
@@ -9453,19 +9453,19 @@ def _short_line(value: str, limit: int = 90) -> str:
 
 
 ADMIN_FIELD_LABELS = {
-    "name_ru": "Название RU",
-    "name_en": "Название EN",
+    "name_ru": "Название (рус.)",
+    "name_en": "Название (англ.)",
     "summary_ru_verified": "Summary (verified)",
     "summary_ru_theoretical": "Summary (theoretical)",
     "dose_ru": "Dose",
     "timing_ru": "Timing",
     "safety_ru": "Safety",
-    "evidence_grade": "Evidence grade",
+    "evidence_grade": "Уровень доказательности",
     "confidence": "Confidence",
     "tags_json": "Tags",
     "body_targets_json": "Targets",
     "body_burdens_json": "Burdens",
-    "purchase_url": "Purchase URL",
+    "purchase_url": "Ссылка на покупку",
 }
 
 ADMIN_JSON_FIELDS = {"tags_json", "body_targets_json", "body_burdens_json"}

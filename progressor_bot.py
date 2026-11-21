@@ -61,9 +61,9 @@ def install(app,source,db_path,*,render=None,back_callback=None,notify=None):
         await asyncio.to_thread(ensure_schema,db_path)
         await asyncio.to_thread(cache_settings,db_path,[{'user_id':uid,'preferences':value['preferences']}])
         p=value['preferences'];context.user_data['progressor_connection_screen']=value
-        labels={'gym':'Gym Diary','food':'Food','supply':'Supply'}
+        labels={'gym':'Тренировки','food':'Еда','supply':'БАДы'}
         rows=[[InlineKeyboardButton(('✓ ' if p['sources'][s] else '○ ')+labels[s],callback_data='pg:link:'+s)] for s in labels]
-        for field,label in [('hints','Подсказки'),('notifications','Обычные напоминания'),('weight_notifications','Новый вес → проверить цель Food'),('goal_links','Связанные действия после смены цели')]:
+        for field,label in [('hints','Подсказки'),('notifications','Обычные напоминания'),('weight_notifications','Новый вес → проверить цель питания'),('goal_links','Связанные действия после смены цели')]:
             rows.append([InlineKeyboardButton(('✓ ' if p[field] else '○ ')+label,callback_data='pg:pref:'+field)])
         rows.append([InlineKeyboardButton('Вернуться из отдыха' if p['rest_active'] else 'Отдохнуть от напоминаний',callback_data='pg:rest')])
         rows.append([InlineKeyboardButton('Вес и источники',callback_data='pg:weights'),InlineKeyboardButton('Моя неделя',callback_data='pg:weekly')])
@@ -120,9 +120,9 @@ def install(app,source,db_path,*,render=None,back_callback=None,notify=None):
             value=await client.call(source,'/internal/v1/connections/weekly',{'user_id':uid});lines=['Моя неделя']
             n=value.get('nutrition');w=value.get('workouts');s=value.get('supply')
             if n:
-                a=n['averages_on_logged_days'];lines.append(f"Food: {n['logged_days']} записанных дней из 7. Среднее по ним: {a['kcal']} ккал; Б {a['protein']}, Ж {a['fat']}, У {a['carbs']} г.")
-            if w:lines.append(f"Gym Diary: сессий {w['recorded_sessions']}, завершено {w['completed_sessions']}; рабочих подходов {w['working_sets']}.")
-            if s:lines.append(f"Supply: активных добавок {s['active_supplements']}; отметок приёма {s['recorded_intakes']}.")
+                a=n['averages_on_logged_days'];lines.append(f"Еда: {n['logged_days']} записанных дней из 7. Среднее по ним: {a['kcal']} ккал; Б {a['protein']}, Ж {a['fat']}, У {a['carbs']} г.")
+            if w:lines.append(f"Тренировки: сессий {w['recorded_sessions']}, завершено {w['completed_sessions']}; рабочих подходов {w['working_sets']}.")
+            if s:lines.append(f"БАДы: активных добавок {s['active_supplements']}; отметок приёма {s['recorded_intakes']}.")
             lines.append(value['coverage']);await show(update,context,'\n\n'.join(lines),back)
         elif parts[1]=='weekly_plan':
             value=await client.call(source,'/internal/v1/connections/weekly-plan',{'user_id':uid})
@@ -143,16 +143,16 @@ def install(app,source,db_path,*,render=None,back_callback=None,notify=None):
             if not r:await account_menu(update,context);return
             await client.call(source,'/internal/v1/connections/account',{'user_id':uid,'action':'rhythm','fingerprint':r['fingerprint'],'base_goal_key':r['base_goal_key'],'extra':int(parts[2])})
             context.user_data.pop('progressor_rhythm',None)
-            await show(update,context,'Ритм подтверждён. Food применит план после синхронизации, обычно в течение минуты. Недельная сумма сохранена.',back)
+            await show(update,context,'Ритм подтверждён. Раздел «Еда» применит план после синхронизации, обычно в течение минуты. Недельная сумма сохранена.',back)
         elif parts[1]=='rhythm_off':
             await client.call(source,'/internal/v1/connections/account',{'user_id':uid,'action':'rhythm_off'})
-            await show(update,context,'После синхронизации Food вернётся к вашей одинаковой цели на каждый день.',back)
+            await show(update,context,'После синхронизации раздел «Еда» вернётся к вашей одинаковой цели на каждый день.',back)
         elif parts[1]=='coach_permissions':
             value=await client.call(source,'/internal/v1/connections/account',{'user_id':uid});rows=[]
             for item in value['coach']['items']:
                 rows.append([InlineKeyboardButton(('✓ ' if item['macros'] else '○ ')+'КБЖУ · '+item['label'],callback_data='pg:coach_macros:'+item['coach_id'])])
                 rows.append([InlineKeyboardButton(('✓ ' if item['top_dishes'] else '○ ')+'5 частых блюд',callback_data='pg:coach_dishes:'+item['coach_id'])])
-            await show(update,context,value['coach']['explanation']+'\n\nРазрешение из этого меню действует 30 дней. Срок 7/90 дней можно выбрать в приложении.' if rows else 'Сначала подтвердите связь с тренером в Gym Diary.',rows+back)
+            await show(update,context,value['coach']['explanation']+'\n\nРазрешение из этого меню действует 30 дней. Срок 7/90 дней можно выбрать в приложении.' if rows else 'Сначала подтвердите связь с тренером в разделе «Тренировки».',rows+back)
         elif parts[1] in ('coach_macros','coach_dishes'):
             value=await client.call(source,'/internal/v1/connections/account',{'user_id':uid});item=next((i for i in value['coach']['items'] if i['coach_id']==parts[2]),None)
             if not item:await account_menu(update,context);return

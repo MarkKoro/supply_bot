@@ -35,7 +35,7 @@ WEBAPP_DIR = BASE_DIR / "webapp"
 ASSETS_DIR = WEBAPP_DIR / "assets"
 ASSETS_DIR.mkdir(parents=True, exist_ok=True)
 
-app = FastAPI(title="ГУДы БАДы WebApp")
+app = FastAPI(title="ГУДы БАДы")
 
 @app.exception_handler(db.AssistantQuotaExceeded)
 async def assistant_limit_response(request, exc):
@@ -496,10 +496,62 @@ def _decode_json_or_default(raw, default):
         return default
 
 
+_PAYMENT_MISMATCH_RU = "Платёж не совпадает со счётом. Не оплачивайте повторно; обратитесь в поддержку."
+_LOGIN_FAILED_RU = "Не удалось подтвердить вход. Откройте приложение заново из бота."
+# Internal codes/details stay stable for code paths; users see Russian text.
+_RU_ERROR_DETAILS = {
+    "Invalid initData": _LOGIN_FAILED_RU,
+    "Missing user in initData": _LOGIN_FAILED_RU,
+    "Invalid user payload": _LOGIN_FAILED_RU,
+    "YooKassa credentials are not configured": "Оплата картой временно недоступна",
+    "Unknown plan": "Неизвестный тариф",
+    "Plan price is not configured": "Цена тарифа не настроена",
+    "Payment is not confirmed": "Платёж ещё не подтверждён",
+    "Payment project or kind mismatch": _PAYMENT_MISMATCH_RU,
+    "Invalid payment metadata or amount": _PAYMENT_MISMATCH_RU,
+    "Payment order mismatch": _PAYMENT_MISMATCH_RU,
+    "Payment amount, currency or plan mismatch": _PAYMENT_MISMATCH_RU,
+    "Project mismatch": _PAYMENT_MISMATCH_RU,
+    "Payment user mismatch": _PAYMENT_MISMATCH_RU,
+    "Payment order not found": "Счёт не найден. Откройте оплату заново.",
+    "Unknown method": "Неизвестный способ оплаты",
+    "Use redirect flow": "Оплатите на странице ЮKassa",
+    "Stars disabled": "Оплата звёздами сейчас недоступна",
+    "RUB disabled": "Оплата в рублях сейчас недоступна",
+    "Unsupported kind": "Неизвестный вид оплаты",
+    "Invalid payment_id": "Некорректный номер платежа",
+    "INVOICE_UNAVAILABLE": "Не удалось создать счёт. Попробуйте ещё раз.",
+    "status must be taken/skipped/none": "Некорректный статус приёма",
+    "TODAY_CHANGED": "План на сегодня изменился. Обновите экран.",
+    "INTAKE_NOT_IN_PLAN": "Этого приёма нет в плане на сегодня",
+    "COMPLEX_NOT_IN_PLAN": "Этого комплекса нет в плане на сегодня",
+    "SLOT_NOT_IN_PLAN": "Этого времени приёма нет в плане на сегодня",
+    "Unsupported source": "Неизвестный источник",
+    "Report not found": "Анализ не найден",
+    "Assistant run not found": "Расчёт не найден",
+    "INVALID_STOCK": "Некорректный остаток в упаковке",
+    "invalid energy": "Некорректное значение энергии",
+    "invalid sleep": "Некорректное значение сна",
+    "invalid stress": "Некорректное значение стресса",
+    "invalid training": "Некорректное значение тренировок",
+}
+
+
+def _ru_error_detail(detail):
+    if isinstance(detail, str):
+        return _RU_ERROR_DETAILS.get(detail, detail)
+    if isinstance(detail, dict) and detail.get("code") in _RU_ERROR_DETAILS and not detail.get("message"):
+        return {**detail, "message": _RU_ERROR_DETAILS[detail["code"]]}
+    return detail
+
+
 async def supply_http_exception_handler(request, exc: HTTPException):
     if request.url.path.startswith("/api/"):
+        detail = _ru_error_detail(exc.detail)
+        if isinstance(detail, dict) and detail.get("message"):
+            detail = detail["message"]
         return JSONResponse(
-            {"ok": False, "error": str(exc.detail), "code": "HTTP_ERROR"},
+            {"ok": False, "error": str(detail), "code": "HTTP_ERROR"},
             status_code=exc.status_code,
         )
     return await fastapi_http_exception_handler(request, exc)
@@ -541,8 +593,8 @@ def _subscription_title_description(plan_id: str) -> tuple[str, str, int, int]:
     months = int(s.PREMIUM_PLANS.get(plan_id, 0) or 0)
     if months <= 0:
         raise HTTPException(status_code=400, detail="Unknown plan")
-    title = f"Premium на {months} {('месяц' if months == 1 else 'месяца' if months in {2, 3, 4} else 'месяцев')}"
-    description = f"Premium подписка на {months} {('месяц' if months == 1 else 'месяца' if months in {2, 3, 4} else 'месяцев')}"
+    title = f"Премиум на {months} {('месяц' if months == 1 else 'месяца' if months in {2, 3, 4} else 'месяцев')}"
+    description = f"Подписка Премиум на {months} {('месяц' if months == 1 else 'месяца' if months in {2, 3, 4} else 'месяцев')}"
     price_minor = int(s.PREMIUM_PRICES_RUB.get(plan_id, 0) or 0)
     if price_minor <= 0:
         raise HTTPException(status_code=400, detail="Plan price is not configured")
@@ -1230,7 +1282,7 @@ async def api_receipt_email_set(
     try:
         result = await db.upsert_user_receipt_email(conn, tg_user_id, body.email, source="webapp")
         if not result.get("ok"):
-            return JSONResponse({"ok": False, "code": "INVALID_EMAIL", "message": "Введите корректный email для чека."}, status_code=400)
+            return JSONResponse({"ok": False, "code": "INVALID_EMAIL", "message": "Введите корректный адрес эл. почты для чека."}, status_code=400)
     finally:
         await conn.close()
     return JSONResponse({"ok": True, **result})
@@ -1267,8 +1319,8 @@ async def api_billing_create_invoice_link(
 
     payload = f"sub:{plan_id}:stars:{db.utc_now_iso()}"
     req = {
-        "title": "Premium подписка",
-        "description": "Доступ к WebApp + AI + расширенным функциям",
+        "title": "Подписка Премиум",
+        "description": "Доступ к приложению, ИИ и расширенным функциям",
         "payload": payload,
         "need_shipping_address": False,
         "is_flexible": False,
@@ -1289,7 +1341,7 @@ async def api_billing_create_invoice_link(
     if not isinstance(data, dict) or resp.status_code >= 500:
         raise HTTPException(status_code=502, detail={"ok": False, "code": "INVOICE_UNAVAILABLE"})
     if not data.get("ok"):
-        raise HTTPException(status_code=400, detail=str(data))
+        raise HTTPException(status_code=400, detail="Telegram не принял запрос на оплату. Попробуйте ещё раз.")
     invoice_link = data.get("result")
     if resp.status_code >= 400 or not isinstance(invoice_link, str) or not invoice_link.strip():
         raise HTTPException(status_code=502, detail={"ok": False, "code": "INVOICE_UNAVAILABLE"})
@@ -1328,7 +1380,7 @@ async def api_payments_redirect_create(
     wants_receipt = bool(receipt_email_state.get("wants_receipt"))
     has_receipt_email = bool(receipt_email_state.get("has_email"))
     if wants_receipt and not has_receipt_email:
-        raise HTTPException(status_code=400, detail={"ok": False, "code": "RECEIPT_EMAIL_REQUIRED", "message": "Чтобы получить чек на почту, укажите email."})
+        raise HTTPException(status_code=400, detail={"ok": False, "code": "RECEIPT_EMAIL_REQUIRED", "message": "Чтобы получить чек на почту, укажите адрес эл. почты."})
 
     metadata["receipt_email"] = str(receipt_email_state.get("email") or "") if has_receipt_email else ""
     metadata["receipt_email_collected_at"] = str(receipt_email_state.get("collected_at") or "") if has_receipt_email else ""
@@ -1369,7 +1421,7 @@ async def api_payments_yookassa_status(
     async with httpx.AsyncClient(timeout=20.0, auth=(s.YOOKASSA_SHOP_ID, s.YOOKASSA_SECRET_KEY)) as client:
         resp = await client.get(f"https://api.yookassa.ru/v3/payments/{pid}")
     if resp.status_code >= 400:
-        raise HTTPException(status_code=502, detail=f"YooKassa status error: {resp.text[:300]}")
+        raise HTTPException(status_code=502, detail="Не удалось получить статус оплаты. Попробуйте ещё раз.")
     payment = resp.json()
     metadata = payment.get("metadata") or {}
     if str(metadata.get("project_key") or "") != s.PROJECT_KEY:
@@ -1595,7 +1647,7 @@ async def api_admin_import_purchase_urls(
 @app.get('/api/integrations/supplements')
 async def api_supplement_overlap(x_telegram_init_data: str = Header(default='',alias='X-Telegram-Init-Data')):
     uid=await _auth_user_id(x_telegram_init_data)
-    if not await _premium_guard(uid):raise HTTPException(402,'Нужен доступ Supply')
+    if not await _premium_guard(uid):raise HTTPException(402,'Нужен доступ к разделу «БАДы»')
     import supplement_overlap as overlap
     conn=await db.connect(s.DB_PATH)
     try:return await overlap.check(conn,uid)
@@ -1604,7 +1656,7 @@ async def api_supplement_overlap(x_telegram_init_data: str = Header(default='',a
 @app.post('/api/integrations/supplements')
 async def api_supplement_composition(body:dict,x_telegram_init_data: str = Header(default='',alias='X-Telegram-Init-Data')):
     uid=await _auth_user_id(x_telegram_init_data)
-    if not await _premium_guard(uid):raise HTTPException(402,'Нужен доступ Supply')
+    if not await _premium_guard(uid):raise HTTPException(402,'Нужен доступ к разделу «БАДы»')
     if set(body)!={'supplement_id','entries','revision'} or type(body['supplement_id']) is not int:raise HTTPException(422,'Проверьте состав')
     import supplement_overlap as overlap
     conn=await db.connect(s.DB_PATH)
@@ -1615,7 +1667,7 @@ async def api_supplement_composition(body:dict,x_telegram_init_data: str = Heade
 @app.get('/api/integrations/meal-anchors')
 async def api_meal_anchors(x_telegram_init_data: str = Header(default='',alias='X-Telegram-Init-Data')):
     uid=await _auth_user_id(x_telegram_init_data)
-    if not await _premium_guard(uid):raise HTTPException(402,'Нужен доступ Supply')
+    if not await _premium_guard(uid):raise HTTPException(402,'Нужен доступ к разделу «БАДы»')
     import meal_anchors
     conn=await db.connect(s.DB_PATH)
     try:
@@ -1639,7 +1691,7 @@ async def api_timezone_preview(body:dict,x_telegram_init_data: str = Header(defa
 @app.post('/api/integrations/meal-anchors')
 async def api_meal_anchor_save(body:dict,x_telegram_init_data: str = Header(default='',alias='X-Telegram-Init-Data')):
     uid=await _auth_user_id(x_telegram_init_data)
-    if not await _premium_guard(uid):raise HTTPException(402,'Нужен доступ Supply')
+    if not await _premium_guard(uid):raise HTTPException(402,'Нужен доступ к разделу «БАДы»')
     if set(body)!={'supplement_id','time','enabled'} or type(body['supplement_id']) is not int:raise HTTPException(422,'Проверьте выбранный приём')
     import meal_anchors
     conn=await db.connect(s.DB_PATH)
@@ -2142,7 +2194,7 @@ async def api_profile_labs_explain(body: dict = Body(default={}), x_telegram_ini
     if not await _premium_guard(uid):
         raise HTTPException(status_code=402, detail="PREMIUM_REQUIRED")
     if body.get("allow_ai") is not True:
-        raise HTTPException(status_code=400, detail="Нужно разрешение на передачу истории в OpenAI")
+        raise HTTPException(status_code=400, detail="Нужно разрешение на передачу истории в сервис ИИ (OpenAI)")
     conn = await db.connect(s.DB_PATH)
     try:
         async with db.transaction(conn) as tx:
@@ -2155,7 +2207,7 @@ async def api_profile_labs_explain(body: dict = Body(default={}), x_telegram_ini
             if cached and cached["input_hash"] == fingerprint and cached["status"] == "done":
                 return JSONResponse({"ok": True, "cached": True})
             if not s.OPENAI_API_KEY:
-                raise HTTPException(status_code=503, detail="OpenAI пока не подключён")
+                raise HTTPException(status_code=503, detail="ИИ пока не подключён")
             if len(json.dumps(snapshot, ensure_ascii=False)) > 60000:
                 raise HTTPException(status_code=400, detail="История слишком большая для одного пояснения. Все результаты доступны в разделе динамики")
             active = await db.find_active_assistant_job(tx, uid, "lab_explain")
@@ -2353,7 +2405,7 @@ async def api_profile_labs_recognize(report_id: int, body: LabRecognizeBody, x_t
     if not await _premium_guard(uid):
         raise HTTPException(status_code=402, detail="PREMIUM_REQUIRED")
     if not body.allow_ai:
-        raise HTTPException(status_code=400, detail="Нужно разрешение на отправку документа в OpenAI")
+        raise HTTPException(status_code=400, detail="Нужно разрешение на отправку документа в сервис ИИ (OpenAI)")
     if not s.OPENAI_API_KEY:
         raise HTTPException(status_code=503, detail="ИИ-распознавание пока не настроено")
     try:
@@ -3769,7 +3821,7 @@ async def api_checkin(body: CheckinBody, x_telegram_init_data: str = Header(defa
                 {
                     "ok": False,
                     "code": "CHECKIN_LIMIT_REACHED",
-                    "message": "Daily limit reached for this target date",
+                    "message": "Лимит на этот день уже исчерпан",
                     "checkin": {
                         "id": int(existing.get("id") or 0),
                         "answers": existing_answers,
@@ -3923,7 +3975,7 @@ async def api_checkin_apply(body: CheckinApplyBody, x_telegram_init_data: str = 
                     {
                         "ok": False,
                         "code": "UNSUPPORTED_LOCAL_DATE",
-                        "message": "Only today's or tomorrow's local date is supported for applying recommendations",
+                        "message": "Рекомендации можно применить только на сегодня или на завтра",
                     },
                     status_code=400,
                 )
@@ -4021,7 +4073,7 @@ async def api_recommendations_apply_all(body: RecommendationsApplyBody, x_telegr
             local_date = _normalize_local_date(body.local_date)
             if body.local_date is not None and str(body.local_date).strip() and not local_date:
                 return JSONResponse(
-                    {"ok": False, "code": "INVALID_LOCAL_DATE", "error": "local_date must be in YYYY-MM-DD format"},
+                    {"ok": False, "code": "INVALID_LOCAL_DATE", "error": "Дата должна быть в формате ГГГГ-ММ-ДД"},
                     status_code=400,
                 )
             if not local_date:
@@ -4032,7 +4084,7 @@ async def api_recommendations_apply_all(body: RecommendationsApplyBody, x_telegr
                     {
                         "ok": False,
                         "code": "UNSUPPORTED_LOCAL_DATE",
-                        "message": "Only today's or tomorrow's local date is supported for applying recommendations",
+                        "message": "Рекомендации можно применить только на сегодня или на завтра",
                     },
                     status_code=400,
                 )

@@ -5,7 +5,7 @@
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
   <meta name="robots" content="noindex" />
-  <title>ГУДы БАДы WebApp</title>
+  <title>ГУДы БАДы</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <script>try{var d=document.documentElement,l=localStorage;if(l.getItem('progressor.ui')==='2')d.dataset.pgUi='2';var t=l.getItem('progressor.theme');if(t)d.dataset.pgTheme=t;var s=l.getItem('progressor.scheme');if(s)d.dataset.pgScheme=s;}catch(e){}</script>
   <style>
@@ -1530,12 +1530,36 @@
     return !!liveInitData;
   }
 
+  const RU_ERROR_CODES = {
+    UNAUTHORIZED: "Сессия истекла. Закройте и снова откройте приложение в Telegram.",
+    FORBIDDEN: "Нет доступа",
+    PERMISSION_DENIED: "Недостаточно прав",
+    ADMIN_REQUIRED: "Недостаточно прав",
+    PREMIUM_REQUIRED: "Нужен Премиум",
+    PAID_PREMIUM_REQUIRED: "Нужен оплаченный Премиум",
+    BANNED: "Доступ ограничен",
+    NOT_FOUND: "Не найдено",
+    VALIDATION: "Проверьте введённые данные",
+    AI_UNAVAILABLE: "ИИ временно недоступен",
+    OPENAI_DISABLED: "ИИ временно недоступен",
+    REQUEST_TIMEOUT: "Сервер долго не отвечает. Попробуйте ещё раз.",
+    HTTP_ERROR: "Не удалось выполнить действие. Попробуйте ещё раз."
+  };
+  // Error codes stay in Error.message for program checks; only the visible text is translated.
+  function ruErrorText(text) {
+    const value = String(text ?? "");
+    if (RU_ERROR_CODES[value]) return RU_ERROR_CODES[value];
+    const http = /^HTTP_(\d{3})$/.exec(value);
+    if (http) return `Ошибка сервера (код ${http[1]}). Попробуйте ещё раз.`;
+    if (/^[A-Z][A-Z0-9_]{2,}$/.test(value)) return "Не удалось выполнить действие. Попробуйте ещё раз.";
+    return value;
+  }
   function showToast(text) {
     const wrap = document.getElementById("toastWrap");
     if (!wrap) return;
     const toast = document.createElement("div");
     toast.className = "toast fade";
-    toast.textContent = String(text ?? "");
+    toast.textContent = ruErrorText(text);
     wrap.replaceChildren(toast);
     clearTimeout(state.toastTimer);
     state.toastTimer = setTimeout(() => { wrap.replaceChildren(); }, 2200);
@@ -1557,7 +1581,7 @@
     const value = String((inputEl?.value || state.payment.emailInput || '')).trim().toLowerCase();
     state.payment.emailInput = value;
     if (!isValidEmail(value)) {
-      state.payment.emailError = 'Введите корректный email.';
+      state.payment.emailError = 'Введите корректный адрес эл. почты.';
       showToast(state.payment.emailError);
       return;
     }
@@ -1567,9 +1591,9 @@
       const res = await api('api/receipt-email', { method: 'POST', body: { email: value } });
       state.payment.receiptEmail = { ...(state.payment.receiptEmail || {}), email: res.email, status: 'provided', collected_at: res.collected_at, has_email: true };
       state.payment.emailInput = String(res.email || '');
-      showToast('Email для чека сохранён');
+      showToast('Почта для чека сохранена');
     } catch (e) {
-      state.payment.emailError = 'Не удалось сохранить email.';
+      state.payment.emailError = 'Не удалось сохранить эл. почту.';
     } finally {
       state.payment.savingEmail = false;
       if (planId) renderPaymentScreen(planId);
@@ -1769,11 +1793,11 @@
     const me = state.me || {};
     if (me.premium) {
       const until = String(me.premium_until_utc || '').slice(0, 10);
-      return until ? `Premium до ${until}` : 'Premium активен';
+      return until ? `Премиум до ${until}` : 'Премиум активен';
     }
     if (me.starter_trial_active) {
       const until = String(me.starter_trial_until_utc || '').slice(0, 10);
-      return until ? `Starter до ${until}` : 'Starter активен';
+      return until ? `Стартовый доступ до ${until}` : 'Стартовый доступ активен';
     }
     return 'Без активной подписки';
   }
@@ -1790,7 +1814,7 @@
     const opts = (options && typeof options === "object") ? options : {};
     const rawUsername = String(state.me?.bot_username || "").trim().replace(/^@+/, "");
     if (!rawUsername) {
-      showToast("Не удалось открыть бота: username не настроен");
+      showToast("Не удалось открыть бота: не настроено имя бота");
       return;
     }
     const payload = target === "starter_offer" ? "webapp_starter_gift" : "webapp_onboarding";
@@ -1924,7 +1948,7 @@
       throw new Error("UNAUTHORIZED");
     }
     if (res.status === 402) {
-      showToast("Требуется Premium");
+      showToast("Нужен Премиум");
       throw new Error("PREMIUM_REQUIRED");
     }
     if (res.status === 403) {
@@ -1953,8 +1977,8 @@
     const fromStarter = Boolean(info.started_from_starter);
     const carriedStarterDays = Number(info.carried_starter_days || 0);
     const carryoverNote = fromStarter
-      ? `Оставшиеся дни Starter добавлены к сроку Premium${carriedStarterDays > 0 ? ` (≈ ${Math.ceil(carriedStarterDays)} дн.)` : ''}.`
-      : 'Доступ к Premium открыт сразу после оплаты.';
+      ? `Оставшиеся дни стартового доступа добавлены к сроку Премиума${carriedStarterDays > 0 ? ` (≈ ${Math.ceil(carriedStarterDays)} дн.)` : ''}.`
+      : 'Доступ к Премиуму открыт сразу после оплаты.';
     return `
       <div class="payment-success-overlay" data-payment-success-overlay>
         <section class="payment-success-card">
@@ -2335,7 +2359,7 @@
     const starterGiftHint = hasUnusedStarterGift() ? `
       <div class="card gift-reminder-card" style="margin-top:10px; padding:12px;">
         <div><strong>🎁 У вас есть неиспользованный подарок в боте</strong></div>
-        <div class="muted" style="margin-top:6px">Активируйте Starter-пак на 3 дня в боте — и получите полный доступ к WebApp без оплаты на время пробного периода.</div>
+        <div class="muted" style="margin-top:6px">Активируйте стартовый пакет на 3 дня в боте — и получите полный доступ к приложению без оплаты на время пробного периода.</div>
         <div class="gift-reminder-row" style="margin-top:10px;">
           <button class="btn" type="button" data-open-bot-start data-bot-target="starter_offer" data-close-webapp="1">Перейти в бота</button>
         </div>
@@ -2379,12 +2403,12 @@
         <div class="card fade" style="margin-top:16px;">
           <h2 style="margin:0 0 6px">Рады вас видеть 💙</h2>
           <div class="muted">
-            Чтобы открыть WebApp, сначала завершите первичное знакомство в боте.
-            Там же вас ждёт подарок — Starter-пак на 3 дня с полным доступом.
+            Чтобы открыть приложение, сначала завершите первичное знакомство в боте.
+            Там же вас ждёт подарок — стартовый пакет на 3 дня с полным доступом.
           </div>
           <div class="card gift-reminder-card" style="margin-top:12px; padding:12px;">
             <div><strong>Сначала зайдите в бота и нажмите «Старт»</strong></div>
-            <div class="muted" style="margin-top:6px">После этого продолжите короткий стартовый сценарий. Как только дойдёте до предложения Starter-пака, этот экран исчезнет.</div>
+            <div class="muted" style="margin-top:6px">После этого продолжите короткий стартовый сценарий. Как только дойдёте до предложения стартового пакета, этот экран исчезнет.</div>
           </div>
           <div style="margin-top:12px; display:grid; gap:10px;">
             <button class="btn" type="button" data-open-bot-start data-close-webapp="1" style="min-height:52px; font-size:16px;">Перейти в бота и начать</button>
@@ -2485,8 +2509,8 @@
       renderPaymentScreen(data.plan_id || planId);
     } catch (e) {
       if (e?.code === 'RECEIPT_EMAIL_REQUIRED') {
-        state.payment.emailError = 'Чтобы получить чек на почту, сначала укажите email.';
-        showToast('Добавьте email для чека');
+        state.payment.emailError = 'Чтобы получить чек на почту, сначала укажите адрес эл. почты.';
+        showToast('Добавьте эл. почту для чека');
         renderPaymentScreen(planId);
       } else {
         showToast(e?.httpStatus ? e.message : "Не удалось подготовить платёж. Попробуйте ещё раз.");
@@ -2555,15 +2579,15 @@
     const nextHtml = `
       <div class="main-content">
         <div class="card fade">
-          <h2 style="margin:0 0 8px">Оплата Premium</h2>
+          <h2 style="margin:0 0 8px">Оплата Премиума</h2>
           <div class="muted">Тариф: <b>${esc(planNameRu(planId, meta?.months))}</b> · ${priceRub.toFixed(2)} ₽</div>
           <ul class="muted" style="margin-top:10px; padding-left:18px;">
-            <li>постоянный доступ к WebApp</li>
-            <li>AI check-in</li>
+            <li>постоянный доступ к приложению</li>
+            <li>ИИ-чек-ин</li>
             <li>удобный ежедневный трекинг</li>
-            <li>карта / today / настройка стека / напоминания</li>
+            <li>карта / «Сегодня» / настройка стека / напоминания</li>
           </ul>
-          <div class="muted" style="margin-top:10px">RUB-оплата откроется на безопасной внешней странице YooKassa во внешнем браузере.</div>
+          <div class="muted" style="margin-top:10px">Оплата в рублях откроется на безопасной внешней странице ЮKassa во внешнем браузере.</div>
           <label style="display:flex; align-items:flex-start; gap:8px; margin-top:10px; cursor:pointer;">
             <input id="receiptWantedCheckbox" type="checkbox" ${wantsReceipt ? 'checked' : ''} ${state.payment.savingReceiptPref ? 'disabled' : ''} style="margin-top:2px;" />
             <span class="muted" style="line-height:1.35">Хочу получить чек на почту</span>
@@ -2571,8 +2595,8 @@
           ${wantsReceipt ? `<div class="card" style="margin-top:12px; padding:12px; border:1px solid var(--line);">
             <div><b>Email для чека</b></div>
             ${hasReceiptEmail ? `<div class="muted" style="margin-top:6px">Сохранён: <code>${esc(receiptEmail)}</code></div>
-              <button class="btn secondary" id="changeReceiptEmailBtn" style="margin-top:8px">Изменить email</button>` : `
-              <div class="muted" style="margin-top:6px">Чтобы получить чек на почту, укажите email.</div>
+              <button class="btn secondary" id="changeReceiptEmailBtn" style="margin-top:8px">Изменить почту</button>` : `
+              <div class="muted" style="margin-top:6px">Чтобы получить чек на почту, укажите адрес эл. почты.</div>
               <div class="row" style="margin-top:8px; gap:8px; flex-wrap:wrap; align-items:center;">
                 <input id="receiptEmailInput" type="email" placeholder="example@mail.com" value="${esc(state.payment.emailInput || '')}" class="${activeStep === 'email' ? 'input-cta-active' : ''}" style="flex:1; min-width:220px; padding:10px; border-radius:10px; border:1px solid var(--accent); background:var(--bg-soft); color:var(--text); box-shadow:0 0 0 1px rgba(125,183,255,0.25);" />
                 <button class="btn secondary ${activeStep === 'email' ? 'cta-active' : ''}" id="saveReceiptEmailBtn" ${state.payment.savingEmail ? 'disabled' : ''}>${state.payment.savingEmail ? 'Сохранение…' : 'Сохранить email'}</button>
@@ -3131,7 +3155,7 @@
       binder = bindSurveyEvents;
     }
     const giftReminder = hasUnusedStarterGift()
-      ? `<section class="card gift-reminder-card fade"><div class="gift-reminder-row"><div><strong>🎁 У вас есть неиспользованный подарок в боте</strong><div class="muted" style="margin-top:4px">Активируйте Starter-пак на 3 дня — это можно сделать прямо в боте.</div></div><button class="btn secondary" type="button" data-open-bot-start data-bot-target="starter_offer" data-close-webapp="1">Открыть бота</button></div></section>`
+      ? `<section class="card gift-reminder-card fade"><div class="gift-reminder-row"><div><strong>🎁 У вас есть неиспользованный подарок в боте</strong><div class="muted" style="margin-top:4px">Активируйте стартовый пакет на 3 дня — это можно сделать прямо в боте.</div></div><button class="btn secondary" type="button" data-open-bot-start data-bot-target="starter_offer" data-close-webapp="1">Открыть бота</button></div></section>`
       : "";
     if (giftReminder) nextHtml = `${giftReminder}${nextHtml}`;
     renderTopbarActions();
@@ -3451,8 +3475,8 @@
       const processing = sv.processingStatus === 'processing';
       const nativeRetry = !processing && sv.answerSource === 'bot';
       const title = processing ? 'Расчёт ещё идёт' : 'Не удалось завершить расчёт';
-      const text = processing ? 'Ответы сохранены. Повторный запрос не запускается — можно обновить результат.' : nativeRetry ? 'Ответы сохранены в боте Supply. Продолжите расчёт в том же чате.' : 'Ответы сохранены. Можно повторить расчёт с этими же ответами; повтор ограничен общим лимитом попыток.';
-      const retry = !processing && !nativeRetry ? `<button class="btn" id="surveyRetry" ${sv.reading || sv.readError ? 'disabled' : ''}>Повторить с сохранёнными ответами</button>` : nativeRetry && sv.retryInBotUrl ? `<a class="btn" href="${esc(sv.retryInBotUrl)}" target="_blank" rel="noopener">Открыть бот Supply</a>` : '';
+      const text = processing ? 'Ответы сохранены. Повторный запрос не запускается — можно обновить результат.' : nativeRetry ? 'Ответы сохранены в боте «БАДы». Продолжите расчёт в том же чате.' : 'Ответы сохранены. Можно повторить расчёт с этими же ответами; повтор ограничен общим лимитом попыток.';
+      const retry = !processing && !nativeRetry ? `<button class="btn" id="surveyRetry" ${sv.reading || sv.readError ? 'disabled' : ''}>Повторить с сохранёнными ответами</button>` : nativeRetry && sv.retryInBotUrl ? `<a class="btn" href="${esc(sv.retryInBotUrl)}" target="_blank" rel="noopener">Открыть бот «БАДы»</a>` : '';
       return `${dateNotice}<div class="card survey-card" role="status"><h3>${title}</h3><p>${text}</p><div class="segmented"><button class="seg-btn ${sv.target==='today'?'active':''}" data-set-target="today">Сегодня</button><button class="seg-btn ${sv.target==='tomorrow'?'active':''}" data-set-target="tomorrow">Завтра</button></div><div class="survey-actions">${retry}<button class="btn secondary" id="surveyRefresh" ${sv.refreshing ? 'disabled' : ''}>${sv.refreshing ? 'Обновляем…' : 'Обновить результат'}</button></div></div>`;
     }
     const appliedItems = Array.isArray(sv.appliedNotice?.items) ? sv.appliedNotice.items : [];
@@ -4507,11 +4531,11 @@
     ];
     if (!kind) return '';
     return `<div class="sheet-backdrop" data-bulk-close></div><aside class="sheet fade">
-      <div class="row"><strong>${titles[kind] || 'Bulk'}</strong><button class="btn secondary" data-bulk-close>Закрыть</button></div>
+      <div class="row"><strong>${titles[kind] || 'Массовое изменение'}</strong><button class="btn secondary" data-bulk-close>Закрыть</button></div>
       ${kind==='token' ? `<div style="margin-top:10px"><select id="bulkTokenField" class="select">${tokenFields.map((f)=>`<option value="${f.key}">${f.label}</option>`).join('')}</select></div><div style="margin-top:8px"><input id="bulkTokenValue" class="input" placeholder="Например: brain"/></div><div class="row" style="margin-top:8px"><button class="btn" data-bulk-action="token_add">Добавить</button><button class="btn secondary" data-bulk-action="token_remove">Удалить</button></div>` : ''}
-      ${kind==='evidence' ? `<div style="margin-top:10px"><select id="bulkEvidence" class="select">${['A','B','C','D'].map((v)=>`<option value="${v}">${v}</option>`).join('')}</select></div><div class="row" style="margin-top:8px"><button class="btn" data-bulk-action="set_evidence">Preview</button></div>` : ''}
-      ${kind==='confidence' ? `<div style="margin-top:10px"><select id="bulkConfidence" class="select">${['High','Medium','Low','Unknown'].map((v)=>`<option value="${v}">${v}</option>`).join('')}</select></div><div class="row" style="margin-top:8px"><button class="btn" data-bulk-action="set_confidence">Preview</button></div>` : ''}
-      ${kind==='purchase' ? `<div style="margin-top:10px"><input id="bulkTemplate" class="input" value="https://shop.example.com/search?q={slug}"/></div><div class="row" style="margin-top:8px"><button class="btn" data-bulk-action="purchase_template">Preview</button><button class="btn secondary" data-bulk-action="purchase_clear">Очистить ссылки</button></div>` : ''}
+      ${kind==='evidence' ? `<div style="margin-top:10px"><select id="bulkEvidence" class="select">${['A','B','C','D'].map((v)=>`<option value="${v}">${v}</option>`).join('')}</select></div><div class="row" style="margin-top:8px"><button class="btn" data-bulk-action="set_evidence">Предпросмотр</button></div>` : ''}
+      ${kind==='confidence' ? `<div style="margin-top:10px"><select id="bulkConfidence" class="select">${['High','Medium','Low','Unknown'].map((v)=>`<option value="${v}">${({High:'Высокая',Medium:'Средняя',Low:'Низкая',Unknown:'Неизвестно'})[v]}</option>`).join('')}</select></div><div class="row" style="margin-top:8px"><button class="btn" data-bulk-action="set_confidence">Предпросмотр</button></div>` : ''}
+      ${kind==='purchase' ? `<div style="margin-top:10px"><input id="bulkTemplate" class="input" value="https://shop.example.com/search?q={slug}"/></div><div class="row" style="margin-top:8px"><button class="btn" data-bulk-action="purchase_template">Предпросмотр</button><button class="btn secondary" data-bulk-action="purchase_clear">Очистить ссылки</button></div>` : ''}
     </aside>`;
   }
 
@@ -4553,7 +4577,7 @@
       ${perms.content_edit ? `<div class="card fade admin-toolbar">
         <div class="row"><strong>Редактор добавок</strong><span class="muted" id="adminResultCount">${a.total} найдено</span></div>
         <div style="display:flex; gap:8px; margin-top:8px;">
-          <input id="adminSearch" class="input" placeholder="Поиск по slug / названию" value="${esc(a.q)}" />
+          <input id="adminSearch" class="input" placeholder="Поиск по коду или названию" value="${esc(a.q)}" />
           ${perms.content_bulk ? `<button class="btn secondary" id="adminSelectionToggle">${a.selectionMode ? 'Готово' : 'Выбор'}</button>` : ''}
         </div>
         <div class="row" style="margin-top:8px">
@@ -4840,7 +4864,7 @@ function adminField(label, field, value, kind='input') {
       renderActiveTab();
     } catch (e) {
       if (e.message === 'PERMISSION_DENIED') { state.me.role = "none"; state.me.perms = {}; state.activeTab = 'today'; renderMainApp(); renderActiveTab(); showToast('нет прав'); return; }
-      showToast('Ошибка preview');
+      showToast('Ошибка предпросмотра');
     }
   }
 
@@ -4852,7 +4876,7 @@ function adminField(label, field, value, kind='input') {
     document.getElementById('adminUserDeleteConfirm')?.addEventListener('input', (e)=>{ state.admin.userDeleteConfirm = e.target.value; });
     document.getElementById('adminUserFind')?.addEventListener('click', async ()=>{
       const raw = String(state.admin.userLookupId || '').trim();
-      if (!/^\d+$/.test(raw)) return showToast('Введите numeric tg_id');
+      if (!/^\d+$/.test(raw)) return showToast('Введите числовой Telegram ID');
       const version = ++adminUserLoadVersion;
       try {
         const res = await api(`./api/admin/user/${raw}`);
@@ -5111,8 +5135,8 @@ function adminField(label, field, value, kind='input') {
   }
 
   function renderBodyMap() {
-    if (state.loadingBodyMap && !state.bodyMap) return '<div class="card">Загружаем BodyMap...</div>';
-    if (!state.bodyMap) return '<div class="card">Нет данных BodyMap. Попробуйте открыть раздел позже — он обновляется автоматически.</div>';
+    if (state.loadingBodyMap && !state.bodyMap) return '<div class="card">Загружаем карту тела...</div>';
+    if (!state.bodyMap) return '<div class="card">Нет данных для карты тела. Попробуйте открыть раздел позже — он обновляется автоматически.</div>';
     return `
       <div class="row" style="margin-bottom:8px"><span class="muted">План на сегодня · ${Number(state.bodyMap.supplements_count || 0)} БАДов</span><button class="btn secondary survey-help-btn" type="button" aria-label="Как читать карту" data-bodymap-help-toggle>?</button></div>
       ${state.bodyMapHelpOpen ? `<div class="survey-help muted" style="margin-bottom:8px">Контур показывает баланс по системе: зелёный — пользы больше, жёлтый — баланс, красный — нагрузки больше. Оценка строится по вашим активным добавкам, их профилю и истории применения. Это навигатор, чтобы быстрее понять, что поддерживаете и где стоит пересобрать схему вместе с рекомендациями.</div>` : ''}
@@ -5195,7 +5219,7 @@ function adminField(label, field, value, kind='input') {
       const map = await api('./api/body_map');
       if (requestId === bodyMapRequestId) state.bodyMap = map;
     } catch (e) {
-      if (requestId === bodyMapRequestId && e.message !== 'PREMIUM_REQUIRED') showToast('Не удалось загрузить BodyMap');
+      if (requestId === bodyMapRequestId && e.message !== 'PREMIUM_REQUIRED') showToast('Не удалось загрузить карту тела');
     } finally {
       if (requestId === bodyMapRequestId) {
         state.loadingBodyMap = false;
@@ -5736,7 +5760,7 @@ function adminField(label, field, value, kind='input') {
       <label class="muted">Комментарий<textarea class="textarea" id="${type}Notes">${esc(draft.notes||'')}</textarea></label>
       ${type==='manual'?`<datalist id="labAnalyteNames">${analyteOptions()}</datalist><div id="manualRows">${(draft.results||[{}]).map(renderLabRowForMap).join('')}</div><button class="btn secondary" data-add-manual-row>+ Показатель</button><button class="btn" data-save-manual ${busy?'disabled':''}>${busy?'Сохраняем…':'Сохранить анализ'}</button>`:
       `<div class="muted">PDF, фото JPG/PNG/WEBP, DOCX, XLSX, CSV, TXT или JSON · до 12 МБ · до 20 страниц</div>
-      <label class="muted"><input type="checkbox" id="labAllowAi" ${draft.allow_ai?'checked':''}/> Разрешаю передать документ в OpenAI для распознавания, если обычного чтения недостаточно</label>
+      <label class="muted"><input type="checkbox" id="labAllowAi" ${draft.allow_ai?'checked':''}/> Разрешаю передать документ в сервис ИИ (OpenAI) для распознавания, если обычного чтения недостаточно</label>
       <div class="muted">После загрузки можно проверить и исправить каждый результат.</div><button class="btn" data-upload-labs ${busy?'disabled':''}>${busy?'Читаем документ…':'Загрузить документ'}</button>`}
       <div class="muted" role="status" data-lab-form-status>${esc(state.profileUi.labFormError||'')}</div></div></section></div>`;
   }
@@ -5791,9 +5815,9 @@ function adminField(label, field, value, kind='input') {
     return `<section class="card fade">
       <div class="row"><strong>🧪 Нутриентный помощник</strong></div>
       <div class="muted" style="margin-top:8px">Модуль доступен в интерфейсе для всех, чтобы было понятно, что он делает и где находится.</div>
-      <div class="muted" style="margin-top:6px">Для запуска персональных расчётов нужен Premium.</div>
+      <div class="muted" style="margin-top:6px">Для запуска персональных расчётов нужен Премиум.</div>
       ${priceHint ? `<div class="muted" style="margin-top:6px">Тарифы: ${esc(priceHint)}</div>` : ''}
-      <div class="row" style="margin-top:10px"><button class="btn" data-assistant-open-premium>Открыть Premium</button></div>
+      <div class="row" style="margin-top:10px"><button class="btn" data-assistant-open-premium>Открыть Премиум</button></div>
     </section>`;
   }
 
@@ -5836,7 +5860,7 @@ function adminField(label, field, value, kind='input') {
       ${unseenCount ? `<div style="margin-top:8px"><button class="btn secondary" data-ach-open-new>🔴 Показать новое (${unseenCount})</button></div>` : ''}
       <div class="ios-group" style="margin-top:10px">
         <details ${achNextExpanded ? 'open' : ''} data-ach-next-details><summary><span>🎯 Дальше по плану</span><span class="ios-arrow">▾</span></summary><div class="ios-content">${next.length ? next.map((item)=>`<div class="ach-item"><div><strong>${esc(item.title_ru || '')}</strong></div><div class="muted">Прогресс: ${Math.max(0, Math.min(100, Number(item.pct || 0)))}%</div>${item.hint_ru ? `<div class="muted">${esc(item.hint_ru)}</div>` : ''}</div>`).join('') : '<div class="muted">Сейчас нет актуальных шагов.</div>'}</div></details>
-        <details ${achRecentExpanded ? 'open' : ''} data-ach-recent-details><summary><span>🕒 Последние открытия</span><span class="ios-arrow">▾</span></summary><div class="ios-content">${recent.length ? recent.slice(0,8).map((item)=>`<div class="ach-item"><div><strong>${esc(item.title_ru || '')}</strong>${item.is_unseen ? '<span class="new-pill">NEW</span>' : ''}</div><div class="muted">${esc(formatUtcShort(item.unlocked_at_utc || ''))}</div><div class="muted">${esc(item.desc_ru || 'Описание появится позже')}</div>${Array.isArray(item.reward_verbose) && item.reward_verbose.length ? `<div class="muted" style="margin-top:4px">Награда: ${esc(item.reward_verbose.join(' · '))}</div>` : ''}</div>`).join('') : '<div class="muted">Пока нет новых открытий.</div>'}</div></details>
+        <details ${achRecentExpanded ? 'open' : ''} data-ach-recent-details><summary><span>🕒 Последние открытия</span><span class="ios-arrow">▾</span></summary><div class="ios-content">${recent.length ? recent.slice(0,8).map((item)=>`<div class="ach-item"><div><strong>${esc(item.title_ru || '')}</strong>${item.is_unseen ? '<span class="new-pill">НОВОЕ</span>' : ''}</div><div class="muted">${esc(formatUtcShort(item.unlocked_at_utc || ''))}</div><div class="muted">${esc(item.desc_ru || 'Описание появится позже')}</div>${Array.isArray(item.reward_verbose) && item.reward_verbose.length ? `<div class="muted" style="margin-top:4px">Награда: ${esc(item.reward_verbose.join(' · '))}</div>` : ''}</div>`).join('') : '<div class="muted">Пока нет новых открытий.</div>'}</div></details>
         <details ${achAllExpanded ? 'open' : ''} data-ach-all-details><summary><span>🏅 Все достижения</span><span class="ios-arrow">▾</span></summary><div class="ios-content"><div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap;">${filterBtn('all','Все')}${filterBtn('unlocked','Открытые')}${filterBtn('locked','Закрытые')}${filterBtn('new','Новые')}</div><div style="margin-top:8px"><input class="input" id="achSearch" placeholder="Поиск по названию или описанию" value="${esc(state.ui?.achQuery || "")}" /></div>${groupedHtml || '<div class="muted" style="margin-top:10px">Ничего не найдено.</div>'}</div></details>
       </div></section>`;
   }
@@ -6034,7 +6058,7 @@ function adminField(label, field, value, kind='input') {
 
   function renderAssistantBasisLabs(labs = []) {
     if (!Array.isArray(labs) || !labs.length) return '<div class="muted">Нет анализов в базе расчёта</div>';
-    return labs.map((l)=>`<div class="item-row" style="display:block"><div><strong>${esc(l.canonical_analyte_name_ru || l.analyte_name_ru || l.analyte_code || 'Показатель')}</strong></div><div class="muted">${esc(l.value || '—')} ${esc(l.unit || '')} · реф: ${esc(l.ref_low ?? '—')}–${esc(l.ref_high ?? '—')}</div><div class="muted">Статус до LLM: ${esc(assistantInterpretationRu(l.interpreted_status_pre_llm))} · источник: ${esc(assistantReferenceSourceRu(l.reference_source))}</div></div>`).join('');
+    return labs.map((l)=>`<div class="item-row" style="display:block"><div><strong>${esc(l.canonical_analyte_name_ru || l.analyte_name_ru || l.analyte_code || 'Показатель')}</strong></div><div class="muted">${esc(l.value || '—')} ${esc(l.unit || '')} · реф: ${esc(l.ref_low ?? '—')}–${esc(l.ref_high ?? '—')}</div><div class="muted">Статус до ИИ: ${esc(assistantInterpretationRu(l.interpreted_status_pre_llm))} · источник: ${esc(assistantReferenceSourceRu(l.reference_source))}</div></div>`).join('');
   }
 
   function renderMyNutrientsModal() {
@@ -6231,7 +6255,7 @@ function adminField(label, field, value, kind='input') {
       ${(summary.series||[]).length?renderLabExplanation(summary):''}
       <section class="card fade"><h3>Приём между анализами</h3><div class="muted">${summary.interval?.from?`${esc(summary.interval.from)} — ${esc(summary.interval.to)} · после первого анализа`:'По вашим отметкам'}</div>${intakes||'<div class="muted">За этот период отметок приёма пока нет.</div>'}</section>
       ${summary.after_latest?.length?`<section class="card fade"><h3>После последнего анализа</h3>${summary.after_latest.map(item=>`<div class="lab-history-point"><strong>${esc(item.name)}</strong><div class="muted">${esc(item.first_day)} — ${esc(item.last_day)} · отмечен приём: ${item.taken_days} дн.</div>${Object.entries(item.doses||{}).map(([dose,days])=>`<div class="muted">${esc(dose)} · ${days} дн.</div>`).join('')}${item.unknown_dose_days?`<div class="muted">Доза не записана: ${item.unknown_dose_days} дн.</div>`:''}</div>`).join('')}</section>`:''}`:''}
-      ${view==='documents'||view==='history'?`<section class="card"><div class="muted">${summary.ai_configured?`Обращения к ИИ: ${summary.ai_used||0} из ${summary.ai_limit||20} за месяц`:'Таблицы и текст читаются без ИИ. Для распознавания фото администратору нужно подключить OpenAI.'}</div></section>`:''}${renderLabSelectionModal()}${renderLabAiConsentModal()}`;
+      ${view==='documents'||view==='history'?`<section class="card"><div class="muted">${summary.ai_configured?`Обращения к ИИ: ${summary.ai_used||0} из ${summary.ai_limit||20} за месяц`:'Таблицы и текст читаются без ИИ. Для распознавания фото администратору нужно подключить сервис ИИ.'}</div></section>`:''}${renderLabSelectionModal()}${renderLabAiConsentModal()}`;
   }
 
   function renderLabExplanation(summary) {
@@ -6250,9 +6274,9 @@ function adminField(label, field, value, kind='input') {
       <div class="field-grid">${items.map(item=>`<label class="muted">${esc(item.name)}${item.can_resume?`<div>Сохранённая доза: ${esc(item.current_dose||'не указана')}. История и настройки сохранятся.</div>`:''}<input class="input" data-lab-dose="${item.supplement_id}" ${item.can_resume?'disabled':''} maxlength="120" placeholder="Например, число и единица с упаковки" value="${esc(item.can_resume?item.current_dose:state.profileUi.labDoses?.[item.supplement_id]||'')}"/></label>${!item.can_resume?(item.last_intake?.doses||[]).map((dose,index)=>`<button type="button" class="btn secondary" data-lab-reuse-dose="${item.supplement_id}" data-dose-index="${index}">Повторить мою дозу: ${esc(dose)}</button>`).join(''):''}`).join('')}</div><button class="btn" data-lab-add-confirm ${state.profileUi.labAdding?'disabled':''}>${state.profileUi.labAdding?'Сохраняем…':state.profileUi.labResume?.length?'Возобновить с прежними настройками':'Добавить в мой список'}</button><div class="muted" role="status" data-lab-form-status>${esc(state.profileUi.labFormError||'')}</div></section></div>`;
   }
   function renderLabAiConsentModal() {
-    if(state.profileUi.labExplainOpen)return `<div class="modal-overlay" data-close-lab-ai><section class="card modal-card" onclick="event.stopPropagation()"><div class="row"><strong>Пояснить историю</strong><button class="btn secondary" data-close-lab-ai>Закрыть</button></div><div class="muted" style="margin-top:8px">В OpenAI будут переданы подтверждённые показатели, отметки приёма, записанные дозы и данные профиля. Пояснение сохранится; повторное открытие не требует нового запроса.</div><button class="btn" data-lab-explain-confirm>Разрешаю, получить пояснение</button><div class="muted" role="status" data-lab-form-status>${esc(state.profileUi.labFormError||'')}</div></section></div>`;
+    if(state.profileUi.labExplainOpen)return `<div class="modal-overlay" data-close-lab-ai><section class="card modal-card" onclick="event.stopPropagation()"><div class="row"><strong>Пояснить историю</strong><button class="btn secondary" data-close-lab-ai>Закрыть</button></div><div class="muted" style="margin-top:8px">В сервис ИИ (OpenAI) будут переданы подтверждённые показатели, отметки приёма, записанные дозы и данные профиля. Пояснение сохранится; повторное открытие не требует нового запроса.</div><button class="btn" data-lab-explain-confirm>Разрешаю, получить пояснение</button><div class="muted" role="status" data-lab-form-status>${esc(state.profileUi.labFormError||'')}</div></section></div>`;
     if(!state.profileUi.labRecognizeId)return '';
-    return `<div class="modal-overlay" data-close-lab-ai><section class="card modal-card" onclick="event.stopPropagation()"><div class="row"><strong>Распознать документ</strong><button class="btn secondary" data-close-lab-ai>Закрыть</button></div><div class="muted" style="margin-top:8px">Для распознавания этот документ будет отправлен в OpenAI. После обработки проверьте результаты; сохранённые данные заменяются только после вашего подтверждения.</div><button class="btn" data-lab-ai-confirm>Разрешаю, распознать</button><div class="muted" role="status" data-lab-form-status>${esc(state.profileUi.labFormError||'')}</div></section></div>`;
+    return `<div class="modal-overlay" data-close-lab-ai><section class="card modal-card" onclick="event.stopPropagation()"><div class="row"><strong>Распознать документ</strong><button class="btn secondary" data-close-lab-ai>Закрыть</button></div><div class="muted" style="margin-top:8px">Для распознавания этот документ будет отправлен в сервис ИИ (OpenAI). После обработки проверьте результаты; сохранённые данные заменяются только после вашего подтверждения.</div><button class="btn" data-lab-ai-confirm>Разрешаю, распознать</button><div class="muted" role="status" data-lab-form-status>${esc(state.profileUi.labFormError||'')}</div></section></div>`;
   }
 
   function renderProfile() {
@@ -7527,7 +7551,7 @@ function adminField(label, field, value, kind='input') {
               const next = item.status === "taken" ? "none" : "taken";
               return `<button type="button" class="item-row today-item-row ${isBlocked ? 'blocked' : ''}" data-item="${esc(item.supplement_id)}" data-next="${next}" ${isBlocked || todayActionBusy([item]) ? 'disabled' : ''}>
                 <span class="status-pill ${statusClass(isBlocked ? 'skipped' : item.status)}">${isBlocked ? 'Не пить' : statusText(item.status)}</span>
-                <span class="today-item-name">${esc(item.name || '')}${aiAdd ? '<span class="today-ai-pill">AI</span>' : ''}${isBlocked ? '<span class="today-ai-pill">AI: пауза</span>' : ''}</span>
+                <span class="today-item-name">${esc(item.name || '')}${aiAdd ? '<span class="today-ai-pill">ИИ</span>' : ''}${isBlocked ? '<span class="today-ai-pill">ИИ: пауза</span>' : ''}</span>
               </button>${isBlocked ? `<div class="muted" style="margin:4px 0 8px 12px">На сегодня предложено не пить от ИИ${item.blocked_reason ? `: ${esc(item.blocked_reason)}` : ''}</div>` : ''}`;
             }).join("")}
           </div>
@@ -7655,8 +7679,8 @@ function adminField(label, field, value, kind='input') {
     const accessHint = me.premium
       ? "Полный доступ активен."
       : (me.starter_trial_active
-          ? `Starter активен до ${String(me.starter_trial_until_utc || '').slice(0, 10) || '—'}.`
-          : "Оформи Premium, чтобы вернуть полный доступ к WebApp.");
+          ? `Стартовый доступ активен до ${String(me.starter_trial_until_utc || '').slice(0, 10) || '—'}.`
+          : "Оформи Премиум, чтобы вернуть полный доступ к приложению.");
     const ach = state.ach || {};
     const items = Array.isArray(ach.achievements) ? ach.achievements : [];
     const unlocked = items.filter((x) => x.unlocked);
@@ -7738,7 +7762,7 @@ function adminField(label, field, value, kind='input') {
           <div class="ach-grid">
             ${sorted.map((a)=>{
               const isNew = Boolean(a.unlocked && !String(a.seen_at_utc || "").trim());
-              return `<div class="ach-item ${a.unlocked ? "" : "locked"}"><div><strong>${a.unlocked ? (rarityIcon[a.rarity]||'⚪') : '🔒'} ${esc(a.title_ru)}</strong>${isNew ? '<span class="new-pill">NEW</span>' : ''}</div><div class="muted">${esc(a.desc_ru)}</div><div class="muted">${a.unlocked_at_utc ? 'Открыто: '+esc(a.unlocked_at_utc) : ''}</div><div style="margin-top:6px">${rewardChips(a.reward)}</div></div>`;
+              return `<div class="ach-item ${a.unlocked ? "" : "locked"}"><div><strong>${a.unlocked ? (rarityIcon[a.rarity]||'⚪') : '🔒'} ${esc(a.title_ru)}</strong>${isNew ? '<span class="new-pill">НОВОЕ</span>' : ''}</div><div class="muted">${esc(a.desc_ru)}</div><div class="muted">${a.unlocked_at_utc ? 'Открыто: '+esc(a.unlocked_at_utc) : ''}</div><div style="margin-top:6px">${rewardChips(a.reward)}</div></div>`;
             }).join('')}
           </div>
         </div>
@@ -7780,7 +7804,7 @@ function adminField(label, field, value, kind='input') {
                 <div class="muted" style="margin-top:8px"><b>Часовой пояс:</b> ${esc(state.settingsData?.tz_name || "UTC")}</div>
                 <div class="muted" style="margin-top:4px"><b>Доступ:</b> ${esc(accessLabel)}</div>
                 <div class="muted" style="margin-top:4px">${esc(accessHint)}</div>
-                <div class="muted" style="margin-top:4px">После подписки: постоянный доступ к WebApp, AI check-in и удобный ежедневный трекинг.</div>
+                <div class="muted" style="margin-top:4px">После подписки: постоянный доступ к приложению, ИИ-чек-ин и удобный ежедневный трекинг.</div>
                 <div class="muted" style="margin-top:6px">Документы: ${state.settingsData?.offer_url ? `<a href="${esc(state.settingsData.offer_url)}" target="_blank" rel="noopener noreferrer">Оферта</a>${state.settingsData?.offer_version ? ` (v${esc(state.settingsData.offer_version)})` : ''}` : 'Оферта недоступна'} · ${state.settingsData?.privacy_url ? `<a href="${esc(state.settingsData.privacy_url)}" target="_blank" rel="noopener noreferrer">Политика конфиденциальности</a>${state.settingsData?.privacy_version ? ` (v${esc(state.settingsData.privacy_version)})` : ''}` : 'Политика конфиденциальности недоступна'}</div>
               </div>
             </details>
@@ -7790,7 +7814,7 @@ function adminField(label, field, value, kind='input') {
               <summary><span>💳 Подписка</span><span class="ios-arrow">▾</span></summary>
               <div class="ios-content">
                 <div class="muted" style="margin-top:8px">${me.premium ? `Активна до ${esc(String(me.premium_until_utc || '').slice(0, 10) || '—')}` : 'Не активна'}</div>
-                <div class="muted" style="margin-top:6px">Преимущества: доступ к WebApp, AI check-in, удобный ежедневный трекинг, карта/today/настройка стека/напоминания.</div>
+                <div class="muted" style="margin-top:6px">Преимущества: доступ к приложению, ИИ-чек-ин, удобный ежедневный трекинг, карта/«Сегодня»/настройка стека/напоминания.</div>
                 <div class="muted" style="margin-top:8px">Рубли</div>
                 <div class="premium-plan-grid">
                   ${rubPlanTiles || '<div class="muted">Планы в рублях недоступны</div>'}
@@ -7845,7 +7869,7 @@ function adminField(label, field, value, kind='input') {
         <section class="card modal-card" data-settings-slot-id="${esc(slotEdit.slotId)}" onclick="event.stopPropagation()">
           <div class="row"><strong>Изменить время слота</strong><button class="btn secondary" type="button" data-slot-edit-close>Закрыть</button></div>
           <div class="field-grid" style="margin-top:10px">
-            <label class="muted">Новое время (HH:MM)
+            <label class="muted">Новое время (ЧЧ:ММ)
               <input class="input" id="settingsSlotTimeInput" type="time" value="${esc(slotEdit.time || '')}" />
             </label>
             <div class="row" style="justify-content:space-between;gap:8px">
@@ -7978,7 +8002,7 @@ function adminField(label, field, value, kind='input') {
       const input = document.getElementById('settingsSlotTimeInput');
       const time = normalizeHHMM(input?.value || '');
       if (!slotId || !time) {
-        showToast('Укажите время в формате HH:MM');
+        showToast('Укажите время в формате ЧЧ:ММ');
         return;
       }
       if (state.settingsUi.slotBusy[slotId]) return;
@@ -8035,10 +8059,10 @@ function adminField(label, field, value, kind='input') {
       if (state.settingsUi.addingSlot) return;
       const now = new Date();
       const defaultTime = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
-      const picked = prompt('Время нового слота (HH:MM)', defaultTime);
+      const picked = prompt('Время нового слота (ЧЧ:ММ)', defaultTime);
       const time = normalizeHHMM(picked || '');
       if (!time) {
-        if (picked != null) showToast('Введите время в формате HH:MM');
+        if (picked != null) showToast('Введите время в формате ЧЧ:ММ');
         return;
       }
       state.settingsUi.addingSlot = true;
@@ -8206,7 +8230,7 @@ function adminField(label, field, value, kind='input') {
     const time = hub.timeMode === 'custom' ? normalizeHHMM(hub.customTime) || null : null;
     const slotId = String(hub.slotId || 'morning');
     const doseText = hub.doseText || '', noteText = hub.noteText || '';
-    if (hub.timeMode === 'custom' && !time) { showToast('Введите время HH:MM'); return false; }
+    if (hub.timeMode === 'custom' && !time) { showToast('Введите время ЧЧ:ММ'); return false; }
     hub.saving = true;
     const save = async () => {
       try {

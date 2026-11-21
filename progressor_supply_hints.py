@@ -18,6 +18,6 @@ async def prepare(path,user_id):
         hint=data.get('inline_hint') or {}
         if hint.get('key') not in ('food_sources_iron.v1','food_sources_vitamin_b12.v1'):return None
         if not await asyncio.to_thread(reserve,path,user_id,hint['key']):return None
-        text='\nПо записанным блюдам Food: '+hint['message']+'\nОценка состава приблизительная; пропущенные блюда неизвестны. Это обзор пищевых источников, а не вывод о дефиците организма или назначение дозы.'
+        text='\nПо записанным блюдам: '+hint['message']+'\nОценка состава приблизительная; пропущенные блюда неизвестны. Это обзор пищевых источников, а не вывод о дефиците организма или назначение дозы.'
         return {'text':text[:1000],'catalog':('iron' if hint['key']=='food_sources_iron.v1' else 'b12') if hint.get('secondary_action') else None}
     except Exception:return None

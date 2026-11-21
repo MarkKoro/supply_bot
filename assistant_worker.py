@@ -29,7 +29,7 @@ async def process_lab_explanation_job(conn, job: dict, payload: dict) -> None:
     tg_user_id = int(job["tg_user_id"])
     settings = get_settings()
     if not settings.OPENAI_API_KEY:
-        raise ValueError("OpenAI пока не подключён")
+        raise ValueError("ИИ пока не подключён")
     async with db.transaction(conn) as tx:
         if not await db.assistant_lease_valid(tx, job):
             return

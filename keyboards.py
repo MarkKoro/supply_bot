@@ -526,7 +526,7 @@ def admin_hub_kb(*, perms: dict[str, bool] | None = None) -> InlineKeyboardMarku
     if perms.get("content_edit", False):
         rows.append([InlineKeyboardButton("🔎 Контент: найти БАД", callback_data="admin:supp_search")])
     if perms.get("content_bulk", False):
-        rows.append([InlineKeyboardButton("📦 Bulk операции", callback_data="admin:bulk_stub")])
+        rows.append([InlineKeyboardButton("📦 Массовые операции", callback_data="admin:bulk_stub")])
         rows.append([InlineKeyboardButton("➕ Дополнить базу", callback_data="admin:seed_patch")])
     if perms.get("users_view", False) or perms.get("users_ban", False):
         rows.append([InlineKeyboardButton("👤 Пользователи", callback_data="admin:users_stub")])
@@ -578,19 +578,19 @@ def admin_supp_card_kb(supplement_id: int, purchase_url: str) -> InlineKeyboardM
 
 def admin_supp_field_picker_kb(supplement_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("Название RU", callback_data=f"admin:supp_edit_field:{supplement_id}:name_ru")],
-        [InlineKeyboardButton("Название EN", callback_data=f"admin:supp_edit_field:{supplement_id}:name_en")],
+        [InlineKeyboardButton("Название (рус.)", callback_data=f"admin:supp_edit_field:{supplement_id}:name_ru")],
+        [InlineKeyboardButton("Название (англ.)", callback_data=f"admin:supp_edit_field:{supplement_id}:name_en")],
         [InlineKeyboardButton("Summary (verified)", callback_data=f"admin:supp_edit_field:{supplement_id}:summary_ru_verified")],
         [InlineKeyboardButton("Summary (theoretical)", callback_data=f"admin:supp_edit_field:{supplement_id}:summary_ru_theoretical")],
         [InlineKeyboardButton("Dose", callback_data=f"admin:supp_edit_field:{supplement_id}:dose_ru")],
         [InlineKeyboardButton("Timing", callback_data=f"admin:supp_edit_field:{supplement_id}:timing_ru")],
         [InlineKeyboardButton("Safety", callback_data=f"admin:supp_edit_field:{supplement_id}:safety_ru")],
-        [InlineKeyboardButton("Evidence grade", callback_data=f"admin:supp_edit_field:{supplement_id}:evidence_grade")],
+        [InlineKeyboardButton("Уровень доказательности", callback_data=f"admin:supp_edit_field:{supplement_id}:evidence_grade")],
         [InlineKeyboardButton("Confidence", callback_data=f"admin:supp_edit_field:{supplement_id}:confidence")],
         [InlineKeyboardButton("Tags", callback_data=f"admin:supp_edit_field:{supplement_id}:tags_json")],
         [InlineKeyboardButton("Targets", callback_data=f"admin:supp_edit_field:{supplement_id}:body_targets_json")],
         [InlineKeyboardButton("Burdens", callback_data=f"admin:supp_edit_field:{supplement_id}:body_burdens_json")],
-        [InlineKeyboardButton("Purchase URL", callback_data=f"admin:supp_edit_field:{supplement_id}:purchase_url")],
+        [InlineKeyboardButton("Ссылка на покупку", callback_data=f"admin:supp_edit_field:{supplement_id}:purchase_url")],
         [InlineKeyboardButton("⬅️ Назад", callback_data=f"admin:supp_open:{supplement_id}")],
     ])
 
@@ -1143,7 +1143,7 @@ def premium_webapp_checkout_kb(payment_url: str) -> InlineKeyboardMarkup:
     ])
 def premium_upsell_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("⭐ Купить Premium", callback_data="menu:premium")],
+        [InlineKeyboardButton("⭐ Купить Премиум", callback_data="menu:premium")],
         [InlineKeyboardButton("Progressor · 3 продукта", callback_data="pg:menu")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")],
     ])
@@ -1169,8 +1169,8 @@ def admin_paychecks_kb(*, index: int, total: int, filter_code: str, current_rece
     rows: list[list[InlineKeyboardButton]] = []
     filters = [
         ("Все", "all"),
-        ("Без email", "missing_email"),
-        ("С email", "has_email"),
+        ("Без почты", "missing_email"),
+        ("С почтой", "has_email"),
         ("Чек не отправлен", "receipt_pending"),
         ("Чек отправлен", "receipt_sent"),
         ("Хочет чека", "wants_receipt"),

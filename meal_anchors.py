@@ -19,7 +19,7 @@ async def get(conn,tg_id,sid):
     rows=await db.fetchall(conn,'SELECT time_local FROM progressor_meal_anchors WHERE user_id=? AND supplement_id=?',(tg_id,sid))
     on={r['time_local'] for r in rows}
     return {'supplement_id':sid,'slots':[{'time':t,'enabled':t in on} for t in times],
-      'note':'Если вы запишете еду в Food не раньше чем за 90 минут до выбранного приёма, напоминание придёт после записи. Если еды нет, она записана поздно или связь недоступна, остаётся обычное время. Повторного уведомления в этом слоте не будет. Выбранная доза сохраняется.'}
+      'note':'Если вы запишете еду в разделе «Еда» не раньше чем за 90 минут до выбранного приёма, напоминание придёт после записи. Если еды нет, она записана поздно или связь недоступна, остаётся обычное время. Повторного уведомления в этом слоте не будет. Выбранная доза сохраняется.'}
 
 async def save(conn,tg_id,sid,local_time,enabled):
     current=await get(conn,tg_id,sid)

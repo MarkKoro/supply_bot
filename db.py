@@ -10116,7 +10116,7 @@ async def build_goal_based_fallback_adds(
                 "action": "add",
                 "slug": str(row["slug"]),
                 "name_ru": str(row["name_ru"] or ""),
-                "reason": "Добавлено fallback по целям/запросу из чек-ина",
+                "reason": "Добавлено по целям и запросу из чек-ина (резервный подбор)",
                 "priority": 2,
                 "suggested_time": _normalize_hhmm(now_hhmm) or "12:00",
                 "suggested_slot_id": None,
@@ -10302,7 +10302,7 @@ async def run_diagnostics(conn: aiosqlite.Connection, apply: bool = False) -> di
             JOIN supplements s ON s.id=p.supplement_id WHERE COALESCE(s.is_active,1)=0""")
         if apply and disabled_rows:
             await conn.execute("DELETE FROM day_plan_items WHERE rowid IN (%s)" % ",".join(["?"]*len(disabled_rows)), tuple(int(r["rowid"]) for r in disabled_rows))
-        await push("DISABLED_SUPP_IN_PLAN", [dict(r) for r in disabled_rows], len(disabled_rows) if apply else 0, "Неактивные добавки убраны из day plan")
+        await push("DISABLED_SUPP_IN_PLAN", [dict(r) for r in disabled_rows], len(disabled_rows) if apply else 0, "Неактивные добавки убраны из плана на день")
 
         bad_time_rows = []
         manual_rows = []
@@ -10321,7 +10321,7 @@ async def run_diagnostics(conn: aiosqlite.Connection, apply: bool = False) -> di
                     manual_rows.append({"table": table, "rowid": int(r["rowid"]), "bad": str(r["t"])})
                     if apply and table in {"user_complex_schedules", "user_schedules", "user_schedule_slots"}:
                         await conn.execute(f"UPDATE {table} SET is_enabled=0 WHERE rowid=?", (int(r["rowid"]),))
-        await push("BAD_TIME_FORMAT", bad_time_rows, len(bad_time_rows) if apply else 0, "Время нормализовано до HH:MM")
+        await push("BAD_TIME_FORMAT", bad_time_rows, len(bad_time_rows) if apply else 0, "Время приведено к формату ЧЧ:ММ")
         await push("BAD_TIME_MANUAL", manual_rows, len(manual_rows) if apply else 0, "Неразбираемые значения отключены")
 
         slot_norm_rows = []
@@ -12393,7 +12393,7 @@ def _assistant_primary_cta(assistant_state: str) -> str:
         "active_plan": "Открыть мой план",
         "stale": "Обновить план",
         "rebuilding": "Проверить статус обновления",
-        "follow_up": "Проверить follow-up",
+        "follow_up": "Проверить повторный контроль",
     }
     return mapping.get(str(assistant_state or ""), "Открыть помощник")
 
@@ -12406,7 +12406,7 @@ def _assistant_state_title(assistant_state: str) -> str:
         "active_plan": "План активен",
         "stale": "План требует обновления",
         "rebuilding": "Идёт обновление",
-        "follow_up": "Есть follow-up",
+        "follow_up": "Есть повторный контроль",
     }
     return mapping.get(str(assistant_state or ""), "В работе")
 
@@ -12518,7 +12518,7 @@ async def get_nutrient_assistant_dashboard(conn: aiosqlite.Connection, tg_user_i
         {"key": "profile", "title": "Профиль заполнен", "done": bool(profile_ready)},
         {"key": "labs", "title": "Анализы добавлены", "done": bool(labs_ready)},
         {"key": "plan", "title": "Есть актуальный план", "done": bool(has_plan)},
-        {"key": "followup", "title": "Включён follow-up", "done": bool(has_followup)},
+        {"key": "followup", "title": "Включён повторный контроль", "done": bool(has_followup)},
     ]
     readiness_done = sum(1 for item in readiness_steps if item["done"])
 
@@ -12570,7 +12570,7 @@ async def get_nutrient_assistant_dashboard(conn: aiosqlite.Connection, tg_user_i
             "active_plan": "План актуален и готов к использованию.",
             "stale": "Появились новые данные — лучше обновить план.",
             "rebuilding": "Мы пересобираем рекомендации на основе последних изменений.",
-            "follow_up": "Есть активные follow-up шаги, чтобы поддерживать прогресс.",
+            "follow_up": "Есть активные шаги повторного контроля, чтобы поддерживать прогресс.",
         }.get(assistant_state, "Состояние обновляется"),
         "primary_cta": primary_cta,
         "readiness": {
@@ -12594,7 +12594,7 @@ async def get_nutrient_assistant_dashboard(conn: aiosqlite.Connection, tg_user_i
         "premium_value": [
             "Собирает план по профилю, анализам и текущему стеку.",
             "Показывает, когда план устарел и почему.",
-            "Ведёт follow-up и напоминания без перегруза.",
+            "Ведёт повторный контроль и напоминания без перегруза.",
             "Сохраняет историю изменений, чтобы видеть динамику.",
         ],
     }
